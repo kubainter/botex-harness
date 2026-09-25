@@ -13,7 +13,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from botex.security import resolve_safe_path, SecurityError, mask_secrets
-from botex.patch_engine import apply_patch, validate_syntax, snapshot_manager
+from botex.patch_engine import (
+    apply_fuzzy_patch, apply_patch, validate_syntax, snapshot_manager,
+)
 from botex.file_tools import (
     get_file_outline, read_file_lines, create_file, list_dir,
     delete_file, move_file,
@@ -1313,7 +1315,47 @@ def test_review_regressions():
     assert command_policy_error('node -p "x=1"', allowlist=allowlist, deny_args=deny)
     assert command_policy_error('git switch main', allowlist=allowlist, deny_args=deny)
     assert command_policy_error('python -m pip install x', allowlist=allowlist, deny_args=deny)
+    assert command_policy_error('python -m pytest', allowlist=allowlist, deny_args=deny)
     assert not command_policy_error('pytest tests/', allowlist=allowlist, deny_args=deny)
+
+    # --- Fuzzy patches reject ambiguous indentation-only matches ----------
+    matched, _, _ = apply_fuzzy_patch(
+        "def first():\n    return value\n\n"
+        "def second():\n    return value\n",
+        "return value",
+        "return other",
+    )
+    assert not matched
+
+    # --- Concurrent rollback is optimistic and fails closed ---------------
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        target = root / "state.py"
+        target.write_text("value = 1\n", encoding="utf-8")
+        assert apply_patch(
+            "state.py", "value = 1", "value = 2", root, task_id="task_a"
+        )["ok"]
+        assert apply_patch(
+            "state.py", "value = 2", "value = 3", root, task_id="task_b"
+        )["ok"]
+        snapshot_manager.rollback_task("task_a")
+        assert target.read_text(encoding="utf-8") == "value = 3\n"
+        assert snapshot_manager.verify_rollback("task_a", expect_entries=True)
+
+    # --- Snapshot markers cannot escape the task workspace ----------------
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        target = root / "safe.txt"
+        outside = root.parent / "outside.txt"
+        target.write_text("safe", encoding="utf-8")
+        outside.write_text("outside", encoding="utf-8")
+        task_id = "tampered_task"
+        snapshot_manager.snapshot_file(task_id, target, root)
+        target.write_text("changed", encoding="utf-8")
+        marker = next(snapshot_manager._task_dir(task_id).glob("*.meta"))
+        marker.write_text(str(outside), encoding="utf-8")
+        snapshot_manager.rollback_task(task_id)
+        assert outside.read_text(encoding="utf-8") == "outside"
 
     # --- gitignore: anchored patterns and negations ----------------------
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -2072,4 +2114,3 @@ if __name__ == "__main__":
     test_mcp_memory_and_stats()
     test_mcp_tool_surface()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")
-

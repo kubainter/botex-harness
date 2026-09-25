@@ -261,20 +261,21 @@ def create_file(path: str, content: str, workspace_root: str | Path, task_id: st
         }
 
     try:
-        if safe_path.exists():
-            # Snapshot existing file before overwriting
-            snapshot_manager.snapshot_file(task_id, safe_path)
-        else:
-            snapshot_manager.record_created_file(task_id, safe_path)
-        safe_path.parent.mkdir(parents=True, exist_ok=True)
-        safe_path.write_text(content, encoding="utf-8")
-        lines_count = len(content.splitlines())
-        return {
-            "ok": True,
-            "path": path,
-            "lines_written": lines_count,
-            "message": f"File '{path}' created successfully ({lines_count} lines)."
-        }
+        with snapshot_manager.mutation_lock():
+            if safe_path.exists():
+                snapshot_manager.snapshot_file(task_id, safe_path, workspace_root)
+            else:
+                snapshot_manager.record_created_file(task_id, safe_path, workspace_root)
+            safe_path.parent.mkdir(parents=True, exist_ok=True)
+            safe_path.write_text(content, encoding="utf-8")
+            snapshot_manager.record_expected_state(task_id, safe_path)
+            lines_count = len(content.splitlines())
+            return {
+                "ok": True,
+                "path": path,
+                "lines_written": lines_count,
+                "message": f"File '{path}' created successfully ({lines_count} lines)."
+            }
     except Exception as e:
         return {"ok": False, "error": f"Failed to create file: {e}"}
 
@@ -298,13 +299,15 @@ def delete_file(path: str, workspace_root: str | Path, task_id: str = "default")
         return {"ok": False, "error": f"'{path}' is a directory — only files can be deleted."}
 
     try:
-        snapshot_manager.snapshot_file(task_id, safe_path)
-        safe_path.unlink()
-        return {
-            "ok": True,
-            "path": path,
-            "message": f"File '{path}' deleted (snapshot retained for rollback)."
-        }
+        with snapshot_manager.mutation_lock():
+            snapshot_manager.snapshot_file(task_id, safe_path, workspace_root)
+            safe_path.unlink()
+            snapshot_manager.record_expected_state(task_id, safe_path)
+            return {
+                "ok": True,
+                "path": path,
+                "message": f"File '{path}' deleted (snapshot retained for rollback)."
+            }
     except Exception as e:
         return {"ok": False, "error": f"Failed to delete file: {e}"}
 
@@ -327,24 +330,27 @@ def move_file(src_path: str, dst_path: str, workspace_root: str | Path, task_id:
         return {"ok": False, "error": "Source and destination are the same file."}
 
     try:
-        snapshot_manager.snapshot_file(task_id, safe_src)
-        if safe_dst.exists():
-            snapshot_manager.snapshot_file(task_id, safe_dst)
+        with snapshot_manager.mutation_lock():
+            snapshot_manager.snapshot_file(task_id, safe_src, workspace_root)
+            if safe_dst.exists():
+                snapshot_manager.snapshot_file(task_id, safe_dst, workspace_root)
             # shutil.move refuses to overwrite on Windows but silently
             # replaces on POSIX — unlink first for consistent behavior.
-            safe_dst.unlink()
-        else:
-            # The move creates dst — record it so rollback removes it;
-            # otherwise rollback restores src but orphans the moved file.
-            snapshot_manager.record_created_file(task_id, safe_dst)
-        safe_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(safe_src), str(safe_dst))
-        return {
-            "ok": True,
-            "src": src_path,
-            "dst": dst_path,
-            "message": f"Moved '{src_path}' -> '{dst_path}' (snapshot retained for rollback)."
-        }
+                safe_dst.unlink()
+            else:
+                # The move creates dst — record it so rollback removes it;
+                # otherwise rollback restores src but orphans the moved file.
+                snapshot_manager.record_created_file(task_id, safe_dst, workspace_root)
+            safe_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(safe_src), str(safe_dst))
+            snapshot_manager.record_expected_state(task_id, safe_src)
+            snapshot_manager.record_expected_state(task_id, safe_dst)
+            return {
+                "ok": True,
+                "src": src_path,
+                "dst": dst_path,
+                "message": f"Moved '{src_path}' -> '{dst_path}' (snapshot retained for rollback)."
+            }
     except Exception as e:
         return {"ok": False, "error": f"Failed to move file: {e}"}
 

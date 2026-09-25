@@ -524,7 +524,7 @@ async def run_botex_task(
         # The attempt stays registered (prune-protected) until the rollback
         # decision is made — a missing registry can never be mistaken for a
         # verified-clean workspace.
-        snapshot_manager.begin_task(attempt_task_id)
+        snapshot_manager.begin_task(attempt_task_id, Path(workspace_dir))
         try:
             try:
                 last_result = await _run_botex_task_once(

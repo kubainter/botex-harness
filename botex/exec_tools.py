@@ -99,6 +99,8 @@ def command_policy_error(command: str, *, allowlist: List[str], deny_args: List[
             f"Command '{binary}' is not in the exec allowlist "
             f"({', '.join(sorted(allowed)) or 'empty'})."
         )
+    if binary in {"python", "python3", "py"} and "-m" in tokens[1:]:
+        return "Python module execution is denied by exec policy."
     hit = _deny_hit(tokens, deny_args)
     if hit:
         return f"Argument '{hit}' is denied by exec policy."

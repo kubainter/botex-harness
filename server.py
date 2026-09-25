@@ -631,7 +631,11 @@ async def check_health() -> str:
 @mcp.tool()
 async def clean_snapshots(max_age_days: float = 7.0, max_total_mb: float = 50.0) -> str:
     """Purges old or excess backup snapshots from disk."""
-    res = snapshot_manager.clean_old_snapshots(max_age_days=max_age_days, max_total_mb=max_total_mb)
+    res = snapshot_manager.clean_old_snapshots(
+        max_age_days=max_age_days,
+        max_total_mb=max_total_mb,
+        protected_task_ids=set(snapshot_manager.active_task_ids),
+    )
     return (f"[OK] Purged old snapshots: removed {res['deleted_dirs']} folders, "
             f"freed {res['freed_mb']} MB. Remaining: {res['remaining_mb']} MB.")
 
@@ -745,7 +749,9 @@ def _try_local_command(line: str) -> bool:
         for s in snaps:
             print(f"  {accent('*')} {s['task_id']:<10} | {s['created_at']} | {s['files_count']} {t('lc.files')} | {s['size_kb']} KB ({s['age_days']} {t('lc.days')})")
     elif cmd == "clean-snapshots":
-        res = snapshot_manager.clean_old_snapshots()
+        res = snapshot_manager.clean_old_snapshots(
+            protected_task_ids=set(snapshot_manager.active_task_ids)
+        )
         print(ok(f"[OK] {res['deleted_dirs']} {t('lc.cleaned')} {res['freed_mb']} MB. {t('lc.remaining')} {res['remaining_mb']} MB."))
     elif cmd == "config":
         _cli_config(parts[1:])
@@ -1095,7 +1101,11 @@ def main():
         for s in snaps:
             print(f"  * Task: {s['task_id']:<10} | {s['created_at']} | {s['files_count']} {t('lc.files')} | {s['size_kb']} KB ({s['age_days']} {t('lc.days')})")
     elif len(sys.argv) > 1 and sys.argv[1] == "--clean-snapshots":
-        res = snapshot_manager.clean_old_snapshots(max_age_days=7.0, max_total_mb=50.0)
+        res = snapshot_manager.clean_old_snapshots(
+            max_age_days=7.0,
+            max_total_mb=50.0,
+            protected_task_ids=set(snapshot_manager.active_task_ids),
+        )
         print(ok(f"[OK] {res['deleted_dirs']} {t('lc.cleaned')} {res['freed_mb']} MB. {t('lc.remaining')} {res['remaining_mb']} MB."))
     elif len(sys.argv) > 1 and sys.argv[1] == "health":
         print(mark_status(asyncio.run(check_health())))

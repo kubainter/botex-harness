@@ -10,9 +10,12 @@ never corrupt source code on disk.
 import ast
 import hashlib
 import json
+import os
 import shutil
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 
@@ -31,12 +34,56 @@ class SnapshotManager:
         self.base_dir = Path(base_dir) if base_dir is not None else _default_snapshot_dir()
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.active_task_ids: set[str] = set()
+        self._task_roots: Dict[str, Path] = {}
+        self._expected_states: Dict[Tuple[str, Path], Optional[str]] = {}
+        self._mutation_lock = threading.RLock()
 
-    def begin_task(self, task_id: str) -> None:
+    def begin_task(self, task_id: str, workspace_root: Optional[Path] = None) -> None:
         self.active_task_ids.add(task_id)
+        if workspace_root is not None:
+            self._task_roots[task_id] = Path(workspace_root).resolve()
 
     def end_task(self, task_id: str) -> None:
         self.active_task_ids.discard(task_id)
+        self._task_roots.pop(task_id, None)
+        for key in list(self._expected_states):
+            if key[0] == task_id:
+                del self._expected_states[key]
+
+    @contextmanager
+    def mutation_lock(self):
+        with self._mutation_lock:
+            yield
+
+    def _register_path(self, task_id: str, file_path: Path,
+                       workspace_root: Optional[Path] = None) -> Path:
+        resolved = Path(file_path).resolve()
+        root = (
+            Path(workspace_root).resolve()
+            if workspace_root is not None
+            else self._task_roots.get(task_id)
+        )
+        if root is None:
+            root = resolved.parent
+        elif not resolved.is_relative_to(root):
+            root = Path(os.path.commonpath([str(root), str(resolved)]))
+        self._task_roots[task_id] = root
+        return resolved
+
+    def _safe_task_path(self, task_id: str, file_path: Path) -> Optional[Path]:
+        root = self._task_roots.get(task_id)
+        if root is None:
+            return None
+        resolved = Path(file_path).resolve()
+        return resolved if resolved.is_relative_to(root) else None
+
+    def record_expected_state(self, task_id: str, file_path: Path) -> None:
+        """Record the state this task must still own before rollback."""
+        resolved = self._safe_task_path(task_id, file_path)
+        if resolved is None:
+            return
+        state = hashlib.sha256(resolved.read_bytes()).hexdigest() if resolved.exists() else None
+        self._expected_states[(task_id, resolved)] = state
 
     def _task_dir(self, task_id: str) -> Path:
         safe_id = "".join(c for c in task_id if c.isalnum() or c in ("-", "_"))[:32]
@@ -56,8 +103,10 @@ class SnapshotManager:
         )[:40]
         return f"{digest}_{tail}"
 
-    def snapshot_file(self, task_id: str, file_path: Path) -> Path:
+    def snapshot_file(self, task_id: str, file_path: Path,
+                      workspace_root: Optional[Path] = None) -> Path:
         """Create a backup of a file before modifying it."""
+        file_path = self._register_path(task_id, file_path, workspace_root)
         task_dir = self._task_dir(task_id)
         task_dir.mkdir(parents=True, exist_ok=True)
         entry = self._entry_name(file_path)
@@ -69,8 +118,10 @@ class SnapshotManager:
             meta.write_text(str(file_path), encoding="utf-8")
         return dest
 
-    def record_created_file(self, task_id: str, file_path: Path) -> None:
+    def record_created_file(self, task_id: str, file_path: Path,
+                            workspace_root: Optional[Path] = None) -> None:
         """Record a newly-created file so rollback can remove it."""
+        file_path = self._register_path(task_id, file_path, workspace_root)
         task_dir = self._task_dir(task_id)
         task_dir.mkdir(parents=True, exist_ok=True)
         marker = task_dir / (self._entry_name(file_path) + ".created")
@@ -85,31 +136,58 @@ class SnapshotManager:
         collected instead of aborting the restore; callers must confirm the
         outcome with verify_rollback()."""
         task_dir = self._task_dir(task_id)
-        if not task_dir.exists():
-            return []
-        restored = []
-        created_paths = set()
-        for marker in task_dir.glob("*.created"):
-            try:
-                created_path = Path(marker.read_text(encoding="utf-8").strip())
-                created_paths.add(created_path)
-                if created_path.is_file():
-                    created_path.unlink()
-                    restored.append(str(created_path))
-            except (OSError, ValueError):
-                pass
-        for meta_file in task_dir.glob("*.meta"):
-            try:
-                orig_path = Path(meta_file.read_text(encoding="utf-8").strip())
-                backup_file = task_dir / meta_file.stem
-                if orig_path in created_paths or not backup_file.exists():
-                    continue
-                orig_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(backup_file, orig_path)
-                restored.append(str(orig_path))
-            except (OSError, ValueError):
-                pass
-        return restored
+        with self._mutation_lock:
+            if not task_dir.exists():
+                return []
+            restored = []
+            created_paths = set()
+            for marker in task_dir.glob("*.created"):
+                try:
+                    created_path = Path(marker.read_text(encoding="utf-8").strip())
+                    safe_path = self._safe_task_path(task_id, created_path)
+                    if safe_path is None:
+                        continue
+                    created_paths.add(safe_path)
+                    expected = self._expected_states.get((task_id, safe_path))
+                    current = (
+                        hashlib.sha256(safe_path.read_bytes()).hexdigest()
+                        if safe_path.exists() else None
+                    )
+                    if (
+                        (task_id, safe_path) in self._expected_states
+                        and current != expected
+                    ):
+                        continue
+                    if safe_path.is_file():
+                        safe_path.unlink()
+                        restored.append(str(safe_path))
+                except (OSError, ValueError):
+                    pass
+            for meta_file in task_dir.glob("*.meta"):
+                try:
+                    orig_path = Path(meta_file.read_text(encoding="utf-8").strip())
+                    safe_path = self._safe_task_path(task_id, orig_path)
+                    if safe_path is None:
+                        continue
+                    backup_file = task_dir / meta_file.stem
+                    if safe_path in created_paths or not backup_file.exists():
+                        continue
+                    expected = self._expected_states.get((task_id, safe_path))
+                    current = (
+                        hashlib.sha256(safe_path.read_bytes()).hexdigest()
+                        if safe_path.exists() else None
+                    )
+                    if (
+                        (task_id, safe_path) in self._expected_states
+                        and current != expected
+                    ):
+                        continue
+                    safe_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(backup_file, safe_path)
+                    restored.append(str(safe_path))
+                except (OSError, ValueError):
+                    pass
+            return restored
 
     def mutated_paths(self, task_id: str) -> List[Path]:
         """Ground-truth mutation registry: every path this task snapshotted
@@ -122,7 +200,9 @@ class SnapshotManager:
         paths: List[Path] = []
         for marker in list(task_dir.glob("*.created")) + list(task_dir.glob("*.meta")):
             try:
-                paths.append(Path(marker.read_text(encoding="utf-8").strip()))
+                path = self._safe_task_path(task_id, Path(marker.read_text(encoding="utf-8").strip()))
+                if path is not None:
+                    paths.append(path)
             except (OSError, ValueError):
                 pass
         return paths
@@ -143,7 +223,12 @@ class SnapshotManager:
         created_paths = set()
         for marker in task_dir.glob("*.created"):
             try:
-                p = Path(marker.read_text(encoding="utf-8").strip())
+                p = self._safe_task_path(
+                    task_id, Path(marker.read_text(encoding="utf-8").strip())
+                )
+                if p is None:
+                    unconfirmed.append("<unsafe snapshot path>")
+                    continue
                 created_paths.add(p)
             except (OSError, ValueError):
                 continue
@@ -151,7 +236,12 @@ class SnapshotManager:
                 unconfirmed.append(str(p))
         for meta in task_dir.glob("*.meta"):
             try:
-                orig = Path(meta.read_text(encoding="utf-8").strip())
+                orig = self._safe_task_path(
+                    task_id, Path(meta.read_text(encoding="utf-8").strip())
+                )
+                if orig is None:
+                    unconfirmed.append("<unsafe snapshot path>")
+                    continue
             except (OSError, ValueError):
                 continue
             if orig in created_paths:
@@ -374,6 +464,7 @@ def apply_fuzzy_patch(
         orig_lines = _normalize_newlines(original).splitlines()
         first_target = search_lines_stripped[0]
 
+        matches = []
         for i, line in enumerate(orig_lines):
             if line.strip() == first_target:
                 # Potential match: check if subsequent non-empty lines match
@@ -392,27 +483,26 @@ def apply_fuzzy_patch(
                     matching_end_idx = curr_orig_idx
 
                 if matched:
-                    # Detect indentation from the first matched line
-                    lead_indent = line[: len(line) - len(line.lstrip())]
-                    replace_lines = norm_replace.splitlines()
-                    
-                    # Adapt indentation of replacement lines if replacement is unindented
-                    adapted_replace = []
-                    for r_line in replace_lines:
-                        if r_line.strip():
-                            # If replacement doesn't have indent, give it the target indent
-                            if not r_line.startswith(" ") and not r_line.startswith("\t"):
-                                adapted_replace.append(lead_indent + r_line)
-                            else:
-                                adapted_replace.append(r_line)
-                        else:
-                            adapted_replace.append("")
+                    matches.append((i, matching_end_idx, line))
 
-                    new_lines = orig_lines[:i] + adapted_replace + orig_lines[matching_end_idx + 1:]
-                    out = "\n".join(new_lines)
-                    if crlf_mode:
-                        out = out.replace("\n", "\r\n")
-                    return True, out, 3
+        if len(matches) == 1:
+            i, matching_end_idx, line = matches[0]
+            lead_indent = line[: len(line) - len(line.lstrip())]
+            replace_lines = norm_replace.splitlines()
+            adapted_replace = []
+            for r_line in replace_lines:
+                if r_line.strip():
+                    adapted_replace.append(
+                        lead_indent + r_line
+                        if not r_line.startswith((" ", "\t")) else r_line
+                    )
+                else:
+                    adapted_replace.append("")
+            new_lines = orig_lines[:i] + adapted_replace + orig_lines[matching_end_idx + 1:]
+            out = "\n".join(new_lines)
+            if crlf_mode:
+                out = out.replace("\n", "\r\n")
+            return True, out, 3
 
     return False, original, 0
 
@@ -442,38 +532,38 @@ def apply_patch(
     if not safe_path.is_file():
         return {"ok": False, "error": f"'{path}' is a directory, not a file."}
 
-    try:
-        content = safe_path.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return {"ok": False, "error": f"Failed to read file: {e}"}
+    with snapshot_manager.mutation_lock():
+        try:
+            content = safe_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to read file: {e}"}
 
-    # Backup before any modification
-    snapshot_manager.snapshot_file(task_id, safe_path)
+        success, new_content, level = apply_fuzzy_patch(content, search_block, replace_block)
+        if not success:
+            return {
+                "ok": False,
+                "error": (
+                    f"Search block could not be located in '{path}'. Make sure the "
+                    "search block matches existing code and is unique."
+                )
+            }
 
-    # Apply fuzzy patch
-    success, new_content, level = apply_fuzzy_patch(content, search_block, replace_block)
-    if not success:
-        return {
-            "ok": False,
-            "error": f"Search block could not be located in '{path}'. Make sure the search block matches existing code."
-        }
+        is_valid, syntax_err = validate_syntax(new_content, safe_path)
+        if not is_valid:
+            return {
+                "ok": False,
+                "error": (
+                    f"Patch rejected: {syntax_err}. "
+                    "The file was NOT modified. Please correct the code syntax in your patch."
+                )
+            }
 
-    # Pre-write syntax check on new_content
-    is_valid, syntax_err = validate_syntax(new_content, safe_path)
-    if not is_valid:
-        return {
-            "ok": False,
-            "error": (
-                f"Patch rejected: {syntax_err}. "
-                "The file was NOT modified. Please correct the code syntax in your patch."
-            )
-        }
-
-    # Write to disk
-    try:
-        safe_path.write_text(new_content, encoding="utf-8")
-    except Exception as e:
-        return {"ok": False, "error": f"Failed to write file: {e}"}
+        try:
+            snapshot_manager.snapshot_file(task_id, safe_path, workspace_root)
+            safe_path.write_text(new_content, encoding="utf-8")
+            snapshot_manager.record_expected_state(task_id, safe_path)
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to write file: {e}"}
 
     # Line stats
     orig_lines = content.splitlines()
