@@ -1,0 +1,322 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
+"""
+BoteX Workspace Memory Vault
+============================
+Workspace-scoped, persistent, and portable memory storage for MCP clients.
+Supports context notes, architectural decisions, task handoffs, and lessons learned.
+Format: Markdown with YAML frontmatter (compatible with ecc.memory.v1).
+Location: <workspace_dir>/.botex/memory/
+"""
+import json
+import re
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+try:
+    from .security import resolve_safe_path, mask_secrets, SecurityError
+except (ImportError, ValueError):
+    from security import resolve_safe_path, mask_secrets, SecurityError
+
+__all__ = ["save_memory", "search_memory", "read_memory", "VALID_KINDS", "MAX_MEMORY_BYTES"]
+
+VALID_KINDS = frozenset({"context", "decision", "handoff", "lesson"})
+MEMORY_DIR_NAME = ".botex/memory"
+SCHEMA_VERSION = "ecc.memory.v1"
+MAX_MEMORY_BYTES = 1_048_576  # 1 MB cap
+
+
+def _sanitize_id(memory_id: str) -> str:
+    """Validate memory_id against path traversal attacks."""
+    clean = memory_id.strip()
+    if clean.endswith(".md"):
+        clean = clean[:-3]
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+        raise SecurityError(f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed.")
+    return clean
+
+
+def _serialize_val(val: Any) -> str:
+    """Serialize scalar value safely for YAML frontmatter."""
+    if val is None:
+        return "null"
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, (int, float)):
+        return str(val)
+    s = str(val).replace("\r", "").replace("\n", " ")
+    # Quote strings that contain special characters or might be misinterpreted
+    if any(c in s for c in (":", "#", "[", "]", "{", "}", "'", '"', "\\")) or s.lower() in ("true", "false", "null", "none"):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def _serialize_frontmatter(metadata: Dict[str, Any], content: str) -> str:
+    """Format metadata and content as Markdown with YAML frontmatter."""
+    lines = ["---"]
+    for key, val in metadata.items():
+        if isinstance(val, list):
+            lines.append(f"{key}:")
+            for item in val:
+                lines.append(f"  - {_serialize_val(item)}")
+        else:
+            lines.append(f"{key}: {_serialize_val(val)}")
+    lines.append("---")
+    lines.append("")
+    lines.append(content.rstrip())
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _parse_val(raw: str) -> Any:
+    """Parse a scalar value from frontmatter line."""
+    val = raw.strip()
+    if not val:
+        return ""
+    if val.startswith('"') and val.endswith('"'):
+        try:
+            return json.loads(val)
+        except Exception:
+            return val[1:-1]
+    if val.startswith("'") and val.endswith("'"):
+        return val[1:-1]
+    low = val.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low in ("null", "none"):
+        return None
+    try:
+        if "." in val or "e" in low:
+            return float(val)
+        return int(val)
+    except ValueError:
+        return val
+
+
+def _parse_frontmatter(text: str) -> tuple[Dict[str, Any], str]:
+    """Parse YAML frontmatter and body from Markdown text."""
+    if not text.startswith("---"):
+        return {}, text
+
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+
+    yaml_block = parts[1]
+    body = parts[2].lstrip("\r\n")
+
+    metadata: Dict[str, Any] = {}
+    current_list_key: Optional[str] = None
+
+    for line in yaml_block.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        # Check for list item
+        if line.startswith("  - ") or line.startswith("    - ") or stripped.startswith("- "):
+            item_raw = stripped[1:].strip()
+            item = _parse_val(item_raw)
+            if current_list_key and isinstance(metadata.get(current_list_key), list):
+                metadata[current_list_key].append(item)
+            continue
+
+        if ":" in stripped:
+            key, val_raw = stripped.split(":", 1)
+            key = key.strip()
+            val_raw = val_raw.strip()
+            if not val_raw:
+                # Start of a list
+                current_list_key = key
+                metadata[key] = []
+            else:
+                current_list_key = None
+                metadata[key] = _parse_val(val_raw)
+
+    return metadata, body
+
+
+def _ensure_memory_dir(workspace_root: Path) -> Path:
+    """Ensure <workspace_root>/.botex/memory exists and is protected with .gitignore."""
+    mem_dir = workspace_root / ".botex" / "memory"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+
+    botex_dir = workspace_root / ".botex"
+    gi_path = botex_dir / ".gitignore"
+    if not gi_path.exists():
+        try:
+            gi_path.write_text("# Auto-generated by BoteX Memory Vault\n*\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    return mem_dir
+
+
+def save_memory(
+    workspace_dir: str = ".",
+    title: str = "",
+    content: str = "",
+    kind: str = "context",
+    tags: Optional[List[str]] = None,
+    memory_id: Optional[str] = None,
+    source: str = "botex",
+) -> Dict[str, Any]:
+    """
+    Save a context, decision, handoff, or lesson entry to the workspace Memory Vault.
+    Masks secrets and ensures directory isolation.
+    """
+    try:
+        root_path = Path(workspace_dir).resolve()
+        if not root_path.exists():
+            return {"ok": False, "error": f"Workspace directory '{workspace_dir}' does not exist."}
+
+        norm_kind = str(kind).strip().lower()
+        if norm_kind not in VALID_KINDS:
+            norm_kind = "context"
+
+        clean_tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
+        masked_title = mask_secrets(title.strip() or "Untitled Memory")
+        masked_content = mask_secrets(content.strip())
+
+        if len(masked_content.encode("utf-8")) > MAX_MEMORY_BYTES:
+            return {
+                "ok": False,
+                "error": f"Memory content exceeds maximum allowed size ({MAX_MEMORY_BYTES} bytes).",
+            }
+
+        mid = _sanitize_id(memory_id) if memory_id else f"mem_{uuid.uuid4().hex[:8]}"
+
+        mem_dir = _ensure_memory_dir(root_path)
+        file_path = mem_dir / f"{mid}.md"
+
+        metadata = {
+            "id": mid,
+            "schema": SCHEMA_VERSION,
+            "title": masked_title,
+            "kind": norm_kind,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tags": clean_tags,
+            "source": source,
+        }
+
+        full_text = _serialize_frontmatter(metadata, masked_content)
+        file_path.write_text(full_text, encoding="utf-8")
+
+        rel_path = f".botex/memory/{mid}.md"
+        return {
+            "ok": True,
+            "id": mid,
+            "path": rel_path,
+            "title": masked_title,
+            "kind": norm_kind,
+            "tags": clean_tags,
+        }
+    except SecurityError as se:
+        return {"ok": False, "error": f"Security violation: {se}"}
+    except Exception as exc:
+        return {"ok": False, "error": f"Failed to save memory: {exc}"}
+
+
+def search_memory(
+    workspace_dir: str = ".",
+    query: str = "",
+    tag: Optional[str] = None,
+    kind: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Search memories in <workspace_dir>/.botex/memory by keyword query, tag, or kind.
+    """
+    try:
+        root_path = Path(workspace_dir).resolve()
+        mem_dir = root_path / ".botex" / "memory"
+        if not mem_dir.exists() or not mem_dir.is_dir():
+            return {"ok": True, "count": 0, "memories": []}
+
+        q_lower = query.strip().lower() if query else ""
+        tag_lower = tag.strip().lower() if tag else ""
+        kind_lower = kind.strip().lower() if kind else ""
+
+        results = []
+        for file_p in mem_dir.glob("*.md"):
+            if not file_p.is_file():
+                continue
+            try:
+                raw_text = file_p.read_text(encoding="utf-8", errors="replace")
+                meta, body = _parse_frontmatter(raw_text)
+                entry_id = meta.get("id") or file_p.stem
+                entry_title = meta.get("title") or entry_id
+                entry_kind = str(meta.get("kind") or "context").lower()
+                entry_tags = meta.get("tags") or []
+                entry_ts = meta.get("timestamp") or ""
+
+                # Filter by kind
+                if kind_lower and entry_kind != kind_lower:
+                    continue
+
+                # Filter by tag
+                if tag_lower:
+                    tags_lower = [str(t).lower() for t in entry_tags]
+                    if tag_lower not in tags_lower:
+                        continue
+
+                # Filter by query
+                if q_lower:
+                    searchable = f"{entry_title} {body} {' '.join(entry_tags)}".lower()
+                    if q_lower not in searchable:
+                        continue
+
+                preview = body[:200] + ("…" if len(body) > 200 else "")
+                results.append({
+                    "id": entry_id,
+                    "title": entry_title,
+                    "kind": entry_kind,
+                    "tags": entry_tags,
+                    "timestamp": entry_ts,
+                    "preview": preview,
+                    "path": f".botex/memory/{file_p.name}",
+                })
+            except Exception:
+                continue
+
+        # Sort newest first
+        results.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        return {"ok": True, "count": len(results), "memories": results}
+    except Exception as exc:
+        return {"ok": False, "error": f"Failed to search memory: {exc}"}
+
+
+def read_memory(
+    workspace_dir: str = ".",
+    memory_id: str = "",
+) -> Dict[str, Any]:
+    """
+    Read full memory entry by ID from <workspace_dir>/.botex/memory/<memory_id>.md.
+    """
+    try:
+        root_path = Path(workspace_dir).resolve()
+        mid = _sanitize_id(memory_id)
+        mem_dir = root_path / ".botex" / "memory"
+        file_path = mem_dir / f"{mid}.md"
+
+        # Verify path stays within mem_dir
+        safe_path = resolve_safe_path(root_path, file_path.relative_to(root_path))
+        if not safe_path.exists() or not safe_path.is_file():
+            return {"ok": False, "error": f"Memory entry '{mid}' not found."}
+
+        raw_text = safe_path.read_text(encoding="utf-8", errors="replace")
+        meta, body = _parse_frontmatter(raw_text)
+
+        return {
+            "ok": True,
+            "id": mid,
+            "metadata": meta,
+            "content": body,
+        }
+    except SecurityError as se:
+        return {"ok": False, "error": f"Security violation: {se}"}
+    except Exception as exc:
+        return {"ok": False, "error": f"Failed to read memory: {exc}"}
