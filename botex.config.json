@@ -1,0 +1,112 @@
+{
+  "providers": {
+    "openrouter": {
+      "default": true,
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "extra_body": {"provider": {"data_collection": "deny"}, "reasoning": {"max_tokens": 4000}},
+      "zdr": {
+        "enabled": true,
+        "deny_patterns": [":free", "openrouter/free"]
+      },
+      "decisions_models": ["typesafe/jev-*", "~typesafe/jev-*"],
+      "models": {
+        "default": "openrouter/auto",
+        "auto-beta": "openrouter/auto-beta",
+        "coding": "openrouter/pareto-code",
+        "fast": "deepseek/deepseek-v4-flash-0731"
+      },
+      "model_fallbacks": {
+        "default": ["google/gemini-2.5-flash", "deepseek/deepseek-v3.2"],
+        "auto-beta": ["google/gemini-2.5-flash", "deepseek/deepseek-v3.2"],
+        "coding": ["qwen/qwen3-coder", "qwen/qwen3-coder-flash", "deepseek/deepseek-v3.2"],
+        "fast": ["google/gemini-2.5-flash-lite", "openai/gpt-4o-mini", "deepseek/deepseek-v3.2"]
+      }
+    },
+    "nvidia": {
+      "default": false,
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key_env": "NVIDIA_API_KEY",
+      "extra_body": {},
+      "capabilities": {},
+      "models": {
+        "default": "meta/llama-3.3-70b-instruct",
+        "coding": "qwen/qwen3-coder-480b-a35b-instruct",
+        "fast": "meta/llama-3.3-70b-instruct"
+      }
+    }
+  },
+  "engine": {
+    "max_turns": 15,
+    "max_tokens": 8000,
+    "reasoning_max_tokens": 16000,
+    "request_timeout_s": 300,
+    "max_concurrent_tasks": 3,
+    "max_queued_tasks": 32,
+    "task_result_ttl_s": 3600,
+    "max_duration_s": 900,
+    "max_task_duration_s": 0,
+    "temperature": 0.1,
+    "budget_limit_usd": 0.5,
+    "default_mode": "edit",
+    "allow_destructive": false,
+    "require_read_before_write": true,
+    "mode_profiles": {
+      "readonly": "fast",
+      "edit": "",
+      "destructive": "coding",
+      "full": "coding"
+    }
+  },
+  "net": {
+    "enabled": true,
+    "policy": "caller",
+    "allowed_hosts": ["docs.openrouter.ai", "openrouter.ai"],
+    "allowed_urls": [],
+    "timeout_s": 20,
+    "max_bytes": 200000,
+    "max_requests_per_task": 5,
+    "max_redirects": 3
+  },
+  "exec": {
+    "enabled": false,
+    "allowlist": ["pytest", "python", "py", "ruff", "mypy", "node", "npm", "git", "pip"],
+    "deny_args": [
+      "python -c", "python3 -c", "py -c", "node -e", "npm exec", "npx",
+      "pip install", "pip uninstall",
+      "git push", "git commit", "git clean", "git reset", "git checkout",
+      "git restore", "git rm", "git config", "git rebase", "git merge",
+      "git pull", "git fetch", "git clone", "git apply", "git stash",
+      "git tag", "git branch -d", "git branch -D",
+      "sudo", "rm", "del", "format", "shutdown", "reboot",
+      "curl", "wget", "iex", "invoke-expression"
+    ],
+    "timeout_s": 120,
+    "max_output_bytes": 20000
+  },
+  "paths": {
+    "snapshot_dir": ".snapshots",
+    "snapshot_auto_prune": true,
+    "snapshot_max_age_days": 7,
+    "snapshot_max_total_mb": 50,
+    "analytics_file": ".agent_analytics.json",
+    "env_file": ""
+  },
+  "app": {
+    "referer": ""
+  },
+  "analytics": {
+    "store_full_text": false,
+    "preview_chars": 160
+  },
+  "ui": {
+    "language": "auto"
+  },
+  "pricing": {
+    "enabled": true,
+    "max_input_per_mtok": 2.0,
+    "max_output_per_mtok": 4.0,
+    "on_unknown": "allow",
+    "cache_ttl_hours": 24
+  }
+}
