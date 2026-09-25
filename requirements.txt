@@ -1,0 +1,8 @@
+# BoteX core dependencies
+openai>=1.40
+python-dotenv>=1.0
+mcp>=2.0
+typing_extensions>=4.0
+
+# Optional — prettier CLI output for --stats / run summaries
+# rich>=13.0
