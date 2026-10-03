@@ -196,40 +196,69 @@ def is_safe_dir(dir_name: str) -> bool:
     return dir_name.lower() not in _IGNORED_DIRS_LOWER
 
 
-def check_model_zdr(model: str, provider_cfg: Dict[str, Any]) -> Tuple[bool, str]:
+def zdr_enforced(
+    provider_cfg: Dict[str, Any],
+    allow_non_zdr: bool = False,
+) -> bool:
+    """
+    Whether Zero Data Retention policy is enforced for this run.
+
+    Resolution (highest priority first):
+    - ``allow_non_zdr=True`` — explicit per-run consent, relaxes everything;
+    - ``providers.<name>.zdr.enabled`` — operator-level provider setting;
+    - when no ``zdr`` section exists, falls back to
+      ``extra_body.provider.data_collection == "deny"``.
+
+    The same predicate drives both the local model gate
+    (``check_model_zdr``) and the wire ``data_collection`` flag, so they can
+    never disagree: a relaxed run always relaxes both.
+    """
+    if allow_non_zdr:
+        return False
+    zdr_cfg = provider_cfg.get("zdr")
+    if zdr_cfg is None:
+        return (
+            provider_cfg.get("extra_body", {})
+            .get("provider", {})
+            .get("data_collection") == "deny"
+        )
+    return bool(zdr_cfg.get("enabled", True))
+
+
+def check_model_zdr(
+    model: str,
+    provider_cfg: Dict[str, Any],
+    allow_non_zdr: bool = False,
+) -> Tuple[bool, str]:
     """
     Pre-flight Zero Data Retention (ZDR) gate.
     Rejects models that do not provide ZDR (e.g. :free, openrouter/free)
     locally before any network call is dispatched.
 
-    Returns (is_allowed, rejection_reason).
+    ``allow_non_zdr`` is per-run caller consent — it relaxes the gate for
+    this run only. Returns (is_allowed, rejection_reason).
     """
     if not model:
         return True, ""
 
+    if not zdr_enforced(provider_cfg, allow_non_zdr):
+        return True, ""
+
     zdr_cfg = provider_cfg.get("zdr")
-    # If explicit zdr section is missing, check provider.data_collection in extra_body
     if zdr_cfg is None:
-        data_col = (
-            provider_cfg.get("extra_body", {})
-            .get("provider", {})
-            .get("data_collection")
-        )
-        is_enabled = (data_col == "deny")
         deny_patterns = [":free", "openrouter/free"]
     else:
-        is_enabled = bool(zdr_cfg.get("enabled", True))
         deny_patterns = zdr_cfg.get("deny_patterns") or [":free", "openrouter/free"]
-
-    if not is_enabled:
-        return True, ""
 
     model_lower = model.lower()
     for pattern in deny_patterns:
         if pattern.lower() in model_lower:
             return False, (
                 f"[ZDR BLOCK] Model '{model}' violates Zero Data Retention policy "
-                f"(matches pattern '{pattern}'). Rejected locally by BoteX Pre-Flight Guardrail."
+                f"(matches pattern '{pattern}'). Rejected locally by BoteX Pre-Flight Guardrail. "
+                "To allow non-ZDR models: pass allow_non_zdr/--allow-non-zdr "
+                "for this run, or use a provider with zdr.enabled=false "
+                "(e.g. the 'openrouter-free' preset)."
             )
 
     return True, ""

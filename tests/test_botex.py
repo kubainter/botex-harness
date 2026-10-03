@@ -30,6 +30,18 @@ import botex.net_tools as net_tools
 import botex.pricing as pricing
 
 
+def _purge_snapshot_tasks(*task_ids: str) -> None:
+    """Drop persisted snapshot dirs for fixed test task ids.
+
+    Snapshot registries live under the project .snapshots/ and survive the
+    run — a reused task_id would otherwise inherit the previous run's
+    markers whose tempdir paths now resolve outside the workspace
+    (reported as "<unsafe snapshot path>"), breaking verify_rollback."""
+    import shutil
+    for tid in task_ids:
+        shutil.rmtree(snapshot_manager._task_dir(tid), ignore_errors=True)
+
+
 def test_security():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
@@ -175,6 +187,7 @@ def helper_fn():
 
 
 def test_destructive_ops_and_rollback():
+    _purge_snapshot_tasks("test_destructive_01", "test_destructive_02")
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         victim = root / "old.py"
@@ -1205,10 +1218,19 @@ def test_mcp_structured_output():
 
 def test_zdr_guardrail():
     """Zero Data Retention (ZDR) guardrail: pre-flight local rejection of
-    free-tier and non-ZDR models before any network call or token spend."""
+    free-tier and non-ZDR models before any network call or token spend.
+    Also covers the explicit opt-out paths: per-run allow_non_zdr consent
+    and the openrouter-free provider preset — both must relax the local
+    gate AND the wire data_collection flag via the same predicate."""
     import asyncio
-    from botex.security import check_model_zdr
+    import os
+    import tempfile
+    from types import SimpleNamespace
+    import json as _json
+    from botex.security import check_model_zdr, zdr_enforced
+    import botex.engine as engine
     from botex.engine import run_botex_task
+    import botex.config as config_mod
 
     # 1. Direct unit checks for check_model_zdr
     # Pattern rejection when ZDR enabled
@@ -1253,6 +1275,131 @@ def test_zdr_guardrail():
     assert res["steps"] == 0
     assert len(res["files_touched"]) == 0
 
+    # 3. zdr_enforced — single predicate shared by the gate and extra_body.
+    #    No zdr section + no data_collection=deny -> not enforced.
+    assert zdr_enforced({"extra_body": {"provider": {"data_collection": "deny"}}}) is True
+    assert zdr_enforced({"extra_body": {}}) is False
+    assert zdr_enforced({}) is False
+    assert zdr_enforced({"zdr": {"enabled": True}}) is True
+    assert zdr_enforced({"zdr": {"enabled": False}}) is False
+    # zdr section wins over the extra_body fallback in both directions
+    assert zdr_enforced({"zdr": {"enabled": True},
+                         "extra_body": {"provider": {"data_collection": "allow"}}}) is True
+    # per-run consent relaxes anything
+    assert zdr_enforced({"zdr": {"enabled": True}}, allow_non_zdr=True) is False
+
+    # 4. check_model_zdr honors per-run consent
+    ok, msg = check_model_zdr(
+        "qwen/qwen3.8-27b:free",
+        {"zdr": {"enabled": True, "deny_patterns": [":free"]}},
+        allow_non_zdr=True,
+    )
+    assert ok and msg == ""
+
+    # 5. Engine integration: allow_non_zdr lets a :free model through AND
+    #    flips the wire data_collection to "allow" — without mutating the
+    #    shared provider config (the next run must still see "deny").
+    def resp(content=None, tool_calls=None, finish="stop"):
+        msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, finish_reason=finish)],
+            usage=SimpleNamespace(
+                prompt_tokens=1, completion_tokens=1,
+                prompt_tokens_details=None, completion_tokens_details=None))
+
+    class FakeClient:
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.calls = []
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            self.calls.append(kw)
+            return self.responses.pop(0)
+
+    orig = {k: getattr(engine, k) for k in (
+        "AsyncOpenAI", "check_model_price", "check_model_tools",
+        "check_budget_limit", "log_run", "print_run_summary")}
+    try:
+        engine.check_model_price = lambda *a, **k: (True, "")
+        engine.check_model_tools = lambda *a, **k: (True, "")
+        engine.check_budget_limit = lambda *a, **k: (False, 0.0)
+        engine.log_run = lambda **kw: {"cost_usd": 0.0}
+        engine.print_run_summary = lambda *a, **k: None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def run(client, **kw):
+                engine.AsyncOpenAI = lambda **_: client
+                args = dict(workspace_dir=tmpdir, task="t", api_key="x",
+                            mode="readonly")
+                args.update(kw)
+                return asyncio.run(engine.run_botex_task(**args))
+
+            # a) flag on a ZDR-enabled provider: model passes, wire relaxed
+            fake = FakeClient([resp("STATUS: DONE\nok")])
+            res = run(fake, model="qwen/qwen3.8-27b:free",
+                      allow_non_zdr=True)
+            assert res["status"] == "DONE", res.get("message")
+            assert res["zdr_enforced"] is False
+            assert res["attempts"][0]["zdr_enforced"] is False
+            eb = fake.calls[0]["extra_body"]
+            assert eb["provider"]["data_collection"] == "allow"
+
+            # b) provider config is NOT mutated — same model without the
+            #    flag is still rejected.
+            res = run(FakeClient([]), model="qwen/qwen3.8-27b:free")
+            assert res["status"] == "ZDR_VIOLATION"
+
+            # c) openrouter-free preset: no flag needed, wire flag is allow
+            fake = FakeClient([resp("STATUS: DONE\nok")])
+            res = run(fake, provider="openrouter-free")
+            assert res["status"] == "DONE", res.get("message")
+            assert res["zdr_enforced"] is False
+            eb = fake.calls[0]["extra_body"]
+            assert eb["provider"]["data_collection"] == "allow"
+            # default profile resolves to a :free slug
+            assert fake.calls[0]["model"].endswith(":free")
+
+            # d) strict mode clamps a rogue extra_body "allow" back to
+            #    "deny" — the wire flag can never disagree with the gate.
+            import copy as _copy
+            orig_resolve = engine.resolve_provider
+
+            def _resolve_allow(name=""):
+                pname, pcfg = orig_resolve(name)
+                pcfg = dict(pcfg)
+                eb = _copy.deepcopy(pcfg.get("extra_body") or {})
+                eb.setdefault("provider", {})["data_collection"] = "allow"
+                pcfg["extra_body"] = eb
+                return pname, pcfg
+
+            engine.resolve_provider = _resolve_allow
+            try:
+                fake = FakeClient([resp("STATUS: DONE\nok")])
+                res = run(fake, model="qwen/qwen3.8-27b")
+                assert res["status"] == "DONE", res.get("message")
+                assert res["zdr_enforced"] is True
+                eb = fake.calls[0]["extra_body"]
+                assert eb["provider"]["data_collection"] == "deny"
+            finally:
+                engine.resolve_provider = orig_resolve
+    finally:
+        for k, v in orig.items():
+            setattr(engine, k, v)
+
+    # 6. BOTEX_PROVIDER selects a configured provider between the explicit
+    #    parameter and the config default — it is a selector only.
+    old_env = os.environ.get("BOTEX_PROVIDER")
+    try:
+        os.environ["BOTEX_PROVIDER"] = "openrouter-free"
+        assert config_mod.resolve_provider("")[0] == "openrouter-free"
+        assert config_mod.resolve_provider("nvidia")[0] == "nvidia"
+    finally:
+        if old_env is None:
+            os.environ.pop("BOTEX_PROVIDER", None)
+        else:
+            os.environ["BOTEX_PROVIDER"] = old_env
+
     print("[PASS] ZDR Guardrail Tests")
 
 
@@ -1268,6 +1415,10 @@ def test_review_regressions():
     from botex.exec_tools import command_policy_error
     from botex.security import is_gitignored, load_gitignore_patterns
     import botex.engine as engine
+
+    # Purge stale snapshot registries for the fixed ids used below.
+    _purge_snapshot_tasks(
+        "collision_task", "task_a", "task_b", "tampered_task")
 
     # --- Snapshot registry: collision-free names -------------------------
     with tempfile.TemporaryDirectory() as tmpdir:
