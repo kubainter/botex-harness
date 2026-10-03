@@ -7,6 +7,7 @@ Headless Autonomous Tool Loop with Context Pruning, Zero-Retention,
 Quota Optimization, and Automatic Self-Healing.
 """
 import asyncio
+import copy
 import json
 import re
 import sys
@@ -24,7 +25,9 @@ try:
         delete_file, move_file,
     )
     from .patch_engine import apply_patch, snapshot_manager, validate_syntax
-    from .security import resolve_safe_path, SecurityError, check_model_zdr
+    from .security import (
+        resolve_safe_path, SecurityError, check_model_zdr, zdr_enforced,
+    )
     from .analytics import log_run, print_run_summary, check_budget_limit
     from .config import (
         PROJECT_ROOT, engine_setting, env_file, is_decisions_model,
@@ -55,7 +58,9 @@ except (ImportError, ValueError):
         delete_file, move_file,
     )
     from patch_engine import apply_patch, snapshot_manager, validate_syntax
-    from security import resolve_safe_path, SecurityError, check_model_zdr
+    from security import (
+        resolve_safe_path, SecurityError, check_model_zdr, zdr_enforced,
+    )
     from analytics import log_run, print_run_summary, check_budget_limit
     from config import (
         PROJECT_ROOT, engine_setting, env_file, is_decisions_model,
@@ -493,6 +498,7 @@ async def run_botex_task(
     verify_command: str = "",
     recipe: str = "",
     require_read_before_write: Optional[bool] = None,
+    allow_non_zdr: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Run one task, using configured model failover only before any write."""
     resolved_profile = profile
@@ -506,6 +512,10 @@ async def run_botex_task(
     last_result: Dict[str, Any] = {}
     attempts: List[Dict[str, Any]] = []
     chain_start = time.time()
+    # Resolved once for the whole chain — the flag/provider pair is fixed
+    # for the run, so every attempt record reports the same privacy state.
+    _zdr_pname, _zdr_pcfg = resolve_provider(provider)
+    zdr_on = zdr_enforced(_zdr_pcfg, bool(allow_non_zdr))
     try:
         max_task_duration_s = int(engine_setting("max_task_duration_s") or 0)
     except (TypeError, ValueError):
@@ -541,6 +551,7 @@ async def run_botex_task(
                     verify_command=verify_command,
                     recipe=recipe,
                     require_read_before_write=require_read_before_write,
+                    allow_non_zdr=allow_non_zdr,
                 )
             except Exception as exc:
                 # An attempt that crashes still gets a structured result —
@@ -558,6 +569,7 @@ async def run_botex_task(
                     "duration_s": round(time.time() - chain_start, 2),
                     "cost_usd": 0.0,
                 }
+            last_result["zdr_enforced"] = zdr_on
             attempt_record = {
                 "model": candidate,
                 "task_id": attempt_task_id,
@@ -565,6 +577,7 @@ async def run_botex_task(
                 "failure_kind": last_result.get("failure_kind"),
                 "duration_s": float(last_result.get("duration_s") or 0.0),
                 "cost_usd": float(last_result.get("cost_usd") or 0.0),
+                "zdr_enforced": zdr_on,
             }
             # Fallback policy: a mutated workspace is handed to the next
             # candidate only after a confirmed full rollback — coverage is
@@ -650,6 +663,7 @@ async def _run_botex_task_once_impl(
     verify_command: str = "",
     recipe: str = "",
     require_read_before_write: Optional[bool] = None,
+    allow_non_zdr: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Executes an autonomous coding task in workspace_dir using the BoteX engine.
@@ -843,8 +857,10 @@ async def _run_botex_task_once_impl(
         )
     ]
 
-    # 0.4 Zero Data Retention (ZDR) guardrail — reject non-ZDR models locally before network.
-    zdr_ok, zdr_msg = check_model_zdr(model, provider_cfg)
+    # 0.4 Zero Data Retention (ZDR) guardrail — reject non-ZDR models locally
+    # before network. allow_non_zdr is the caller's per-run consent to relax it.
+    zdr_ok, zdr_msg = check_model_zdr(
+        model, provider_cfg, allow_non_zdr=bool(allow_non_zdr))
     if not zdr_ok:
         return {
             "ok": False,
@@ -971,7 +987,37 @@ async def _run_botex_task_once_impl(
         provider_name, provider_cfg, api_key,
         client_factory=AsyncOpenAI,
     )
+    # The wire flag follows the same zdr_enforced() decision as the local
+    # gate — a relaxed run keeping data_collection=deny would leave :free
+    # models with no eligible upstream endpoints. Deep-copied: the shared
+    # provider config is never mutated. Only an explicit "deny" is flipped —
+    # providers that never declared a data policy (e.g. NVIDIA) must not
+    # grow OpenRouter-specific fields on their requests.
     provider_extra_body = provider_cfg.get("extra_body") or {}
+    zdr_on = zdr_enforced(provider_cfg, bool(allow_non_zdr))
+    if not zdr_on:
+        provider_extra_body = copy.deepcopy(provider_extra_body)
+        prov_prefs = provider_extra_body.get("provider")
+        flipped = isinstance(prov_prefs, dict) and (
+            prov_prefs.get("data_collection") == "deny")
+        if flipped:
+            prov_prefs["data_collection"] = "allow"
+        # A relaxed run never goes silently: warn when a declared ZDR
+        # posture was relaxed (zdr block) or the wire flag was flipped.
+        if flipped or "zdr" in provider_cfg:
+            sys.stderr.write(
+                "[BoteX] ZDR relaxed for this run — prompts may be logged "
+                "or used for training by the provider.\n"
+            )
+    else:
+        # Strict mode must hold on the wire too: a local override of
+        # data_collection to "allow" is clamped back to "deny" so the flag
+        # can never disagree with the pre-flight gate.
+        prov_prefs = provider_extra_body.get("provider")
+        if isinstance(prov_prefs, dict) and \
+                prov_prefs.get("data_collection") == "allow":
+            provider_extra_body = copy.deepcopy(provider_extra_body)
+            provider_extra_body["provider"]["data_collection"] = "deny"
     net_hosts = net_scope["allowed_hosts"]
     net_urls = net_scope["allowed_urls"]
     effective_net_policy = net_scope["policy"]

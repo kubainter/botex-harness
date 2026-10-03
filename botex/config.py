@@ -82,6 +82,41 @@ DEFAULTS: Dict[str, Any] = {
                 "fast": "meta/llama-3.3-70b-instruct",
             },
         },
+        # Free-tier preset for operators without a paid subscription.
+        # ZDR is explicitly OFF here: :free models may be served by
+        # endpoints that log/train on prompts — the operator opts in by
+        # selecting this provider (per run, via BOTEX_PROVIDER, or by
+        # marking it default). All profiles resolve to tool-capable :free
+        # slugs; fallbacks stay :free — never silently paid.
+        "openrouter-free": {
+            "default": False,
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "extra_body": {
+                "provider": {"data_collection": "allow"},
+                "reasoning": {"max_tokens": 3000},
+            },
+            "zdr": {"enabled": False},
+            "models": {
+                "default": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "coding": "cohere/north-mini-code:free",
+                "fast": "google/gemma-4-31b-it:free",
+            },
+            "model_fallbacks": {
+                "default": [
+                    "nvidia/nemotron-3.5-lightning:free",
+                    "qwen/qwen3.8-27b:free",
+                ],
+                "coding": [
+                    "poolside/laguna-s-2.1:free",
+                    "qwen/qwen3.8-27b:free",
+                ],
+                "fast": [
+                    "nvidia/nemotron-3.5-lightning:free",
+                    "liquid/lfm-2.5-2.6b:free",
+                ],
+            },
+        },
     },
     "engine": {
         "max_turns": 15,
@@ -338,12 +373,15 @@ def set_local_config(dotted_key: str, value: Any) -> None:
 
 def resolve_provider(name: str = "") -> tuple[str, Dict[str, Any]]:
     """
-    Resolve the active provider. Explicit ``name`` wins; otherwise the first
-    provider flagged ``"default": true`` is used; otherwise ``openrouter``
-    when present, else the first configured provider. Returns ``(name, cfg)``;
-    ``cfg`` is empty when an explicitly named provider does not exist.
+    Resolve the active provider. Explicit ``name`` wins; otherwise the
+    ``BOTEX_PROVIDER`` env var; otherwise the first provider flagged
+    ``"default": true``; otherwise ``openrouter`` when present, else the
+    first configured provider. Returns ``(name, cfg)``; ``cfg`` is empty
+    when a named provider does not exist.
     """
     providers = load_config().get("providers", {})
+    if not name:
+        name = os.environ.get("BOTEX_PROVIDER", "") or ""
     if name:
         return name, providers.get(name, {})
     for pname, pcfg in providers.items():
