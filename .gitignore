@@ -91,4 +91,5 @@ temp/
 tmp/
 
 # Local diagnostic and personal scripts
-inspect_sessions.py
+inspect_sessions.py
+.coverage
