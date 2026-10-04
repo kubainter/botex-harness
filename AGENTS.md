@@ -1,55 +1,55 @@
-# BoteX - Instrukcja Operacyjna dla Agentów AI
+# BoteX - Operational Instructions for AI Agents
 
-Niniejszy dokument stanowi przewodnik i zbiór reguł dla agentów AI pracujących nad repozytorium **BoteX**.
+This document serves as a guide and rulebook for AI agents working on the **BoteX** repository.
 
-## 1. Przegląd architektury
+## 1. Architecture Overview
 
-BoteX to uprząż egzekucyjna (execution harness) dla agentów edytujących kod, działająca jako serwer MCP. Główne katalogi i moduły to:
+BoteX is an execution harness for autonomous code-editing agents, functioning as an MCP server. The main directories and modules are:
 
-*   **`botex/`** - Główny pakiet aplikacji.
-    *   `server.py` - Główny punkt wejścia serwera MCP oraz dyspozytor CLI. W katalogu głównym.
-    *   `engine.py` - Autonomiczna pętla wykonawcza, zarządzanie kontekstem i wyzwalanie wycofań (rollbacks).
-    *   `patch_engine.py` - Mechanizm fuzzy patchowania, weryfikacja składni w pamięci oraz zarządzanie snapshotami.
-    *   `file_tools.py` - Bezpieczne czytanie plików (outline-first), tworzenie, przenoszenie i usuwanie.
-    *   `security.py` - Zabezpieczenia przed atakami Path Traversal, maskowanie sekretów, filtrowanie `.gitignore`.
-    *   `exec_tools.py` - Wykonywanie poleceń z kontrolą polityk i filtrowaniem argumentów.
-    *   `capabilities.py` - Ustawienia uprawnień (tryby: `readonly`, `edit`, `destructive`, `full`).
-    *   `pricing.py` & `analytics.py` - Ochrona budżetu, księga kosztów, sprawdzanie cen modeli.
-    *   `providers.py` - Adaptery dostawców (OpenRouter, itp.) i normalizator żądań.
-*   **`tests/`** - Zestaw testów (unit i integracyjnych end-to-end).
-*   **`docs/`** - Dokumentacja, w tym szczegółowe omówienie architektury (`TUTORIAL.md`).
-*   **`recipes/`** - (w pakiecie `botex/`) Wyspecjalizowane persony agentów (planner, reviewer itp.).
+*   **`botex/`** - Main application package.
+    *   `server.py` - Main MCP server entry point and CLI dispatcher. Located in the root directory.
+    *   `engine.py` - Autonomous execution loop, context management, and rollback triggers.
+    *   `patch_engine.py` - Fuzzy patch mechanism, in-memory syntax validation, and snapshot management.
+    *   `file_tools.py` - Safe file reading (outline-first), creation, moving, and deletion.
+    *   `security.py` - Protections against Path Traversal attacks, secret masking, and `.gitignore` filtering.
+    *   `exec_tools.py` - Command execution with policy control and argument filtering.
+    *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`).
+    *   `pricing.py` & `analytics.py` - Budget protection, cost ledger, and model pricing checks.
+    *   `providers.py` - Provider adapters (OpenRouter, etc.) and request normalizer.
+*   **`tests/`** - Test suite (unit and end-to-end integration tests).
+*   **`docs/`** - Documentation, including a detailed architecture deep dive (`TUTORIAL.md`).
+*   **`recipes/`** - (in `botex/` package) Specialized agent personas (planner, reviewer, etc.).
 
-## 2. Narzędzia i komendy
+## 2. Tools and Commands
 
-*   **Testy (Pytest):** Aby uruchomić pełen zestaw testów, użyj poniższej komendy z ustawioną zmienną środowiskową:
+*   **Testing (Pytest):** To run the full test suite, use the following command with the environment variable set:
     ```bash
     PYTHONPATH=. python -m pytest tests/test_botex.py
     ```
-*   **Linting i formatowanie (Ruff):** Projekt korzysta z narzędzia Ruff. Aby sprawdzić kod:
+*   **Linting and Formatting (Ruff):** The project uses Ruff. To check the code:
     ```bash
     ruff check .
     ```
-*   **Instalacja:** Aplikacja definiowana jest w `pyproject.toml`. Do instalacji w trybie deweloperskim można użyć np.:
+*   **Installation:** The application is defined in `pyproject.toml`. To install in development mode, you can use:
     ```bash
     pip install -e .
     ```
 
-## 3. Zasady i ograniczenia
+## 3. Rules and Constraints
 
-### 3.1. Katalogi i pliki zablokowane do edycji
-Pod żadnym pozorem nie należy modyfikować następujących lokalizacji:
-*   `build/`, `dist/`, `*.egg-info/` - artefakty procesu budowania.
-*   `.snapshots/` - katalog kopii zapasowych tworzonych w trakcie działania (modyfikowany tylko przez sam system BoteX).
-*   `.env`, `botex.config.local.json` - pliki konfiguracyjne zawierające wrażliwe dane i sekrety środowiska dewelopera.
-*   `.agent_analytics.json`, `.model_pricing.json` - pliki przechowujące stan i historię.
+### 3.1. Directories and Files Blocked from Editing
+Under no circumstances should you modify the following locations:
+*   `build/`, `dist/`, `*.egg-info/` - build process artifacts.
+*   `.snapshots/` - directory for backup copies created during operation (modified only by the BoteX system itself).
+*   `.env`, `botex.config.local.json` - configuration files containing sensitive data and developer environment secrets.
+*   `.agent_analytics.json`, `.model_pricing.json` - files storing state and history.
 
-### 3.2. Konwencje repozytorium
-*   **Commity:** Staraj się, by opisy commitów były zwięzłe, rzeczowe i po angielsku. Tytuł nie powinien przekraczać 50 znaków, a jeśli potrzebny jest dłuższy opis, dodaj go po pustej linii.
-*   **Pull Requesty:** Unikaj eksponowania szczegółów potencjalnych luk w zabezpieczeniach (CRITICAL) w publicznych opisach PR, zgodnie z regułą Zero Data Retention / bezwyciekową. Pamiętaj, aby poprawki związane z bezpieczeństwem były krótsze niż 50 linii kodu.
+### 3.2. Repository Conventions
+*   **Commits:** Try to keep commit messages concise, factual, and in English. The title should not exceed 50 characters, and if a longer description is needed, add it after a blank line.
+*   **Pull Requests:** Avoid exposing details of potential vulnerabilities (CRITICAL) in public PR descriptions, in accordance with the Zero Data Retention / leak-free rule. Remember that security-related fixes should be shorter than 50 lines of code.
 
-## 4. Kryteria autonomii
+## 4. Autonomy Criteria
 
-1.  **Działaj zachowawczo i autonomicznie:** W przypadku braku pewności podczas rozwiązywania problemów inżynieryjnych wybieraj najbardziej logiczne, zachowawcze i zgodne z istniejącymi wzorcami rozwiązanie, **zamiast wstrzymywać pracę i pytać użytkownika**.
-2.  **Tylko bezpieczne polecenia:** Jeśli musisz wykonać skrypty, ogranicz się do autoryzowanej białej listy (m.in. `pytest`, `python`, `ruff`, `git`).
-3.  **Weryfikuj przed zatwierdzeniem:** Pamiętaj o uruchomieniu testów po dokonaniu zmian i sprawdzaniu składni wprowadzanych modyfikacji.
+1.  **Act conservatively and autonomously:** In case of uncertainty when solving engineering problems, choose the most logical, conservative solution that aligns with existing patterns, **instead of halting work and asking the user**.
+2.  **Safe commands only:** If you must execute scripts, restrict yourself to the authorized allowlist (e.g., `pytest`, `python`, `ruff`, `git`).
+3.  **Verify before committing:** Remember to run tests after making changes and check the syntax of the modifications introduced.
