@@ -2390,6 +2390,289 @@ def test_interactive_config():
         assert mock_pick.call_count == 4
         mock_set_local_config.assert_not_called()
 
+
+def test_cli_config():
+    from unittest.mock import patch, MagicMock
+    from server import _cli_config
+
+    with patch("sys.stdin.isatty") as mock_isatty, \
+         patch("server.load_config") as mock_load_config, \
+         patch("server.set_local_config") as mock_set_local_config, \
+         patch("server.set_language") as mock_set_language, \
+         patch("server.resolve_provider") as mock_resolve_provider, \
+         patch("server._interactive_config") as mock_interactive, \
+         patch("builtins.print") as mock_print:
+
+        mock_load_config.return_value = {
+            "providers": {
+                "prov1": {"models": {"mod1": {}}},
+                "prov2": {"models": {"mod2": {}}}
+            },
+            "engine": {
+                "default_profile": "mod1",
+                "default_mode": "edit"
+            }
+        }
+        mock_resolve_provider.return_value = ("prov1", None)
+
+        # Test no args interactive
+        mock_isatty.return_value = True
+        _cli_config([])
+        mock_interactive.assert_called_once()
+
+        # Test show
+        _cli_config(["show"])
+
+        # Test provider
+        _cli_config(["provider", "prov2"])
+        mock_set_local_config.assert_any_call("providers.prov1.default", False)
+        mock_set_local_config.assert_any_call("providers.prov2.default", True)
+
+        # Test provider unknown
+        _cli_config(["provider", "unknown"])
+
+        # Test model
+        _cli_config(["model", "slug"])
+        mock_set_local_config.assert_any_call("providers.prov1.models.default", "slug")
+
+        # Test model with provider
+        _cli_config(["model", "prov2", "slug2"])
+        mock_set_local_config.assert_any_call("providers.prov2.models.default", "slug2")
+
+        # Test model unknown provider
+        _cli_config(["model", "unknown", "slug2"])
+
+        # Test profile
+        _cli_config(["profile", "mod2"])
+        mock_set_local_config.assert_any_call("engine.default_profile", "mod2")
+
+        # Test mode
+        _cli_config(["mode", "edit"])
+        mock_set_local_config.assert_any_call("engine.default_mode", "edit")
+
+        # Test mode unknown
+        _cli_config(["mode", "unknown"])
+
+        # Test language
+        _cli_config(["language", "pl"])
+        mock_set_local_config.assert_any_call("ui.language", "pl")
+        mock_set_language.assert_called_with("pl")
+
+        # Test language unknown
+        _cli_config(["language", "unknown"])
+
+        # Test zdr
+        _cli_config(["zdr", "on"])
+        mock_set_local_config.assert_any_call("providers.prov1.zdr.enabled", True)
+
+        # Test zdr provider
+        _cli_config(["zdr", "off", "prov2"])
+        mock_set_local_config.assert_any_call("providers.prov2.zdr.enabled", False)
+
+        # Test zdr unknown provider
+        _cli_config(["zdr", "on", "unknown"])
+
+        # Test zdr unknown state
+        _cli_config(["zdr", "unknown"])
+
+        # Test price in
+        _cli_config(["price", "in", "0.5"])
+        mock_set_local_config.assert_any_call("pricing.max_input_per_mtok", 0.5)
+
+        # Test price out
+        _cli_config(["price", "out", "1.5"])
+        mock_set_local_config.assert_any_call("pricing.max_output_per_mtok", 1.5)
+
+        # Test price invalid
+        _cli_config(["price", "in", "invalid"])
+        _cli_config(["price", "unknown", "1.0"])
+        _cli_config(["unknown"])
+
+def test_cli_models():
+    from unittest.mock import patch
+    from server import _cli_models
+
+    with patch("server.load_config") as mock_load_config, \
+         patch("server.load_catalog") as mock_load_catalog, \
+         patch("server.model_price") as mock_model_price, \
+         patch("builtins.print") as mock_print:
+
+        mock_load_config.return_value = {
+            "pricing": {
+                "cache_ttl_hours": 24,
+                "max_input_per_mtok": 1.0,
+                "max_output_per_mtok": 2.0
+            },
+            "providers": {
+                "prov1": {
+                    "base_url": "url1",
+                    "default": True,
+                    "models": {"mod1": "slug1"}
+                },
+                "prov2": {
+                    "models": {"mod2": "slug2"}
+                }
+            }
+        }
+
+        # Test normal listing
+        mock_model_price.side_effect = [(0.5, 1.5), None]
+        _cli_models([])
+
+        # Check load_catalog is called correctly (not refresh)
+        mock_load_catalog.assert_any_call("url1", ttl_hours=24.0, force_refresh=False)
+
+        # Test with refresh
+        mock_model_price.side_effect = [(0.5, 1.5), None]
+        _cli_models(["--refresh"])
+        mock_load_catalog.assert_any_call("url1", ttl_hours=24.0, force_refresh=True)
+
+def test_repl():
+    from unittest.mock import patch, MagicMock
+    from server import _repl
+
+    with patch("builtins.input") as mock_input, \
+         patch("server._try_local_command") as mock_try_local, \
+         patch("server.run_botex_task") as mock_run_task, \
+         patch("server._print_repl_help") as mock_print_help, \
+         patch("builtins.print") as mock_print:
+
+        # Test case 1: empty input -> help -> exit_cmd
+        mock_input.side_effect = ["", "help", "quit"]
+        _repl([])
+        mock_print_help.assert_called_once()
+
+        # Test case 2: mode -> try_local (true) -> try_local (false) -> run_botex_task -> KeyboardInterrupt -> Exception -> EOFError
+        mock_input.side_effect = ["mode readonly", "health", "do task", "interrupt", "exception", EOFError]
+        mock_try_local.side_effect = [True, False, False, False]
+
+        async def mock_run(*args, **kwargs):
+            if kwargs.get("task") == "interrupt":
+                raise KeyboardInterrupt()
+            if kwargs.get("task") == "exception":
+                raise ValueError("error")
+            return {"ok": True, "status": "DONE", "cost_usd": 0.1, "summary": "done"}
+
+        mock_run_task.side_effect = mock_run
+
+        _repl([])
+
+        mock_try_local.assert_any_call("health")
+        mock_try_local.assert_any_call("do task")
+        mock_try_local.assert_any_call("interrupt")
+        mock_try_local.assert_any_call("exception")
+
+def test_main():
+    from unittest.mock import patch, MagicMock
+    from server import main
+    import sys
+
+    with patch("server.init_language") as mock_init_lang, \
+         patch("server.load_config", return_value={"ui": {"language": "auto"}}), \
+         patch("server._repl") as mock_repl, \
+         patch("server.run_botex_task") as mock_run_task, \
+         patch("server.cli_stats") as mock_cli_stats, \
+         patch("server.cli_history") as mock_cli_history, \
+         patch("server.snapshot_manager") as mock_snaps, \
+         patch("server.check_health") as mock_health, \
+         patch("server._cli_config") as mock_cli_config, \
+         patch("server._cli_models") as mock_cli_models, \
+         patch("server._start_mcp_server") as mock_mcp, \
+         patch("server._print_usage") as mock_usage, \
+         patch("server._print_repl_help") as mock_repl_help, \
+         patch("builtins.print") as mock_print, \
+         patch("sys.exit") as mock_exit, \
+         patch("sys.stdin.isatty") as mock_isatty:
+
+        # test repl
+        with patch("sys.argv", ["server.py", "repl"]):
+            main()
+            mock_repl.assert_called_once()
+        mock_repl.reset_mock()
+
+        # test run
+        with patch("sys.argv", ["server.py", "run", "do task", "--workspace", "myws"]):
+            async def mock_run(*args, **kwargs):
+                return {"ok": True, "status": "DONE", "task_id": "123", "steps": 1}
+            mock_run_task.side_effect = mock_run
+            main()
+            mock_run_task.assert_called_once()
+            mock_exit.assert_called_with(0)
+        mock_run_task.reset_mock()
+        mock_exit.reset_mock()
+
+        # test --stats
+        with patch("sys.argv", ["server.py", "--stats", "--month"]):
+            main()
+            mock_cli_stats.assert_called_with("month")
+
+        # test --history
+        with patch("sys.argv", ["server.py", "--history", "123"]):
+            main()
+            mock_cli_history.assert_called_with("123")
+
+        # test --snapshots
+        with patch("sys.argv", ["server.py", "--snapshots"]):
+            mock_snaps.list_snapshots.return_value = [{"task_id": "test", "created_at": "now", "files_count": 1, "size_kb": 100, "age_days": 1}]
+            main()
+            mock_snaps.list_snapshots.assert_called_once()
+
+        # test --clean-snapshots
+        with patch("sys.argv", ["server.py", "--clean-snapshots"]):
+            mock_snaps.clean_old_snapshots.return_value = {"deleted_dirs": 1, "freed_mb": 1, "remaining_mb": 1}
+            main()
+            mock_snaps.clean_old_snapshots.assert_called_once()
+
+        # test health
+        with patch("sys.argv", ["server.py", "health"]):
+            async def mock_h(*args, **kwargs):
+                return {"status": "ok"}
+            mock_health.side_effect = mock_h
+            main()
+            mock_health.assert_called_once()
+
+        # test config
+        with patch("sys.argv", ["server.py", "config", "show"]):
+            main()
+            mock_cli_config.assert_called_with(["show"])
+
+        # test models
+        with patch("sys.argv", ["server.py", "models", "--refresh"]):
+            main()
+            mock_cli_models.assert_called_with(["--refresh"])
+
+        # test serve
+        with patch("sys.argv", ["server.py", "serve"]):
+            main()
+            mock_mcp.assert_called_once()
+        mock_mcp.reset_mock()
+
+        # test help
+        with patch("sys.argv", ["server.py", "help"]):
+            main()
+            mock_usage.assert_called_once()
+        mock_usage.reset_mock()
+
+        # test unknown
+        with patch("sys.argv", ["server.py", "unknown"]):
+            main()
+            mock_usage.assert_called_once()
+            mock_exit.assert_called_with(2)
+        mock_exit.reset_mock()
+
+        # test empty isatty
+        with patch("sys.argv", ["server.py"]):
+            mock_isatty.return_value = True
+            main()
+            mock_repl_help.assert_called_once()
+            mock_repl.assert_called_once_with([])
+
+        # test empty non-isatty
+        mock_mcp.reset_mock()
+        with patch("sys.argv", ["server.py"]):
+            mock_isatty.return_value = False
+            main()
+            mock_mcp.assert_called_once()
 if __name__ == "__main__":
     print("Running BoteX Test Suite...")
     test_security()
@@ -2420,4 +2703,8 @@ if __name__ == "__main__":
     test_normalize_cli_style()
     test_pick()
     test_interactive_config()
+    test_cli_config()
+    test_cli_models()
+    test_repl()
+    test_main()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")
