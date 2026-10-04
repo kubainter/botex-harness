@@ -50,6 +50,6 @@ Under no circumstances should you modify the following locations:
 
 ## 4. Autonomy Criteria
 
-1.  **Act conservatively and autonomously:** In case of uncertainty when solving engineering problems, choose the most logical, conservative solution that aligns with existing patterns, **instead of halting work and asking the user**.
+1.  **Act conservatively and autonomously:** In case of minor uncertainty when solving engineering problems, choose the most logical, conservative solution that aligns with existing patterns. However, **if you are not 100% sure about the solution (acting as a safety fuse), you must halt work and ask the user** how they want to proceed to ensure it is fixed properly.
 2.  **Safe commands only:** If you must execute scripts, restrict yourself to the authorized allowlist (e.g., `pytest`, `python`, `ruff`, `git`).
 3.  **Verify before committing:** Remember to run tests after making changes and check the syntax of the modifications introduced.
