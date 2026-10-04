@@ -153,7 +153,7 @@ for the whole run:
 
 ### Provider, model, cost
 
-- `provider`: `openrouter` (default) or `nvidia`, per server config
+- `provider`: `openrouter` (default), `nvidia`, or `openrouter-free` (free `:free` models, ZDR off — no subscription needed)
 - `profile`: `default` / `coding` / `auto-beta` / `fast` — resolved per provider
 - `model`: explicit slug, overrides profile
 - **Leave `model` and `profile` empty to let the mode pick the tier**:
@@ -169,6 +169,9 @@ for the whole run:
   marks as lacking tool calling (`UNSUPPORTED`, zero cost) — do not retry
   with the same model.
 - OpenRouter requests enforce `provider.data_collection=deny` (ZDR).
+  `:free` models fail the pre-flight gate with `ZDR_VIOLATION` — they run
+  only with explicit consent: `allow_non_zdr=true` per run or the
+  `openrouter-free` provider. Such results report `zdr_enforced: false`.
   NVIDIA applies its own data policy.
 
 ## Reading the result
@@ -192,6 +195,7 @@ for the whole run:
 | `STAGNANT_ROLLBACK` | Engine detected a no-progress loop and rolled back changes |
 | `BUDGET_EXCEEDED` | Daily spend cap reached — surface this to the user |
 | `PRICE_EXCEEDED` | Resolved model is over the pricing guardrail cap |
+| `ZDR_VIOLATION` | Model matched the ZDR deny list (`:free`/`openrouter/free`) — use `allow_non_zdr`, `openrouter-free`, or pick a ZDR model |
 | `REQUEST_TIMEOUT` | A single provider request exceeded its wall-clock bound |
 | `DONE_WITHOUT_WRITE` | Required output was not written or salvaged |
 | `VERIFICATION_FAILED` | `verify_command` failed twice; changes were rolled back |

@@ -34,7 +34,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 
 from botex.engine import run_botex_task
-from botex.security import mask_secrets
+from botex.security import mask_secrets, zdr_enforced
 from botex.file_tools import get_file_outline as _get_file_outline
 from botex.analytics import cli_stats, cli_history, load_analytics
 from botex.patch_engine import snapshot_manager
@@ -63,6 +63,7 @@ class SubagentAttemptResult(TypedDict, total=False):
     cost_usd: float
     rolled_back: bool
     rollback_verified: bool
+    zdr_enforced: bool
 
 
 class SubagentTaskResult(TypedDict, total=False):
@@ -93,6 +94,7 @@ class SubagentTaskResult(TypedDict, total=False):
     lines_removed: int
     attempts: list[SubagentAttemptResult]
     fallback_from: str
+    zdr_enforced: bool
 
 
 def _masked_result(res: dict) -> dict:
@@ -123,6 +125,8 @@ def _format_result_text(res: dict) -> str:
         lines.append(f"- Model chain: {chain}")
     if res.get("rollback_verified") is False:
         lines.append("- WARNING: rollback could not be verified — workspace may be dirty")
+    if res.get("zdr_enforced") is False:
+        lines.append("- Privacy: non-ZDR — provider may log or train on prompts")
     lines += [
         f"- Duration: {res.get('duration_s', 0)}s | Cost: {cost_str}",
         f"- Modified files: {files_str}",
@@ -198,6 +202,7 @@ async def start_task(
     output_path: str = "",
     verify_command: str = "",
     recipe: str = "",
+    allow_non_zdr: bool = False,
 ) -> dict[str, Any]:
     """Start a detached BoteX task and return its task_id immediately.
 
@@ -228,6 +233,9 @@ async def start_task(
       clamped to 1.
     - net_allowed_hosts / net_allowed_urls narrow or replace the net
       scope per run according to net.policy (see run_subagent).
+    - allow_non_zdr: per-run consent to relax Zero Data Retention — needed
+      for free (:free) models whose endpoints may log or train on prompts.
+      Same semantics as in run_subagent.
 
     Returns:
         {"task_id": str, "status": "QUEUED"} — poll with get_task_status.
@@ -258,6 +266,7 @@ async def start_task(
         "api_key": api_key, "output_path": output_path,
         "verify_command": verify_command,
         "recipe": recipe,
+        "allow_non_zdr": allow_non_zdr,
     }
     task_obj = asyncio.create_task(_background_task(task_id, kwargs))
     _TASKS[task_id] = {
@@ -313,15 +322,21 @@ async def fetch_url(url: str, max_bytes: int = 0) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def recommend_models(task_type: str = "coding", limit: int = 5) -> str:
+async def recommend_models(task_type: str = "coding", limit: int = 5, include_free: bool = False) -> str:
     """
     [EN] Fetches the most cost-effective and capable models from OpenRouter based on live benchmarks.
     USE THIS TOOL BEFORE calling `run_subagent` if you are unsure which model ID to use or want to optimize for cost/quality.
-    
+    include_free=True also admits ':free' variants (non-ZDR — prompts may be
+    logged/trained on); they require allow_non_zdr or the openrouter-free
+    provider to actually run.
+
     [PL] Pobiera rekomendacje modeli z OpenRouter na podstawie benchmarków.
     Użyj tego narzędzia ZANIM wywołasz `run_subagent`, jeśli nie znasz dokładnego ID modelu.
+    include_free=True dopuszcza warianty ':free' (non-ZDR — prompty mogą być
+    logowane/trenowane); do uruchomienia wymagają allow_non_zdr albo
+    providera openrouter-free.
     """
-    results = get_recommended_models(task_type, limit)
+    results = get_recommended_models(task_type, limit, include_free=include_free)
     return json.dumps(results, indent=2)
 
 @mcp.tool()
@@ -346,6 +361,7 @@ async def run_subagent(
     net_allowed_urls: list[str] = [],
     verify_command: str = "",
     recipe: str = "",
+    allow_non_zdr: bool = False,
 ) -> Annotated[CallToolResult, SubagentTaskResult]:
     """
     Runs BoteX — an autonomous code execution engine (agent-agnostic harness).
@@ -421,6 +437,13 @@ async def run_subagent(
                exec.enabled=true in config and exec authorization.
         recipe: Optional operational persona / workflow prompt (e.g. 'planner',
                'code-explorer', 'reviewer', 'security-reviewer', 'build-resolver', 'tdd').
+        allow_non_zdr: Per-run consent to relax the Zero Data Retention
+               gate. Required for free (:free) models whose endpoints may
+               log or train on prompts — it also switches the wire
+               provider.data_collection flag to 'allow'. Grant only with
+               the operator's consent; the result carries
+               zdr_enforced=false. The openrouter-free provider preset is
+               the persistent config-level alternative.
 
     Returns:
         A pretty-text report in the text content (unchanged format for legacy
@@ -450,6 +473,7 @@ async def run_subagent(
         net_allowed_urls=net_allowed_urls or None,
         verify_command=verify_command,
         recipe=recipe,
+        allow_non_zdr=True if allow_non_zdr else None,
     )
 
     res = _masked_result(res)
@@ -618,12 +642,16 @@ async def check_health() -> str:
     keys_report = "\n".join(key_lines) or "[MISSING] No providers configured"
     snaps = snapshot_manager.list_snapshots()
     total_mb = sum(s["size_kb"] for s in snaps) / 1024
+    def_pname, def_pcfg = resolve_provider()
+    zdr_state = ("ACTIVE" if zdr_enforced(def_pcfg)
+                 else "OFF — provider may log/train on prompts")
 
     return (
         "=== BOTEX HARNESS HEALTH CHECK ===\n"
         f"{keys_report}\n"
         f"[OK] Snapshot directory: active ({len(snaps)} backups, {total_mb:.2f} MB)\n"
-        f"[OK] Path Traversal protection and Zero-Retention: ACTIVE\n"
+        f"[OK] Path Traversal protection: ACTIVE | "
+        f"Zero-Retention ({def_pname}): {zdr_state}\n"
         "[SUCCESS] BoteX engine is fully ready for autonomous work on disk!"
     )
 
@@ -663,6 +691,7 @@ def _print_usage():
 {title(t('usage.commands'))}
   {c('botex repl [-w DIR] [--profile P]')}   {d(t('usage.repl'))}
   {c('botex run "task" [flags]')}            {d(t('usage.run'))}
+  {c('    --allow-non-zdr')}                 {d(t('usage.allow_non_zdr'))}
   {c('botex --stats [--month]')}             {d(t('usage.stats'))}
   {c('botex --history <task_id>')}           {d(t('usage.history'))}
   {c('botex --snapshots')}                   {d(t('usage.snapshots'))}
@@ -674,6 +703,7 @@ def _print_usage():
   {c('botex config model [prov] <slug>')}    {d(t('usage.config.model'))}
   {c('botex config profile <name>')}         {d(t('usage.config.profile'))}
   {c('botex config mode <preset>')}          {d(t('usage.config.mode'))}
+  {c('botex config zdr <on|off> [prov]')}    {d(t('usage.config.zdr'))}
   {c('botex models [--refresh]')}            {d(t('usage.models'))}
 
 {title(t('usage.repl_cmds'))}
@@ -696,10 +726,11 @@ def _print_repl_help():
   {c('snapshots')}               {d(t('repl.snapshots'))}
   {c('clean-snapshots')}         {d(t('repl.clean'))}
   {c('config')}                  {d(t('repl.config'))}
-  {c('config provider|model|profile|mode|language|price <value>')}
+  {c('config provider|model|profile|mode|language|price|zdr <value>')}
                       {d(t('repl.config.set'))}
   {c('models [--refresh]')}      {d(t('usage.models'))}
   {c('mode <preset>')}           {d(t('repl.mode'))}
+  {c('botex repl --allow-non-zdr')} {d(t('repl.allow_non_zdr'))}
   {c('help')}                    {d(t('repl.help'))}
   {c('exit')}                    {d(t('repl.exit'))}
 
@@ -840,7 +871,8 @@ def _cli_config(argv):
         print(title(t("cfg.title")))
         for name, p in providers.items():
             marker = accent(" [default]") if p.get("default") else ""
-            print(f"{accent('provider ' + name)}{marker}: {dim(p.get('base_url', ''))}")
+            zdr_state = "ZDR:on" if zdr_enforced(p) else "ZDR:off"
+            print(f"{accent('provider ' + name)}{marker}: {dim(p.get('base_url', ''))} {dim('[' + zdr_state + ']')}")
             for prof, mdl in p.get("models", {}).items():
                 print(f"    {accent(prof)}: {mdl}")
         eng = cfg.get("engine", {})
@@ -888,6 +920,21 @@ def _cli_config(argv):
         set_local_config("ui.language", lang)
         set_language(lang)
         print(ok(t("cfg.default_lang", name=lang)))
+    elif key == "zdr" and rest:
+        # `config zdr on|off [provider]` — persistent per-provider ZDR toggle
+        # in botex.config.local.json. "off" relaxes both the local model gate
+        # and the wire data_collection flag (engine derives both from the
+        # same zdr_enforced predicate).
+        state = rest[0].lower()
+        if state not in ("on", "off"):
+            print(err(t("cfg.zdr_unknown")))
+            return
+        pname = rest[1] if len(rest) > 1 else resolve_provider()[0]
+        if pname not in providers:
+            print(err(t("cfg.unknown_provider", name=pname, avail=", ".join(providers))))
+            return
+        set_local_config(f"providers.{pname}.zdr.enabled", state == "on")
+        print(ok(t("cfg.zdr_set", name=pname, state=state)))
     elif key == "price" and len(rest) >= 2:
         which = rest[0].lower()
         try:
@@ -949,6 +996,10 @@ def _repl(argv):
     parser.add_argument("--max-turns", type=int, default=0, help="Step limit (0 = config value)")
     parser.add_argument("--max-tokens", type=int, default=0, help="Per-turn completion cap (0 = config; reasoning models need ~8000+)")
     parser.add_argument("--max-duration", type=int, default=0, help="Wall-clock limit in seconds (0 = config)")
+    parser.add_argument(
+        "--allow-non-zdr", action="store_true",
+        help="Relaxes Zero Data Retention for this session (needed for :free models; provider may log/train on prompts)"
+    )
     args = parser.parse_args(argv)
 
     print(title("BoteX REPL") + " — " + t("repl.banner") + " "
@@ -992,6 +1043,7 @@ def _repl(argv):
                 max_turns=args.max_turns or None,
                 max_tokens=args.max_tokens or None,
                 max_duration_s=args.max_duration or None,
+                allow_non_zdr=True if args.allow_non_zdr else None,
                 confirm_fn=_interactive_confirm
             ))
         except KeyboardInterrupt:
@@ -1050,6 +1102,10 @@ def main():
         )
         parser.add_argument("--output-path", default="", help="Required output file")
         parser.add_argument("--verify-command", default="", help="Allowlisted command required to pass after writes")
+        parser.add_argument(
+            "--allow-non-zdr", action="store_true",
+            help="Relaxes Zero Data Retention for this run (needed for :free models; provider may log/train on prompts)"
+        )
         args = parser.parse_args(sys.argv[2:])
 
         # Destructive ops: pre-authorized via flag/config, or gated per-op by an
@@ -1080,7 +1136,8 @@ def main():
             confirm_fn=confirm_fn,
             api_key=args.api_key,
             output_path=args.output_path,
-            verify_command=args.verify_command
+            verify_command=args.verify_command,
+            allow_non_zdr=True if args.allow_non_zdr else None,
         ))
         status_str = ok(t("repl.success")) if res.get("ok") else err(t("repl.failure"))
         print(f"{status_str} {t('run.status')} {res.get('status')} | {t('run.task')} {res.get('task_id')} | "
