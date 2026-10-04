@@ -1,0 +1,4 @@
+## 2026-10-04 - [SSRF Bypass using Carrier-Grade NAT IPs]
+**Vulnerability:** The SSRF protection in `botex/net_tools.py:_public_ips` used a blocklist of IP types (`is_private`, `is_loopback`, `is_link_local`, `is_reserved`, `is_multicast`, `is_unspecified`) to reject internal IP resolutions. This missed certain IP ranges like Carrier-Grade NAT (`100.64.0.0/10`) which are not classified as `is_private` but are not globally routable. This could allow an attacker to bypass the SSRF protection if internal services use those ranges.
+**Learning:** Blocklist approaches for IP validation are prone to bypasses due to evolving or obscure reserved IP address ranges. The `ipaddress` module's `.is_global` property implements a strict allowlist approach to guarantee public routability.
+**Prevention:** Always use `ip.is_global` (an allowlist approach) to verify that an IP is intended for the public internet when defending against Server-Side Request Forgery.
