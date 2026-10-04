@@ -1,0 +1,42 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Wersja wydania (np. v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Create release zip archive
+      run: |
+        # Kopiujemy niezbędne pliki do tymczasowego folderu, by spakować na czysto
+        mkdir -p botex-release
+        cp -r botex docs skills tests botex.cmd botex.sh server.py pyproject.toml requirements.txt README.md ROADMAP.md AGENTS.md LICENSE NOTICE glama.json botex.config.json botex-release/
+
+        # Spakowanie
+        cd botex-release
+        zip -r ../botex-${{ github.event.inputs.version }}.zip .
+        cd ..
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.event.inputs.version }}
+        name: Release ${{ github.event.inputs.version }}
+        files: botex-${{ github.event.inputs.version }}.zip
+        generate_release_notes: true
