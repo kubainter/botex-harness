@@ -72,7 +72,12 @@ maintenance.
 * `resolve_safe_path()` blocks path traversal outside `workspace_dir`.
 * Read/write of `.env*`, `*.pem`, `*.key`, `id_rsa`, and similar patterns is blocked.
 * Secret-like strings are masked in file reads, command output, and analytics.
-* OpenRouter requests always include `provider: {"data_collection": "deny"}`.
+* OpenRouter requests include `provider: {"data_collection": "deny"}` while
+  ZDR is enforced. Both the local model gate and this wire flag derive from
+  one predicate (`zdr_enforced`): a provider with `zdr.enabled: false` or a
+  run with `allow_non_zdr` relaxes both — `:free` models then route
+  normally. Relaxed runs print a stderr warning and report
+  `zdr_enforced: false`.
 * `reasoning.max_tokens` (in `extra_body`) caps hidden thinking so reasoning
   models cannot consume the entire `max_tokens` budget before emitting output.
 
@@ -161,7 +166,7 @@ drives the `model_fallbacks` retry policy.
 * `get_stats(period)` — cost/token report from analytics
 * `check_health()` — provider, key, model, and budget readiness
 * `clean_snapshots(max_age_days, max_total_mb)` — prune old snapshots
-* `recommend_models(task_type, limit)` — live OpenRouter cost/quality ranking
+* `recommend_models(task_type, limit, include_free)` — live OpenRouter cost/quality ranking (`include_free=True` also admits non-ZDR `:free` variants)
 
 `run_subagent` is a single blocking call; for long runs prefer `start_task` +
 `get_task_status`. Clients can also issue multiple independent `tools/call`
@@ -208,8 +213,12 @@ Resolution order (lowest to highest priority):
 
 Key sections:
 
-* `providers.<name>` — `base_url`, `api_key_env`, `extra_body`, `capabilities`,
-  `models` profiles, and per-profile `model_fallbacks` retry chains.
+* `providers.<name>` — `base_url`, `api_key_env`, `extra_body`, `zdr`
+  (`enabled` + `deny_patterns`), `capabilities`, `models` profiles, and
+  per-profile `model_fallbacks` retry chains. The bundled `openrouter-free`
+  preset ships `zdr.enabled: false` with `:free` tool-capable models for
+  operators without a paid subscription — select it per run, via
+  `BOTEX_PROVIDER`, or via `botex config provider openrouter-free`.
 * `engine.default_profile`, `engine.mode_profiles`, `engine.max_turns`,
   `engine.max_tokens`, `engine.reasoning_max_tokens`, `engine.request_timeout_s`,
   `engine.max_duration_s`, `engine.temperature`, `engine.budget_limit_usd`,
@@ -226,7 +235,8 @@ Key sections:
   `paths.snapshot_auto_prune` (+ age/size quotas).
 * `app.referer` — your attribution URL; the name "BoteX" is fixed.
 * `analytics.store_full_text`, `analytics.preview_chars`.
-* `ui.language` — `en` or `pl`; affects CLI only.
+* `ui.language` — `en`, `pl`, or `auto` (OS locale; `BOTEX_LANG` overrides);
+  affects CLI only.
 
 ## 8. CLI usage
 
@@ -239,6 +249,12 @@ botex run "Add a --verbose flag to cli.py" -w ./project --profile coding
 botex run "Fix failing test" --files tests/test_app.py --max-turns 25 --budget 0.50
 botex run "Remove the legacy module" -w ./project --mode destructive
 botex run "Quick code review" -w ./project --mode readonly --max-duration 300 --max-tokens 4000
+
+# free models (non-ZDR opt-in)
+botex run "task" --provider openrouter-free                 # preset, per-run
+botex run "task" --model qwen/qwen3.8-27b:free --allow-non-zdr
+botex config provider openrouter-free                       # persistent switch
+botex config zdr off                                        # relax ZDR on current provider
 
 # maintenance
 botex --stats
@@ -266,7 +282,7 @@ fuzzy patching & rollback, file tools, destructive ops, capability modes, exec
 policy, pricing, network guards, fetch policy, fallback & verify, async task
 registry, write-guard, provider adapter, analytics, MCP structured output, ZDR,
 review regression, tool-misuse guards, read-before-write, memory vault, recipes,
-MCP memory & stats), ending with:
+MCP memory & stats, MCP tool surface), ending with:
 
 ```
 [SUCCESS] ALL BOTEX ENGINE TESTS PASSED!

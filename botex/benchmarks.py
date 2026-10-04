@@ -4,10 +4,17 @@ import urllib.request
 import json
 from typing import List, Dict, Any
 
-def get_recommended_models(task_type: str = "coding", limit: int = 5) -> List[Dict[str, Any]]:
+def get_recommended_models(
+    task_type: str = "coding",
+    limit: int = 5,
+    include_free: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Fetches model recommendations. Uses OpenRouter's /api/v1/models endpoint to
     find the most cost-effective models suitable for the given task.
+
+    ``include_free=True`` admits ``:free`` variants — they may log/train on
+    prompts (non-ZDR), so they stay excluded by default.
     """
     url = "https://openrouter.ai/api/v1/models"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -39,8 +46,11 @@ def get_recommended_models(task_type: str = "coding", limit: int = 5) -> List[Di
         
         # ZDR (Zero Data Retention) enforcement:
         # OpenRouter's free fallback providers (like Google AI Studio) may collect data.
-        # To strictly enforce ZDR, we exclude any model with ':free' in the slug unless overridden.
-        if ":free" in slug.lower():
+        # To strictly enforce ZDR, we exclude slugs matching the pre-flight
+        # gate's deny patterns (':free', 'openrouter/free') unless the caller
+        # opted in via include_free.
+        if (":free" in slug.lower() or "openrouter/free" in slug.lower()) \
+                and not include_free:
             continue
 
         # Simple heuristic for 'coding' task:

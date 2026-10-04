@@ -19,7 +19,7 @@ Instead of trusting the model to behave, BoteX wraps every action in safety gate
 * **Multi-tier fuzzy patching**: Patches are whitespace- and newline-resilient (CRLF/LF agnostic with indentation detection), so minor formatting mismatches don't break execution.
 * **Automatic snapshot rollback**: Every touched file is snapshotted before modification. If an agent loops, stagnates, or fails verification, the entire workspace reverts cleanly.
 * **Hard budget & pricing caps**: Pre-flight checks verify model pricing against live provider catalogs. If a task exceeds its budget or a model is overpriced, BoteX aborts before spending a cent.
-* **Strict privacy & Zero Data Retention (ZDR)**: Enforces `provider.data_collection: deny` on OpenRouter calls, blocks `.env`/secrets, masks API keys in logs, and prevents path traversal attacks.
+* **Strict privacy & Zero Data Retention (ZDR)**: Enforces `provider.data_collection: deny` on OpenRouter calls, blocks `.env`/secrets, masks API keys in logs, and prevents path traversal attacks. Free (`:free`) models that cannot guarantee ZDR are rejected locally — opt out explicitly per run (`allow_non_zdr`) or via the `openrouter-free` provider preset.
 
 ---
 
@@ -103,7 +103,7 @@ BoteX exposes a focused set of MCP tools:
 * **`get_stats(period)`**: Generates token usage and cost reports from the local analytics ledger.
 * **`check_health()`**: Checks readiness of providers, models, keys, and budget limits.
 * **`clean_snapshots(max_age_days, max_total_mb)`**: Prunes old workspace backup snapshots.
-* **`recommend_models(task_type, limit)`**: Queries live OpenRouter pricing/quality rankings for coding tasks.
+* **`recommend_models(task_type, limit, include_free)`**: Queries live OpenRouter pricing/quality rankings for coding tasks. `include_free=true` also admits `:free` variants.
 * **`fetch_url(url)`**: Safe, caller-side URL fetching with strict host and size filters.
 
 ---
@@ -128,6 +128,7 @@ Example payload for `run_subagent`:
 | `task` | *(required)* | Clear description of what needs to be implemented or fixed. |
 | `files` | `[]` | List of primary target files to nudge the agent toward. |
 | `workspace_dir` | `.` | Root directory the agent is restricted to. |
+| `provider` | `""` | API provider from `botex.config.json` (`openrouter`, `nvidia`, `openrouter-free`; empty = configured default or `BOTEX_PROVIDER`). |
 | `profile` | `"default"` | Model profile configured in `botex.config.json` (`default`, `coding`, `fast`). |
 | `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full`. |
 | `recipe` | `""` | Specialized workflow persona (`planner`, `code-explorer`, `reviewer`, `security-reviewer`, `build-resolver`, `tdd`). |
@@ -136,6 +137,7 @@ Example payload for `run_subagent`:
 | `allow_destructive`| `false` | Explicit opt-in for `delete_file` and `move_file`. |
 | `allow_exec` | `false` | Explicit opt-in for `run_command` (requires `exec.enabled: true` in config). |
 | `allow_net` | `false` | Explicit opt-in for web access via `read_url`. |
+| `allow_non_zdr` | `false` | Per-run consent to relax the ZDR gate — required for `:free` models (provider may log/train on prompts). The result carries `zdr_enforced: false`. |
 | `output_path` | `""` | Enforce that this exact file must be written and non-empty for `DONE` status. |
 | `verify_command` | `""` | Verification command (e.g. `pytest tests/test_auth.py`) that must pass before completion. |
 
@@ -176,6 +178,33 @@ If a model refuses a task, burns its token limit without output, or hits provide
 ```
 
 Before handing off the workspace to the next candidate model, **BoteX verifies that any partial changes from the failed attempt were completely rolled back**. A candidate never inherits a dirty or half-broken workspace.
+
+---
+
+## Free Models (Non-ZDR Opt-in)
+
+ZDR is on by default and `:free` slugs are rejected pre-flight with `ZDR_VIOLATION`. Operators without a paid subscription — or anyone who accepts that free endpoints may log/train on prompts — can opt in two ways, both leaving an audit trail (`zdr_enforced: false` in the result and a stderr warning):
+
+```bash
+# Persistent: switch to the bundled free-tier provider preset
+# (all profiles resolve to tool-capable :free models)
+botex config provider openrouter-free          # or BOTEX_PROVIDER=openrouter-free
+
+# or relax ZDR on the current provider (keeps paid models, widens routing)
+botex config zdr off                            # 'on' restores enforcement
+
+# Per-run only — no config change:
+botex run "task" --provider openrouter-free
+botex run "task" --model qwen/qwen3.8-27b:free --allow-non-zdr
+```
+
+```json
+{"task": "...", "provider": "openrouter-free"}
+{"task": "...", "model": "qwen/qwen3.8-27b:free", "allow_non_zdr": true}
+```
+
+> [!NOTE]
+> `:free` variants also require the OpenRouter **account-level** free-model opt-in (privacy settings); without it requests surface as `provider_policy_denied`. Free models carry per-day rate limits — the `model_fallbacks` chains in the preset stay entirely on `:free` slugs.
 
 ---
 
