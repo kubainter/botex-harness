@@ -2303,6 +2303,93 @@ def test_try_local_command():
 
         assert _try_local_command("unknown") == False
 
+def test_normalize_cli_style():
+    from server import _normalize_cli_style
+
+    assert _normalize_cli_style('botex run "hello world"') == "hello world"
+    assert _normalize_cli_style("botex run 'hello world'") == "hello world"
+    assert _normalize_cli_style("botex health") == "health"
+    assert _normalize_cli_style('run "hello world"') == "hello world"
+    assert _normalize_cli_style("run 'hello world'") == "hello world"
+    assert _normalize_cli_style("hello world") == "hello world"
+    assert _normalize_cli_style("botex") == "botex"
+    assert _normalize_cli_style("run") == "run"
+
+def test_pick():
+    from unittest.mock import patch
+    from server import _pick
+
+    with patch("builtins.print"), patch("builtins.input") as mock_input:
+        mock_input.return_value = "1"
+        assert _pick("test", ["a", "b"], "a") == "a"
+
+        mock_input.return_value = "2"
+        assert _pick("test", ["a", "b"], "a") == "b"
+
+        mock_input.return_value = "b"
+        assert _pick("test", ["a", "b"], "a") == "b"
+
+        mock_input.return_value = ""
+        assert _pick("test", ["a", "b"], "a") == None
+
+        mock_input.return_value = "invalid"
+        assert _pick("test", ["a", "b"], "a") == None
+
+        mock_input.return_value = "3"
+        assert _pick("test", ["a", "b"], "a") == None
+
+def test_interactive_config():
+    from unittest.mock import patch, MagicMock
+    from server import _interactive_config
+
+    with patch("server.load_config") as mock_load_config, \
+         patch("server.resolve_provider") as mock_resolve_provider, \
+         patch("server._pick") as mock_pick, \
+         patch("server.set_local_config") as mock_set_local_config, \
+         patch("server.set_language") as mock_set_language, \
+         patch("server._cli_config") as mock_cli_config:
+
+        mock_load_config.return_value = {
+            "providers": {
+                "prov1": {"models": {"mod1": {}}},
+                "prov2": {"models": {"mod2": {}}}
+            },
+            "engine": {
+                "default_profile": "mod1",
+                "default_mode": "edit"
+            }
+        }
+        mock_resolve_provider.return_value = ("prov1", None)
+
+        # Test case: user changes provider to prov2, changes profile to mod2, and changes mode to code
+        mock_pick.side_effect = ["prov2", "mod2", "code", "en"]
+
+        _interactive_config()
+
+        # _pick should be called 3 times
+        assert mock_pick.call_count == 4
+        # First call is picking the provider
+        mock_pick.assert_any_call("Provider", ["prov1", "prov2"], "prov1")
+
+        # Check set_local_config calls
+        mock_set_local_config.assert_any_call("providers.prov1.default", False)
+        mock_set_local_config.assert_any_call("providers.prov2.default", True)
+        mock_set_local_config.assert_any_call("engine.default_profile", "mod2")
+        mock_set_local_config.assert_any_call("engine.default_mode", "code")
+        mock_set_local_config.assert_any_call("ui.language", "en")
+        mock_set_language.assert_called_with("en")
+        mock_cli_config.assert_called_with(["show"])
+
+        # Test case: user keeps existing config
+        mock_set_local_config.reset_mock()
+        mock_pick.reset_mock()
+        mock_pick.side_effect = [None, None, None, None]
+
+        _interactive_config()
+
+        assert mock_pick.call_count == 4
+        mock_set_local_config.assert_not_called()
+
 if __name__ == "__main__":
     print("Running BoteX Test Suite...")
     test_security()
@@ -2329,4 +2416,8 @@ if __name__ == "__main__":
     test_recipes_and_rationalization_heuristics()
     test_mcp_memory_and_stats()
     test_mcp_tool_surface()
+    test_try_local_command()
+    test_normalize_cli_style()
+    test_pick()
+    test_interactive_config()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")
