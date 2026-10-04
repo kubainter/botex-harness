@@ -2238,6 +2238,71 @@ def test_mcp_tool_surface():
     print("[PASS] MCP Tool Surface Tests")
 
 
+
+def test_try_local_command():
+    from unittest.mock import patch
+    from server import _try_local_command
+    with patch("server.check_health") as mock_health, \
+         patch("server.cli_stats") as mock_stats, \
+         patch("server.cli_history") as mock_history, \
+         patch("server.snapshot_manager") as mock_snaps, \
+         patch("server._cli_config") as mock_config, \
+         patch("server._cli_models") as mock_models, \
+         patch("builtins.print") as mock_print:
+
+        async def mock_health_coro():
+            return {"status": "ok"}
+
+        mock_health.side_effect = mock_health_coro
+
+        mock_snaps.list_snapshots.return_value = [{"task_id": "test", "created_at": "now", "files_count": 1, "size_kb": 100, "age_days": 1}]
+        mock_snaps.clean_old_snapshots.return_value = {"deleted_dirs": 1, "freed_mb": 1, "remaining_mb": 1}
+
+        assert _try_local_command("") == True
+
+        assert _try_local_command("health") == True
+        mock_health.assert_called_once()
+
+        assert _try_local_command("stats") == True
+        mock_stats.assert_called_with("week")
+
+        assert _try_local_command("stats month") == True
+        mock_stats.assert_called_with("month")
+
+        assert _try_local_command("history") == True
+        mock_history.assert_called_with(None)
+
+        assert _try_local_command("history 123") == True
+        mock_history.assert_called_with("123")
+
+        assert _try_local_command("snapshots") == True
+        mock_snaps.list_snapshots.assert_called_once()
+
+        assert _try_local_command("clean-snapshots") == True
+        mock_snaps.clean_old_snapshots.assert_called_once()
+
+        assert _try_local_command("config") == True
+        mock_config.assert_called_with([])
+
+        assert _try_local_command("config param1") == True
+        mock_config.assert_called_with(["param1"])
+
+        assert _try_local_command("models") == True
+        mock_models.assert_called_with([])
+
+        assert _try_local_command("models param1") == True
+        mock_models.assert_called_with(["param1"])
+
+        assert _try_local_command("serve") == True
+        assert _try_local_command("server") == True
+        assert _try_local_command("repl") == True
+        assert _try_local_command("-foo") == True
+        assert _try_local_command("botex") == True
+        assert _try_local_command("python") == True
+        assert _try_local_command("py") == True
+
+        assert _try_local_command("unknown") == False
+
 if __name__ == "__main__":
     print("Running BoteX Test Suite...")
     test_security()
