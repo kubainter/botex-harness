@@ -137,8 +137,7 @@ def _public_ips(host: str, scheme: str = "https") -> list[str]:
         raise ValueError(f"Host could not be resolved: {host}")
     for value in addresses:
         ip = ipaddress.ip_address(value)
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+        if not ip.is_global:
             raise ValueError(f"Host resolves to a non-public address: {host}")
     return addresses
 
