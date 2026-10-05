@@ -132,7 +132,7 @@ Example payload for `run_subagent`:
 | `profile` | `"default"` | Model profile configured in `botex.config.json` (`default`, `coding`, `fast`). |
 | `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full`. |
 | `recipe` | `""` | Specialized workflow persona (`planner`, `code-explorer`, `reviewer`, `security-reviewer`, `build-resolver`, `tdd`). |
-| `max_turns` | `0` | Max tool-loop iterations (`0` uses configured default, usually 15). |
+| `max_turns` | `0` | Max tool-loop iterations (`0` uses `engine.max_turns`, usually 15, overridable per mode via `engine.mode_max_turns`). |
 | `budget_limit_usd`| `-1` | Hard spend limit for this task (`-1` uses global config, `0` = unlimited). |
 | `allow_destructive`| `false` | Explicit opt-in for `delete_file` and `move_file`. |
 | `allow_exec` | `false` | Explicit opt-in for `run_command` (requires `exec.enabled: true` in config). |

@@ -87,6 +87,27 @@ line counts. `undo_task(task_id)` wraps `rollback_task` + `verify_rollback`
 pre/post diffs from the snapshot store. Together they make delegation
 trustable: every run is inspectable and reversible.
 
+### 9. Turn budget for review passes (`readonly` starves at 15 steps) — implemented
+Observed: `readonly` review runs (`reviewer`/`security-reviewer` recipe →
+`fast` profile) on `deepseek-v4-flash` and `deepseek-v3.2` burned all 15
+turns doing single small `read_file_lines` calls in a loop over ~5 files
+of 1500+ lines each, ending `MAX_TURNS_REACHED` with nothing produced —
+paid tokens, zero review. `engine.max_turns` was one global value; a
+review pass legitimately needs more read steps than an edit pass needs
+write steps, and the deadline nudge cannot salvage a model that has only
+read fragments.
+
+Implemented as a mix of all three weighed options: (a)
+`engine.mode_max_turns` per-mode override (`readonly` defaults to 30),
+resolved as explicit caller arg > mode map > `engine.max_turns`; (b)
+caller guidance in `skills/botex/SKILL.md`; (c) prompt-side fix — the
+system prompt, `read_file_lines` description and both reviewer recipes
+now push whole-file reads ("one wide call over many narrow slices"), and
+the task prompt carries `STEP BUDGET`. Additionally, `turns_exhausted`
+now triggers at most one fallback per chain — the second candidate gets
+the same budget and typically starves the same way, so repeat retries
+just re-burned the read budget (the observed double-burn).
+
 ## Later — needs design or an external dependency
 
 ### Plan / dry-run mode (`mode="plan"`)
@@ -311,6 +332,9 @@ rest.
 
 ## Done recently (for reference)
 
+- Per-mode step budgets (`engine.mode_max_turns`, `readonly` = 30) +
+  `turns_exhausted` fallback capped at one retry per chain + bulk-read
+  guidance in prompt/recipes (`STEP BUDGET` line in task prompt)
 - Result contracts: `TaskContract` kinds (`analysis`/`edit`/`file_output`),
   disk-validated `DONE`, `failure_kind` taxonomy, `model_tool_misuse`,
   malformed tool-arg validation with signature echo
