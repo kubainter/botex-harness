@@ -2238,6 +2238,127 @@ def test_mcp_tool_surface():
     print("[PASS] MCP Tool Surface Tests")
 
 
+
+def test_exec_tools_coverage():
+    from unittest.mock import patch, MagicMock, AsyncMock
+    from botex.exec_tools import (
+        _binary_name, _split_command, _deny_hit, _sanitized_env,
+        _kill_tree, run_command, command_policy_error
+    )
+    import os
+    import asyncio
+    from pathlib import Path
+
+    # _binary_name
+    assert _binary_name("cmd.exe") == "cmd"
+    assert _binary_name("CMD.EXE") == "cmd"
+    assert _binary_name("script.bat") == "script"
+
+    # _split_command Windows edge case
+    with patch("os.name", "nt"):
+        assert _split_command('echo "hello"') == ["echo", "hello"]
+
+    # _split_command exceptions
+    import shlex
+    try:
+        _split_command('echo "unmatched')
+        assert False, "Should raise ValueError"
+    except ValueError:
+        pass
+
+    # empty command
+    assert command_policy_error("", allowlist=[], deny_args=[]) == "Empty command."
+
+    # _deny_hit edge cases
+    assert _deny_hit(["cmd"], [""]) == ""
+    assert _deny_hit(["cmd", "arg"], ["arg"]) == "arg"
+
+    # _sanitized_env
+    with patch.dict(os.environ, {"NORMAL": "val", "API_KEY": "secret"}):
+        env = _sanitized_env()
+        assert "NORMAL" in env
+        assert "API_KEY" not in env
+
+    # run_command tests
+    workspace = Path(".")
+
+    # 1. Normal execution
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"output", b""))
+        mock_exec.return_value = proc
+
+        res = asyncio.run(run_command("cmd", workspace, allowlist=["cmd"], deny_args=[]))
+        assert res["ok"] == True
+        assert res["stdout"] == "output"
+
+    # 2. Timeout
+    with patch("asyncio.create_subprocess_exec") as mock_exec, \
+         patch("botex.exec_tools._kill_tree", new_callable=AsyncMock) as mock_kill:
+        proc = MagicMock()
+        proc.returncode = -1
+
+        async def slow_comm(*args, **kwargs):
+            await asyncio.sleep(0.5)
+            return (b"", b"")
+
+        proc.communicate.side_effect = slow_comm
+        mock_exec.return_value = proc
+
+        res = asyncio.run(run_command("cmd", workspace, allowlist=["cmd"], deny_args=[], timeout_s=0.1))
+        assert res["ok"] == False
+        assert res["timed_out"] == True
+        mock_kill.assert_called_once()
+
+    # 3. FileNotFoundError
+    with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError()):
+        res = asyncio.run(run_command("cmd", workspace, allowlist=["cmd"], deny_args=[]))
+        assert res["ok"] == False
+        assert "not found" in res["error"]
+
+    # 4. Generic exception
+    with patch("asyncio.create_subprocess_exec", side_effect=ValueError("spawn error")):
+        res = asyncio.run(run_command("cmd", workspace, allowlist=["cmd"], deny_args=[]))
+        assert res["ok"] == False
+        assert "spawn error" in res["error"]
+
+    # 5. Output truncation
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"a" * 15, b""))
+        mock_exec.return_value = proc
+
+        res = asyncio.run(run_command("cmd", workspace, allowlist=["cmd"], deny_args=[], max_output_bytes=10))
+        assert res["ok"] == True
+        assert "truncated" in res["stdout"]
+
+    # _kill_tree POSIX
+    with patch("os.name", "posix"):
+        proc = MagicMock()
+        proc.kill = MagicMock()
+        asyncio.run(_kill_tree(proc))
+        proc.kill.assert_called_once()
+
+    # _kill_tree POSIX exception fallback
+    with patch("os.name", "posix"):
+        proc = MagicMock()
+        proc.kill.side_effect = [Exception("error1"), Exception("error2")]
+        asyncio.run(_kill_tree(proc))
+        assert proc.kill.call_count == 2
+
+    # _kill_tree NT
+    with patch("os.name", "nt"):
+        proc = MagicMock()
+        proc.pid = 123
+
+        async def mock_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("asyncio.to_thread", side_effect=mock_to_thread):
+            with patch.dict('sys.modules', {'subprocess': MagicMock()}):
+                asyncio.run(_kill_tree(proc))
 if __name__ == "__main__":
     print("Running BoteX Test Suite...")
     test_security()
@@ -2264,4 +2385,5 @@ if __name__ == "__main__":
     test_recipes_and_rationalization_heuristics()
     test_mcp_memory_and_stats()
     test_mcp_tool_surface()
+    test_exec_tools_coverage()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")
