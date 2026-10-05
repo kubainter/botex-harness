@@ -988,6 +988,118 @@ def test_engine_write_guards():
             assert logged and logged[-1]["status"] == "API_ERROR"
             assert logged[-1]["failure_kind"] == "provider_error"
             assert logged[-1]["provider"] == "openrouter"
+
+            engine.log_run = lambda **kw: {"cost_usd": 0.0}
+
+            # 24. mode_max_turns: a readonly run with no explicit max_turns
+            # inherits the per-mode step budget (default 30) instead of the
+            # global 15 — review passes legitimately need more read steps.
+            class AlwaysRead:
+                def __init__(self):
+                    self.calls = []
+                    self.chat = SimpleNamespace(
+                        completions=SimpleNamespace(create=self._create))
+
+                async def _create(self, **kw):
+                    self.calls.append(kw)
+                    return resp(tool_calls=[tcall("read_file_lines", {
+                        "path": "a.txt", "start": 1, "end": 10})])
+
+            (Path(tmpdir) / "a.txt").write_text("x\n" * 50, encoding="utf-8")
+            fake = AlwaysRead()
+            res = run(fake, task="review a.txt", mode="readonly")
+            assert res["status"] == "MAX_TURNS_REACHED"
+            assert len(fake.calls) == 30
+
+            # 25. An explicit caller max_turns still wins over the mode map.
+            fake = AlwaysRead()
+            res = run(fake, task="review a.txt", mode="readonly", max_turns=5)
+            assert res["status"] == "MAX_TURNS_REACHED"
+            assert len(fake.calls) == 5
+
+            # 26. A mode without a map override inherits engine.max_turns.
+            fake = AlwaysRead()
+            res = run(fake, task="inspect a.txt", mode="edit")
+            assert res["status"] == "MAX_TURNS_REACHED"
+            assert len(fake.calls) == 15
+
+            # 27. turns_exhausted triggers at most one fallback per chain —
+            # a third candidate never retries the same starvation pattern.
+            fake = AlwaysRead()
+            orig_candidates = engine.resolve_model_candidates
+            engine.resolve_model_candidates = lambda *a, **k: [
+                "first", "second", "third"]
+            try:
+                res = run(fake, task="review a.txt", mode="readonly",
+                          max_turns=3)
+            finally:
+                engine.resolve_model_candidates = orig_candidates
+            assert res["status"] == "MAX_TURNS_REACHED"
+            assert len(res["attempts"]) == 2
+            assert [a["model"] for a in res["attempts"]] == [
+                "first", "second"]
+            assert [c["model"] for c in fake.calls] == ["first"] * 3 + [
+                "second"] * 3
+
+            # 28. The exhaustion cap does not consume other fallback kinds:
+            # exhaust -> provider_error -> DONE runs the full chain.
+            class ExhaustThenError:
+                def __init__(self):
+                    self.calls = []
+                    self.chat = SimpleNamespace(
+                        completions=SimpleNamespace(create=self._create))
+
+                async def _create(self, **kw):
+                    self.calls.append(kw)
+                    if kw["model"] == "exhausts":
+                        return resp(tool_calls=[tcall("read_file_lines", {
+                            "path": "a.txt", "start": 1, "end": 10})])
+                    if kw["model"] == "errors":
+                        raise RuntimeError("provider went away")
+                    return resp("STATUS: DONE\nreview complete")
+
+            fake = ExhaustThenError()
+            orig_candidates = engine.resolve_model_candidates
+            engine.resolve_model_candidates = lambda *a, **k: [
+                "exhausts", "errors", "finishes"]
+            try:
+                res = run(fake, task="review a.txt", mode="readonly",
+                          max_turns=2)
+            finally:
+                engine.resolve_model_candidates = orig_candidates
+            assert res["status"] == "DONE"
+            assert [a["model"] for a in res["attempts"]] == [
+                "exhausts", "errors", "finishes"]
+
+            # 29. Malformed mode_max_turns degrades safely: a non-dict map
+            # falls back to engine.max_turns; an unparseable per-mode value
+            # yields CONFIG_ERROR instead of crashing the run.
+            orig_load_config = engine.load_config
+            try:
+                engine.load_config = lambda reload=False: {
+                    **orig_load_config(reload),
+                    "engine": {
+                        **orig_load_config().get("engine", {}),
+                        "mode_max_turns": 42,
+                    },
+                }
+                fake = AlwaysRead()
+                res = run(fake, task="review a.txt", mode="readonly")
+                assert res["status"] == "MAX_TURNS_REACHED"
+                assert len(fake.calls) == 15
+
+                engine.load_config = lambda reload=False: {
+                    **orig_load_config(reload),
+                    "engine": {
+                        **orig_load_config().get("engine", {}),
+                        "mode_max_turns": {"readonly": "thirty"},
+                    },
+                }
+                fake = AlwaysRead()
+                res = run(fake, task="review a.txt", mode="readonly")
+                assert res["status"] == "CONFIG_ERROR" and not fake.calls
+            finally:
+                engine.load_config = orig_load_config
     finally:
         for k, v in orig.items():
             setattr(engine, k, v)

@@ -117,7 +117,9 @@ and text-only guards.
   {"supports_tools": true}`; this declaration overrides the catalog.
 * **Budget** — `budget_limit_usd` is checked at the start of each task.
   Exceeding it returns `BUDGET_EXCEEDED`.
-* **Limits** — `max_turns` (steps), `max_tokens` (per-turn completion ceiling),
+* **Limits** — `max_turns` (steps; per-mode override via
+  `engine.mode_max_turns`, e.g. `readonly` defaults to 30 since review passes
+  need more read steps), `max_tokens` (per-turn completion ceiling),
   `max_duration_s` (wall-clock limit, checked between turns).
 
 Router profiles such as `openrouter/auto` and `openrouter/auto-beta` can route
@@ -219,7 +221,8 @@ Key sections:
   preset ships `zdr.enabled: false` with `:free` tool-capable models for
   operators without a paid subscription — select it per run, via
   `BOTEX_PROVIDER`, or via `botex config provider openrouter-free`.
-* `engine.default_profile`, `engine.mode_profiles`, `engine.max_turns`,
+* `engine.default_profile`, `engine.mode_profiles`, `engine.mode_max_turns`,
+  `engine.max_turns`,
   `engine.max_tokens`, `engine.reasoning_max_tokens`, `engine.request_timeout_s`,
   `engine.max_duration_s`, `engine.temperature`, `engine.budget_limit_usd`,
   `engine.allow_destructive`, `engine.default_mode`,

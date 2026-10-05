@@ -73,6 +73,12 @@
       "edit": "",
       "destructive": "coding",
       "full": "coding"
+    },
+    "mode_max_turns": {
+      "readonly": 30,
+      "edit": 0,
+      "destructive": 0,
+      "full": 0
     }
   },
   "net": {
