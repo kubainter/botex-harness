@@ -171,6 +171,18 @@ DEFAULTS: Dict[str, Any] = {
             "destructive": "coding",
             "full": "coding",
         },
+        # Capability-mode -> step-limit override, consulted ONLY when the
+        # caller leaves `max_turns` unset. A readonly review pass legitimately
+        # needs more read steps than an edit run needs write steps — observed
+        # fast-tier models starving on large-file reviews: 15 turns of small
+        # reads over 1500-line files end as MAX_TURNS_REACHED with nothing
+        # produced. 0/missing falls back to max_turns.
+        "mode_max_turns": {
+            "readonly": 30,
+            "edit": 0,
+            "destructive": 0,
+            "full": 0,
+        },
         # When False, delete_file/move_file are not exposed to the agent at all.
         # Callers may still gate them per-run via confirm_fn / CLI prompt.
         "allow_destructive": False,

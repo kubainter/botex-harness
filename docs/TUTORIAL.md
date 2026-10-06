@@ -117,7 +117,9 @@ and text-only guards.
   {"supports_tools": true}`; this declaration overrides the catalog.
 * **Budget** — `budget_limit_usd` is checked at the start of each task.
   Exceeding it returns `BUDGET_EXCEEDED`.
-* **Limits** — `max_turns` (steps), `max_tokens` (per-turn completion ceiling),
+* **Limits** — `max_turns` (steps; per-mode override via
+  `engine.mode_max_turns`, e.g. `readonly` defaults to 30 since review passes
+  need more read steps), `max_tokens` (per-turn completion ceiling),
   `max_duration_s` (wall-clock limit, checked between turns).
 
 Router profiles such as `openrouter/auto` and `openrouter/auto-beta` can route
@@ -203,6 +205,12 @@ narrow tasks with explicit `files` over one broad "review everything" request.
 Model resolution priority: `model` > `profile` > `mode_profiles[mode]` >
 `default_profile`. Zeros and empty strings fall back to configured defaults.
 
+### Using Recipes as System Prompts
+
+BoteX dynamically constructs the `system` message for every task. It starts with a hardcoded operational prompt (which enforces the BoteX protocol, file tool rules, and termination formats). If the `recipe` parameter is specified (e.g. `"recipe": "reviewer"`), BoteX loads the corresponding file from the `recipes/` directory and injects its content directly into the system prompt.
+
+This mechanism acts as BoteX's native **System Prompt injection**. Instead of writing ad-hoc prompt blocks, you can curate reusable markdown files that define the agent's persona, its objectives, and specific coding constraints. For example, if you are analyzing an Unreal Engine 4 game mod, you could pass `"recipe": "ue4"` pointing to a custom `recipes/ue4.md` file, which configures the LLM to focus on memory leaks and UE4 Blueprint behaviors.
+
 ## 7. Configuration
 
 Resolution order (lowest to highest priority):
@@ -219,7 +227,8 @@ Key sections:
   preset ships `zdr.enabled: false` with `:free` tool-capable models for
   operators without a paid subscription — select it per run, via
   `BOTEX_PROVIDER`, or via `botex config provider openrouter-free`.
-* `engine.default_profile`, `engine.mode_profiles`, `engine.max_turns`,
+* `engine.default_profile`, `engine.mode_profiles`, `engine.mode_max_turns`,
+  `engine.max_turns`,
   `engine.max_tokens`, `engine.reasoning_max_tokens`, `engine.request_timeout_s`,
   `engine.max_duration_s`, `engine.temperature`, `engine.budget_limit_usd`,
   `engine.allow_destructive`, `engine.default_mode`,

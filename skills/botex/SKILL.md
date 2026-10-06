@@ -286,6 +286,12 @@ requests). This is faster, cheaper, and keeps each run within `max_turns`
 and `max_duration_s`. One call per well-defined change set — not one call
 per repository.
 
+Read-heavy passes get a larger default step budget via
+`engine.mode_max_turns` (`readonly` = 30 vs the global 15), and a
+`turns_exhausted` result retries a different model at most once per call
+chain. If a broad review still reports `MAX_TURNS_REACHED`, split it by
+`files` rather than re-running the same wide task.
+
 ## Safety properties you can rely on
 
 - Workspace confinement: tools cannot escape `workspace_dir`
