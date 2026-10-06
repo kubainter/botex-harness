@@ -1100,6 +1100,39 @@ def test_engine_write_guards():
                 assert res["status"] == "CONFIG_ERROR" and not fake.calls
             finally:
                 engine.load_config = orig_load_config
+
+            # 30. output_path missing without fallback salvage -> DONE_WITHOUT_WRITE
+            class NoWriteNoSalvage:
+                def __init__(self):
+                    self.calls = []
+                    self.chat = SimpleNamespace(
+                        completions=SimpleNamespace(create=self._create))
+                    self.attempt = 0
+                async def _create(self, **kw):
+                    self.calls.append(kw)
+                    self.attempt += 1
+                    if self.attempt == 1:
+                        return resp("STATUS: DONE\nno text to salvage")
+                    return resp("STATUS: DONE")
+
+            fake = NoWriteNoSalvage()
+            res = run(fake, task="write test", mode="edit", output_path="missing.txt")
+            assert res["status"] == "DONE_WITHOUT_WRITE"
+            assert "never wrote" in res["summary"]
+
+            # 31. Falsy mode_max_turns fallback logic coverage -> MAX_TURNS_REACHED
+            orig_load_config = engine.load_config
+            try:
+                engine.load_config = lambda reload=False: {
+                    **orig_load_config(reload),
+                    "engine": { **orig_load_config().get("engine", {}), "mode_max_turns": {"readonly": ""} }
+                }
+                fake_read = AlwaysRead()
+                res = run(fake_read, task="review a.txt", mode="readonly")
+                assert res["status"] == "MAX_TURNS_REACHED"
+            finally:
+                engine.load_config = orig_load_config
+
     finally:
         for k, v in orig.items():
             setattr(engine, k, v)
