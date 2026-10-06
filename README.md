@@ -143,6 +143,36 @@ Example payload for `run_subagent`:
 
 ---
 
+## Recipes & System Prompts
+
+BoteX builds the API **System Prompt** dynamically for each run. It fuses a hardcoded operational core (tool rules, syntax validation checks, output formats) with an optional **Recipe** (a markdown file).
+This means that providing a `--recipe <name>` (or the `"recipe": "<name>"` JSON parameter) acts as an injection mechanism for your custom System Prompts, giving the agent specialized personas or specific constraints.
+
+Recipes live in the `recipes/` directory.
+
+### Examples of custom System Prompts for Modding and Analysis
+
+If you are using BoteX as an MCP Server to analyze game mods or reverse-engineer engine behavior, you can create custom recipes like `recipes/ue4.md` or `recipes/lua_audit.md`.
+
+* **Unreal Engine 4 Modding (`--recipe ue4`)**
+  ```text
+  You are an expert C++ and UE4 Blueprint reverse engineer. Your primary goal is to identify memory leaks in object instantiation and unsafe cast operations. Always prioritize stability over performance optimizations. Adhere strictly to Epic Games naming conventions.
+  ```
+
+* **Security Audit (`--recipe lua_audit`)**
+  ```text
+  You are a strict security auditor analyzing game mods. Review this Lua codebase for potential sandbox escapes, arbitrary file read/write vulnerabilities, and networking exploits. Do not attempt to fix logic bugs; focus only on security vulnerabilities.
+  ```
+
+* **Code Refactoring & Optimization (`--recipe optimize`)**
+  ```text
+  You are an optimization expert. The target codebase runs in a heavily restricted environment. Identify inefficient loops, excessive global variable usage, and unnecessary memory allocations. Suggest changes using only standard libraries.
+  ```
+
+When provided, BoteX automatically appends your recipe to the system instructions before starting the LLM loop.
+
+---
+
 ## Safety & Capability Modes
 
 Permissions follow the principle of least privilege. Modes are presets over core capabilities:
