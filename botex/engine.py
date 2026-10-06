@@ -125,7 +125,12 @@ BOTEX_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file_lines",
-            "description": "Reads specific lines (1-indexed, inclusive) from a file based on get_file_outline.",
+            "description": (
+                "Reads a line range (1-indexed, inclusive) from a file, usually "
+                "after get_file_outline. Large ranges are allowed — when you "
+                "need most of a file, prefer one wide read (e.g. 1-2000) over "
+                "many narrow slices; each call spends one step."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -321,7 +326,7 @@ Your mission: execute the requested code change precisely, cleanly, and with min
 
 CRITICAL OPERATIONAL RULES:
 1. ZERO small talk, conversational filler, greetings, or explanations.
-2. Outline-First: Before inspecting any file over 100 lines, ALWAYS call get_file_outline first, then read only the targeted lines needed with read_file_lines.
+2. Outline-First: Before inspecting any file over 100 lines, ALWAYS call get_file_outline first, then read only the targeted lines needed with read_file_lines. For whole-file tasks (reviews, audits), request the full range in ONE read_file_lines call (e.g. 1-2000) instead of many narrow slices — every tool call spends one step of your limited budget.
 3. In-Memory Validation: apply_patch and create_file automatically perform syntax checks. If a patch fails syntax check or matching, read the error and correct it in your next step.
 4. Scope limit: You have ONLY the following tools: {TOOLS}.
    Network policy: {NETWORK_POLICY}
@@ -512,6 +517,10 @@ async def run_botex_task(
     last_result: Dict[str, Any] = {}
     attempts: List[Dict[str, Any]] = []
     chain_start = time.time()
+    # A turns_exhausted result may trigger at most one fallback per chain:
+    # the next candidate gets the same step budget, so repeating that retry
+    # just re-burns the whole read budget on the same starvation pattern.
+    exhaustion_retries = 0
     # Resolved once for the whole chain — the flag/provider pair is fixed
     # for the run, so every attempt record reports the same privacy state.
     _zdr_pname, _zdr_pcfg = resolve_provider(provider)
@@ -613,6 +622,10 @@ async def run_botex_task(
                     or not should_fallback(last_result, has_mutations)
                     or chain_expired):
                 break
+            if last_result.get("failure_kind") == "turns_exhausted":
+                exhaustion_retries += 1
+                if exhaustion_retries > 1:
+                    break
         finally:
             snapshot_manager.end_task(attempt_task_id)
     last_result["attempts"] = attempts
@@ -732,7 +745,19 @@ async def _run_botex_task_once_impl(
         # Clamped, not just cast: a non-positive max_turns would leave the
         # `turn` variable unbound after the (empty) loop; a malformed config
         # value must degrade to CONFIG_ERROR, not crash the run.
-        max_turns = max(1, int(engine_setting("max_turns", max_turns)))
+        # Step limit chain: explicit caller arg > per-mode override
+        # (engine.mode_max_turns — readonly reviews legitimately need more
+        # read steps than an edit run needs write steps) > engine.max_turns.
+        if max_turns is None:
+            try:
+                turns_mode = resolve_mode_name(mode)
+            except ValueError:
+                turns_mode = ""
+            mode_max = load_config().get("engine", {}).get("mode_max_turns")
+            max_turns = (
+                mode_max.get(turns_mode) if isinstance(mode_max, dict) else None
+            ) or engine_setting("max_turns")
+        max_turns = max(1, int(max_turns))
         max_tokens = max(1, int(engine_setting("max_tokens", max_tokens)))
         # Raised per-turn cap applied once a response reports reasoning
         # tokens — thinking shares the max_tokens budget, so the base cap
@@ -1031,6 +1056,9 @@ async def _run_botex_task_once_impl(
     if files:
         initial_user_prompt += f"PRIMARY TARGET FILES: {', '.join(files)}\n"
     initial_user_prompt += f"WORKSPACE ROOT: {root_path.as_posix()}\n"
+    initial_user_prompt += (
+        f"STEP BUDGET: {max_turns} tool steps total — plan reads accordingly.\n"
+    )
     if output_path:
         initial_user_prompt += (
             f"REQUIRED OUTPUT FILE: {output_path} — write the result there "

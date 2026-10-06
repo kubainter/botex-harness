@@ -132,7 +132,7 @@ Example payload for `run_subagent`:
 | `profile` | `"default"` | Model profile configured in `botex.config.json` (`default`, `coding`, `fast`). |
 | `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full`. |
 | `recipe` | `""` | Specialized workflow persona (`planner`, `code-explorer`, `reviewer`, `security-reviewer`, `build-resolver`, `tdd`). |
-| `max_turns` | `0` | Max tool-loop iterations (`0` uses configured default, usually 15). |
+| `max_turns` | `0` | Max tool-loop iterations (`0` uses `engine.max_turns`, usually 15, overridable per mode via `engine.mode_max_turns`). |
 | `budget_limit_usd`| `-1` | Hard spend limit for this task (`-1` uses global config, `0` = unlimited). |
 | `allow_destructive`| `false` | Explicit opt-in for `delete_file` and `move_file`. |
 | `allow_exec` | `false` | Explicit opt-in for `run_command` (requires `exec.enabled: true` in config). |
@@ -140,6 +140,36 @@ Example payload for `run_subagent`:
 | `allow_non_zdr` | `false` | Per-run consent to relax the ZDR gate — required for `:free` models (provider may log/train on prompts). The result carries `zdr_enforced: false`. |
 | `output_path` | `""` | Enforce that this exact file must be written and non-empty for `DONE` status. |
 | `verify_command` | `""` | Verification command (e.g. `pytest tests/test_auth.py`) that must pass before completion. |
+
+---
+
+## Recipes & System Prompts
+
+BoteX builds the API **System Prompt** dynamically for each run. It fuses a hardcoded operational core (tool rules, syntax validation checks, output formats) with an optional **Recipe** (a markdown file).
+This means that providing a `--recipe <name>` (or the `"recipe": "<name>"` JSON parameter) acts as an injection mechanism for your custom System Prompts, giving the agent specialized personas or specific constraints.
+
+Recipes live in the `recipes/` directory.
+
+### Examples of custom System Prompts for Modding and Analysis
+
+If you are using BoteX as an MCP Server to analyze game mods or reverse-engineer engine behavior, you can create custom recipes like `recipes/ue4.md` or `recipes/lua_audit.md`.
+
+* **Unreal Engine 4 Modding (`--recipe ue4`)**
+  ```text
+  You are an expert C++ and UE4 Blueprint reverse engineer. Your primary goal is to identify memory leaks in object instantiation and unsafe cast operations. Always prioritize stability over performance optimizations. Adhere strictly to Epic Games naming conventions.
+  ```
+
+* **Security Audit (`--recipe lua_audit`)**
+  ```text
+  You are a strict security auditor analyzing game mods. Review this Lua codebase for potential sandbox escapes, arbitrary file read/write vulnerabilities, and networking exploits. Do not attempt to fix logic bugs; focus only on security vulnerabilities.
+  ```
+
+* **Code Refactoring & Optimization (`--recipe optimize`)**
+  ```text
+  You are an optimization expert. The target codebase runs in a heavily restricted environment. Identify inefficient loops, excessive global variable usage, and unnecessary memory allocations. Suggest changes using only standard libraries.
+  ```
+
+When provided, BoteX automatically appends your recipe to the system instructions before starting the LLM loop.
 
 ---
 
