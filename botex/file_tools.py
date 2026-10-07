@@ -195,7 +195,7 @@ def read_file_lines(path: str, start: int, end: int, workspace_root: str | Path)
         "start": start_idx,
         "end": end_idx,
         "total_file_lines": total,
-        "content": body
+        "content": f"<untrusted_file_content path=\"{path}\">\n{body}\n</untrusted_file_content>"
     }
 
 
@@ -229,11 +229,12 @@ def read_file(path: str, workspace_root: str | Path) -> Dict[str, Any]:
         }
 
     numbered = [f"{i + 1}: {line}" for i, line in enumerate(lines)]
+    body = mask_secrets("\n".join(numbered))
     return {
         "ok": True,
         "path": path,
         "total_lines": len(lines),
-        "content": mask_secrets("\n".join(numbered))
+        "content": f"<untrusted_file_content path=\"{path}\">\n{body}\n</untrusted_file_content>"
     }
 
 
