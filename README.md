@@ -14,6 +14,7 @@ Giving an LLM direct, unrestricted access to your repository usually ends the sa
 Instead of trusting the model to behave, BoteX wraps every action in safety gates:
 
 * **Outline-first inspection**: Agents inspect symbol skeletons (`get_outline`) before asking for specific line ranges. This prevents dumping massive files into context and slashes token waste.
+* **Prompt Injection & Untrusted Data Isolation (OWASP #1)**: External content retrieved by tools (file contents, web pages, memory notes) is automatically wrapped in XML-like untrusted data boundary tags (`<untrusted_file_content>`, `<untrusted_web_content>`). System prompt rules instruct the LLM to treat bounded content strictly as data, preventing prompt injection attacks.
 * **Read-before-write gate**: Models cannot patch a file they haven't inspected in the current session. No blind edits, no guessing.
 * **Pre-write syntax validation**: Code modifications are validated in memory (e.g. `ast.parse` for Python) *before* saving. If the patch breaks syntax, it gets rejected on the spot.
 * **Multi-tier fuzzy patching**: Patches are whitespace- and newline-resilient (CRLF/LF agnostic with indentation detection), so minor formatting mismatches don't break execution.

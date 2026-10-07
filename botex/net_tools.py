@@ -317,13 +317,14 @@ def _read_url_sync(url: str, *, allowed_hosts: list[str], allowed_urls: list[str
                 return {"ok": False, "error": f"Unsupported content type: {content_type or 'unknown'}"}
             data = response.read(max_bytes + 1)
             text = data[:max_bytes].decode("utf-8", errors="replace")
+            masked_text = mask_secrets(text)
             return {
                 "ok": True,
                 "url": mask_secrets(current),
                 "status_code": response.status,
                 "content_type": content_type,
                 "truncated": len(data) > max_bytes,
-                "content": mask_secrets(text),
+                "content": f"<untrusted_web_content url=\"{mask_secrets(current)}\">\n{masked_text}\n</untrusted_web_content>",
             }
         except (http.client.HTTPException, ssl.SSLError, UnicodeError,
                 TimeoutError, OSError) as exc:
