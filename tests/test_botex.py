@@ -69,6 +69,28 @@ def test_owasp_prompt_injection_isolation():
     print("[PASS] OWASP #1 Prompt Injection Isolation Tests")
 
 
+def test_owasp_sensitive_info_disclosure():
+    """OWASP #2: Sensitive Information Disclosure & Secret Guardrails."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        # 1. Blocked environment and config files
+        for blocked_file in (".env.custom", "secrets.env", ".gitconfig", ".dockercfg", "id_ed25519"):
+            blocked_caught = False
+            try:
+                resolve_safe_path(root, blocked_file)
+            except SecurityError:
+                blocked_caught = True
+            assert blocked_caught, f"Sensitive file '{blocked_file}' must be blocked"
+
+        # 2. Secret masking for NVIDIA tokens (nvapi-...)
+        nv_token = "nvapi-abcdefghijklmnopqrstuvwxyz012345"
+        masked = mask_secrets(f"key: {nv_token}")
+        assert "nvapi-" not in masked
+        assert "[REDACTED]" in masked
+    print("[PASS] OWASP #2 Sensitive Info Disclosure Tests")
+
+
 def test_security():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
@@ -2862,6 +2884,7 @@ if __name__ == "__main__":
     print("Running BoteX Test Suite...")
     test_security()
     test_owasp_prompt_injection_isolation()
+    test_owasp_sensitive_info_disclosure()
     test_pre_write_syntax()
     test_fuzzy_patching_and_rollback()
     test_outline_and_reading()
