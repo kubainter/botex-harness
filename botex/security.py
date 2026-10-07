@@ -16,12 +16,12 @@ from typing import Any, Dict, Tuple
 # Blocked file patterns — never read or write these
 # ---------------------------------------------------------------------------
 BLOCKED_FILE_PATTERNS = {
-    ".env", ".env.local", ".env.production", ".env.staging",
+    ".env", ".env.*", "*.env",
     "*.pem", "*.key", "*.p12", "*.pfx", "*.crt", "*.cer",
-    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_*",
     "*.secret", "*.secrets", "*.private",
     "credentials.json", "service-account*.json",
-    ".netrc", ".npmrc",
+    ".netrc", ".npmrc", ".dockercfg", ".gitconfig", ".htpasswd",
     "botex.config.local.json",  # may hold secrets.openrouter_api_key
 }
 
@@ -61,10 +61,10 @@ _SECRET_PATTERNS = [
     re.compile(r'(?i)(password|passwd|token|secret|api[_\-]?key|auth[_\-]?key)\s*[=:]\s*["\']?[^\s"\']{6,}["\']?'),
     # Bearer tokens
     re.compile(r'Bearer\s+[a-zA-Z0-9\-_\.]{20,}'),
-    # Provider-prefixed tokens (GitHub, GitLab, Slack, Stripe, GCP, npm, PyPI)
+    # Provider-prefixed tokens (GitHub, GitLab, Slack, Stripe, GCP, npm, PyPI, NVIDIA)
     re.compile(
         r'\b(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[bapors]-|'
-        r'sk_live_|sk_test_|rk_live_|AIza|npm_|pypi-)[A-Za-z0-9_\-]{10,}'
+        r'sk_live_|sk_test_|rk_live_|AIza|npm_|pypi-|nvapi-)[A-Za-z0-9_\-]{10,}'
     ),
     # Base64-ish long strings often used as secrets — pure-hex tokens are
     # left alone so hashes/digests in file content survive masking
