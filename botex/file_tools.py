@@ -13,10 +13,16 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 try:
-    from .security import resolve_safe_path, load_gitignore_patterns, is_gitignored, is_safe_dir, mask_secrets, SecurityError
+    from .security import (
+        resolve_safe_path, load_gitignore_patterns, is_gitignored, is_safe_dir,
+        mask_secrets, wrap_untrusted_content, SecurityError
+    )
     from .patch_engine import validate_syntax, snapshot_manager
 except (ImportError, ValueError):
-    from security import resolve_safe_path, load_gitignore_patterns, is_gitignored, is_safe_dir, mask_secrets, SecurityError
+    from security import (
+        resolve_safe_path, load_gitignore_patterns, is_gitignored, is_safe_dir,
+        mask_secrets, wrap_untrusted_content, SecurityError
+    )
     from patch_engine import validate_syntax, snapshot_manager
 
 # ---------------------------------------------------------------------------
@@ -188,14 +194,14 @@ def read_file_lines(path: str, start: int, end: int, workspace_root: str | Path)
     selected = lines[start_idx - 1 : end_idx]
     numbered = [f"{start_idx + i}: {line}" for i, line in enumerate(selected)]
 
-    body = mask_secrets("\n".join(numbered))
+    body = "\n".join(numbered)
     return {
         "ok": True,
         "path": path,
         "start": start_idx,
         "end": end_idx,
         "total_file_lines": total,
-        "content": body
+        "content": wrap_untrusted_content(body, tag="untrusted_file_content", path=path)
     }
 
 
@@ -229,11 +235,12 @@ def read_file(path: str, workspace_root: str | Path) -> Dict[str, Any]:
         }
 
     numbered = [f"{i + 1}: {line}" for i, line in enumerate(lines)]
+    body = "\n".join(numbered)
     return {
         "ok": True,
         "path": path,
         "total_lines": len(lines),
-        "content": mask_secrets("\n".join(numbered))
+        "content": wrap_untrusted_content(body, tag="untrusted_file_content", path=path)
     }
 
 
