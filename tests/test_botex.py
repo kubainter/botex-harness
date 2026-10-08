@@ -2866,15 +2866,182 @@ if __name__ == "__main__":
     test_cli_models()
     test_repl()
     test_main()
-    test_owasp_output_validation_syntax_gates()
-    test_owasp_unbounded_consumption_stagnation()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")
+
+def test_owasp_unbounded_consumption_mid_loop_budget():
+    """
+    Test OWASP #6: Unbounded Consumption.
+    Verifies that the engine aborts mid-loop if the budget_limit_usd is exceeded
+    by the cumulative token cost of the current task.
+    """
+    import botex.engine as engine
+    import asyncio
+    import tempfile
+    from types import SimpleNamespace
+
+    def resp(content=None, tool_calls=None, finish="stop"):
+        msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, finish_reason=finish)],
+            usage=SimpleNamespace(
+                prompt_tokens=1000000, completion_tokens=1000000,
+                prompt_tokens_details=None, completion_tokens_details=None),
+        )
+
+    class FakeClient:
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            self.calls.append(kw)
+            return self.responses.pop(0)
+
+    orig_check_model_price = engine.check_model_price
+    orig_check_model_tools = engine.check_model_tools
+    orig_check_budget_limit = engine.check_budget_limit
+    orig_calculate_cost_usd = engine.calculate_cost_usd
+    orig_log_run = engine.log_run
+    orig_print_run_summary = engine.print_run_summary
+    orig_AsyncOpenAI = engine.AsyncOpenAI
+
+    engine.check_model_price = lambda *a, **k: (True, "")
+    engine.check_model_tools = lambda *a, **k: (True, "")
+    engine.check_budget_limit = lambda *a, **k: (False, 0.0)
+    engine.calculate_cost_usd = lambda *a, **k: 1000.0  # Force huge cost
+    engine.log_run = lambda **kw: {"cost_usd": 1000.0}
+    engine.print_run_summary = lambda *a, **k: None
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def run(client, **kw):
+                engine.AsyncOpenAI = lambda **_: client
+                args = dict(workspace_dir=tmpdir, model="test/model", api_key="x", mode="edit")
+                args.update(kw)
+                return asyncio.run(engine.run_botex_task(**args))
+
+            # Provide responses. It should abort after the first response
+            fake = FakeClient([
+                resp(content="Trying to do something"),
+                resp(content="Should not be reached")
+            ])
+            res = run(fake, task="test budget", budget_limit_usd=1.0)
+
+            assert res["status"] == "BUDGET_EXCEEDED"
+            assert "mid-run" in res["message"]
+            assert len(fake.calls) == 1
+    finally:
+        engine.check_model_price = orig_check_model_price
+        engine.check_model_tools = orig_check_model_tools
+        engine.check_budget_limit = orig_check_budget_limit
+        engine.calculate_cost_usd = orig_calculate_cost_usd
+        engine.log_run = orig_log_run
+        engine.print_run_summary = orig_print_run_summary
+        engine.AsyncOpenAI = orig_AsyncOpenAI
+
+def test_owasp_unbounded_consumption_stagnation():
+    """
+    Test OWASP #6: Unbounded Consumption.
+    Verifies that the engine aborts and rolls back when the model enters
+    a failing mutation loop (3 consecutive failed writes or 3 identical failures).
+    """
+    import botex.engine as engine
+    import tempfile
+    import asyncio
+    from types import SimpleNamespace
+    import json as _json
+
+    def resp(content=None, tool_calls=None, finish="stop", reasoning=0):
+        msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, finish_reason=finish)],
+            usage=SimpleNamespace(
+                prompt_tokens=1, completion_tokens=1,
+                prompt_tokens_details=None,
+                completion_tokens_details=(
+                    SimpleNamespace(reasoning_tokens=reasoning)
+                    if reasoning else None)),
+        )
+
+    def tcall(name, args):
+        return SimpleNamespace(
+            id="t1", type="function",
+            function=SimpleNamespace(
+                name=name,
+                arguments=args if isinstance(args, str) else _json.dumps(args)))
+
+    class FakeClient:
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.calls = []
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            self.calls.append(kw)
+            return self.responses.pop(0)
+
+    orig_check_model_price = engine.check_model_price
+    orig_check_model_tools = engine.check_model_tools
+    orig_check_budget_limit = engine.check_budget_limit
+    orig_calculate_cost_usd = engine.calculate_cost_usd
+    orig_log_run = engine.log_run
+    orig_print_run_summary = engine.print_run_summary
+    orig_AsyncOpenAI = engine.AsyncOpenAI
+
+    engine.check_model_price = lambda *a, **k: (True, "")
+    engine.check_model_tools = lambda *a, **k: (True, "")
+    engine.check_budget_limit = lambda *a, **k: (False, 0.0)
+    engine.calculate_cost_usd = lambda *a, **k: 0.0
+    engine.log_run = lambda **kw: {"cost_usd": 0.0}
+    engine.print_run_summary = lambda *a, **k: None
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def run(client, **kw):
+                engine.AsyncOpenAI = lambda **_: client
+                args = dict(workspace_dir=tmpdir, model="test/model",
+                            api_key="x", mode="edit")
+                args.update(kw)
+                return asyncio.run(engine.run_botex_task(**args))
+
+            # Test 1: 3 identical failed patch attempts
+            fake1 = FakeClient([
+                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "foo", "replace_block": "bar"})]),
+                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "foo", "replace_block": "bar"})]),
+                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "foo", "replace_block": "bar"})]),
+                resp("STATUS: DONE")
+            ])
+            res = run(fake1, task="fix it")
+            assert res["status"] == "STAGNANT_ROLLBACK"
+            assert "3 identical failed attempts" in res["message"]
+
+            # Test 2: 3 consecutive failed mutations (different but all fail)
+            fake2 = FakeClient([
+                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "foo", "replace_block": "bar"})]),
+                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "bar", "replace_block": "baz"})]),
+                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "baz", "replace_block": "qux"})]),
+                resp("STATUS: DONE")
+            ])
+            res = run(fake2, task="fix it")
+            assert res["status"] == "STAGNANT_ROLLBACK"
+            assert "3 consecutive failed mutations" in res["message"]
+
+    finally:
+        engine.check_model_price = orig_check_model_price
+        engine.check_model_tools = orig_check_model_tools
+        engine.check_budget_limit = orig_check_budget_limit
+        engine.calculate_cost_usd = orig_calculate_cost_usd
+        engine.log_run = orig_log_run
+        engine.print_run_summary = orig_print_run_summary
+        engine.AsyncOpenAI = orig_AsyncOpenAI
 
 def test_owasp_output_validation_syntax_gates():
     """
-    Test OWASP #7 & #10: Output Validation, Syntax & Verification Gates.
-    Verifies that syntax checks reject bad Bash and Python (ruff) patches,
-    and that verify_command retries 3 times before failing and rolling back.
+    Test OWASP #7 & #10: Misinformation & Improper Output Handling.
+    Verifies that syntax checks reject bad Bash and Python (ruff) patches (OWASP #7),
+    and that verify_command retries 3 times before failing and rolling back (OWASP #7).
     """
     from botex.patch_engine import validate_syntax
     from pathlib import Path
@@ -2967,9 +3134,11 @@ def test_owasp_output_validation_syntax_gates():
     orig_check_model_price = engine.check_model_price
     orig_check_model_tools = engine.check_model_tools
     orig_check_budget_limit = engine.check_budget_limit
+    orig_calculate_cost_usd = engine.calculate_cost_usd
     engine.check_model_price = lambda *a, **k: (True, "")
     engine.check_model_tools = lambda *a, **k: (True, "")
     engine.check_budget_limit = lambda *a, **k: (False, 0.0)
+    engine.calculate_cost_usd = lambda *a, **k: 0.0
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2999,97 +3168,4 @@ def test_owasp_output_validation_syntax_gates():
         engine.check_model_price = orig_check_model_price
         engine.check_model_tools = orig_check_model_tools
         engine.check_budget_limit = orig_check_budget_limit
-
-def test_owasp_unbounded_consumption_stagnation():
-    """
-    Test OWASP #6: Unbounded Consumption.
-    Verifies that the engine aborts and rolls back when the model enters
-    a failing mutation loop (3 consecutive failed writes or 3 identical failures).
-    """
-    import botex.engine as engine
-    import tempfile
-    import asyncio
-    from types import SimpleNamespace
-    import json as _json
-
-    def resp(content=None, tool_calls=None, finish="stop", reasoning=0):
-        msg = SimpleNamespace(content=content, tool_calls=tool_calls)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=msg, finish_reason=finish)],
-            usage=SimpleNamespace(
-                prompt_tokens=1, completion_tokens=1,
-                prompt_tokens_details=None,
-                completion_tokens_details=(
-                    SimpleNamespace(reasoning_tokens=reasoning)
-                    if reasoning else None)),
-        )
-
-    def tcall(name, args):
-        return SimpleNamespace(
-            id="t1", type="function",
-            function=SimpleNamespace(
-                name=name,
-                arguments=args if isinstance(args, str) else _json.dumps(args)))
-
-    class FakeClient:
-        def __init__(self, responses):
-            self.responses = list(responses)
-            self.calls = []
-            self.chat = SimpleNamespace(
-                completions=SimpleNamespace(create=self._create))
-
-        async def _create(self, **kw):
-            self.calls.append(kw)
-            return self.responses.pop(0)
-
-    orig_check_model_price = engine.check_model_price
-    orig_check_model_tools = engine.check_model_tools
-    orig_check_budget_limit = engine.check_budget_limit
-    orig_log_run = engine.log_run
-    orig_print_run_summary = engine.print_run_summary
-    orig_AsyncOpenAI = engine.AsyncOpenAI
-
-    engine.check_model_price = lambda *a, **k: (True, "")
-    engine.check_model_tools = lambda *a, **k: (True, "")
-    engine.check_budget_limit = lambda *a, **k: (False, 0.0)
-    engine.log_run = lambda **kw: {"cost_usd": 0.0}
-    engine.print_run_summary = lambda *a, **k: None
-
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            def run(client, **kw):
-                engine.AsyncOpenAI = lambda **_: client
-                args = dict(workspace_dir=tmpdir, model="test/model",
-                            api_key="x", mode="edit")
-                args.update(kw)
-                return asyncio.run(engine.run_botex_task(**args))
-
-            # Test 1: 3 identical failed patch attempts
-            fake1 = FakeClient([
-                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "foo", "replace_block": "bar"})]),
-                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "foo", "replace_block": "bar"})]),
-                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "foo", "replace_block": "bar"})]),
-                resp("STATUS: DONE")
-            ])
-            res = run(fake1, task="fix it")
-            assert res["status"] == "STAGNANT_ROLLBACK"
-            assert "3 identical failed attempts" in res["message"]
-
-            # Test 2: 3 consecutive failed mutations (different but all fail)
-            fake2 = FakeClient([
-                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "foo", "replace_block": "bar"})]),
-                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "bar", "replace_block": "baz"})]),
-                resp(tool_calls=[tcall("apply_patch", {"path": "test.txt", "search_block": "baz", "replace_block": "qux"})]),
-                resp("STATUS: DONE")
-            ])
-            res = run(fake2, task="fix it")
-            assert res["status"] == "STAGNANT_ROLLBACK"
-            assert "3 consecutive failed mutations" in res["message"]
-
-    finally:
-        engine.check_model_price = orig_check_model_price
-        engine.check_model_tools = orig_check_model_tools
-        engine.check_budget_limit = orig_check_budget_limit
-        engine.log_run = orig_log_run
-        engine.print_run_summary = orig_print_run_summary
-        engine.AsyncOpenAI = orig_AsyncOpenAI
+        engine.calculate_cost_usd = orig_calculate_cost_usd

@@ -28,7 +28,7 @@ try:
     from .security import (
         resolve_safe_path, SecurityError, check_model_zdr, zdr_enforced,
     )
-    from .analytics import log_run, print_run_summary, check_budget_limit
+    from .analytics import log_run, print_run_summary, check_budget_limit, calculate_cost_usd
     from .config import (
         PROJECT_ROOT, engine_setting, env_file, is_decisions_model,
         load_config,
@@ -61,7 +61,7 @@ except (ImportError, ValueError):
     from security import (
         resolve_safe_path, SecurityError, check_model_zdr, zdr_enforced,
     )
-    from analytics import log_run, print_run_summary, check_budget_limit
+    from analytics import log_run, print_run_summary, check_budget_limit, calculate_cost_usd
     from config import (
         PROJECT_ROOT, engine_setting, env_file, is_decisions_model,
         load_config,
@@ -1233,6 +1233,39 @@ async def _run_botex_task_once_impl(
         last_reasoning_tokens = usage.reasoning_tokens
         if last_reasoning_tokens:
             effective_max_tokens = max(effective_max_tokens, reasoning_cap)
+
+        if budget_limit_usd > 0:
+            current_run_cost = calculate_cost_usd(model, total_prompt_tokens, total_completion_tokens)
+            # check_budget_limit only accounts for past completed runs
+            _, past_spend = check_budget_limit(budget_limit_usd)
+            if (past_spend + current_run_cost) >= budget_limit_usd:
+                rollback_verified = _rollback_attempt(task_id, files_touched)
+                duration = time.time() - start_time
+                summary_text = (
+                    f"[BUDGET BLOCK] Task exceeded daily limit (${budget_limit_usd:.2f}) "
+                    f"mid-run. (Spent today including this run: ${past_spend + current_run_cost:.4f})"
+                )
+                log_entry = log_run(
+                    task_id=task_id, model=model, provider=provider_name,
+                    duration_s=duration, steps=turn,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    cached_tokens=total_cached_tokens,
+                    files_touched=list(files_touched),
+                    lines_added=lines_added_total,
+                    lines_removed=lines_removed_total,
+                    status="BUDGET_EXCEEDED", summary=summary_text,
+                )
+                print_run_summary(log_entry)
+                return {
+                    "ok": False, "task_id": task_id, "status": "BUDGET_EXCEEDED",
+                    "summary": summary_text, "message": summary_text,
+                    "files_touched": list(files_touched),
+                    "exec_ran": exec_ran, "steps": turn,
+                    "duration_s": round(duration, 2),
+                    "cost_usd": log_entry["cost_usd"],
+                    "rollback_verified": rollback_verified,
+                }
 
         if nresp.finish_reason == "provider_error":
             # A malformed/provider-level error response is a provider
