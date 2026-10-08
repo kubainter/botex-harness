@@ -22,6 +22,7 @@ Instead of trusting the model to behave, BoteX wraps every action in safety gate
 * **Automatic snapshot rollback**: Every touched file is snapshotted before modification. If an agent loops, stagnates, or fails verification, the entire workspace reverts cleanly.
 * **Hard budget & pricing caps**: Pre-flight checks verify model pricing against live provider catalogs. If a task exceeds its budget or a model is overpriced, BoteX aborts before spending a cent.
 * **Strict privacy & Zero Data Retention (ZDR)**: Enforces `provider.data_collection: deny` on OpenRouter calls, blocks `.env`/secrets, masks API keys in logs, and prevents path traversal attacks. Free (`:free`) models that cannot guarantee ZDR are rejected locally — opt out explicitly per run (`allow_non_zdr`) or via the `openrouter-free` provider preset.
+* **Enhanced Permission Controls (OWASP #3 - Excessive Agency)**: BoteX protects against Excessive Agency via a centralized Agency Middleware. Tools are strictly defined with Risk Levels (LOW, MEDIUM, HIGH) and required scopes. High-risk destructive actions automatically require explicit interactive operator approval, limiting the potential damage of prompt injections or hallucinations.
 
 ---
 

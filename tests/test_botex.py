@@ -919,7 +919,8 @@ def test_engine_write_guards():
                 orig_candidates = engine.resolve_model_candidates
                 engine.resolve_model_candidates = lambda *a, **k: ["first", "second"]
                 try:
-                    res = run(fake, task="check version", allow_exec=True)
+                    # Provide confirm_fn=lambda t, p: True to bypass check_agency_policy for exec in the test.
+                    res = run(fake, task="check version", allow_exec=True, mode="full", confirm_fn=lambda t, p: True)
                 finally:
                     engine.resolve_model_candidates = orig_candidates
                 assert res["status"] == "API_ERROR"
@@ -2880,6 +2881,36 @@ def test_main():
             mock_isatty.return_value = False
             main()
             mock_mcp.assert_called_once()
+def test_owasp_excessive_agency():
+    """
+    Test OWASP #3: Excessive Agency & Enhanced Permission Controls.
+    Verifies that the Agency Middleware (ToolPolicy) enforces the required scopes and risk levels.
+    """
+    from botex.capabilities import check_agency_policy, CAP_READ, CAP_WRITE, CAP_EXEC, CAP_DESTRUCTIVE
+
+    # 1. Fully authorized tool execution (LOW risk)
+    assert not check_agency_policy("get_file_outline", {CAP_READ})
+
+    # 2. Blocked tool execution due to missing scope (MEDIUM risk)
+    err = check_agency_policy("create_file", {CAP_READ})
+    assert "Missing required scopes" in err and "create_file" in err
+
+    # 3. High risk tool requiring approval (CAP_DESTRUCTIVE)
+    # Should fail if approval not given
+    err = check_agency_policy("delete_file", {CAP_READ, CAP_WRITE, CAP_DESTRUCTIVE}, confirm_fn=None)
+    assert "requires operator confirmation" in err
+
+    # Should fail if confirm_fn returns False
+    err = check_agency_policy("delete_file", {CAP_READ, CAP_WRITE, CAP_DESTRUCTIVE}, confirm_fn=lambda t, p: False)
+    assert "was not confirmed" in err
+
+    # Should pass if confirm_fn returns True
+    assert not check_agency_policy("delete_file", {CAP_READ, CAP_WRITE, CAP_DESTRUCTIVE}, confirm_fn=lambda t, p: True)
+
+    # 4. Unknown tool execution
+    err = check_agency_policy("evil_hacker_tool", {CAP_READ, CAP_WRITE})
+    assert "Unknown tool" in err
+
 if __name__ == "__main__":
     print("Running BoteX Test Suite...")
     test_security()
@@ -2917,4 +2948,5 @@ if __name__ == "__main__":
     test_cli_models()
     test_repl()
     test_main()
+    test_owasp_excessive_agency()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")
