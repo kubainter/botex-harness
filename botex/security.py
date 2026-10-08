@@ -85,9 +85,15 @@ def mask_secrets(text: str) -> str:
 def wrap_untrusted_content(content: str, tag: str = "untrusted_content", **attrs: str) -> str:
     """
     Wrap untrusted content in XML-like boundary tags to mitigate Prompt Injection (OWASP #1).
-    Applies secret masking automatically.
+    Applies secret masking automatically and escapes attribute values against boundary injection.
     """
-    attr_str = "".join(f' {k}="{v}"' for k, v in attrs.items() if v)
+    cleaned_attrs = []
+    for k, v in attrs.items():
+        if v:
+            # Escape double quotes in attribute values to prevent attribute injection
+            safe_val = str(v).replace('"', '&quot;')
+            cleaned_attrs.append(f'{k}="{safe_val}"')
+    attr_str = " " + " ".join(cleaned_attrs) if cleaned_attrs else ""
     masked = mask_secrets(content)
     return f"<{tag}{attr_str}>\n{masked}\n</{tag}>"
 
