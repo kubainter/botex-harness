@@ -74,10 +74,12 @@ def mark_status(text: str) -> str:
         return text
     for token, style in (
         ("[SUKCES]", "green"), ("[SUCCESS]", "green"), ("[OK]", "green"),
-        ("DONE", "green"),
-        ("[BŁĄD]", "red"), ("[FAILURE]", "red"), ("[BRAK]", "red"),
-        ("[MISSING]", "red"), ("ERROR", "red"),
-        ("STAGNANT", "yellow"), ("[default]", "cyan"),
+        ("DONE", "green"), ("[ACTIVE]", "green"),
+        ("[BŁĄD]", "red"), ("[FAILURE]", "red"), ("[FAILED]", "red"),
+        ("[BRAK]", "red"), ("[MISSING]", "red"), ("ERROR", "red"),
+        ("STAGNANT", "yellow"), ("[WARNING]", "yellow"), ("[WARN]", "yellow"),
+        ("[INTERRUPTED]", "yellow"), ("[PRZERWANO]", "yellow"),
+        ("[default]", "cyan"),
     ):
         text = text.replace(token, f"{_CODES[style]}{token}{_RESET}")
     return text
