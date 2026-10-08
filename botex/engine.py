@@ -28,7 +28,7 @@ try:
     from .security import (
         resolve_safe_path, SecurityError, check_model_zdr, zdr_enforced,
     )
-    from .analytics import log_run, print_run_summary, check_budget_limit
+    from .analytics import log_run, print_run_summary, check_budget_limit, calculate_cost_usd
     from .config import (
         PROJECT_ROOT, engine_setting, env_file, is_decisions_model,
         load_config,
@@ -61,7 +61,7 @@ except (ImportError, ValueError):
     from security import (
         resolve_safe_path, SecurityError, check_model_zdr, zdr_enforced,
     )
-    from analytics import log_run, print_run_summary, check_budget_limit
+    from analytics import log_run, print_run_summary, check_budget_limit, calculate_cost_usd
     from config import (
         PROJECT_ROOT, engine_setting, env_file, is_decisions_model,
         load_config,
@@ -1122,6 +1122,7 @@ async def _run_botex_task_once_impl(
     stagnant_turns = 0
     last_action_signature = ""
     repeat_turns = 0
+    failed_mutations_streak = 0
     last_full_signature = ""
     no_tool_strikes = 0
     # Invocation-level failures (malformed JSON args, non-object args,
@@ -1232,6 +1233,39 @@ async def _run_botex_task_once_impl(
         last_reasoning_tokens = usage.reasoning_tokens
         if last_reasoning_tokens:
             effective_max_tokens = max(effective_max_tokens, reasoning_cap)
+
+        if budget_limit_usd > 0:
+            current_run_cost = calculate_cost_usd(model, total_prompt_tokens, total_completion_tokens)
+            # check_budget_limit only accounts for past completed runs
+            _, past_spend = check_budget_limit(budget_limit_usd)
+            if (past_spend + current_run_cost) >= budget_limit_usd:
+                rollback_verified = _rollback_attempt(task_id, files_touched)
+                duration = time.time() - start_time
+                summary_text = (
+                    f"[BUDGET BLOCK] Task exceeded daily limit (${budget_limit_usd:.2f}) "
+                    f"mid-run. (Spent today including this run: ${past_spend + current_run_cost:.4f})"
+                )
+                log_entry = log_run(
+                    task_id=task_id, model=model, provider=provider_name,
+                    duration_s=duration, steps=turn,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    cached_tokens=total_cached_tokens,
+                    files_touched=list(files_touched),
+                    lines_added=lines_added_total,
+                    lines_removed=lines_removed_total,
+                    status="BUDGET_EXCEEDED", summary=summary_text,
+                )
+                print_run_summary(log_entry)
+                return {
+                    "ok": False, "task_id": task_id, "status": "BUDGET_EXCEEDED",
+                    "summary": summary_text, "message": summary_text,
+                    "files_touched": list(files_touched),
+                    "exec_ran": exec_ran, "steps": turn,
+                    "duration_s": round(duration, 2),
+                    "cost_usd": log_entry["cost_usd"],
+                    "rollback_verified": rollback_verified,
+                }
 
         if nresp.finish_reason == "provider_error":
             # A malformed/provider-level error response is a provider
@@ -1459,10 +1493,12 @@ async def _run_botex_task_once_impl(
                     )
                     if verification.get("ok"):
                         verify_passed = True
-                    elif verify_attempts < 2:
+                    elif verify_attempts < 3:
                         messages.append({"role": "user", "content": (
-                            "Verification failed. Fix the workspace using the "
-                            "tool result below, then retry verification.\n"
+                            "Verification failed. You MUST fix the workspace using the "
+                            "tool result below before finishing. Read the error output "
+                            "carefully and apply the necessary patches. Then, reply "
+                            "STATUS: DONE again to retry verification.\n\n"
                             + json.dumps(verification, ensure_ascii=False)
                         )})
                         continue
@@ -1471,7 +1507,7 @@ async def _run_botex_task_once_impl(
                         rolled_ok = rollback_verified is not False
                         duration = time.time() - start_time
                         summary_text = (
-                            "Verification command failed after 2 attempts. "
+                            "Verification command failed after 3 attempts. "
                             + ("Changes were rolled back." if rolled_ok
                                else "Rollback could NOT be verified — the "
                                     "workspace may still contain partial changes.")
@@ -1694,6 +1730,7 @@ async def _run_botex_task_once_impl(
         no_tool_strikes = 0
         turn_actions = []
         touched_before_turn = set(files_touched)
+        turn_mutated = False
         for tc in nresp.tool_calls:
             fn_name = tc.name
             raw_args = tc.arguments
@@ -1897,6 +1934,8 @@ async def _run_botex_task_once_impl(
 
             if isinstance(tool_result, dict) and tool_result.get("ok"):
                 ok_tool_calls += 1
+                if fn_name not in READ_ONLY_TOOLS and fn_name != "run_command":
+                    turn_mutated = True
 
             messages.append({
                 "role": "tool",
@@ -1904,14 +1943,9 @@ async def _run_botex_task_once_impl(
                 "content": json.dumps(tool_result, ensure_ascii=False)
             })
 
-        # Check for stagnation / loop deadlock.
-        # Only mutating actions count toward the rollback trigger — a
-        # read-heavy task (analysis) is not a deadlock. Identical repeated
-        # read-only turns get a soft nudge instead.
-        # Progress is measured per-turn: a cumulative "not files_touched"
-        # would disable loop detection forever after the first write, which
-        # is exactly when patch-retry deadlocks happen.
-        turn_mutated = files_touched != touched_before_turn
+        # OWASP #6 Unbounded Consumption: Loop / Stagnation Detection
+        # Prevent the model from burning API budget by retrying failing mutations
+        # or repeating the exact same failed action in a loop.
         mut_actions = [
             a for a in turn_actions
             if a.split(":", 1)[0] not in READ_ONLY_TOOLS
@@ -1924,8 +1958,13 @@ async def _run_botex_task_once_impl(
         ):
             stagnant_turns += 1
         elif current_action_sig:
-            stagnant_turns = 0
+            stagnant_turns = 1
             last_action_signature = current_action_sig
+
+        if mut_actions and not turn_mutated:
+            failed_mutations_streak += 1
+        elif turn_mutated:
+            failed_mutations_streak = 0
 
         full_sig = ",".join(turn_actions)
         if full_sig and full_sig == last_full_signature and not turn_mutated:
@@ -1955,13 +1994,15 @@ async def _run_botex_task_once_impl(
                 "STATUS: DONE. Do not spend the remaining steps reading."
             )})
 
-        if stagnant_turns >= 3:
+        if stagnant_turns >= 3 or failed_mutations_streak >= 3:
             # Stagnation deadlock detected: rollback and exit
             rollback_verified = _rollback_attempt(task_id, files_touched)
             rolled_ok = rollback_verified is not False
             duration = time.time() - start_time
+
+            reason = "3 identical failed attempts" if stagnant_turns >= 3 else "3 consecutive failed mutations"
             summary_text = (
-                "No-progress loop detected (3 repeated attempts). "
+                f"No-progress loop detected ({reason}). "
                 + ("Changes were rolled back." if rolled_ok
                    else "Rollback could NOT be verified — the workspace may "
                         "still contain partial changes.")
@@ -1987,7 +2028,7 @@ async def _run_botex_task_once_impl(
                 "task_id": task_id,
                 "status": "STAGNANT_ROLLBACK",
                 "message": (
-                    "Subagent loop aborted due to lack of progress. "
+                    f"Subagent loop aborted due to lack of progress ({reason}). "
                     + ("Original state restored." if rolled_ok
                        else "Rollback unverified — inspect the workspace.")
                 ),
