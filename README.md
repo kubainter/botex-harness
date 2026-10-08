@@ -2,6 +2,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
+[![BoteX MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/kubainter/botex-harness/badges/card.svg)](https://glama.ai/mcp/servers/kubainter/botex-harness)
 
 Giving an LLM direct, unrestricted access to your repository usually ends the same way: it hallucinates line numbers, corrupts indentation, writes broken syntax, eats your token budget reading thousands of irrelevant lines, or gets stuck in an infinite fix-break loop.
 
@@ -19,7 +20,7 @@ Instead of trusting the model to behave, BoteX wraps every action in safety gate
 * **Multi-tier fuzzy patching**: Patches are whitespace- and newline-resilient (CRLF/LF agnostic with indentation detection), so minor formatting mismatches don't break execution.
 * **Automatic snapshot rollback**: Every touched file is snapshotted before modification. If an agent loops, stagnates, or fails verification, the entire workspace reverts cleanly.
 * **Hard budget & pricing caps**: Pre-flight checks verify model pricing against live provider catalogs. If a task exceeds its budget or a model is overpriced, BoteX aborts before spending a cent.
-* **Strict privacy & Zero Data Retention (ZDR)**: Enforces `provider.data_collection: deny` on OpenRouter calls, blocks `.env`/secrets, masks API keys in logs, and prevents path traversal attacks. Free (`:free`) models that cannot guarantee ZDR are rejected locally — opt out explicitly per run (`allow_non_zdr`) or via the `openrouter-free` provider preset.
+* **Strict privacy & Zero Data Retention (ZDR)**: Enforces `provider.data_collection: deny` on OpenRouter calls, blocks `.env`/secrets, masks API keys in logs, and prevents path traversal attacks. Free (`:free`) models that cannot guarantee ZDR are rejected locally. Opt out explicitly per run (`allow_non_zdr`) or via the `openrouter-free` provider preset.
 
 ---
 
@@ -95,8 +96,8 @@ BoteX exposes a focused set of MCP tools:
 * **`get_task_status(task_id)`**: Polls progress, logs, and results for a background task.
 
 ### Workspace Memory Vault
-* **`save_memory(key, content, category)`**: Saves persistent notes, decisions, or architectural context across agent sessions.
-* **`read_memory(key)`** / **`search_memory(query)`**: Retrieves saved workspace memory.
+* **`save_memory(title, content, kind, tags, memory_id, workspace_dir)`**: Saves persistent notes, decisions, handoffs, or lessons to the workspace Memory Vault (`<workspace_dir>/.botex/memory/`).
+* **`read_memory(memory_id)`** / **`search_memory(query, tag, kind)`**: Retrieves saved workspace memory.
 
 ### Diagnostics & Utility
 * **`get_outline(path, workspace_dir)`**: Returns a high-level symbol outline of a file without reading all lines.
@@ -129,17 +130,23 @@ Example payload for `run_subagent`:
 | `files` | `[]` | List of primary target files to nudge the agent toward. |
 | `workspace_dir` | `.` | Root directory the agent is restricted to. |
 | `provider` | `""` | API provider from `botex.config.json` (`openrouter`, `nvidia`, `openrouter-free`; empty = configured default or `BOTEX_PROVIDER`). |
-| `profile` | `"default"` | Model profile configured in `botex.config.json` (`default`, `coding`, `fast`). |
-| `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full`. |
+| `model` | `""` | Explicit provider model ID; overrides `profile`. |
+| `profile` | `""` | Model profile from `botex.config.json` (`default`, `coding`, `auto-beta`, `fast`). Empty = picked per mode via `engine.mode_profiles`. |
+| `api_key` | `""` | Provider API key per-request; highest priority (overrides env/.env/config). |
+| `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full` (empty = `engine.default_mode`). |
 | `recipe` | `""` | Specialized workflow persona (`planner`, `code-explorer`, `reviewer`, `security-reviewer`, `build-resolver`, `tdd`). |
 | `max_turns` | `0` | Max tool-loop iterations (`0` uses `engine.max_turns`, usually 15, overridable per mode via `engine.mode_max_turns`). |
+| `max_tokens` | `0` | Per-turn completion cap (`0` = config value; reasoning models need ~8000+). |
+| `max_duration_s` | `0` | Total wall-clock limit in seconds (`0` = config value). |
 | `budget_limit_usd`| `-1` | Hard spend limit for this task (`-1` uses global config, `0` = unlimited). |
 | `allow_destructive`| `false` | Explicit opt-in for `delete_file` and `move_file`. |
 | `allow_exec` | `false` | Explicit opt-in for `run_command` (requires `exec.enabled: true` in config). |
 | `allow_net` | `false` | Explicit opt-in for web access via `read_url`. |
-| `allow_non_zdr` | `false` | Per-run consent to relax the ZDR gate — required for `:free` models (provider may log/train on prompts). The result carries `zdr_enforced: false`. |
+| `net_allowed_hosts` | `[]` | Per-run host authorization for `read_url` (interacts with `net.policy`). |
+| `net_allowed_urls` | `[]` | Per-run URL authorization; a trailing `/` authorizes that subtree. |
+| `allow_non_zdr` | `false` | Per-run consent to relax the ZDR gate; required for `:free` models (provider may log/train on prompts). The result carries `zdr_enforced: false`. |
 | `output_path` | `""` | Enforce that this exact file must be written and non-empty for `DONE` status. |
-| `verify_command` | `""` | Verification command (e.g. `pytest tests/test_auth.py`) that must pass before completion. |
+| `verify_command` | `""` | Verification command (e.g. `pytest tests/test_auth.py`) that must pass before completion. Requires `exec.enabled: true` and exec authorization. |
 
 ---
 
@@ -148,11 +155,11 @@ Example payload for `run_subagent`:
 BoteX builds the API **System Prompt** dynamically for each run. It fuses a hardcoded operational core (tool rules, syntax validation checks, output formats) with an optional **Recipe** (a markdown file).
 This means that providing a `--recipe <name>` (or the `"recipe": "<name>"` JSON parameter) acts as an injection mechanism for your custom System Prompts, giving the agent specialized personas or specific constraints.
 
-Recipes live in the `recipes/` directory.
+Recipes live in the `botex/recipes/` directory.
 
 ### Examples of custom System Prompts for Modding and Analysis
 
-If you are using BoteX as an MCP Server to analyze game mods or reverse-engineer engine behavior, you can create custom recipes like `recipes/ue4.md` or `recipes/lua_audit.md`.
+If you are using BoteX as an MCP Server to analyze game mods or reverse-engineer engine behavior, you can create custom recipes like `botex/recipes/ue4.md` or `botex/recipes/lua_audit.md`.
 
 * **Unreal Engine 4 Modding (`--recipe ue4`)**
   ```text
@@ -213,7 +220,7 @@ Before handing off the workspace to the next candidate model, **BoteX verifies t
 
 ## Free Models (Non-ZDR Opt-in)
 
-ZDR is on by default and `:free` slugs are rejected pre-flight with `ZDR_VIOLATION`. Operators without a paid subscription — or anyone who accepts that free endpoints may log/train on prompts — can opt in two ways, both leaving an audit trail (`zdr_enforced: false` in the result and a stderr warning):
+ZDR is on by default and `:free` slugs are rejected pre-flight with `ZDR_VIOLATION`. Operators without a paid subscription (or anyone who accepts that free endpoints may log/train on prompts) can opt in two ways; both leave an audit trail (`zdr_enforced: false` in the result and a stderr warning):
 
 ```bash
 # Persistent: switch to the bundled free-tier provider preset
@@ -223,7 +230,7 @@ botex config provider openrouter-free          # or BOTEX_PROVIDER=openrouter-fr
 # or relax ZDR on the current provider (keeps paid models, widens routing)
 botex config zdr off                            # 'on' restores enforcement
 
-# Per-run only — no config change:
+# Per-run only, no config change:
 botex run "task" --provider openrouter-free
 botex run "task" --model qwen/qwen3.8-27b:free --allow-non-zdr
 ```
@@ -234,15 +241,15 @@ botex run "task" --model qwen/qwen3.8-27b:free --allow-non-zdr
 ```
 
 > [!NOTE]
-> `:free` variants also require the OpenRouter **account-level** free-model opt-in (privacy settings); without it requests surface as `provider_policy_denied`. Free models carry per-day rate limits — the `model_fallbacks` chains in the preset stay entirely on `:free` slugs.
+> `:free` variants also require the OpenRouter **account-level** free-model opt-in (privacy settings); without it requests surface as `provider_policy_denied`. Free models carry per-day rate limits. The `model_fallbacks` chains in the preset stay entirely on `:free` slugs.
 
 ---
 
 ## Configuration
 
 Settings are resolved hierarchically (lowest to highest priority):
-1. `botex.config.json` — committed defaults (provider profiles, engine limits, security lists).
-2. `botex.config.local.json` — machine-local overrides (**gitignored**; place custom keys or limits here).
+1. `botex.config.json`: committed defaults (provider profiles, engine limits, security lists).
+2. `botex.config.local.json`: machine-local overrides (**gitignored**; place custom keys or limits here).
 3. `BOTEX_*` environment variables.
 
 Example `botex.config.local.json`:
@@ -295,6 +302,8 @@ botex --stats --month      # Monthly cost report
 botex --history <task_id>  # Inspect exact prompts, tool calls, and diffs for a run
 botex --snapshots          # Check disk usage of backup snapshots
 botex --clean-snapshots    # Prune old snapshot backups
+botex models [--refresh]   # List configured provider models (refresh catalog)
+botex serve                # Force MCP stdio server mode explicitly
 ```
 
 ---
@@ -305,6 +314,8 @@ botex --clean-snapshots    # Prune old snapshot backups
 server.py              MCP server entry point & CLI dispatcher
 botex.cmd / botex.sh   Zero-install launchers (auto-detects python environment)
 pyproject.toml         Package configuration (exposes `botex` CLI command)
+requirements.txt       Runtime dependencies
+botex.config.json      Committed defaults (providers, engine limits, exec/net policy)
 botex/
   engine.py            Autonomous execution loop, context management & rollback triggers
   file_tools.py        Safe outline-first reading, file creation, moving & deletion
@@ -312,13 +323,19 @@ botex/
   security.py          Path traversal defenses, secret masking & gitignore filtering
   exec_tools.py        Policy-controlled command execution & argument filtering
   capabilities.py      Permission presets (readonly, edit, destructive, full)
+  net_tools.py         Net policy enforcement (read_url / fetch_url)
+  memory.py            Workspace memory vault (.botex/memory/)
   analytics.py         Cost/token ledger, budgeting & summary reporting
   pricing.py           Live model price guardrail & catalog checks
   providers.py         Provider adapters (OpenRouter, NVIDIA, etc.) & request normalizer
+  benchmarks.py        Live model recommendations (recommend_models)
   contracts.py         Task completion verification & status taxonomy
+  recipes.py           Recipe loading & system-prompt injection
+  i18n.py / ui.py      CLI language & status rendering
   recipes/             Specialized agent personas (planner, reviewer, tdd, etc.)
+skills/botex/          Caller-side SKILL.md (delegation patterns)
 tests/
-  test_botex.py        Comprehensive test suite (24 unit & integration test groups)
+  test_botex.py        Test suite (33 unit & integration test groups)
   test_live_e2e.py     Live end-to-end integration suite against OpenRouter
 docs/
   TUTORIAL.md          Architecture deep dive and technical walkthrough
@@ -336,13 +353,13 @@ python -m pytest tests/test_botex.py
 
 Expected result:
 ```
-============================= 24 passed in 7.90s ==============================
+============================= 33 passed in ~10s ==============================
 ```
 
 ---
 
 ## License & Trademark
 
-BoteX is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE) for details. Derivative works must retain attribution notices as specified in [NOTICE](NOTICE).
+BoteX is licensed under the **Apache License 2.0**. See [LICENSE](LICENSE) for details. Derivative works must retain attribution notices as specified in [NOTICE](NOTICE).
 
 **The BoteX name and logo are trademarks of Jakub Grzesiak** ([jg-webtech.pl](https://jg-webtech.pl)). You are free to fork and modify the code under Apache-2.0, but forks or derived distributions should not use the name "BoteX" or suggest official endorsement without prior written consent.
