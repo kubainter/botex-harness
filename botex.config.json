@@ -38,7 +38,7 @@
     "openrouter-free": {
       "default": false,
       "base_url": "https://openrouter.ai/api/v1",
-      "api_key_env": "OPENROUTER_API_KEY",
+      "api_key_env": "OPENROUTER_API_FREE_KEY",
       "extra_body": {"provider": {"data_collection": "allow"}, "reasoning": {"max_tokens": 4000}},
       "zdr": {"enabled": false},
       "models": {
