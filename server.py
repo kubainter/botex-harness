@@ -658,7 +658,28 @@ async def check_health() -> str:
 
 @mcp.tool()
 async def clean_snapshots(max_age_days: float = 7.0, max_total_mb: float = 50.0) -> str:
-    """Purges old or excess backup snapshots from disk."""
+    """
+    Purges old or excess backup snapshots from disk.
+
+    WARNING: This is a DESTRUCTIVE operation that permanently deletes backup
+    data used for task rollbacks. Active in-flight tasks are protected and will
+    not be removed.
+
+    The cleanup process operates in two phases:
+    1. Time-based: Removes all snapshots strictly older than `max_age_days`.
+    2. Quota-based: If the total size of remaining snapshots still exceeds
+       `max_total_mb`, it removes the oldest snapshots until the size is under the limit.
+
+    Args:
+        max_age_days: The maximum allowed age of a snapshot in days. Snapshots
+            older than this are always deleted, regardless of quota.
+        max_total_mb: The maximum total allowed disk usage for all snapshots
+            in megabytes. If exceeded after phase 1, oldest snapshots are deleted.
+
+    Returns:
+        A string summarizing the cleanup results, including the number of deleted
+        directories, freed MB, and remaining MB.
+    """
     res = snapshot_manager.clean_old_snapshots(
         max_age_days=max_age_days,
         max_total_mb=max_total_mb,
