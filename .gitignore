@@ -93,3 +93,7 @@ tmp/
 # Local diagnostic and personal scripts
 inspect_sessions.py
 .coverage
+
+# Local analysis & decision records (working docs, not for repo)
+docs/ECC_CATALOG.md
+docs/RUN_COMMAND_ANALYSIS.md
