@@ -24,14 +24,44 @@ CAP_DESTRUCTIVE = "destructive"
 CAP_EXEC = "exec"
 CAP_NET = "net"
 
-# Tool name -> required capability. Names absent here default to CAP_READ.
+from dataclasses import dataclass
+from enum import Enum
+from typing import List
+
+
+class RiskLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+@dataclass
+class ToolPolicy:
+    required_scopes: List[str]
+    risk: RiskLevel
+    approval_required: bool = False
+
+
+# Tools that only require CAP_READ (implicit)
+# The full registry with scopes and risk for OWASP #3 Excessive Agency
+TOOL_REGISTRY = {
+    "get_file_outline": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
+    "read_file_lines": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
+    "read_file": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
+    "list_dir": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
+    "apply_patch": ToolPolicy(required_scopes=[CAP_WRITE], risk=RiskLevel.MEDIUM),
+    "create_file": ToolPolicy(required_scopes=[CAP_WRITE], risk=RiskLevel.MEDIUM),
+    "delete_file": ToolPolicy(required_scopes=[CAP_DESTRUCTIVE], risk=RiskLevel.HIGH, approval_required=True),
+    "move_file": ToolPolicy(required_scopes=[CAP_DESTRUCTIVE], risk=RiskLevel.HIGH, approval_required=True),
+    "run_command": ToolPolicy(required_scopes=[CAP_EXEC], risk=RiskLevel.HIGH, approval_required=True),
+    "read_url": ToolPolicy(required_scopes=[CAP_NET], risk=RiskLevel.MEDIUM),
+}
+
+# Backwards compatibility mapping for legacy capability lookups
 TOOL_CAPABILITY = {
-    "apply_patch": CAP_WRITE,
-    "create_file": CAP_WRITE,
-    "delete_file": CAP_DESTRUCTIVE,
-    "move_file": CAP_DESTRUCTIVE,
-    "run_command": CAP_EXEC,
-    "read_url": CAP_NET,
+    name: policy.required_scopes[0]
+    for name, policy in TOOL_REGISTRY.items()
+    if policy.required_scopes
 }
 
 # Capabilities that an interactive confirm_fn may grant per-operation.
@@ -97,7 +127,49 @@ def tool_allowed(tool_name: str, caps: Set[str], can_confirm: bool = False) -> b
     interactive confirmation callback (``can_confirm``) — the gate is then
     enforced per-operation at dispatch time.
     """
-    cap = TOOL_CAPABILITY.get(tool_name, CAP_READ)
-    if cap in caps:
+    policy = TOOL_REGISTRY.get(tool_name)
+    if not policy:
+        return False
+
+    # We require ALL required scopes to be present in caps
+    missing_scopes = set(policy.required_scopes) - caps
+    if not missing_scopes:
         return True
-    return can_confirm and cap in GATED_BY_CONFIRM
+
+    # If not fully granted, check if missing capabilities are purely those
+    # that can be interactively granted. If so, and we have can_confirm, allow it.
+    if can_confirm and missing_scopes.issubset(GATED_BY_CONFIRM):
+        return True
+
+    return False
+
+def check_agency_policy(tool_name: str, caps: Set[str], confirm_fn=None, op_path: str = "") -> str:
+    """
+    The Agency Middleware (OWASP #3). Evaluates ToolPolicy before executing the tool.
+    Returns an error string if blocked, or an empty string if allowed.
+    """
+    policy = TOOL_REGISTRY.get(tool_name)
+    if not policy:
+        return f"Unknown tool '{tool_name}'."
+
+    # Check scopes
+    missing_scopes = set(policy.required_scopes) - caps
+    # Gated capabilities (like destructive or exec) can be granted dynamically via confirm_fn
+    # For capabilities missing from statically-granted caps, if they are gated,
+    # we enforce interactive approval below. If a missing capability is not interactive,
+    # the operation is blocked.
+    if missing_scopes and not (confirm_fn and missing_scopes.issubset(GATED_BY_CONFIRM)):
+        return f"Missing required scopes for {tool_name}: {', '.join(missing_scopes)}"
+
+    # Risk and approval middleware
+    requires_approval = policy.approval_required or bool(missing_scopes)
+
+    if requires_approval:
+        if not confirm_fn:
+            return f"Operation '{tool_name}' requires operator confirmation, but none is available."
+
+        # We pass the op_path (e.g. command or path) to confirm_fn
+        if not confirm_fn(tool_name, op_path):
+            return f"Operation '{tool_name}' was not confirmed by the operator."
+
+    return ""

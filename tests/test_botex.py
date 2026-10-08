@@ -919,7 +919,8 @@ def test_engine_write_guards():
                 orig_candidates = engine.resolve_model_candidates
                 engine.resolve_model_candidates = lambda *a, **k: ["first", "second"]
                 try:
-                    res = run(fake, task="check version", allow_exec=True)
+                    # Provide confirm_fn=lambda t, p: True to bypass check_agency_policy for exec in the test.
+                    res = run(fake, task="check version", allow_exec=True, mode="full", confirm_fn=lambda t, p: True)
                 finally:
                     engine.resolve_model_candidates = orig_candidates
                 assert res["status"] == "API_ERROR"
@@ -2867,6 +2868,119 @@ def test_main():
             mock_isatty.return_value = False
             main()
             mock_mcp.assert_called_once()
+def test_owasp_excessive_agency():
+    """
+    Test OWASP #3: Excessive Agency & Enhanced Permission Controls.
+    Verifies that the Agency Middleware (ToolPolicy) enforces the required scopes and risk levels.
+    """
+    from botex.capabilities import check_agency_policy, CAP_READ, CAP_WRITE, CAP_EXEC, CAP_DESTRUCTIVE
+
+    # 1. Fully authorized tool execution (LOW risk)
+    assert not check_agency_policy("get_file_outline", {CAP_READ})
+
+    # 2. Blocked tool execution due to missing scope (MEDIUM risk)
+    err = check_agency_policy("create_file", {CAP_READ})
+    assert "Missing required scopes" in err and "create_file" in err
+
+    # 3. High risk tool requiring approval (CAP_DESTRUCTIVE)
+    # Should fail if approval not given
+    err = check_agency_policy("delete_file", {CAP_READ, CAP_WRITE, CAP_DESTRUCTIVE}, confirm_fn=None)
+    assert "requires operator confirmation" in err
+
+    # Should fail if confirm_fn returns False
+    err = check_agency_policy("delete_file", {CAP_READ, CAP_WRITE, CAP_DESTRUCTIVE}, confirm_fn=lambda t, p: False)
+    assert "was not confirmed" in err
+
+    # Should pass if confirm_fn returns True
+    assert not check_agency_policy("delete_file", {CAP_READ, CAP_WRITE, CAP_DESTRUCTIVE}, confirm_fn=lambda t, p: True)
+
+    # 4. Unknown tool execution
+    err = check_agency_policy("evil_hacker_tool", {CAP_READ, CAP_WRITE})
+    assert "Unknown tool" in err
+
+def test_owasp_excessive_agency_integration():
+    """
+    Test OWASP #3: Excessive Agency Engine Integration.
+    Verifies that the LLM is blocked by Agency Middleware when trying to run a high-risk tool.
+    """
+    import asyncio
+    import tempfile
+    from types import SimpleNamespace
+    import botex.engine as engine
+
+    def resp(content=None, tool_calls=None, finish="stop", reasoning=0):
+        import json as _json
+        msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, finish_reason=finish)],
+            usage=SimpleNamespace(
+                prompt_tokens=1, completion_tokens=1,
+                prompt_tokens_details=None,
+                completion_tokens_details=(
+                    SimpleNamespace(reasoning_tokens=reasoning)
+                    if reasoning else None)),
+        )
+
+    def tcall(name, args):
+        import json as _json
+        return SimpleNamespace(
+            id="t1", type="function",
+            function=SimpleNamespace(
+                name=name,
+                arguments=args if isinstance(args, str) else _json.dumps(args)))
+
+    class FakeClient:
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.calls = []
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            self.calls.append(kw)
+            return self.responses.pop(0)
+
+    orig_check_model_price = engine.check_model_price
+    orig_check_model_tools = engine.check_model_tools
+    orig_check_budget_limit = engine.check_budget_limit
+    orig_log_run = engine.log_run
+    orig_print_run_summary = engine.print_run_summary
+    orig_AsyncOpenAI = engine.AsyncOpenAI
+
+    engine.check_model_price = lambda *a, **k: (True, "")
+    engine.check_model_tools = lambda *a, **k: (True, "")
+    engine.check_budget_limit = lambda *a, **k: (False, 0.0)
+    engine.log_run = lambda **kw: {"cost_usd": 0.0}
+    engine.print_run_summary = lambda *a, **k: None
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def run(client, **kw):
+                engine.AsyncOpenAI = lambda **_: client
+                args = dict(workspace_dir=tmpdir, model="test/model",
+                            api_key="x", mode="edit")
+                args.update(kw)
+                return asyncio.run(engine.run_botex_task(**args))
+
+            # Try to execute delete_file with edit mode (write only, no destructive)
+            fake = FakeClient([
+                resp(tool_calls=[tcall("delete_file", {"path": "test.txt"})]),
+                resp("STATUS: DONE\nno write")
+            ])
+
+            res = run(fake, task="delete a file")
+            sent_messages = fake.calls[1]["messages"]
+            tool_result_msg = next((m for m in sent_messages if m["role"] == "tool"), None)
+            assert tool_result_msg is not None
+            assert "Unknown tool" in tool_result_msg["content"] or "requires operator confirmation" in tool_result_msg["content"] or "Missing required scopes" in tool_result_msg["content"]
+    finally:
+        engine.check_model_price = orig_check_model_price
+        engine.check_model_tools = orig_check_model_tools
+        engine.check_budget_limit = orig_check_budget_limit
+        engine.log_run = orig_log_run
+        engine.print_run_summary = orig_print_run_summary
+        engine.AsyncOpenAI = orig_AsyncOpenAI
+
 if __name__ == "__main__":
     print("Running BoteX Test Suite...")
     test_security()
@@ -2903,4 +3017,6 @@ if __name__ == "__main__":
     test_cli_models()
     test_repl()
     test_main()
+    test_owasp_excessive_agency()
+    test_owasp_excessive_agency_integration()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")

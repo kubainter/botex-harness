@@ -38,7 +38,8 @@ try:
     )
     from .capabilities import (
         CAP_DESTRUCTIVE, CAP_EXEC, CAP_NET, CAP_WRITE, TOOL_CAPABILITY,
-        resolve_capabilities, resolve_mode_name, tool_allowed,
+        TOOL_REGISTRY, resolve_capabilities, resolve_mode_name, tool_allowed,
+        check_agency_policy
     )
     from .exec_tools import run_command, command_policy_error
     from .net_tools import read_url, resolve_net_scope
@@ -71,7 +72,8 @@ except (ImportError, ValueError):
     )
     from capabilities import (
         CAP_DESTRUCTIVE, CAP_EXEC, CAP_NET, CAP_WRITE, TOOL_CAPABILITY,
-        resolve_capabilities, resolve_mode_name, tool_allowed,
+        TOOL_REGISTRY, resolve_capabilities, resolve_mode_name, tool_allowed,
+        check_agency_policy
     )
     from exec_tools import run_command, command_policy_error
     from net_tools import read_url, resolve_net_scope
@@ -1743,150 +1745,142 @@ async def _run_botex_task_once_impl(
                     tool_result = {"ok": False, "error": (
                         f"Unknown tool '{fn_name}'. Available tools: "
                         f"{', '.join(tool_names)}.")}
-                elif fn_name == "get_file_outline":
-                    path_arg = args.get("path", "")
-                    tool_result = get_file_outline(path_arg, root_path)
-                    if tool_result.get("ok"):
-                        norm_p = _normalize_track_path(path_arg, root_path)
-                        if norm_p:
-                            files_read.add(norm_p)
-                elif fn_name == "read_file_lines":
-                    path_arg = args.get("path", "")
-                    tool_result = read_file_lines(
-                        path_arg,
-                        int(args.get("start", 1)),
-                        int(args.get("end", 50)),
-                        root_path
-                    )
-                    if tool_result.get("ok"):
-                        norm_p = _normalize_track_path(path_arg, root_path)
-                        if norm_p:
-                            files_read.add(norm_p)
-                elif fn_name == "read_file":
-                    path_arg = args.get("path", "")
-                    tool_result = read_file(path_arg, root_path)
-                    if tool_result.get("ok"):
-                        norm_p = _normalize_track_path(path_arg, root_path)
-                        if norm_p:
-                            files_read.add(norm_p)
-                elif fn_name == "apply_patch":
-                    target_p = args.get("path", "")
-                    norm_p = _normalize_track_path(target_p, root_path)
-                    if require_read_before_write and (not norm_p or norm_p not in files_read):
-                        tool_result = {
-                            "ok": False,
-                            "error": (
-                                f"apply_patch on '{target_p}' rejected — file not read this task. "
-                                "Call get_file_outline(path) or read_file_lines(path, ...) first."
-                            ),
-                        }
+                else:
+                    # Execute Agency Middleware (OWASP #3)
+                    op_path = args.get("path") or args.get("src_path") or args.get("command", "")
+                    agency_error = check_agency_policy(fn_name, caps, confirm_fn, op_path)
+
+                    if agency_error:
+                        # Rejected by Agency Middleware
+                        tool_result = {"ok": False, "error": agency_error}
                     else:
-                        tool_result = apply_patch(
-                            target_p,
-                            args.get("search_block", ""),
-                            args.get("replace_block", ""),
-                            root_path,
-                            task_id=task_id
-                        )
-                        if tool_result.get("ok"):
-                            files_touched.add(target_p)
-                            if norm_p:
-                                files_read.add(norm_p)
-                            lines_added_total += tool_result.get("lines_added", 0)
-                            lines_removed_total += tool_result.get("lines_removed", 0)
-                            # Context Pruning: prune verbose reads for this file
-                            prune_tool_history(messages, target_p)
-                elif fn_name == "create_file":
-                    target_p = args.get("path", "")
-                    norm_p = _normalize_track_path(target_p, root_path)
-                    try:
-                        target_exists = resolve_safe_path(root_path, target_p).is_file()
-                    except Exception:
-                        target_exists = False
-                    if require_read_before_write and target_exists and (not norm_p or norm_p not in files_read):
-                        tool_result = {
-                            "ok": False,
-                            "error": (
-                                f"create_file on '{target_p}' rejected — file not read this task. "
-                                "Call get_file_outline(path) or read_file_lines(path, ...) first."
-                            ),
-                        }
-                    else:
-                        tool_result = create_file(
-                            target_p,
-                            args.get("content", ""),
-                            root_path,
-                            task_id=task_id
-                        )
-                        if tool_result.get("ok"):
-                            files_touched.add(target_p)
-                            if norm_p:
-                                files_read.add(norm_p)
-                            lines_added_total += tool_result.get("lines_written", 0)
-                            prune_tool_history(messages, target_p)
-                elif fn_name in ("delete_file", "move_file"):
-                    op_path = args.get("path") or args.get("src_path", "")
-                    approved = CAP_DESTRUCTIVE in caps or (
-                        confirm_fn(fn_name, op_path) if confirm_fn else False
-                    )
-                    if not approved:
-                        tool_result = {
-                            "ok": False,
-                            "error": f"Operation '{fn_name}' was not confirmed by the operator."
-                        }
-                    elif fn_name == "delete_file":
-                        tool_result = delete_file(op_path, root_path, task_id=task_id)
-                        if tool_result.get("ok"):
-                            files_touched.add(op_path)
-                    else:
-                        src_p = args.get("src_path", "")
-                        dst_p = args.get("dst_path", "")
-                        tool_result = move_file(src_p, dst_p, root_path, task_id=task_id)
-                        if tool_result.get("ok"):
-                            files_touched.update([src_p, dst_p])
-                            norm_dst = _normalize_track_path(dst_p, root_path)
-                            if norm_dst:
-                                files_read.add(norm_dst)
-                elif fn_name == "read_url":
-                    if net_requests >= net_request_limit:
-                        tool_result = {"ok": False, "error": (
-                            f"Network request limit reached ({net_request_limit})."
-                        )}
-                    else:
-                        net_requests += 1
-                        requested_max = int(args.get("max_bytes", net_cfg.get("max_bytes", 200000)))
-                        tool_result = await read_url(
-                            args.get("url", ""),
-                            policy=effective_net_policy,
-                            allowed_hosts=net_hosts,
-                            allowed_urls=net_urls,
-                            timeout_s=int(net_cfg.get("timeout_s", 20)),
-                            max_bytes=max(1, min(requested_max, int(net_cfg.get("max_bytes", 200000)))),
-                            max_redirects=int(net_cfg.get("max_redirects", 3)),
-                        )
-                elif fn_name == "run_command":
-                    cmd = args.get("command", "")
-                    approved = CAP_EXEC in caps or (
-                        confirm_fn(fn_name, cmd) if confirm_fn else False
-                    )
-                    if not approved:
-                        tool_result = {
-                            "ok": False,
-                            "error": "Command execution was not confirmed by the operator."
-                        }
-                    else:
-                        exec_cfg = load_config().get("exec", {})
-                        exec_ran = True
-                        tool_result = await run_command(
-                            cmd,
-                            root_path,
-                            allowlist=exec_cfg.get("allowlist", []),
-                            deny_args=exec_cfg.get("deny_args", []),
-                            timeout_s=int(exec_cfg.get("timeout_s", 120)),
-                            max_output_bytes=int(exec_cfg.get("max_output_bytes", 20000)),
-                        )
-                elif fn_name == "list_dir":
-                    tool_result = list_dir(args.get("path", "."), root_path)
+                        if fn_name == "get_file_outline":
+                            path_arg = args.get("path", "")
+                            tool_result = get_file_outline(path_arg, root_path)
+                            if tool_result.get("ok"):
+                                norm_p = _normalize_track_path(path_arg, root_path)
+                                if norm_p:
+                                    files_read.add(norm_p)
+                        elif fn_name == "read_file_lines":
+                            path_arg = args.get("path", "")
+                            tool_result = read_file_lines(
+                                path_arg,
+                                int(args.get("start", 1)),
+                                int(args.get("end", 50)),
+                                root_path
+                            )
+                            if tool_result.get("ok"):
+                                norm_p = _normalize_track_path(path_arg, root_path)
+                                if norm_p:
+                                    files_read.add(norm_p)
+                        elif fn_name == "read_file":
+                            path_arg = args.get("path", "")
+                            tool_result = read_file(path_arg, root_path)
+                            if tool_result.get("ok"):
+                                norm_p = _normalize_track_path(path_arg, root_path)
+                                if norm_p:
+                                    files_read.add(norm_p)
+                        elif fn_name == "apply_patch":
+                            target_p = args.get("path", "")
+                            norm_p = _normalize_track_path(target_p, root_path)
+                            if require_read_before_write and (not norm_p or norm_p not in files_read):
+                                tool_result = {
+                                    "ok": False,
+                                    "error": (
+                                        f"apply_patch on '{target_p}' rejected — file not read this task. "
+                                        "Call get_file_outline(path) or read_file_lines(path, ...) first."
+                                    ),
+                                }
+                            else:
+                                tool_result = apply_patch(
+                                    target_p,
+                                    args.get("search_block", ""),
+                                    args.get("replace_block", ""),
+                                    root_path,
+                                    task_id=task_id
+                                )
+                                if tool_result.get("ok"):
+                                    files_touched.add(target_p)
+                                    if norm_p:
+                                        files_read.add(norm_p)
+                                    lines_added_total += tool_result.get("lines_added", 0)
+                                    lines_removed_total += tool_result.get("lines_removed", 0)
+                                    # Context Pruning: prune verbose reads for this file
+                                    prune_tool_history(messages, target_p)
+                        elif fn_name == "create_file":
+                            target_p = args.get("path", "")
+                            norm_p = _normalize_track_path(target_p, root_path)
+                            try:
+                                target_exists = resolve_safe_path(root_path, target_p).is_file()
+                            except Exception:
+                                target_exists = False
+                            if require_read_before_write and target_exists and (not norm_p or norm_p not in files_read):
+                                tool_result = {
+                                    "ok": False,
+                                    "error": (
+                                        f"create_file on '{target_p}' rejected — file not read this task. "
+                                        "Call get_file_outline(path) or read_file_lines(path, ...) first."
+                                    ),
+                                }
+                            else:
+                                tool_result = create_file(
+                                    target_p,
+                                    args.get("content", ""),
+                                    root_path,
+                                    task_id=task_id
+                                )
+                                if tool_result.get("ok"):
+                                    files_touched.add(target_p)
+                                    if norm_p:
+                                        files_read.add(norm_p)
+                                    lines_added_total += tool_result.get("lines_written", 0)
+                                    prune_tool_history(messages, target_p)
+                        elif fn_name in ("delete_file", "move_file"):
+                            op_path = args.get("path") or args.get("src_path", "")
+                            if fn_name == "delete_file":
+                                tool_result = delete_file(op_path, root_path, task_id=task_id)
+                                if tool_result.get("ok"):
+                                    files_touched.add(op_path)
+                            else:
+                                src_p = args.get("src_path", "")
+                                dst_p = args.get("dst_path", "")
+                                tool_result = move_file(src_p, dst_p, root_path, task_id=task_id)
+                                if tool_result.get("ok"):
+                                    files_touched.update([src_p, dst_p])
+                                    norm_dst = _normalize_track_path(dst_p, root_path)
+                                    if norm_dst:
+                                        files_read.add(norm_dst)
+                        elif fn_name == "read_url":
+                            if net_requests >= net_request_limit:
+                                tool_result = {"ok": False, "error": (
+                                    f"Network request limit reached ({net_request_limit})."
+                                )}
+                            else:
+                                net_requests += 1
+                                requested_max = int(args.get("max_bytes", net_cfg.get("max_bytes", 200000)))
+                                tool_result = await read_url(
+                                    args.get("url", ""),
+                                    policy=effective_net_policy,
+                                    allowed_hosts=net_hosts,
+                                    allowed_urls=net_urls,
+                                    timeout_s=int(net_cfg.get("timeout_s", 20)),
+                                    max_bytes=max(1, min(requested_max, int(net_cfg.get("max_bytes", 200000)))),
+                                    max_redirects=int(net_cfg.get("max_redirects", 3)),
+                                )
+                        elif fn_name == "run_command":
+                            cmd = args.get("command", "")
+                            exec_cfg = load_config().get("exec", {})
+                            exec_ran = True
+                            tool_result = await run_command(
+                                cmd,
+                                root_path,
+                                allowlist=exec_cfg.get("allowlist", []),
+                                deny_args=exec_cfg.get("deny_args", []),
+                                timeout_s=int(exec_cfg.get("timeout_s", 120)),
+                                max_output_bytes=int(exec_cfg.get("max_output_bytes", 20000)),
+                            )
+                        elif fn_name == "list_dir":
+                            tool_result = list_dir(args.get("path", "."), root_path)
             except Exception as e:
                 # A malformed tool call must not crash the whole run — the
                 # error goes back to the model so it can correct itself.
