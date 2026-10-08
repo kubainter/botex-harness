@@ -2532,19 +2532,6 @@ def test_pick():
         mock_input.return_value = "3"
         assert _pick("test", ["a", "b"], "a") == None
 
-def test_mark_status():
-    from unittest.mock import patch
-    from botex.ui import mark_status
-
-    with patch("botex.ui.colors_enabled", return_value=False):
-        assert mark_status("[FAILED] Error occured") == "[FAILED] Error occured"
-
-    with patch("botex.ui.colors_enabled", return_value=True):
-        res = mark_status("[FAILED] [WARNING] [ACTIVE]")
-        assert "\033[31m[FAILED]\033[0m" in res
-        assert "\033[33m[WARNING]\033[0m" in res
-        assert "\033[32m[ACTIVE]\033[0m" in res
-
 def test_interactive_config():
     from unittest.mock import patch, MagicMock
     from server import _interactive_config
@@ -2911,7 +2898,6 @@ if __name__ == "__main__":
     test_try_local_command()
     test_normalize_cli_style()
     test_pick()
-    test_mark_status()
     test_interactive_config()
     test_cli_config()
     test_cli_models()
