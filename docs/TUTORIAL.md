@@ -13,6 +13,7 @@ Entry point: `server.py`.
 ├── server.py              MCP server + CLI dispatcher
 ├── botex/                 engine package
 │   ├── engine.py          tool loop, context pruning, termination statuses
+│   ├── contracts.py       task contract verification & status taxonomy
 │   ├── config.py          layered config loader (defaults < local < env)
 │   ├── capabilities.py    capability presets (readonly/edit/destructive/full)
 │   ├── exec_tools.py      run_command policy implementation
@@ -21,11 +22,23 @@ Entry point: `server.py`.
 │   ├── pricing.py         pre-flight price and capability guardrails
 │   ├── security.py        path traversal guard, blocked files, secret masking
 │   ├── analytics.py       cost ledger, budget checks, CLI reports
+│   ├── providers.py       provider adapters (OpenRouter, NVIDIA, etc.)
+│   ├── benchmarks.py      live model benchmarks & recommend_models
+│   ├── net_tools.py       SSRF-safe network fetching (read_url, fetch_url)
+│   ├── memory.py          workspace Memory Vault (.botex/memory/)
+│   ├── recipes.py         recipe loader & system prompt injection
 │   ├── i18n.py            CLI localization (EN/PL); MCP responses are always EN
-│   └── ui.py              ANSI helpers with plain-text fallback
-├── tests/test_botex.py    unit and integration suite
-├── docs/TUTORIAL.md       this file
+│   ├── ui.py              ANSI helpers with plain-text fallback
+│   └── recipes/           bundled markdown persona prompts
+├── tests/
+│   ├── test_botex.py      unit and integration suite (33 test groups)
+│   └── test_live_e2e.py   live end-to-end integration suite (OpenRouter)
+├── docs/
+│   └── TUTORIAL.md        this file
 ├── skills/botex/SKILL.md  agent-facing usage contract
+├── botex.cmd / botex.sh   zero-install execution launchers
+├── pyproject.toml         package configuration & scripts
+├── requirements.txt       runtime dependencies
 ├── ROADMAP.md             deferred features with rationale
 └── botex.config.json      committed defaults
 ```
@@ -147,6 +160,7 @@ that the model claimed success or that bytes changed.
 | `REQUEST_TIMEOUT` | A single provider request exceeded `request_timeout_s` |
 | `BUDGET_EXCEEDED` | Daily spend cap exceeded |
 | `PRICE_EXCEEDED` | Model over the configured price cap; rejected locally |
+| `ZDR_VIOLATION` | Model matched the ZDR deny list (:free/openrouter/free) — requires allow_non_zdr or openrouter-free |
 | `CONFIG_ERROR` | Invalid provider, mode, policy, or parameters |
 | `API_ERROR` | Provider call failed; rollback attempted if changes existed |
 | `ERROR` | Pre-run failure such as missing `workspace_dir` |
@@ -162,8 +176,8 @@ drives the `model_fallbacks` retry policy.
 * `run_subagent(task, ...)` — run a bounded editing task; blocks until done
 * `start_task(task, ...)` — detached execution; returns a `task_id`
 * `get_task_status(task_id)` — poll a detached task (`result` text + `result_data` dict)
-* `save_memory` / `search_memory` / `read_memory` — per-workspace Memory Vault
-* `fetch_url(url)` — caller-side URL fetch (not exposed to the internal loop)
+* `save_memory(title, content, workspace_dir, kind, tags, memory_id)` / `search_memory(workspace_dir, query, tag, kind)` / `read_memory(memory_id, workspace_dir)` — per-workspace Memory Vault
+* `fetch_url(url, max_bytes)` — caller-side URL fetch (not exposed to the internal loop)
 * `get_outline(path, workspace_dir)` — symbol skeleton of a file
 * `get_stats(period)` — cost/token report from analytics
 * `check_health()` — provider, key, model, and budget readiness
@@ -198,12 +212,19 @@ narrow tasks with explicit `files` over one broad "review everything" request.
   "net_allowed_urls": [],
   "output_path": "",
   "verify_command": "",
+  "allow_non_zdr": false,
   "api_key": ""
 }
 ```
 
 Model resolution priority: `model` > `profile` > `mode_profiles[mode]` >
 `default_profile`. Zeros and empty strings fall back to configured defaults.
+
+Workspace resolution: an explicit `workspace_dir` (including `.`) always wins; when it is
+empty, `engine.default_workspace` is used (if it is an existing directory), otherwise the
+server's current directory. This applies to `run_subagent`, `start_task`, `get_outline` and
+the memory tools. MCP hosts usually start the server with an arbitrary working directory,
+so pass `workspace_dir` explicitly or set `engine.default_workspace`.
 
 ### Using Recipes as System Prompts
 
@@ -219,10 +240,15 @@ Resolution order (lowest to highest priority):
 2. `botex.config.local.json` — gitignored local overrides
 3. `BOTEX_*` environment variables
 
+The two config files are hot-reloaded: `load_config()` compares their modification times
+(including creation/deletion of the local file) on every call and re-reads on change, so a
+running MCP server picks up edits and `botex config ...` writes without a restart.
+Environment variables are only read from the process environment, so changing them needs a restart.
+
 Key sections:
 
 * `providers.<name>` — `base_url`, `api_key_env`, `extra_body`, `zdr`
-  (`enabled` + `deny_patterns`), `capabilities`, `models` profiles, and
+  (`enabled` + `deny_patterns`), `decisions_models`, `capabilities`, `models` profiles, and
   per-profile `model_fallbacks` retry chains. The bundled `openrouter-free`
   preset ships `zdr.enabled: false` with `:free` tool-capable models for
   operators without a paid subscription — select it per run, via
@@ -230,9 +256,12 @@ Key sections:
 * `engine.default_profile`, `engine.mode_profiles`, `engine.mode_max_turns`,
   `engine.max_turns`,
   `engine.max_tokens`, `engine.reasoning_max_tokens`, `engine.request_timeout_s`,
-  `engine.max_duration_s`, `engine.temperature`, `engine.budget_limit_usd`,
-  `engine.allow_destructive`, `engine.default_mode`,
-  `engine.max_concurrent_tasks`, `engine.task_result_ttl_s`.
+  `engine.max_duration_s`, `engine.max_task_duration_s`, `engine.temperature`,
+  `engine.budget_limit_usd`, `engine.allow_destructive`, `engine.default_mode`,
+  `engine.default_workspace` (default project directory when no workspace is given;
+  env `BOTEX_DEFAULT_WORKSPACE`),
+  `engine.require_read_before_write`, `engine.max_concurrent_tasks`,
+  `engine.max_queued_tasks`, `engine.task_result_ttl_s`.
 * `net.policy`, `net.allowed_hosts`, `net.allowed_urls`, `net.timeout_s`,
   `net.max_bytes`, `net.max_requests_per_task`, `net.max_redirects` —
   `read_url`/`fetch_url` destination policy.
@@ -241,7 +270,8 @@ Key sections:
 * `pricing.enabled`, `pricing.max_input_per_mtok`, `pricing.max_output_per_mtok`,
   `pricing.on_unknown`, `pricing.cache_ttl_hours`.
 * `paths.snapshot_dir`, `paths.analytics_file`, `paths.env_file`,
-  `paths.snapshot_auto_prune` (+ age/size quotas).
+  `paths.snapshot_auto_prune`, `paths.snapshot_max_age_days`,
+  `paths.snapshot_max_total_mb`.
 * `app.referer` — your attribution URL; the name "BoteX" is fixed.
 * `analytics.store_full_text`, `analytics.preview_chars`.
 * `ui.language` — `en`, `pl`, or `auto` (OS locale; `BOTEX_LANG` overrides);
@@ -250,7 +280,7 @@ Key sections:
 ## 8. CLI usage
 
 ```bash
-# interactive REPL
+# interactive REPL (in-session: `workspace` / `cd [DIR]` shows or switches the target project)
 botex repl -w ./my-project --profile coding
 
 # one-shot tasks
@@ -265,6 +295,10 @@ botex run "task" --model qwen/qwen3.8-27b:free --allow-non-zdr
 botex config provider openrouter-free                       # persistent switch
 botex config zdr off                                        # relax ZDR on current provider
 
+# default project directory (used when -w / workspace_dir is not given)
+botex config workspace ./my-project                         # stored as an absolute path
+botex config workspace none                                 # clear (falls back to cwd)
+
 # maintenance
 botex --stats
 botex --stats --month
@@ -273,7 +307,7 @@ botex --snapshots
 botex --clean-snapshots
 botex health
 botex config
-botex models
+botex models [--refresh]
 botex serve
 ```
 
