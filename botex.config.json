@@ -1,4 +1,4 @@
-{
+﻿{
   "providers": {
     "openrouter": {
       "default": true,
@@ -133,3 +133,4 @@
     "cache_ttl_hours": 24
   }
 }
+

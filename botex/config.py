@@ -158,6 +158,10 @@ DEFAULTS: Dict[str, Any] = {
         # Capability mode preset used when a request does not name one:
         # readonly | edit | destructive | full (see botex/capabilities.py).
         "default_mode": "edit",
+        # Project directory used when neither the caller (-w / MCP
+        # workspace_dir) nor the environment names one. Empty = fall back
+        # to the process working directory. Must be an existing directory.
+        "default_workspace": "",
         # Model profile used when a request does not name one
         # (e.g. default | coding | auto-beta — resolved per provider).
         "default_profile": "default",
@@ -291,6 +295,7 @@ _ENV_MAP = {
     "BOTEX_ALLOW_DESTRUCTIVE": ("engine", "allow_destructive"),
     "BOTEX_REQUIRE_READ_BEFORE_WRITE": ("engine", "require_read_before_write"),
     "BOTEX_DEFAULT_MODE": ("engine", "default_mode"),
+    "BOTEX_DEFAULT_WORKSPACE": ("engine", "default_workspace"),
     "BOTEX_DEFAULT_PROFILE": ("engine", "default_profile"),
     "BOTEX_EXEC_ENABLED": ("exec", "enabled"),
     "BOTEX_NET_ENABLED": ("net", "enabled"),
@@ -306,6 +311,7 @@ _ENV_MAP = {
 }
 
 _config_cache: Optional[Dict[str, Any]] = None
+_config_sig: Optional[tuple] = None
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -328,10 +334,28 @@ def _load_json(path: Path) -> Dict[str, Any]:
     return {}
 
 
+def _file_sig(path: Path) -> Optional[int]:
+    """Return the file's mtime in ns, or None if it does not exist."""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _current_sig() -> tuple:
+    return (_file_sig(CONFIG_FILE), _file_sig(LOCAL_CONFIG_FILE))
+
+
 def load_config(reload: bool = False) -> Dict[str, Any]:
-    """Return the merged configuration dict (defaults < file < local < env)."""
-    global _config_cache
-    if _config_cache is not None and not reload:
+    """Return the merged configuration dict (defaults < file < local < env).
+
+    The result is cached, but the cache is invalidated automatically when
+    botex.config.json or botex.config.local.json is modified, created or
+    deleted (cheap mtime check), so long-running processes pick up edits.
+    """
+    global _config_cache, _config_sig
+    sig = _current_sig()
+    if _config_cache is not None and not reload and sig == _config_sig:
         return _config_cache
 
     cfg = _deep_merge(DEFAULTS, _load_json(CONFIG_FILE))
@@ -356,6 +380,7 @@ def load_config(reload: bool = False) -> Dict[str, Any]:
         cfg.setdefault(section, {})[key] = value
 
     _config_cache = cfg
+    _config_sig = sig
     return cfg
 
 
@@ -495,3 +520,33 @@ def app_headers() -> Dict[str, str]:
     if referer:
         headers["HTTP-Referer"] = referer
     return headers
+
+
+def resolve_workspace_source(value: str = "") -> tuple:
+    """Resolve the target project directory and report where it came from.
+
+    Order: explicit ``value`` (``-w`` / MCP ``workspace_dir``) >
+    ``engine.default_workspace`` (when it is an existing directory) >
+    the process working directory. An empty/blank ``value`` means "not
+    specified"; an explicit ``"."`` is honoured as the current directory.
+
+    Returns ``(path, source)`` where source is ``"explicit"``,
+    ``"default_workspace"`` or ``"cwd"``.
+    """
+    if value and str(value).strip():
+        return str(value), "explicit"
+    default = str(engine_setting("default_workspace") or "").strip()
+    if default:
+        p = Path(default).expanduser()
+        if p.is_dir():
+            return str(p.resolve()), "default_workspace"
+        import sys
+        sys.stderr.write(
+            f"[botex] engine.default_workspace '{default}' is not an existing "
+            "directory; falling back to the current directory.\n")
+    return ".", "cwd"
+
+
+def resolve_workspace(value: str = "") -> str:
+    """Return the effective workspace path (see ``resolve_workspace_source``)."""
+    return resolve_workspace_source(value)[0]
