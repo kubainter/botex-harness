@@ -2831,6 +2831,112 @@ def test_main():
             mock_isatty.return_value = False
             main()
             mock_mcp.assert_called_once()
+
+
+def test_config_hot_reload():
+    """load_config() must pick up edits to the local config without reload=True."""
+    import json
+    import os
+    import botex.config as cfgmod
+
+    orig = (cfgmod.LOCAL_CONFIG_FILE, cfgmod._config_cache, cfgmod._config_sig)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local = Path(tmpdir) / "botex.config.local.json"
+        cfgmod.LOCAL_CONFIG_FILE = local
+        cfgmod._config_cache = None
+        cfgmod._config_sig = None
+        try:
+            base = cfgmod.load_config()
+            assert cfgmod.load_config() is base  # unchanged -> same cached object
+
+            # created
+            local.write_text(json.dumps({"pricing": {"max_output_per_mtok": 1.5}}), encoding="utf-8")
+            assert cfgmod.load_config()["pricing"]["max_output_per_mtok"] == 1.5
+
+            # modified (force a distinct mtime regardless of fs resolution)
+            local.write_text(json.dumps({"pricing": {"max_output_per_mtok": 7.0}}), encoding="utf-8")
+            st = local.stat()
+            os.utime(local, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+            assert cfgmod.load_config()["pricing"]["max_output_per_mtok"] == 7.0
+
+            # deleted -> falls back to base value
+            local.unlink()
+            assert (cfgmod.load_config()["pricing"]["max_output_per_mtok"]
+                    == base["pricing"]["max_output_per_mtok"])
+        finally:
+            cfgmod.LOCAL_CONFIG_FILE, cfgmod._config_cache, cfgmod._config_sig = orig
+
+
+def test_resolve_workspace():
+    """explicit > engine.default_workspace (valid dir) > cwd; '.' is explicit."""
+    from unittest.mock import patch
+    import botex.config as cfgmod
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        real = str(Path(tmpdir).resolve())
+        with patch.object(cfgmod, "engine_setting", return_value=real):
+            assert cfgmod.resolve_workspace_source("") == (real, "default_workspace")
+            assert cfgmod.resolve_workspace_source("   ") == (real, "default_workspace")
+            assert cfgmod.resolve_workspace_source("proj") == ("proj", "explicit")
+            # an explicit "." is honoured and never replaced by the default
+            assert cfgmod.resolve_workspace_source(".") == (".", "explicit")
+        missing = str(Path(tmpdir) / "does-not-exist")
+        with patch.object(cfgmod, "engine_setting", return_value=missing):
+            assert cfgmod.resolve_workspace_source("") == (".", "cwd")
+        with patch.object(cfgmod, "engine_setting", return_value=""):
+            assert cfgmod.resolve_workspace("") == "."
+
+    # library/MCP entry points must default to "unspecified", not "."
+    import inspect
+    from botex import engine
+    assert inspect.signature(engine.run_botex_task).parameters["workspace_dir"].default == ""
+
+
+def test_repl_workspace_command():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from server import _repl_workspace
+
+    with tempfile.TemporaryDirectory() as tmpdir, patch("builtins.print") as mock_print:
+        root = Path(tmpdir).resolve()
+        (root / "sub").mkdir()
+        args = SimpleNamespace(workspace=str(root))
+
+        _repl_workspace(args, "")  # show only
+        assert args.workspace == str(root)
+
+        _repl_workspace(args, "sub")  # relative to current workspace
+        assert args.workspace == str(root / "sub")
+
+        _repl_workspace(args, str(root))  # absolute, quoted input tolerated
+        assert args.workspace == str(root)
+
+        _repl_workspace(args, '"nope"')  # invalid -> unchanged
+        assert args.workspace == str(root)
+        assert mock_print.called
+
+
+def test_cli_config_workspace():
+    from unittest.mock import patch
+    from server import _cli_config
+
+    with tempfile.TemporaryDirectory() as tmpdir, \
+            patch("sys.stdin.isatty", return_value=False), \
+            patch("server.load_config", return_value={"providers": {}, "engine": {}}), \
+            patch("server.set_local_config") as mock_set, \
+            patch("builtins.print"):
+        real = str(Path(tmpdir).resolve())
+        _cli_config(["workspace", tmpdir])
+        mock_set.assert_called_once_with("engine.default_workspace", real)
+
+        mock_set.reset_mock()
+        _cli_config(["workspace", str(Path(tmpdir) / "missing")])
+        mock_set.assert_not_called()
+
+        _cli_config(["workspace", "none"])
+        mock_set.assert_called_once_with("engine.default_workspace", "")
+
+
 if __name__ == "__main__":
     print("Running BoteX Test Suite...")
     test_security()
@@ -2866,4 +2972,8 @@ if __name__ == "__main__":
     test_cli_models()
     test_repl()
     test_main()
+    test_config_hot_reload()
+    test_resolve_workspace()
+    test_repl_workspace_command()
+    test_cli_config_workspace()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")

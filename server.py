@@ -10,6 +10,7 @@ optimization to any MCP-compatible client.
 """
 import sys
 import os
+from pathlib import Path
 import asyncio
 import json
 import time
@@ -38,7 +39,10 @@ from botex.security import mask_secrets, zdr_enforced
 from botex.file_tools import get_file_outline as _get_file_outline
 from botex.analytics import cli_stats, cli_history, load_analytics
 from botex.patch_engine import snapshot_manager
-from botex.config import load_config, set_local_config, resolve_provider
+from botex.config import (
+    load_config, set_local_config, resolve_provider,
+    resolve_workspace, resolve_workspace_source,
+)
 from botex.ui import title, accent, ok, warn, err, dim, mark_status
 from botex.i18n import t, init_language, set_language, SUPPORTED
 from botex.pricing import load_catalog, model_price
@@ -184,7 +188,7 @@ def _cleanup_tasks() -> None:
 async def start_task(
     task: str,
     files: list[str] = [],
-    workspace_dir: str = ".",
+    workspace_dir: str = "",
     model: str = "",
     profile: str = "",
     provider: str = "",
@@ -256,7 +260,8 @@ async def start_task(
         }
     task_id = uuid.uuid4().hex[:12]
     kwargs = {
-        "task": task, "files": files, "workspace_dir": workspace_dir,
+        "task": task, "files": files,
+        "workspace_dir": resolve_workspace(workspace_dir),
         "model": model, "profile": profile, "provider": provider,
         "mode": mode, "max_turns": max_turns, "max_tokens": max_tokens,
         "max_duration_s": max_duration_s, "budget_limit_usd": budget_limit_usd,
@@ -343,7 +348,7 @@ async def recommend_models(task_type: str = "coding", limit: int = 5, include_fr
 async def run_subagent(
     task: str,
     files: list[str] = [],
-    workspace_dir: str = ".",
+    workspace_dir: str = "",
     model: str = "",
     profile: str = "",
     provider: str = "",
@@ -380,7 +385,8 @@ async def run_subagent(
     Args:
         task: Precise description of the coding or refactoring task.
         files: Optional list of primary files affected by the task.
-        workspace_dir: Project directory path (defaults to current directory).
+        workspace_dir: Project directory path. Empty = engine.default_workspace
+               from the config, else the server's current directory.
         model: Any model from the provider's catalog. Empty = model from config
                (see 'profile' and botex.config.json).
         profile: Model profile from botex.config.json (e.g. 'default', 'coding',
@@ -484,19 +490,19 @@ async def run_subagent(
 
 
 @mcp.tool()
-async def get_outline(path: str, workspace_dir: str = ".") -> dict[str, Any]:
+async def get_outline(path: str, workspace_dir: str = "") -> dict[str, Any]:
     """
     Returns a lightweight file skeleton (classes, methods, functions, headers,
     line numbers) without reading the whole file. Saves ~90% of tokens.
     """
-    return _get_file_outline(path, workspace_dir)
+    return _get_file_outline(path, resolve_workspace(workspace_dir))
 
 
 @mcp.tool()
 async def save_memory(
     title: str,
     content: str,
-    workspace_dir: str = ".",
+    workspace_dir: str = "",
     kind: str = "context",
     tags: Optional[list[str]] = None,
     memory_id: str = "",
@@ -509,13 +515,14 @@ async def save_memory(
     Args:
         title: Short descriptive title of the memory entry.
         content: Detailed markdown notes, architectural rationale, or handoff context.
-        workspace_dir: Workspace root directory (defaults to current directory).
+        workspace_dir: Workspace root directory. Empty = engine.default_workspace
+               from the config, else the server's current directory.
         kind: Entry category ('context' | 'decision' | 'handoff' | 'lesson').
         tags: Optional list of keyword tags for filtering and discovery.
         memory_id: Optional custom identifier (alphanumeric/hyphen/underscore). Auto-generated if omitted.
     """
     return _save_memory(
-        workspace_dir=workspace_dir,
+        workspace_dir=resolve_workspace(workspace_dir),
         title=title,
         content=content,
         kind=kind,
@@ -526,7 +533,7 @@ async def save_memory(
 
 @mcp.tool()
 async def search_memory(
-    workspace_dir: str = ".",
+    workspace_dir: str = "",
     query: str = "",
     tag: str = "",
     kind: str = "",
@@ -536,13 +543,14 @@ async def search_memory(
     by keyword query, tag, or entry kind (context, decision, handoff, lesson).
 
     Args:
-        workspace_dir: Workspace root directory (defaults to current directory).
+        workspace_dir: Workspace root directory. Empty = engine.default_workspace
+               from the config, else the server's current directory.
         query: Free-text search string matched against title, content, and tags.
         tag: Filter by specific tag.
         kind: Filter by entry kind ('context', 'decision', 'handoff', 'lesson').
     """
     return _search_memory(
-        workspace_dir=workspace_dir,
+        workspace_dir=resolve_workspace(workspace_dir),
         query=query,
         tag=tag or None,
         kind=kind or None,
@@ -552,17 +560,18 @@ async def search_memory(
 @mcp.tool()
 async def read_memory(
     memory_id: str,
-    workspace_dir: str = ".",
+    workspace_dir: str = "",
 ) -> dict[str, Any]:
     """
     Reads the full content and metadata of a specific memory entry by ID from the workspace Memory Vault.
 
     Args:
         memory_id: The ID of the memory entry to retrieve (e.g. 'mem_a1b2c3d4').
-        workspace_dir: Workspace root directory (defaults to current directory).
+        workspace_dir: Workspace root directory. Empty = engine.default_workspace
+               from the config, else the server's current directory.
     """
     return _read_memory(
-        workspace_dir=workspace_dir,
+        workspace_dir=resolve_workspace(workspace_dir),
         memory_id=memory_id,
     )
 
@@ -735,6 +744,42 @@ def _print_usage():
 {d(t('usage.no_args2'))}""")
 
 
+def _resolve_workspace_abs(value: str) -> tuple:
+    """Resolve the target workspace to an absolute path plus its source label."""
+    path, source = resolve_workspace_source(value)
+    return str(Path(path).expanduser().resolve()), source
+
+
+def _warn_if_harness(workspace: str) -> None:
+    """Warn when the target workspace is the BoteX repository itself."""
+    from botex.config import PROJECT_ROOT
+    try:
+        same = Path(workspace).resolve() == PROJECT_ROOT.resolve()
+    except OSError:
+        same = False
+    if same:
+        print(warn(t("ws.harness_warn")))
+
+
+def _repl_workspace(args, arg: str) -> None:
+    """REPL `workspace [DIR]` / `cd [DIR]`: show or switch the target project."""
+    arg = arg.strip().strip("\"'")
+    if not arg:
+        exists = Path(args.workspace).is_dir()
+        line = f"{accent(t('ws.label'))} {args.workspace}"
+        print(line if exists else line + " " + warn(t("ws.missing")))
+        return
+    target = Path(arg).expanduser()
+    if not target.is_absolute():
+        target = Path(args.workspace) / target
+    if not target.is_dir():
+        print(err(t("ws.invalid", path=str(target))))
+        return
+    args.workspace = str(target.resolve())
+    print(ok(t("ws.set", path=args.workspace)))
+    _warn_if_harness(args.workspace)
+
+
 def _print_repl_help():
     c = accent
     d = dim
@@ -747,10 +792,11 @@ def _print_repl_help():
   {c('snapshots')}               {d(t('repl.snapshots'))}
   {c('clean-snapshots')}         {d(t('repl.clean'))}
   {c('config')}                  {d(t('repl.config'))}
-  {c('config provider|model|profile|mode|language|price|zdr <value>')}
+  {c('config provider|model|profile|mode|workspace|language|price|zdr <value>')}
                       {d(t('repl.config.set'))}
   {c('models [--refresh]')}      {d(t('usage.models'))}
   {c('mode <preset>')}           {d(t('repl.mode'))}
+  {c('workspace [DIR]')} / {c('cd [DIR]')}  {d(t('repl.workspace'))}
   {c('botex repl --allow-non-zdr')} {d(t('repl.allow_non_zdr'))}
   {c('help')}                    {d(t('repl.help'))}
   {c('exit')}                    {d(t('repl.exit'))}
@@ -899,6 +945,7 @@ def _cli_config(argv):
         eng = cfg.get("engine", {})
         print(f"{accent('default_profile')}: {eng.get('default_profile', 'default')}")
         print(f"{accent('default_mode')}:    {eng.get('default_mode', 'edit')}")
+        print(f"{accent('default_workspace')}: {eng.get('default_workspace') or t('ws.unset')}")
         print(f"{accent('language')}:        {cfg.get('ui', {}).get('language', 'auto')}")
         print(dim(t("cfg.persist_note")))
         return
@@ -933,6 +980,18 @@ def _cli_config(argv):
             return
         set_local_config("engine.default_mode", m)
         print(ok(t("cfg.default_mode", name=m)))
+    elif key == "workspace" and rest:
+        raw = " ".join(rest).strip().strip("\"'")
+        if raw.lower() in ("none", "off", "unset", "-"):
+            set_local_config("engine.default_workspace", "")
+            print(ok(t("cfg.workspace_cleared")))
+            return
+        p = Path(raw).expanduser()
+        if not p.is_dir():
+            print(err(t("ws.invalid", path=str(p))))
+            return
+        set_local_config("engine.default_workspace", str(p.resolve()))
+        print(ok(t("cfg.workspace_set", path=str(p.resolve()))))
     elif key in ("language", "lang") and rest:
         lang = rest[0].lower()
         if lang not in SUPPORTED:
@@ -1008,7 +1067,9 @@ def _repl(argv):
         prog="botex repl",
         description="Interactive BoteX task loop."
     )
-    parser.add_argument("--workspace", "-w", default=".", help="Project working directory")
+    parser.add_argument(
+        "--workspace", "-w", default="",
+        help="Project working directory (default: engine.default_workspace, else cwd)")
     parser.add_argument("--profile", default="default", help="Model profile (default/coding/auto-beta)")
     parser.add_argument("--provider", default="", help="API provider (openrouter/nvidia; empty = config default)")
     parser.add_argument("--mode", default="", help="Capability preset (readonly/edit/destructive/full; empty = config)")
@@ -1022,13 +1083,15 @@ def _repl(argv):
         help="Relaxes Zero Data Retention for this session (needed for :free models; provider may log/train on prompts)"
     )
     args = parser.parse_args(argv)
+    args.workspace, ws_source = _resolve_workspace_abs(args.workspace)
 
     print(title("BoteX REPL") + " — " + t("repl.banner") + " "
           + dim("(" + t("repl.banner2") + ")"))
-    print(f"{accent('Workspace:')} {args.workspace} | {accent('Provider:')} "
+    print(f"{accent(t('ws.label'))} {args.workspace} {dim('(' + ws_source + ')')} | {accent('Provider:')} "
           f"{args.provider or 'default'} | {accent('Profile:')} {args.profile} "
           f"| {accent('Mode:')} {args.mode or 'default'}"
           + (f" | {accent('Recipe:')} {args.recipe}" if args.recipe else ""))
+    _warn_if_harness(args.workspace)
     while True:
         try:
             task = input(accent("botex> ")).strip()
@@ -1044,6 +1107,9 @@ def _repl(argv):
             _print_repl_help()
             continue
         low = task.lower()
+        if low in ("workspace", "cd") or low.startswith(("workspace ", "cd ")):
+            _repl_workspace(args, task.split(None, 1)[1] if " " in task else "")
+            continue
         if low == "mode" or low.startswith("mode "):
             new_mode = low.split(None, 1)[1].strip() if " " in low else ""
             if new_mode:
@@ -1074,7 +1140,8 @@ def _repl(argv):
             print(err(f"{t('repl.failure')} {e}"))
             continue
         status_str = ok(t("repl.success")) if res.get("ok") else err(t("repl.failure"))
-        print(f"{status_str} {res.get('status')} | {t('repl.cost')} ${res.get('cost_usd', 0.0):.5f} USD")
+        print(f"{status_str} {res.get('status')} | {t('repl.cost')} ${res.get('cost_usd', 0.0):.5f} USD"
+              f" | {accent(t('ws.label'))} {args.workspace}")
         print(res.get("summary") or res.get("message", ""))
 
 
@@ -1090,7 +1157,9 @@ def main():
         )
         parser.add_argument("task", help="Description of the task to perform")
         parser.add_argument("--files", nargs="*", default=[], help="Primary files affected by the task")
-        parser.add_argument("--workspace", "-w", default=".", help="Project working directory")
+        parser.add_argument(
+            "--workspace", "-w", default="",
+            help="Project working directory (default: engine.default_workspace, else cwd)")
         parser.add_argument("--model", default="", help="Explicit provider model (overrides profile)")
         parser.add_argument("--profile", default="default", help="Model profile from botex.config.json (default/coding/auto-beta)")
         parser.add_argument("--provider", default="", help="API provider (openrouter/nvidia; empty = config default)")
@@ -1136,6 +1205,9 @@ def main():
         if not args.allow_destructive and sys.stdin.isatty():
             confirm_fn = _interactive_confirm
 
+        args.workspace, _ws_src = _resolve_workspace_abs(args.workspace)
+        print(f"{accent(t('ws.label'))} {args.workspace} {dim('(' + _ws_src + ')')}")
+        _warn_if_harness(args.workspace)
         res = asyncio.run(run_botex_task(
             task=args.task,
             files=args.files,
@@ -1163,6 +1235,7 @@ def main():
         status_str = ok(t("repl.success")) if res.get("ok") else err(t("repl.failure"))
         print(f"{status_str} {t('run.status')} {res.get('status')} | {t('run.task')} {res.get('task_id')} | "
               f"{t('run.steps')} {res.get('steps')} | {t('repl.cost')} ${res.get('cost_usd', 0.0):.5f} USD")
+        print(f"{accent(t('ws.label'))} {args.workspace}")
         print(f"{accent(t('repl.files'))} {', '.join(res.get('files_touched', [])) or '(none)'}")
         print(res.get("summary") or res.get("message", ""))
         sys.exit(0 if res.get("ok") else 1)

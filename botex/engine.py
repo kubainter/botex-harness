@@ -33,6 +33,7 @@ try:
         PROJECT_ROOT, engine_setting, env_file, is_decisions_model,
         load_config,
         resolve_provider,
+        resolve_workspace,
         resolve_model,
         resolve_model_candidates,
     )
@@ -66,6 +67,7 @@ except (ImportError, ValueError):
         PROJECT_ROOT, engine_setting, env_file, is_decisions_model,
         load_config,
         resolve_provider,
+        resolve_workspace,
         resolve_model,
         resolve_model_candidates,
     )
@@ -483,7 +485,7 @@ def prune_tool_history(messages: List[Dict[str, Any]], target_path: str):
 async def run_botex_task(
     task: str,
     files: Optional[List[str]] = None,
-    workspace_dir: str = ".",
+    workspace_dir: str = "",
     model: str = "",
     profile: str = "",
     max_turns: Optional[int] = None,
@@ -506,6 +508,7 @@ async def run_botex_task(
     allow_non_zdr: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Run one task, using configured model failover only before any write."""
+    workspace_dir = resolve_workspace(workspace_dir)
     resolved_profile = profile
     if not model and not resolved_profile:
         try:
@@ -655,7 +658,7 @@ async def _run_botex_task_once(*args, task_id: Optional[str] = None, **kwargs):
 async def _run_botex_task_once_impl(
     task: str,
     files: Optional[List[str]] = None,
-    workspace_dir: str = ".",
+    workspace_dir: str = "",
     model: str = "",
     profile: str = "",
     task_id: Optional[str] = None,
@@ -957,7 +960,7 @@ async def _run_botex_task_once_impl(
 
     # 2. Resolve workspace root
     try:
-        root_path = Path(workspace_dir).resolve()
+        root_path = Path(resolve_workspace(workspace_dir)).resolve()
         if not root_path.exists():
             return {
                 "ok": False,
