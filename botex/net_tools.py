@@ -9,9 +9,9 @@ import ssl
 from urllib.parse import urljoin, urlsplit
 
 try:
-    from .security import mask_secrets
+    from .security import mask_secrets, wrap_untrusted_content
 except (ImportError, ValueError):
-    from security import mask_secrets
+    from security import mask_secrets, wrap_untrusted_content
 
 _TEXT_CONTENT_TYPES = {
     "text/html", "text/plain", "text/markdown", "application/json",
@@ -317,13 +317,14 @@ def _read_url_sync(url: str, *, allowed_hosts: list[str], allowed_urls: list[str
                 return {"ok": False, "error": f"Unsupported content type: {content_type or 'unknown'}"}
             data = response.read(max_bytes + 1)
             text = data[:max_bytes].decode("utf-8", errors="replace")
+            safe_url = mask_secrets(current)
             return {
                 "ok": True,
-                "url": mask_secrets(current),
+                "url": safe_url,
                 "status_code": response.status,
                 "content_type": content_type,
                 "truncated": len(data) > max_bytes,
-                "content": mask_secrets(text),
+                "content": wrap_untrusted_content(text, tag="untrusted_web_content", url=safe_url),
             }
         except (http.client.HTTPException, ssl.SSLError, UnicodeError,
                 TimeoutError, OSError) as exc:
