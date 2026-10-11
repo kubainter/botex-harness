@@ -339,15 +339,31 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
     """
     ext = file_path.suffix.lower()
 
-    # 1. Python AST validation
+    # 1. Python AST validation + ruff (if available)
     if ext in (".py", ".pyw"):
         try:
             ast.parse(content, filename=file_path.name)
-            return True, None
         except SyntaxError as e:
             return False, f"Python SyntaxError at line {e.lineno}, col {e.offset}: {e.msg}"
         except Exception as e:
             return False, f"Python parse error: {str(e)}"
+
+        ruff_bin = shutil.which("ruff")
+        if ruff_bin:
+            try:
+                proc = subprocess.run(
+                    [ruff_bin, "check", "--select=E9,F821,F822", "-"],
+                    input=content,
+                    text=True,
+                    capture_output=True,
+                    timeout=5
+                )
+                if proc.returncode != 0:
+                    err = proc.stdout.strip() or proc.stderr.strip()
+                    return False, f"Python Ruff validation error: {err}"
+            except Exception:
+                pass
+        return True, None
 
     # 2. JSON validation
     if ext == ".json":
@@ -390,6 +406,24 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
                 )
                 if proc.returncode != 0:
                     return False, f"JavaScript SyntaxError: {proc.stderr.strip()}"
+            except Exception:
+                pass
+        return True, None
+
+    # 5. Bash validation (if bash CLI installed)
+    if ext in (".sh", ".bash", ".command"):
+        bash_bin = shutil.which("bash")
+        if bash_bin:
+            try:
+                proc = subprocess.run(
+                    [bash_bin, "-n"],
+                    input=content,
+                    text=True,
+                    capture_output=True,
+                    timeout=5
+                )
+                if proc.returncode != 0:
+                    return False, f"Bash SyntaxError: {proc.stderr.strip()}"
             except Exception:
                 pass
         return True, None
