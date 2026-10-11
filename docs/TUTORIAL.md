@@ -156,7 +156,7 @@ that the model claimed success or that bytes changed.
 | `MAX_TURNS_REACHED` | Step limit reached; partial progress stays in `files_touched` |
 | `STAGNANT_ROLLBACK` | No-progress loop detected; changes rolled back |
 | `DONE_WITHOUT_WRITE` | Required `output_path` never written or salvaged |
-| `VERIFICATION_FAILED` | `verify_command` failed twice; changes rolled back |
+| `VERIFICATION_FAILED` | `verify_command` failed after 3 attempts; changes rolled back |
 | `REQUEST_TIMEOUT` | A single provider request exceeded `request_timeout_s` |
 | `BUDGET_EXCEEDED` | Daily spend cap exceeded |
 | `PRICE_EXCEEDED` | Model over the configured price cap; rejected locally |

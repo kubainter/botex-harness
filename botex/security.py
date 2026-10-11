@@ -76,7 +76,7 @@ _SECRET_PATTERNS = [
 
 
 def mask_secrets(text: str) -> str:
-    """Replace detected secrets in text with [REDACTED]."""
+    """Replace detected secrets in text with [REDACTED] (OWASP LLM02: Sensitive Information Disclosure)."""
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub('[REDACTED]', text)
     return text
@@ -84,8 +84,9 @@ def mask_secrets(text: str) -> str:
 
 def wrap_untrusted_content(content: str, tag: str = "untrusted_content", **attrs: str) -> str:
     """
-    Wrap untrusted content in XML-like boundary tags to mitigate Prompt Injection (OWASP #1).
-    Applies secret masking automatically and escapes attribute values against boundary injection.
+    Wrap untrusted content in XML-like boundary tags to mitigate Prompt Injection (OWASP LLM01: Prompt Injection).
+    Applies secret masking automatically, neutralizes closing boundary breakouts, and escapes attribute values
+    against boundary injection.
     """
     cleaned_attrs = []
     for k, v in attrs.items():
@@ -95,7 +96,10 @@ def wrap_untrusted_content(content: str, tag: str = "untrusted_content", **attrs
             cleaned_attrs.append(f'{k}="{safe_val}"')
     attr_str = " " + " ".join(cleaned_attrs) if cleaned_attrs else ""
     masked = mask_secrets(content)
-    return f"<{tag}{attr_str}>\n{masked}\n</{tag}>"
+    # Neutralize closing boundary tag breakouts inside untrusted content
+    closing_tag_pattern = re.compile(rf"</\s*{re.escape(tag)}\s*>", re.IGNORECASE)
+    safe_masked = closing_tag_pattern.sub(f"<\\/{tag}>", masked)
+    return f"<{tag}{attr_str}>\n{safe_masked}\n</{tag}>"
 
 
 # ---------------------------------------------------------------------------
