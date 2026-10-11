@@ -43,7 +43,7 @@ class ToolPolicy:
 
 
 # Tools that only require CAP_READ (implicit)
-# The full registry with scopes and risk for OWASP #3 Excessive Agency
+# The full registry with scopes and risk for OWASP LLM03: Excessive Agency (2026)
 TOOL_REGISTRY = {
     "get_file_outline": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
     "read_file_lines": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
@@ -145,7 +145,7 @@ def tool_allowed(tool_name: str, caps: Set[str], can_confirm: bool = False) -> b
 
 def check_agency_policy(tool_name: str, caps: Set[str], confirm_fn=None, op_path: str = "") -> str:
     """
-    The Agency Middleware (OWASP #3). Evaluates ToolPolicy before executing the tool.
+    Agency Middleware (OWASP LLM03: Excessive Agency, 2026 edition). Evaluates ToolPolicy before executing the tool.
     Returns an error string if blocked, or an empty string if allowed.
     """
     policy = TOOL_REGISTRY.get(tool_name)
@@ -159,17 +159,19 @@ def check_agency_policy(tool_name: str, caps: Set[str], confirm_fn=None, op_path
     # we enforce interactive approval below. If a missing capability is not interactive,
     # the operation is blocked.
     if missing_scopes and not (confirm_fn and missing_scopes.issubset(GATED_BY_CONFIRM)):
-        return f"Missing required scopes for {tool_name}: {', '.join(missing_scopes)}"
+        return f"Missing required scopes for {tool_name}: {', '.join(sorted(missing_scopes))}"
 
-    # Risk and approval middleware
+    # Risk and approval middleware:
+    # If missing scopes can be dynamically granted by confirm_fn, or policy requires approval:
     requires_approval = policy.approval_required or bool(missing_scopes)
 
     if requires_approval:
-        if not confirm_fn:
+        if confirm_fn:
+            # We pass the op_path (e.g. command or path) to confirm_fn
+            if not confirm_fn(tool_name, op_path):
+                return f"Operation '{tool_name}' was not confirmed by the operator."
+        elif bool(missing_scopes):
+            # Headless run without confirm_fn cannot grant missing scopes dynamically
             return f"Operation '{tool_name}' requires operator confirmation, but none is available."
-
-        # We pass the op_path (e.g. command or path) to confirm_fn
-        if not confirm_fn(tool_name, op_path):
-            return f"Operation '{tool_name}' was not confirmed by the operator."
 
     return ""
