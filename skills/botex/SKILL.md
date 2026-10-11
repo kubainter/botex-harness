@@ -12,7 +12,7 @@ runs a self-contained tool loop (read → patch → validate → snapshot) over 
 local workspace. You delegate a *file task* to it; it returns a result with
 status, files touched, line balance, and USD cost.
 
-MCP tools: `run_subagent`, `start_task`, `get_task_status`, `save_memory`, `search_memory`, `read_memory`, `fetch_url`, `get_outline`, `get_stats`, `check_health`, `clean_snapshots`.
+MCP tools: `run_subagent`, `start_task`, `get_task_status`, `save_memory`, `search_memory`, `read_memory`, `fetch_url`, `get_outline`, `get_stats`, `check_health`, `clean_snapshots`, `recommend_models`.
 
 It is **not** a general chat agent, not a shell, and not a sandbox.
 
@@ -56,18 +56,26 @@ nudge first — a model mid-analysis may legitimately say "cannot find X".
 ```json
 {
   "task": "<precise description of the change>",
-  "workspace_dir": ".",
+  "workspace_dir": "<absolute project path>",
   "files": ["src/parser.py"],
   "mode": "edit",
   "recipe": "",
+  "profile": "coding",
+  "provider": "",
+  "model": "",
   "max_turns": 0,
   "max_tokens": 0,
+  "max_duration_s": 0,
   "budget_limit_usd": -1.0,
+  "allow_destructive": false,
+  "allow_exec": false,
   "output_path": "",
   "allow_net": false,
   "net_allowed_hosts": [],
   "net_allowed_urls": [],
-  "verify_command": ""
+  "allow_non_zdr": false,
+  "verify_command": "",
+  "api_key": ""
 }
 ```
 
@@ -114,7 +122,7 @@ URLs the internal model may request:
 `net_allowed_hosts` entries authorize the named host and its subdomains.
 `net_allowed_urls` rules are stronger than host rules: a URL ending in `/`
 authorizes that subtree; otherwise it authorizes the exact URL including its
-query string. `fetch_url` is separate from `read_url` and is meant for the
+query string. `fetch_url(url, max_bytes=0)` is separate from `read_url` and is meant for the
 calling agent: under `caller`/`public` it can fetch the explicit URL the caller
 chooses; under `allowlist` it stays inside the configured allowlist. All modes
 keep public-IP checks, DNS/IP pinning, default-port enforcement, redirect
@@ -156,6 +164,7 @@ for the whole run:
 - `provider`: `openrouter` (default), `nvidia`, or `openrouter-free` (free `:free` models, ZDR off — no subscription needed)
 - `profile`: `default` / `coding` / `auto-beta` / `fast` — resolved per provider
 - `model`: explicit slug, overrides profile
+- **Model recommendations (`recommend_models`)**: When unsure which model to pick, call `recommend_models(task_type="coding", limit=5, include_free=False)` before delegating. It queries live OpenRouter rankings optimized for coding benchmarks and token cost (`include_free=True` admits `:free` variants). Avoid guessing model slugs blindly.
 - **Leave `model` and `profile` empty to let the mode pick the tier**:
   `readonly` runs resolve to the cheap `fast` profile, `destructive`/`full`
   to `coding`, `edit` to the server default (`engine.mode_profiles` in
@@ -222,9 +231,11 @@ BoteX includes a persistent, per-workspace Memory Vault stored at `<workspace_di
 (automatically protected with `.gitignore`).
 
 MCP tools:
-- `save_memory(title, content, workspace_dir=".", kind="context", tags=[])`: Save context, decisions, handoffs, or lessons with secret redaction.
-- `search_memory(workspace_dir=".", query="", tag="", kind="")`: Fast keyword/tag search across workspace memories.
-- `read_memory(memory_id, workspace_dir=".")`: Retrieve full entry content and metadata.
+- `save_memory(title, content, workspace_dir="", kind="context", tags=[], memory_id="")`: Save context, decisions, handoffs, or lessons with secret redaction.
+- `search_memory(workspace_dir="", query="", tag="", kind="")`: Fast keyword/tag search across workspace memories.
+- `read_memory(memory_id, workspace_dir="")`: Retrieve full entry content and metadata.
+
+`workspace_dir` empty means "not specified": the server uses `engine.default_workspace` from its config, else its own working directory (which for an MCP host is often not your project). Always pass an explicit absolute `workspace_dir` when delegating; an explicit value (including `.`) is never replaced.
 
 Entry kinds:
 - `context`: General project architecture notes, environment specifics, or setup details.
