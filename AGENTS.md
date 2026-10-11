@@ -6,19 +6,34 @@ This document serves as a guide and rulebook for AI agents working on the **Bote
 
 BoteX is an execution harness for autonomous code-editing agents, functioning as an MCP server. The main directories and modules are:
 
+*   **Root files:**
+    *   `server.py` - Main MCP server entry point and CLI dispatcher.
+    *   `botex.config.json` - Committed default configuration.
+    *   `botex.cmd` / `botex.sh` - Zero-install execution launchers.
+    *   `pyproject.toml` / `requirements.txt` - Project packaging and dependencies.
+    *   `ROADMAP.md` - Technical roadmap, deferred features, and architecture rationale.
 *   **`botex/`** - Main application package.
-    *   `server.py` - Main MCP server entry point and CLI dispatcher. Located in the root directory.
     *   `engine.py` - Autonomous execution loop, context management, and rollback triggers.
+    *   `contracts.py` - Task completion contract verification and status taxonomy.
     *   `patch_engine.py` - Fuzzy patch mechanism, in-memory syntax validation, and snapshot management.
     *   `file_tools.py` - Safe file reading (outline-first), creation, moving, and deletion.
     *   `security.py` - Protections against Path Traversal attacks, secret masking, and `.gitignore` filtering.
     *   `exec_tools.py` - Command execution with policy control and argument filtering.
     *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`).
-    *   `pricing.py` & `analytics.py` - Budget protection, cost ledger, and model pricing checks.
-    *   `providers.py` - Provider adapters (OpenRouter, etc.) and request normalizer.
-*   **`tests/`** - Test suite (unit and end-to-end integration tests).
-*   **`docs/`** - Documentation, including a detailed architecture deep dive (`TUTORIAL.md`).
-*   **`recipes/`** - (in `botex/` package) Specialized agent personas (planner, reviewer, etc.).
+    *   `pricing.py` - Model pricing guardrail, live catalog checks, and cost caps.
+    *   `analytics.py` - Cost/token ledger, budget tracking, and CLI reports.
+    *   `providers.py` - Provider adapters (OpenRouter, NVIDIA, etc.) and request normalizer.
+    *   `benchmarks.py` - Live model recommendations (`recommend_models`) and benchmark rankings.
+    *   `net_tools.py` - SSRF-safe network fetching tools (`read_url`, `fetch_url`).
+    *   `memory.py` - Persistent workspace Memory Vault (`.botex/memory/`).
+    *   `recipes.py` - Recipe loader and system-prompt injection.
+    *   `config.py` - Layered configuration loader (defaults < local < env).
+    *   `i18n.py` - CLI localization (EN/PL).
+    *   `ui.py` - ANSI styling helpers with plain-text fallback.
+    *   `recipes/` - Bundled persona prompts (`planner`, `reviewer`, `tdd`, `build-resolver`, `security-reviewer`, `code-explorer`).
+*   **`tests/`** - Test suite (unit tests in `test_botex.py` and live integration tests in `test_live_e2e.py`).
+*   **`docs/`** - Documentation (`TUTORIAL.md`).
+*   **`skills/`** - Caller-side skill definitions (`skills/botex/SKILL.md`).
 
 ## 2. Tools and Commands
 

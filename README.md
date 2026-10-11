@@ -96,8 +96,8 @@ BoteX exposes a focused set of MCP tools:
 * **`get_task_status(task_id)`**: Polls progress, logs, and results for a background task.
 
 ### Workspace Memory Vault
-* **`save_memory(title, content, kind, tags, memory_id, workspace_dir)`**: Saves persistent notes, decisions, handoffs, or lessons to the workspace Memory Vault (`<workspace_dir>/.botex/memory/`).
-* **`read_memory(memory_id)`** / **`search_memory(query, tag, kind)`**: Retrieves saved workspace memory.
+* **`save_memory(title, content, workspace_dir, kind, tags, memory_id)`**: Saves persistent notes, decisions, handoffs, or lessons to the workspace Memory Vault (`<workspace_dir>/.botex/memory/`).
+* **`read_memory(memory_id, workspace_dir)`** / **`search_memory(workspace_dir, query, tag, kind)`**: Retrieves saved workspace memory.
 
 ### Diagnostics & Utility
 * **`get_outline(path, workspace_dir)`**: Returns a high-level symbol outline of a file without reading all lines.
@@ -105,7 +105,7 @@ BoteX exposes a focused set of MCP tools:
 * **`check_health()`**: Checks readiness of providers, models, keys, and budget limits.
 * **`clean_snapshots(max_age_days, max_total_mb)`**: Prunes old workspace backup snapshots.
 * **`recommend_models(task_type, limit, include_free)`**: Queries live OpenRouter pricing/quality rankings for coding tasks. `include_free=true` also admits `:free` variants.
-* **`fetch_url(url)`**: Safe, caller-side URL fetching with strict host and size filters.
+* **`fetch_url(url, max_bytes)`**: Safe, caller-side URL fetching with strict host and size filters.
 
 ---
 
@@ -128,7 +128,7 @@ Example payload for `run_subagent`:
 |---|---|---|
 | `task` | *(required)* | Clear description of what needs to be implemented or fixed. |
 | `files` | `[]` | List of primary target files to nudge the agent toward. |
-| `workspace_dir` | `.` | Root directory the agent is restricted to. |
+| `workspace_dir` | `""` | Root directory the agent is restricted to. Empty = `engine.default_workspace` from config, else the server's current directory. An explicit value (including `.`) always wins. |
 | `provider` | `""` | API provider from `botex.config.json` (`openrouter`, `nvidia`, `openrouter-free`; empty = configured default or `BOTEX_PROVIDER`). |
 | `model` | `""` | Explicit provider model ID; overrides `profile`. |
 | `profile` | `""` | Model profile from `botex.config.json` (`default`, `coding`, `auto-beta`, `fast`). Empty = picked per mode via `engine.mode_profiles`. |
@@ -252,13 +252,16 @@ Settings are resolved hierarchically (lowest to highest priority):
 2. `botex.config.local.json`: machine-local overrides (**gitignored**; place custom keys or limits here).
 3. `BOTEX_*` environment variables.
 
+Config files are re-read automatically when they change (file `mtime` check on every access), so edits to `botex.config.local.json` - manual or via `botex config ...` - take effect on the next call, including in a running MCP server; no restart is needed. Environment variables are read from the server process environment, so changing them requires a restart.
+
 Example `botex.config.local.json`:
 
 ```json
 {
   "engine": {
     "budget_limit_usd": 1.0,
-    "max_turns": 20
+    "max_turns": 20,
+    "default_workspace": "C:/projects/my-project"
   },
   "pricing": {
     "max_input_per_mtok": 3.0,
@@ -280,6 +283,17 @@ botex repl -w ./my-project --profile coding
 ```
 *Prompts for `[y/N]` confirmation whenever the agent wants to delete or move files.*
 
+The startup banner shows the resolved absolute workspace and where it came from (`explicit`, `default_workspace` or `cwd`), and warns when it is the BoteX repository itself. Inside the REPL, `workspace` (or `cd`) prints the current workspace, and `workspace <DIR>` / `cd <DIR>` switches the target project for the rest of the session (relative paths are resolved against the current workspace; the directory must exist).
+
+Set a persistent default so that running `botex` without `-w` never targets the harness itself:
+
+```bash
+botex config workspace C:/projects/my-project   # writes engine.default_workspace
+botex config workspace none                      # clear it (falls back to cwd)
+```
+
+Workspace resolution: explicit `-w` / `workspace_dir` > `engine.default_workspace` > current directory. `BOTEX_DEFAULT_WORKSPACE` overrides the config value.
+
 ### Headless One-Shot Tasks
 
 ```bash
@@ -297,6 +311,7 @@ botex run "Clean up legacy modules" -w ./my-project --allow-destructive
 
 ```bash
 botex health               # Verify API keys, provider connectivity, and model pricing
+botex config               # Inspect or modify local configuration defaults
 botex --stats              # View weekly token consumption and spend per model
 botex --stats --month      # Monthly cost report
 botex --history <task_id>  # Inspect exact prompts, tool calls, and diffs for a run
@@ -316,6 +331,7 @@ botex.cmd / botex.sh   Zero-install launchers (auto-detects python environment)
 pyproject.toml         Package configuration (exposes `botex` CLI command)
 requirements.txt       Runtime dependencies
 botex.config.json      Committed defaults (providers, engine limits, exec/net policy)
+ROADMAP.md             Deferred features & technical rationale
 botex/
   engine.py            Autonomous execution loop, context management & rollback triggers
   file_tools.py        Safe outline-first reading, file creation, moving & deletion
@@ -323,6 +339,7 @@ botex/
   security.py          Path traversal defenses, secret masking & gitignore filtering
   exec_tools.py        Policy-controlled command execution & argument filtering
   capabilities.py      Permission presets (readonly, edit, destructive, full)
+  config.py            Layered config loader (defaults < local < env)
   net_tools.py         Net policy enforcement (read_url / fetch_url)
   memory.py            Workspace memory vault (.botex/memory/)
   analytics.py         Cost/token ledger, budgeting & summary reporting
