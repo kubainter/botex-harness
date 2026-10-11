@@ -25,6 +25,7 @@ Instead of trusting the model to behave, BoteX wraps every action in safety gate
 * **Improper Output Handling (OWASP #10)**: Strict Read-Before-Write gates ensure no blind writes occur, and every touched file is backed by a pre-mutation snapshot. If an agent hits an error, the automatic snapshot rollback reverts the workspace cleanly.
 * **Hard budget & pricing caps**: Pre-flight checks verify model pricing against live provider catalogs. If a task exceeds its budget or a model is overpriced, BoteX aborts before spending a cent.
 * **Strict privacy & Zero Data Retention (ZDR)**: Enforces `provider.data_collection: deny` on OpenRouter calls, blocks `.env`/secrets, masks API keys in logs, and prevents path traversal attacks. Free (`:free`) models that cannot guarantee ZDR are rejected locally. Opt out explicitly per run (`allow_non_zdr`) or via the `openrouter-free` provider preset.
+* **Enhanced Permission Controls (OWASP #3 - Excessive Agency)**: BoteX protects against Excessive Agency via a centralized Agency Middleware. Tools are strictly defined with Risk Levels (LOW, MEDIUM, HIGH) and required scopes. High-risk destructive actions automatically require explicit interactive operator approval, limiting the potential damage of prompt injections or hallucinations.
 
 ---
 
