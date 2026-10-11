@@ -3,7 +3,7 @@
 **Learning:** Blocklist approaches for IP validation are prone to bypasses due to evolving or obscure reserved IP address ranges. The `ipaddress` module's `.is_global` property implements a strict allowlist approach to guarantee public routability.
 **Prevention:** Always use `ip.is_global` (an allowlist approach) to verify that an IP is intended for the public internet when defending against Server-Side Request Forgery.
 
-## 2026-02-20 - OWASP #3: Excessive Agency Mitigation
+## 2026-02-20 - OWASP LLM03: Excessive Agency Mitigation (2026)
 
 **Vulnerability:**
 Excessive Agency occurs when an LLM agent is granted broader capabilities, permissions, or autonomy than necessary. If the LLM hallucinates or gets manipulated via a prompt injection attack, it may abuse these broad permissions (like executing unintended shell commands or deleting arbitrary files).
