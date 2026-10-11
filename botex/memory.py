@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from .security import resolve_safe_path, mask_secrets, SecurityError
+    from .security import resolve_safe_path, mask_secrets, wrap_untrusted_content, SecurityError
 except (ImportError, ValueError):
-    from security import resolve_safe_path, mask_secrets, SecurityError
+    from security import resolve_safe_path, mask_secrets, wrap_untrusted_content, SecurityError
 
 __all__ = ["save_memory", "search_memory", "read_memory", "VALID_KINDS", "MAX_MEMORY_BYTES"]
 
@@ -314,7 +314,7 @@ def read_memory(
             "ok": True,
             "id": mid,
             "metadata": meta,
-            "content": body,
+            "content": wrap_untrusted_content(body, tag="untrusted_memory_content", id=mid),
         }
     except SecurityError as se:
         return {"ok": False, "error": f"Security violation: {se}"}

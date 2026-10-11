@@ -207,7 +207,7 @@ for the whole run:
 | `ZDR_VIOLATION` | Model matched the ZDR deny list (`:free`/`openrouter/free`) — use `allow_non_zdr`, `openrouter-free`, or pick a ZDR model |
 | `REQUEST_TIMEOUT` | A single provider request exceeded its wall-clock bound |
 | `DONE_WITHOUT_WRITE` | Required output was not written or salvaged |
-| `VERIFICATION_FAILED` | `verify_command` failed twice; changes were rolled back |
+| `VERIFICATION_FAILED` | `verify_command` failed after 3 attempts; changes were rolled back |
 | `CONFIG_ERROR` | Bad provider/mode, net policy, or verify command — fix the request parameters |
 | `API_ERROR` | Provider call failed; files were rolled back — check `failure_kind` (`provider_auth_error` = bad key, `provider_policy_denied`, `provider_unavailable`) |
 | `ERROR` | Invalid/missing `workspace_dir` or other pre-run failure |
