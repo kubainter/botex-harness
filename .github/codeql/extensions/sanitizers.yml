@@ -1,0 +1,15 @@
+# CodeQL Models-as-Data extension: BoteX sanitizers.
+# These functions redact secrets before data reaches storage/logging sinks, so
+# their return values are treated as barriers for the listed queries.
+extensions:
+  - addsTo:
+      pack: codeql/python-all
+      extensible: barrierModel
+    data:
+      # ["type", "path", "kind"]
+      - ["botex.security", "Member[mask_secrets].ReturnValue", "clear-text-storage"]
+      - ["botex.security", "Member[wrap_untrusted_content].ReturnValue", "clear-text-storage"]
+      - ["botex.security", "Member[sanitize_for_storage].ReturnValue", "clear-text-storage"]
+      - ["botex.security", "Member[mask_secrets].ReturnValue", "clear-text-logging"]
+      - ["botex.security", "Member[wrap_untrusted_content].ReturnValue", "clear-text-logging"]
+      - ["botex.security", "Member[sanitize_for_storage].ReturnValue", "clear-text-logging"]

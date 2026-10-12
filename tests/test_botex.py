@@ -2216,6 +2216,74 @@ def test_workspace_memory_vault():
     print("[PASS] Workspace Memory Vault Tests")
 
 
+def test_memory_sanitize_and_legacy_source():
+    """Memory sanitization barrier, legacy source= deprecation, and frontmatter round-trip."""
+    import warnings
+    from botex import memory
+    from botex.security import sanitize_for_storage
+
+    # 1. sanitize_for_storage strips control chars and masks a secret split by \x00
+    cleaned = sanitize_for_storage("ghp_abcdefghij\x00klmnop12")
+    assert "\x00" not in cleaned
+    assert "klmnop12" not in cleaned
+    assert "[REDACTED]" in cleaned
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+
+        # 2a. origin= is reflected in the frontmatter 'source' key
+        res_origin = memory.save_memory(
+            workspace_dir=tmpdir,
+            title="Origin Entry",
+            content="body",
+            origin="cli",
+        )
+        assert res_origin["ok"] is True
+        raw_origin = (root / ".botex" / "memory" / f"{res_origin['id']}.md").read_text(
+            encoding="utf-8"
+        )
+        assert "source: cli" in raw_origin
+
+        # 2b. legacy source= still works but emits a DeprecationWarning
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res_legacy = memory.save_memory(
+                workspace_dir=tmpdir,
+                title="Legacy Entry",
+                content="body",
+                source="legacy-writer",
+            )
+        assert res_legacy["ok"] is True
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+        raw_legacy = (root / ".botex" / "memory" / f"{res_legacy['id']}.md").read_text(
+            encoding="utf-8"
+        )
+        assert "source: legacy-writer" in raw_legacy
+
+        # 2c. unknown kwarg returns ok False
+        bad = memory.save_memory(tmpdir, "Bad", "body", bogus=1)
+        assert bad["ok"] is False
+
+        # 3. save -> read round-trip keeps frontmatter keys (id, kind, tags, source)
+        res_rt = memory.save_memory(
+            workspace_dir=tmpdir,
+            title="Round Trip",
+            content="round trip body",
+            kind="decision",
+            tags=["token: abc"],
+            origin="botex",
+        )
+        assert res_rt["ok"] is True
+        read_res = memory.read_memory(tmpdir, res_rt["id"])
+        assert read_res["ok"] is True
+        meta = read_res["metadata"]
+        assert meta["id"] == res_rt["id"]
+        assert meta["kind"] == "decision"
+        assert meta["tags"] == ["token: abc"]
+        assert meta["source"] == "botex"
+    print("[PASS] Memory Sanitize & Legacy Source Tests")
+
+
 def test_recipes_and_rationalization_heuristics():
     """Recipes registry and delivery-gate rationalization heuristics."""
     import asyncio

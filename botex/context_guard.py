@@ -253,7 +253,7 @@ def sanitize_and_vault_output(
             kind="context",
             tags=tags,
             memory_id=candidate,
-            source=f"context_guard:{source_label}",
+            origin=f"context_guard:{source_label}",
         )
         if saved.get("ok"):
             memory_id = saved["id"]

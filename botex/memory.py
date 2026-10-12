@@ -12,14 +12,25 @@ Location: <workspace_dir>/.botex/memory/
 import json
 import re
 import uuid
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from .security import SecurityError, mask_secrets, resolve_safe_path, wrap_untrusted_content
+    from .security import (
+        SecurityError,
+        resolve_safe_path,
+        sanitize_for_storage,
+        wrap_untrusted_content,
+    )
 except (ImportError, ValueError):
-    from security import SecurityError, mask_secrets, resolve_safe_path, wrap_untrusted_content
+    from security import (
+        SecurityError,
+        resolve_safe_path,
+        sanitize_for_storage,
+        wrap_untrusted_content,
+    )
 
 __all__ = [
     "save_memory",
@@ -178,13 +189,28 @@ def save_memory(
     kind: str = "context",
     tags: Optional[List[str]] = None,
     memory_id: Optional[str] = None,
-    source: str = "botex",
+    origin: str = "botex",
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """
     Save a context, decision, handoff, or lesson entry to the workspace Memory Vault.
     Masks secrets and ensures directory isolation.
+
+    ``origin`` labels the writer; the legacy ``source=`` keyword is still accepted.
     """
     try:
+        legacy_origin = kwargs.pop("source", None)
+        if kwargs:
+            raise TypeError(f"Unexpected arguments: {', '.join(sorted(kwargs))}")
+        if legacy_origin is not None:
+            warnings.warn(
+                "The 'source' keyword argument is deprecated; use 'origin' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if origin == "botex":
+                origin = legacy_origin
+
         root_path = Path(workspace_dir).resolve()
         if not root_path.exists():
             return {"ok": False, "error": f"Workspace directory '{workspace_dir}' does not exist."}
@@ -193,9 +219,9 @@ def save_memory(
         if norm_kind not in VALID_KINDS:
             norm_kind = "context"
 
-        clean_tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
-        masked_title = mask_secrets(title.strip() or "Untitled Memory")
-        masked_content = mask_secrets(content.strip())
+        clean_tags = [sanitize_for_storage(str(t).strip()) for t in (tags or []) if str(t).strip()]
+        masked_title = sanitize_for_storage(title.strip() or "Untitled Memory")
+        masked_content = sanitize_for_storage(content.strip())
 
         if len(masked_content.encode("utf-8")) > MAX_MEMORY_BYTES:
             return {
@@ -215,10 +241,11 @@ def save_memory(
             "kind": norm_kind,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "tags": clean_tags,
-            "source": source,
+            "source": sanitize_for_storage(str(origin)),
         }
 
-        full_text = _serialize_frontmatter(metadata, masked_content)
+        # Final barrier: the serialized document is sanitized again before the file sink.
+        full_text = sanitize_for_storage(_serialize_frontmatter(metadata, masked_content))
         file_path.write_text(full_text, encoding="utf-8")
 
         rel_path = f".botex/memory/{mid}.md"
