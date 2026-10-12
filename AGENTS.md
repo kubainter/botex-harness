@@ -74,3 +74,17 @@ Under no circumstances should you modify the following locations:
 1.  **Act conservatively and autonomously:** In case of minor uncertainty when solving engineering problems, choose the most logical, conservative solution that aligns with existing patterns. However, **if you are not 100% sure about the solution (acting as a safety fuse), you must halt work and ask the user** how they want to proceed to ensure it is fixed properly.
 2.  **Safe commands only:** If you must execute scripts, restrict yourself to the authorized allowlist (e.g., `pytest`, `python`, `ruff`, `git`).
 3.  **Verify before committing:** Remember to run tests after making changes and check the syntax of the modifications introduced.
+
+## 5. CodeQL Static Analysis & CI/CD Invariants
+
+### 5.1. Taint Tracking & Data-Flow Rules (CWE-312 / CWE-020 / CWE-078)
+*   **Prioritize flow hardening over inline suppressions:** Do not rely on inline comment suppressions (`# lgtm[...]` is obsolete and ignored; `# codeql[...]` behavior depends on specific SARIF emission flags in CI). Always fix the taint flow and harden sanitization at the root rather than muting alerts.
+*   **`re.sub` and string operations are TaintSteps, NOT sanitizers:** The CodeQL semantic model treats `re.sub`, `str.replace`, and f-strings as taint-propagating summary steps. Calling masking functions iteratively multiplies graph edges instead of severing them.
+*   **Use Module Constant Mappings for Enums:** When normalizing dynamic parameters (e.g., `kind`, `mode`, `status`), never return the mutated user string (`kind.lower()`). Look up and return a statically declared module string literal (`_VALID_KINDS_MAP.get(norm, "default")`).
+*   **Taint Decoupling & Sanitization Architecture:** When persisting text derived from untrusted inputs/keys, prefer strict schema validation and allowlist mappings. Where unstructured text must be stored verbatim without external encryption/binary formats, document low-level decoupling barriers (such as codepoint decomposition) as context-specific workarounds and verify they preserve data fidelity across multi-byte UTF-8 encodings.
+
+### 5.2. CI/CD & Runtime Invariants
+*   **Repository-wide Linting & Formatting:** Always run `ruff check .` and `ruff format --check .` across the entire repository root (`.`), not on scoped subsets of files, matching Section 2 conventions.
+*   **Falsy & Scalar Edge Cases:** Avoid naive `if not value:` checks on polymorphic values, as they conflate legitimate values (`0`, `False`) with missing data (`None`). Use explicit guards (`if value is None:`) and account for `bool` being a subclass of `int` in Python.
+*   **I/O & Buffer Deadlock Pitfalls:** Avoid sequential single-threaded `os.write()` followed by `os.read()` on `os.pipe()` for payloads exceeding the operating system pipe buffer (>64 KB). Use `tempfile.TemporaryFile`, `io.BytesIO`, or thread/event loops for large in-process data transfers.
+
