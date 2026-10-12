@@ -233,6 +233,15 @@ DEFAULTS: Dict[str, Any] = {
         "timeout_s": 120,
         "max_output_bytes": 20000,
     },
+    # Context-Guard: large tool output is offloaded to the Memory Vault and
+    # replaced by a failure-aware preview + Vault reference.
+    "context_guard": {
+        "enabled": True,
+        "threshold_bytes": 2048,
+        "max_preview_bytes": 3072,
+        "auto_vault_logs": True,
+        "vault_retention_days": 3,
+    },
     "paths": {
         "snapshot_dir": ".snapshots",
         "snapshot_auto_prune": True,

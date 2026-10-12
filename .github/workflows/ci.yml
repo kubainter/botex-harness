@@ -26,8 +26,12 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest pytest-asyncio pytest-cov httpx
+        pip install pytest pytest-asyncio pytest-cov httpx ruff
+
+    - name: Lint with ruff
+      run: |
+        ruff check botex server.py tests/test_context_guard.py
 
     - name: Run tests with pytest
       run: |
-        PYTHONPATH=. python -m pytest tests/test_botex.py -v
+        PYTHONPATH=. python -m pytest tests/ -v

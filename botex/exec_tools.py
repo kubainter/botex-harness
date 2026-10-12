@@ -28,8 +28,10 @@ from typing import Any, Dict, List
 
 try:
     from .security import mask_secrets
+    from .context_guard import sanitize_and_vault_output
 except (ImportError, ValueError):
     from security import mask_secrets
+    from context_guard import sanitize_and_vault_output
 
 # Environment variables whose names look like credentials are not propagated
 # into the child process.
@@ -177,16 +179,24 @@ async def run_command(
         except Exception:
             stdout_b = b""
 
-    raw = (stdout_b or b"")[:max_output_bytes]
-    text = raw.decode("utf-8", errors="replace")
-    if stdout_b and len(stdout_b) > max_output_bytes:
+    # Decode the whole stream BEFORE any truncation so a multi-byte UTF-8
+    # sequence is never cut in half.
+    full_text = (stdout_b or b"").decode("utf-8", errors="replace")
+    text, vault_id = sanitize_and_vault_output(
+        full_text, "run_command", str(workspace_root)
+    )
+    if len(text.encode("utf-8")) > max_output_bytes:
+        text = text.encode("utf-8")[:max_output_bytes].decode("utf-8", errors="ignore")
         text += f"\n[... output truncated at {max_output_bytes} bytes]"
     text = mask_secrets(text)
 
-    return {
+    result: Dict[str, Any] = {
         "ok": proc.returncode == 0 and not timed_out,
         "exit_code": proc.returncode if proc.returncode is not None else -1,
         "timed_out": timed_out,
         "command": tokens[0],
         "stdout": text,
     }
+    if vault_id:
+        result["vault_memory_id"] = vault_id
+    return result
