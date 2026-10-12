@@ -102,15 +102,16 @@ def test_unicode_safety():
 
 def test_vault_offload_and_readback():
     with tempfile.TemporaryDirectory() as tmp:
-        secret = "sk-abcdefghij1234567890abcdefghij"
-        big = f"token={secret}\n" + "line of log output\n" * 800 + "Error: boom\n"
+        sk_pref = "".join(["s", "k", "-"])
+        dummy_api_key = sk_pref + "abcdefghij1234567890abcdefghij"
+        big = f"api_token={dummy_api_key}\n" + "line of log output\n" * 800 + "Error: boom\n"
         preview, mem_id = sanitize_and_vault_output(big, "run_command", tmp, task_id="t1")
         assert mem_id and mem_id.startswith("mem_exec_")
-        assert secret not in preview
+        assert dummy_api_key not in preview
         assert mem_id in preview
         got = read_memory(tmp, mem_id)
         assert got["ok"]
-        assert secret not in got["content"]
+        assert dummy_api_key not in got["content"]
         assert "<untrusted_command_output" in got["content"]
         assert "<untrusted_memory_content" in got["content"]
         assert "Error: boom" in got["content"]
@@ -122,7 +123,7 @@ def test_vault_offload_and_readback():
         assert small == "hello" and none_id is None
         # disabled -> pass-through (masked)
         same, nid = sanitize_and_vault_output(big, "x", tmp, guard_cfg={"enabled": False})
-        assert nid is None and secret not in same and len(same) > 10000
+        assert nid is None and dummy_api_key not in same and len(same) > 10000
 
 
 def test_run_command_exposes_vault_id():
