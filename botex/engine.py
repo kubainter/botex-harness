@@ -43,6 +43,7 @@ try:
         check_agency_policy
     )
     from .exec_tools import run_command, command_policy_error
+    from .context_guard import compact_verification_summary
     from .net_tools import read_url, resolve_net_scope
     from .pricing import check_model_price, check_model_tools
     from .contracts import (
@@ -78,6 +79,7 @@ except (ImportError, ValueError):
         check_agency_policy
     )
     from exec_tools import run_command, command_policy_error
+    from context_guard import compact_verification_summary
     from net_tools import read_url, resolve_net_scope
     from pricing import check_model_price, check_model_tools
     from contracts import (
@@ -463,25 +465,134 @@ def _output_file_ready(output_path: str, root_path: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Context Pruning (Anti-Drain Engine)
 # ---------------------------------------------------------------------------
-def prune_tool_history(messages: List[Dict[str, Any]], target_path: str):
-    """
-    Replaces verbose read_file and read_file_lines responses for target_path
-    with a short placeholder once a patch or file creation for target_path has succeeded.
-    This prevents O(N^2) token growth on subsequent turns.
-    """
+def _tool_call_index(messages: List[Dict[str, Any]]) -> Dict[str, tuple]:
+    """Map tool_call_id -> (function name, parsed arguments dict)."""
+    index: Dict[str, tuple] = {}
     for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            try:
+                fn = tc.get("function", {})
+                raw_args = fn.get("arguments") or "{}"
+                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+                index[tc.get("id", "")] = (fn.get("name", ""), args if isinstance(args, dict) else {})
+            except Exception:
+                continue
+    return index
+
+
+def prune_tool_history(
+    messages: List[Dict[str, Any]],
+    target_path: str,
+    *,
+    root: Optional[Path] = None,
+    readonly: bool = False,
+    max_unique_reads: int = 4,
+    keep_commands: int = 1,
+):
+    """
+    Context-Guard history folding (prevents O(N^2) token growth).
+
+    1. With ``target_path``: replaces verbose read_file / read_file_lines
+       responses for that path once a patch or file creation succeeded. When
+       ``root`` is given, paths are normalized (``_normalize_track_path``)
+       before matching so ``./a.py`` and ``a.py`` are the same file.
+    2. Older ``run_command`` results (all but the newest ``keep_commands``)
+       collapse to a one-line status stub carrying the Vault ID.
+    3. In ``readonly`` mode, when more than ``max_unique_reads`` distinct files
+       were read, the oldest reads fold into reference stubs.
+    """
+    norm_target = _normalize_track_path(target_path, root) if (root and target_path) else None
+    for msg in messages:
+        if not target_path:
+            break
         if msg.get("role") == "tool":
             content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
             # Check if this tool response contains file content for target_path
-            if f'"{target_path}"' in content or target_path in content:
+            maybe = f'"{target_path}"' in content or target_path in content
+            if not maybe and norm_target:
+                maybe = '"path"' in content  # path may be spelled differently
+            if maybe:
                 try:
                     data = json.loads(content)
-                    if isinstance(data, dict) and "content" in data and ("start" in data or "total_lines" in data):
-                        lines_range = f"{data.get('start', 1)}-{data.get('end', data.get('total_lines', '?'))}"
-                        data["content"] = f"[File content pruned: {target_path} lines {lines_range} — changes already applied]"
-                        msg["content"] = json.dumps(data)
+                    if not (isinstance(data, dict) and "content" in data and ("start" in data or "total_lines" in data)):
+                        continue
+                    if norm_target:
+                        data_norm = _normalize_track_path(str(data.get("path", "")), root)
+                        if data_norm != norm_target and str(data.get("path", "")) != target_path:
+                            continue
+                    lines_range = f"{data.get('start', 1)}-{data.get('end', data.get('total_lines', '?'))}"
+                    data["content"] = f"[File content pruned: {target_path} lines {lines_range} — changes already applied]"
+                    msg["content"] = json.dumps(data)
                 except Exception:
                     pass
+
+    calls = _tool_call_index(messages)
+
+    # --- 2. Old run_command output -> status stubs -------------------------
+    cmd_msgs = [
+        m for m in messages
+        if m.get("role") == "tool" and calls.get(m.get("tool_call_id", ""), ("",))[0] == "run_command"
+    ]
+    keep = max(int(keep_commands), 0)
+    for msg in (cmd_msgs[:-keep] if keep else cmd_msgs):
+        content = msg.get("content", "")
+        if not isinstance(content, str) or content.startswith("[Command '"):
+            continue
+        try:
+            data = json.loads(content)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        _, args = calls[msg["tool_call_id"]]
+        cmd = str(args.get("command", data.get("command", "?")))
+        code = data.get("exit_code", "n/a")
+        if data.get("error") and "exit_code" not in data:
+            code = "not run"
+        msg["content"] = (
+            f"[Command '{cmd}' exit code {code} — output pruned to preserve "
+            f"context window. Vault ID: {data.get('vault_memory_id') or 'none'}]"
+        )
+
+    # --- 3. Readonly mode: cap unique file reads ---------------------------
+    if readonly and root is not None:
+        reads: List[tuple] = []  # (message, normalized path)
+        for m in messages:
+            if m.get("role") != "tool":
+                continue
+            name, args = calls.get(m.get("tool_call_id", ""), ("", {}))
+            if name not in ("read_file", "read_file_lines"):
+                continue
+            norm = _normalize_track_path(str(args.get("path", "")), root)
+            if norm:
+                reads.append((m, norm))
+        latest: Dict[str, int] = {}
+        for i, (_m, p) in enumerate(reads):
+            latest[p] = i
+        if len(latest) > max_unique_reads:
+            keep_paths = set(
+                sorted(latest, key=lambda p: latest[p], reverse=True)[:max_unique_reads]
+            )
+            for m, p in reads:
+                if p in keep_paths:
+                    continue
+                content = m.get("content", "")
+                if not isinstance(content, str) or "[File content pruned" in content:
+                    continue
+                try:
+                    data = json.loads(content)
+                except Exception:
+                    continue
+                if isinstance(data, dict) and "content" in data:
+                    data["content"] = (
+                        f"[File content pruned: {p} — read earlier, folded to preserve "
+                        "context window. Re-read with read_file_lines if needed.]"
+                    )
+                    m["content"] = json.dumps(data, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1507,7 +1618,7 @@ async def _run_botex_task_once_impl(
                             "tool result below before finishing. Read the error output "
                             "carefully and apply the necessary patches. Then, reply "
                             "STATUS: DONE again to retry verification.\n\n"
-                            + json.dumps(verification, ensure_ascii=False)
+                            + compact_verification_summary(verification)
                         )})
                         continue
                     else:
@@ -1942,6 +2053,12 @@ async def _run_botex_task_once_impl(
                 "tool_call_id": tc.id,
                 "content": json.dumps(tool_result, ensure_ascii=False)
             })
+            # Context-Guard: fold older command output / (readonly) old reads
+            if fn_name in ("run_command", "read_file", "read_file_lines"):
+                prune_tool_history(
+                    messages, "", root=root_path,
+                    readonly=(resolved_mode == "readonly"),
+                )
 
         # OWASP LLM06: Unbounded Consumption: Loop / Stagnation Detection
         # Prevent the model from burning API budget by retrying failing mutations

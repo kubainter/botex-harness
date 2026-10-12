@@ -11,7 +11,7 @@ Location: <workspace_dir>/.botex/memory/
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -20,7 +20,7 @@ try:
 except (ImportError, ValueError):
     from security import resolve_safe_path, mask_secrets, wrap_untrusted_content, SecurityError
 
-__all__ = ["save_memory", "search_memory", "read_memory", "VALID_KINDS", "MAX_MEMORY_BYTES"]
+__all__ = ["save_memory", "search_memory", "read_memory", "purge_ephemeral_memories", "VALID_KINDS", "MAX_MEMORY_BYTES"]
 
 VALID_KINDS = frozenset({"context", "decision", "handoff", "lesson"})
 MEMORY_DIR_NAME = ".botex/memory"
@@ -320,3 +320,36 @@ def read_memory(
         return {"ok": False, "error": f"Security violation: {se}"}
     except Exception as exc:
         return {"ok": False, "error": f"Failed to read memory: {exc}"}
+
+
+def purge_ephemeral_memories(workspace_dir: str = ".", max_age_days: int = 3) -> int:
+    """
+    Delete Memory Vault entries tagged ``ephemeral`` that are older than
+    ``max_age_days``. Entries without that tag (user notes, decisions,
+    handoffs, lessons) are never touched. Returns the number of deleted files.
+    """
+    deleted = 0
+    try:
+        mem_dir = Path(workspace_dir).resolve() / ".botex" / "memory"
+        if not mem_dir.is_dir():
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(int(max_age_days), 0))
+        for file_p in mem_dir.glob("*.md"):
+            try:
+                if not file_p.is_file():
+                    continue
+                meta, _ = _parse_frontmatter(file_p.read_text(encoding="utf-8", errors="replace"))
+                tags = [str(t).lower() for t in (meta.get("tags") or [])]
+                if "ephemeral" not in tags:
+                    continue
+                ts = datetime.fromisoformat(str(meta.get("timestamp") or ""))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts <= cutoff:
+                    file_p.unlink()
+                    deleted += 1
+            except Exception:
+                continue
+    except Exception:
+        return deleted
+    return deleted

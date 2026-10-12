@@ -35,7 +35,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 
 from botex.engine import run_botex_task
-from botex.security import mask_secrets, zdr_enforced
+from botex.security import mask_secrets, zdr_enforced, wrap_untrusted_content
 from botex.file_tools import get_file_outline as _get_file_outline
 from botex.analytics import cli_stats, cli_history, load_analytics
 from botex.patch_engine import snapshot_manager
@@ -99,6 +99,7 @@ class SubagentTaskResult(TypedDict, total=False):
     attempts: list[SubagentAttemptResult]
     fallback_from: str
     zdr_enforced: bool
+    vault_memory_id: Optional[str]
 
 
 def _masked_result(res: dict) -> dict:
@@ -110,10 +111,55 @@ def _masked_result(res: dict) -> dict:
     return masked
 
 
+REPORT_OFFLOAD_BYTES = 2048
+_REPORT_ABSTRACT_CHARS = 400
+
+
+def _offload_report(res: dict, workspace: str) -> dict:
+    """Context-Guard: when summary exceeds 2 KB, store the full (masked)
+    report in the Memory Vault as ``mem_task_<id>_report`` and return a copy
+    whose summary/message are a compact abstract + ``vault_memory_id``."""
+    summary = res.get("summary") or res.get("message") or ""
+    if not isinstance(summary, str) or len(summary.encode("utf-8")) <= REPORT_OFFLOAD_BYTES:
+        return res
+    if not load_config().get("context_guard", {}).get("enabled", True):
+        return res
+    safe_id = "".join(c if (c.isalnum() or c in "_-") else "_" for c in str(res.get("task_id") or "unknown"))
+    mem_id = f"mem_task_{safe_id}_report"
+    saved = _save_memory(
+        workspace_dir=workspace,
+        title=f"Task {res.get('task_id')} audit report",
+        content=wrap_untrusted_content(summary, tag="untrusted_command_output", source="subagent_report"),
+        kind="context",
+        tags=["ephemeral", "context_guard", "task_report"],
+        memory_id=mem_id,
+        source="context_guard:run_subagent",
+    )
+    if not saved.get("ok"):
+        return res  # offload failed — keep the full inline report
+    abstract = summary[:_REPORT_ABSTRACT_CHARS].rstrip()
+    compact = (
+        f"{abstract}…\n[Report truncated; full text in Memory Vault: "
+        f"'{mem_id}'. read_memory(memory_id='{mem_id}')]"
+    )
+    out = dict(res)
+    out["summary"] = compact
+    if isinstance(out.get("message"), str):
+        out["message"] = compact
+    out["vault_memory_id"] = mem_id
+    return out
+
+
 def _format_result_text(res: dict) -> str:
-    """Human-readable task report (kept as TextContent for legacy clients)."""
+    """Human-readable task report (kept as TextContent for legacy clients).
+    When the report was offloaded to the Memory Vault this is a compact
+    Task Scorecard (< 1 KB) with a read_memory pointer."""
     status_str = "SUCCESS" if res.get("ok") else "FAILURE"
-    files_str = ", ".join(res.get("files_touched", [])) or "(none)"
+    files = list(res.get("files_touched", []))
+    offloaded = res.get("vault_memory_id")
+    if offloaded and len(files) > 5:
+        files = files[:5] + [f"... (+{len(res.get('files_touched', [])) - 5} more)"]
+    files_str = ", ".join(files) or "(none)"
     cost_str = f"${res.get('cost_usd', 0.0):.5f} USD"
     summary_text = res.get("summary") or res.get("message", "")
     lines = [
@@ -135,8 +181,14 @@ def _format_result_text(res: dict) -> str:
         f"- Duration: {res.get('duration_s', 0)}s | Cost: {cost_str}",
         f"- Modified files: {files_str}",
         f"- Line balance: +{res.get('lines_added', 0)} / -{res.get('lines_removed', 0)}",
-        f"\nChange summary:\n{summary_text}"
     ]
+    if offloaded:
+        lines.append(
+            "- Full audit report saved to Memory Vault. "
+            f"Run read_memory(memory_id='{offloaded}') for complete diff."
+        )
+        return "\n".join(lines)
+    lines.append(f"\nChange summary:\n{summary_text}")
     return "\n".join(lines)
 
 
@@ -483,6 +535,7 @@ async def run_subagent(
     )
 
     res = _masked_result(res)
+    res = _offload_report(res, resolve_workspace(workspace_dir))
     return CallToolResult(
         content=[TextContent(type="text", text=_format_result_text(res))],
         structured_content=res,
