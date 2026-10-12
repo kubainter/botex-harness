@@ -16,6 +16,7 @@ assertion errors, ``FAILED`` summary lines) are prioritised over a rigid
 head/tail cut, and long runs of green ``PASSED`` lines are collapsed.
 All slicing operates on decoded text, never on raw bytes.
 """
+
 import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -137,7 +138,7 @@ def _fit_edges(lines: List[str], budget: int) -> List[str]:
         used += n
     tail: List[str] = []
     used = 0
-    for ln in reversed(lines[len(head):]):
+    for ln in reversed(lines[len(head) :]):
         n = len(ln.encode("utf-8")) + 1
         if used + n > tail_b:
             break
@@ -190,13 +191,13 @@ def smart_slice_output(
 
     budget = max(max_preview_bytes - len(pointer.encode("utf-8")) - 64, 256)
     if fail_idx is not None:
-        head = lines[:min(head_lines, fail_idx)]
+        head = lines[: min(head_lines, fail_idx)]
         head_budget = budget // 5
         if _size(head) > head_budget:
             head = _fit_edges(head, head_budget)
         block = lines[fail_idx:]
         block = _fit_edges(block, budget - _size(head) - 40)
-        gap = fail_idx - len(lines[:min(head_lines, fail_idx)])
+        gap = fail_idx - len(lines[: min(head_lines, fail_idx)])
         parts = head
         if gap > 0:
             parts = parts + [f"[... {gap} lines omitted ...]"]
@@ -272,9 +273,7 @@ def sanitize_and_vault_output(
     return preview, memory_id
 
 
-def compact_verification_summary(
-    verification: Dict[str, Any], max_bytes: int = 2048
-) -> str:
+def compact_verification_summary(verification: Dict[str, Any], max_bytes: int = 2048) -> str:
     """Compact failure summary of a verify_command result for the model."""
     if verification.get("timed_out"):
         reason = "timed out"
@@ -291,8 +290,5 @@ def compact_verification_summary(
     if tail.strip():
         lines.append("Error output (tail):\n" + tail)
     if mem_id:
-        lines.append(
-            f"Full log in Memory Vault: '{mem_id}' "
-            f"(read_memory(memory_id='{mem_id}'))."
-        )
+        lines.append(f"Full log in Memory Vault: '{mem_id}' (read_memory(memory_id='{mem_id}')).")
     return "\n".join(lines)

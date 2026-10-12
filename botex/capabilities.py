@@ -10,6 +10,7 @@ explicit ``allow_*`` flags may ADD capabilities, never remove them
 Resolution (fail-closed):
     explicit allow_* flags  >  preset mode  >  engine.default_mode  >  "edit"
 """
+
 from typing import Optional, Set
 
 try:
@@ -51,9 +52,15 @@ TOOL_REGISTRY = {
     "list_dir": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
     "apply_patch": ToolPolicy(required_scopes=[CAP_WRITE], risk=RiskLevel.MEDIUM),
     "create_file": ToolPolicy(required_scopes=[CAP_WRITE], risk=RiskLevel.MEDIUM),
-    "delete_file": ToolPolicy(required_scopes=[CAP_DESTRUCTIVE], risk=RiskLevel.HIGH, approval_required=True),
-    "move_file": ToolPolicy(required_scopes=[CAP_DESTRUCTIVE], risk=RiskLevel.HIGH, approval_required=True),
-    "run_command": ToolPolicy(required_scopes=[CAP_EXEC], risk=RiskLevel.HIGH, approval_required=True),
+    "delete_file": ToolPolicy(
+        required_scopes=[CAP_DESTRUCTIVE], risk=RiskLevel.HIGH, approval_required=True
+    ),
+    "move_file": ToolPolicy(
+        required_scopes=[CAP_DESTRUCTIVE], risk=RiskLevel.HIGH, approval_required=True
+    ),
+    "run_command": ToolPolicy(
+        required_scopes=[CAP_EXEC], risk=RiskLevel.HIGH, approval_required=True
+    ),
     "read_url": ToolPolicy(required_scopes=[CAP_NET], risk=RiskLevel.MEDIUM),
 }
 
@@ -85,9 +92,7 @@ def resolve_mode_name(mode: str = "") -> str:
     cfg_mode = load_config().get("engine", {}).get("default_mode") or DEFAULT_MODE
     chosen = (mode or cfg_mode or DEFAULT_MODE).lower()
     if chosen not in MODES:
-        raise ValueError(
-            f"Unknown mode '{chosen}'. Available modes: {', '.join(sorted(MODES))}."
-        )
+        raise ValueError(f"Unknown mode '{chosen}'. Available modes: {', '.join(sorted(MODES))}.")
     return chosen
 
 
@@ -142,6 +147,7 @@ def tool_allowed(tool_name: str, caps: Set[str], can_confirm: bool = False) -> b
         return True
 
     return False
+
 
 def check_agency_policy(tool_name: str, caps: Set[str], confirm_fn=None, op_path: str = "") -> str:
     """

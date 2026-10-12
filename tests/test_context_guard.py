@@ -2,6 +2,7 @@
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """Context-Guard tests: failure-aware slicing, Unicode safety, Vault offload,
 engine history folding, MCP report offload, ephemeral retention."""
+
 import asyncio
 import json
 import sys
@@ -84,10 +85,16 @@ def test_unicode_safety():
             "import sys\nsys.stdout.buffer.write(('Zażółć gęślą jaźń 🙂\\n' * 3000).encode('utf-8'))\n",
             encoding="utf-8",
         )
-        r = asyncio.run(run_command(
-            f'"{py}" "{code}"', Path(tmp), allowlist=["python"], deny_args=[],
-            timeout_s=30, max_output_bytes=2500,
-        ))
+        r = asyncio.run(
+            run_command(
+                f'"{py}" "{code}"',
+                Path(tmp),
+                allowlist=["python"],
+                deny_args=[],
+                timeout_s=30,
+                max_output_bytes=2500,
+            )
+        )
         assert r["ok"]
         assert "\ufffd" not in r["stdout"]
         assert "Zażółć" in r["stdout"]
@@ -123,10 +130,16 @@ def test_run_command_exposes_vault_id():
         py = sys.executable
         script = Path(tmp) / "noisy.py"
         script.write_text("for i in range(800):\n    print('noise line', i)\n", encoding="utf-8")
-        r = asyncio.run(run_command(
-            f'"{py}" "{script}"', Path(tmp), allowlist=["python"], deny_args=[],
-            timeout_s=30, max_output_bytes=20000,
-        ))
+        r = asyncio.run(
+            run_command(
+                f'"{py}" "{script}"',
+                Path(tmp),
+                allowlist=["python"],
+                deny_args=[],
+                timeout_s=30,
+                max_output_bytes=20000,
+            )
+        )
         assert r["ok"] and r["vault_memory_id"] in r["stdout"]
         full = read_memory(tmp, r["vault_memory_id"])["content"]
         assert "noise line 799" in full and "noise line 0" in full
@@ -152,11 +165,21 @@ def test_purge_ephemeral_only():
 
 def _tool_exchange(i: int, name: str, args: dict, result: dict):
     return [
-        {"role": "assistant", "tool_calls": [{
-            "id": f"c{i}", "type": "function",
-            "function": {"name": name, "arguments": json.dumps(args)}}]},
-        {"role": "tool", "tool_call_id": f"c{i}",
-         "content": json.dumps(result, ensure_ascii=False)},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": f"c{i}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": f"c{i}",
+            "content": json.dumps(result, ensure_ascii=False),
+        },
     ]
 
 
@@ -168,14 +191,22 @@ def test_engine_history_folding():
         msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "go"}]
         for i in range(3):
             msgs += _tool_exchange(
-                i, "run_command", {"command": "pytest -q"},
-                {"ok": False, "exit_code": 1, "stdout": "BIG" * 500,
-                 "vault_memory_id": f"mem_exec_{i}"})
+                i,
+                "run_command",
+                {"command": "pytest -q"},
+                {
+                    "ok": False,
+                    "exit_code": 1,
+                    "stdout": "BIG" * 500,
+                    "vault_memory_id": f"mem_exec_{i}",
+                },
+            )
         prune_tool_history(msgs, "", root=root)
         tools = [m for m in msgs if m["role"] == "tool"]
         assert tools[0]["content"] == (
             "[Command 'pytest -q' exit code 1 — output pruned to preserve "
-            "context window. Vault ID: mem_exec_0]")
+            "context window. Vault ID: mem_exec_0]"
+        )
         assert tools[1]["content"].startswith("[Command 'pytest -q' exit code 1")
         assert "BIG" in tools[2]["content"]  # newest keeps its content
 
@@ -183,8 +214,11 @@ def test_engine_history_folding():
         rmsgs = [{"role": "user", "content": "go"}]
         for n in range(6):
             rmsgs += _tool_exchange(
-                10 + n, "read_file", {"path": f"./f{n}.py" if n == 0 else f"f{n}.py"},
-                {"ok": True, "path": f"f{n}.py", "content": "CODE" * 100, "total_lines": 1})
+                10 + n,
+                "read_file",
+                {"path": f"./f{n}.py" if n == 0 else f"f{n}.py"},
+                {"ok": True, "path": f"f{n}.py", "content": "CODE" * 100, "total_lines": 1},
+            )
         prune_tool_history(rmsgs, "", root=root, readonly=False)
         assert all("CODE" in m["content"] for m in rmsgs if m["role"] == "tool")
         prune_tool_history(rmsgs, "", root=root, readonly=True)
@@ -198,8 +232,13 @@ def test_engine_history_folding():
 
 
 def test_compact_verification_summary():
-    ver = {"ok": False, "exit_code": 1, "timed_out": False,
-           "stdout": _pytest_like_output(), "vault_memory_id": "mem_exec_abc12345"}
+    ver = {
+        "ok": False,
+        "exit_code": 1,
+        "timed_out": False,
+        "stdout": _pytest_like_output(),
+        "vault_memory_id": "mem_exec_abc12345",
+    }
     out = compact_verification_summary(ver)
     assert "exit code 1" in out
     assert "AssertionError" in out
@@ -210,11 +249,20 @@ def test_compact_verification_summary():
 
 def test_mcp_report_offload():
     import server
+
     with tempfile.TemporaryDirectory() as tmp:
         report = "Audit finding line.\n" * 600
-        res = {"ok": True, "task_id": "task_8f1a2b", "status": "DONE", "summary": report,
-               "message": report, "files_touched": ["a.py"], "exec_ran": False,
-               "attempts": [], "steps": 3}
+        res = {
+            "ok": True,
+            "task_id": "task_8f1a2b",
+            "status": "DONE",
+            "summary": report,
+            "message": report,
+            "files_touched": ["a.py"],
+            "exec_ran": False,
+            "attempts": [],
+            "steps": 3,
+        }
         out = server._offload_report(dict(res), tmp)
         assert out["vault_memory_id"] == "mem_task_task_8f1a2b_report"
         assert len(out["summary"].encode("utf-8")) <= 2048

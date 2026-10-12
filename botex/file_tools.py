@@ -6,24 +6,34 @@ BoteX File Tools
 Outline-first I/O tools for the autonomous code agent.
 Optimized for maximum token savings and precise targeted editing.
 """
+
 import ast
 import re
 import shutil
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 try:
+    from .patch_engine import snapshot_manager, validate_syntax
     from .security import (
-        resolve_safe_path, load_gitignore_patterns, is_gitignored, is_safe_dir,
-        mask_secrets, wrap_untrusted_content, SecurityError
+        SecurityError,
+        is_gitignored,
+        is_safe_dir,
+        load_gitignore_patterns,
+        resolve_safe_path,
+        wrap_untrusted_content,
     )
-    from .patch_engine import validate_syntax, snapshot_manager
 except (ImportError, ValueError):
+    from patch_engine import snapshot_manager, validate_syntax
     from security import (
-        resolve_safe_path, load_gitignore_patterns, is_gitignored, is_safe_dir,
-        mask_secrets, wrap_untrusted_content, SecurityError
+        SecurityError,
+        is_gitignored,
+        is_safe_dir,
+        load_gitignore_patterns,
+        resolve_safe_path,
+        wrap_untrusted_content,
     )
-    from patch_engine import validate_syntax, snapshot_manager
+
 
 # ---------------------------------------------------------------------------
 # Outline Engine (Token Saver)
@@ -38,29 +48,33 @@ def _get_python_outline(content: str, safe_path: Path) -> List[Dict[str, Any]]:
 
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
-            outline.append({
-                "type": "class",
-                "name": node.name,
-                "start_line": node.lineno,
-                "end_line": getattr(node, "end_lineno", node.lineno),
-                "methods": [
-                    {
-                        "type": "method",
-                        "name": m.name,
-                        "start_line": m.lineno,
-                        "end_line": getattr(m, "end_lineno", m.lineno),
-                    }
-                    for m in node.body
-                    if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
-                ]
-            })
+            outline.append(
+                {
+                    "type": "class",
+                    "name": node.name,
+                    "start_line": node.lineno,
+                    "end_line": getattr(node, "end_lineno", node.lineno),
+                    "methods": [
+                        {
+                            "type": "method",
+                            "name": m.name,
+                            "start_line": m.lineno,
+                            "end_line": getattr(m, "end_lineno", m.lineno),
+                        }
+                        for m in node.body
+                        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    ],
+                }
+            )
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            outline.append({
-                "type": "function",
-                "name": node.name,
-                "start_line": node.lineno,
-                "end_line": getattr(node, "end_lineno", node.lineno),
-            })
+            outline.append(
+                {
+                    "type": "function",
+                    "name": node.name,
+                    "start_line": node.lineno,
+                    "end_line": getattr(node, "end_lineno", node.lineno),
+                }
+            )
     return outline
 
 
@@ -68,24 +82,33 @@ def _get_regex_outline(content: str) -> List[Dict[str, Any]]:
     outline = []
     lines = content.splitlines()
 
-    class_pat = re.compile(r'^(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z0-9_]+)')
+    class_pat = re.compile(r"^(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z0-9_]+)")
     fn_pat = re.compile(
-        r'^(?:\s*(?:public|private|protected|static|async|function|def|fn|func)\s+)+([A-Za-z0-9_]+)\s*\('
+        r"^(?:\s*(?:public|private|protected|static|async|function|def|fn|func)\s+)+([A-Za-z0-9_]+)\s*\("
     )
-    arrow_pat = re.compile(r'^(?:\s*(?:const|let|var)\s+)+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>')
-    header_pat = re.compile(r'^(#{1,4})\s+(.+)')
+    arrow_pat = re.compile(
+        r"^(?:\s*(?:const|let|var)\s+)+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>"
+    )
+    header_pat = re.compile(r"^(#{1,4})\s+(.+)")
 
     for idx, line in enumerate(lines, 1):
         stripped = line.strip()
-        if not stripped or stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("#"):
+        if (
+            not stripped
+            or stripped.startswith("//")
+            or stripped.startswith("/*")
+            or stripped.startswith("#")
+        ):
             # Check for markdown header
             m_h = header_pat.match(stripped)
             if m_h:
-                outline.append({
-                    "type": f"header_h{len(m_h.group(1))}",
-                    "name": m_h.group(2).strip(),
-                    "line": idx,
-                })
+                outline.append(
+                    {
+                        "type": f"header_h{len(m_h.group(1))}",
+                        "name": m_h.group(2).strip(),
+                        "line": idx,
+                    }
+                )
             continue
 
         m_cls = class_pat.match(stripped)
@@ -140,7 +163,7 @@ def get_file_outline(path: str, workspace_root: str | Path) -> Dict[str, Any]:
         "path": path,
         "total_lines": total_lines,
         "outline": outline,
-        "note": "Use read_file_lines(path, start, end) to inspect specific blocks identified in the outline."
+        "note": "Use read_file_lines(path, start, end) to inspect specific blocks identified in the outline.",
     }
 
 
@@ -169,12 +192,18 @@ def read_file_lines(path: str, start: int, end: int, workspace_root: str | Path)
         start = int(start)
         end = int(end)
     except (TypeError, ValueError):
-        return {"ok": False, "error": f"start/end must be integers (got start={start!r}, end={end!r})."}
+        return {
+            "ok": False,
+            "error": f"start/end must be integers (got start={start!r}, end={end!r}).",
+        }
 
     if start < 1 or end < 1:
         return {"ok": False, "error": "start and end must be >= 1 (lines are 1-indexed)."}
     if start > end:
-        return {"ok": False, "error": f"start ({start}) is greater than end ({end}) — swap the range."}
+        return {
+            "ok": False,
+            "error": f"start ({start}) is greater than end ({end}) — swap the range.",
+        }
 
     lines = content.splitlines()
     total = len(lines)
@@ -188,7 +217,7 @@ def read_file_lines(path: str, start: int, end: int, workspace_root: str | Path)
             "error": (
                 f"start line {start} is beyond file end (total lines: {total}). "
                 f"The file ends at line {total} — there is no more content to read."
-            )
+            ),
         }
 
     selected = lines[start_idx - 1 : end_idx]
@@ -201,7 +230,7 @@ def read_file_lines(path: str, start: int, end: int, workspace_root: str | Path)
         "start": start_idx,
         "end": end_idx,
         "total_file_lines": total,
-        "content": wrap_untrusted_content(body, tag="untrusted_file_content", path=path)
+        "content": wrap_untrusted_content(body, tag="untrusted_file_content", path=path),
     }
 
 
@@ -231,7 +260,7 @@ def read_file(path: str, workspace_root: str | Path) -> Dict[str, Any]:
                 f"File '{path}' has {len(lines)} lines (>250). "
                 "Reading full large files wastes quota. "
                 "Please call get_file_outline(path) and then read_file_lines(path, start, end)."
-            )
+            ),
         }
 
     numbered = [f"{i + 1}: {line}" for i, line in enumerate(lines)]
@@ -240,14 +269,16 @@ def read_file(path: str, workspace_root: str | Path) -> Dict[str, Any]:
         "ok": True,
         "path": path,
         "total_lines": len(lines),
-        "content": wrap_untrusted_content(body, tag="untrusted_file_content", path=path)
+        "content": wrap_untrusted_content(body, tag="untrusted_file_content", path=path),
     }
 
 
 # ---------------------------------------------------------------------------
 # File Creation & Directory Listing
 # ---------------------------------------------------------------------------
-def create_file(path: str, content: str, workspace_root: str | Path, task_id: str = "default") -> Dict[str, Any]:
+def create_file(
+    path: str, content: str, workspace_root: str | Path, task_id: str = "default"
+) -> Dict[str, Any]:
     """
     Create a new file with in-memory pre-write syntax validation.
     """
@@ -257,14 +288,17 @@ def create_file(path: str, content: str, workspace_root: str | Path, task_id: st
         return {"ok": False, "error": str(se)}
 
     if safe_path.is_dir():
-        return {"ok": False, "error": f"'{path}' is an existing directory — cannot create a file there."}
+        return {
+            "ok": False,
+            "error": f"'{path}' is an existing directory — cannot create a file there.",
+        }
 
     # Validate syntax before writing
     is_valid, syntax_err = validate_syntax(content, safe_path)
     if not is_valid:
         return {
             "ok": False,
-            "error": f"File creation rejected: {syntax_err}. File was not written to disk."
+            "error": f"File creation rejected: {syntax_err}. File was not written to disk.",
         }
 
     try:
@@ -281,7 +315,7 @@ def create_file(path: str, content: str, workspace_root: str | Path, task_id: st
                 "ok": True,
                 "path": path,
                 "lines_written": lines_count,
-                "message": f"File '{path}' created successfully ({lines_count} lines)."
+                "message": f"File '{path}' created successfully ({lines_count} lines).",
             }
     except Exception as e:
         return {"ok": False, "error": f"Failed to create file: {e}"}
@@ -313,13 +347,15 @@ def delete_file(path: str, workspace_root: str | Path, task_id: str = "default")
             return {
                 "ok": True,
                 "path": path,
-                "message": f"File '{path}' deleted (snapshot retained for rollback)."
+                "message": f"File '{path}' deleted (snapshot retained for rollback).",
             }
     except Exception as e:
         return {"ok": False, "error": f"Failed to delete file: {e}"}
 
 
-def move_file(src_path: str, dst_path: str, workspace_root: str | Path, task_id: str = "default") -> Dict[str, Any]:
+def move_file(
+    src_path: str, dst_path: str, workspace_root: str | Path, task_id: str = "default"
+) -> Dict[str, Any]:
     """
     Move/rename a file within the workspace. Snapshots both endpoints first.
     """
@@ -341,8 +377,8 @@ def move_file(src_path: str, dst_path: str, workspace_root: str | Path, task_id:
             snapshot_manager.snapshot_file(task_id, safe_src, workspace_root)
             if safe_dst.exists():
                 snapshot_manager.snapshot_file(task_id, safe_dst, workspace_root)
-            # shutil.move refuses to overwrite on Windows but silently
-            # replaces on POSIX — unlink first for consistent behavior.
+                # shutil.move refuses to overwrite on Windows but silently
+                # replaces on POSIX — unlink first for consistent behavior.
                 safe_dst.unlink()
             else:
                 # The move creates dst — record it so rollback removes it;
@@ -356,7 +392,7 @@ def move_file(src_path: str, dst_path: str, workspace_root: str | Path, task_id:
                 "ok": True,
                 "src": src_path,
                 "dst": dst_path,
-                "message": f"Moved '{src_path}' -> '{dst_path}' (snapshot retained for rollback)."
+                "message": f"Moved '{src_path}' -> '{dst_path}' (snapshot retained for rollback).",
             }
     except Exception as e:
         return {"ok": False, "error": f"Failed to move file: {e}"}
@@ -426,5 +462,5 @@ def list_dir(path: str, workspace_root: str | Path, max_depth: int = 2) -> Dict[
         "base_path": path,
         "total_entries": len(entries),
         "truncated": len(entries) > 200,
-        "entries": entries[:200]  # Cap at 200 items to avoid token overflow
+        "entries": entries[:200],  # Cap at 200 items to avoid token overflow
     }

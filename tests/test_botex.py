@@ -3453,7 +3453,6 @@ if __name__ == "__main__":
     test_try_local_command()
     test_normalize_cli_style()
     test_pick()
-    test_mark_status()
     test_interactive_config()
     test_cli_config()
     test_cli_models()

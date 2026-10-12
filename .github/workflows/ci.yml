@@ -30,7 +30,7 @@ jobs:
 
     - name: Lint with ruff
       run: |
-        ruff check botex server.py tests/test_context_guard.py
+        ruff check .
 
     - name: Run tests with pytest
       run: |

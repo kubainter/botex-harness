@@ -8,6 +8,7 @@ Supports context notes, architectural decisions, task handoffs, and lessons lear
 Format: Markdown with YAML frontmatter (compatible with ecc.memory.v1).
 Location: <workspace_dir>/.botex/memory/
 """
+
 import json
 import re
 import uuid
@@ -16,11 +17,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from .security import resolve_safe_path, mask_secrets, wrap_untrusted_content, SecurityError
+    from .security import SecurityError, mask_secrets, resolve_safe_path, wrap_untrusted_content
 except (ImportError, ValueError):
-    from security import resolve_safe_path, mask_secrets, wrap_untrusted_content, SecurityError
+    from security import SecurityError, mask_secrets, resolve_safe_path, wrap_untrusted_content
 
-__all__ = ["save_memory", "search_memory", "read_memory", "purge_ephemeral_memories", "VALID_KINDS", "MAX_MEMORY_BYTES"]
+__all__ = [
+    "save_memory",
+    "search_memory",
+    "read_memory",
+    "purge_ephemeral_memories",
+    "VALID_KINDS",
+    "MAX_MEMORY_BYTES",
+]
 
 VALID_KINDS = frozenset({"context", "decision", "handoff", "lesson"})
 MEMORY_DIR_NAME = ".botex/memory"
@@ -34,7 +42,9 @@ def _sanitize_id(memory_id: str) -> str:
     if clean.endswith(".md"):
         clean = clean[:-3]
     if not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
-        raise SecurityError(f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed.")
+        raise SecurityError(
+            f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed."
+        )
     return clean
 
 
@@ -48,7 +58,12 @@ def _serialize_val(val: Any) -> str:
         return str(val)
     s = str(val).replace("\r", "").replace("\n", " ")
     # Quote strings that contain special characters or might be misinterpreted
-    if any(c in s for c in (":", "#", "[", "]", "{", "}", "'", '"', "\\")) or s.lower() in ("true", "false", "null", "none"):
+    if any(c in s for c in (":", "#", "[", "]", "{", "}", "'", '"', "\\")) or s.lower() in (
+        "true",
+        "false",
+        "null",
+        "none",
+    ):
         return json.dumps(s, ensure_ascii=False)
     return s
 
@@ -270,15 +285,17 @@ def search_memory(
                         continue
 
                 preview = body[:200] + ("…" if len(body) > 200 else "")
-                results.append({
-                    "id": entry_id,
-                    "title": entry_title,
-                    "kind": entry_kind,
-                    "tags": entry_tags,
-                    "timestamp": entry_ts,
-                    "preview": preview,
-                    "path": f".botex/memory/{file_p.name}",
-                })
+                results.append(
+                    {
+                        "id": entry_id,
+                        "title": entry_title,
+                        "kind": entry_kind,
+                        "tags": entry_tags,
+                        "timestamp": entry_ts,
+                        "preview": preview,
+                        "path": f".botex/memory/{file_p.name}",
+                    }
+                )
             except Exception:
                 continue
 

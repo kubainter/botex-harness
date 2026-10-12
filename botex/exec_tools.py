@@ -18,26 +18,24 @@ Hard rules:
 - child environment is sanitized (secret-named variables stripped)
 - hard timeout with process-tree kill; stdout/stderr capped and secret-masked
 """
+
 import asyncio
 import os
 import re
 import shlex
-import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 try:
-    from .security import mask_secrets
     from .context_guard import sanitize_and_vault_output
+    from .security import mask_secrets
 except (ImportError, ValueError):
-    from security import mask_secrets
     from context_guard import sanitize_and_vault_output
+    from security import mask_secrets
 
 # Environment variables whose names look like credentials are not propagated
 # into the child process.
-_SECRET_ENV_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|passwd|password|credential|auth)"
-)
+_SECRET_ENV_RE = re.compile(r"(?i)(api[_-]?key|token|secret|passwd|password|credential|auth)")
 
 
 def _split_command(command: str) -> List[str]:
@@ -110,10 +108,7 @@ def command_policy_error(command: str, *, allowlist: List[str], deny_args: List[
 
 
 def _sanitized_env() -> Dict[str, str]:
-    return {
-        k: v for k, v in os.environ.items()
-        if not _SECRET_ENV_RE.search(k)
-    }
+    return {k: v for k, v in os.environ.items() if not _SECRET_ENV_RE.search(k)}
 
 
 async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
@@ -148,9 +143,7 @@ async def run_command(
     Execute ``command`` inside ``workspace_root`` under the configured policy.
     Returns a dict: ok, exit_code, stdout (masked, truncated), timed_out.
     """
-    policy_error = command_policy_error(
-        command, allowlist=allowlist, deny_args=deny_args
-    )
+    policy_error = command_policy_error(command, allowlist=allowlist, deny_args=deny_args)
     if policy_error:
         return {"ok": False, "error": policy_error}
 
@@ -182,9 +175,7 @@ async def run_command(
     # Decode the whole stream BEFORE any truncation so a multi-byte UTF-8
     # sequence is never cut in half.
     full_text = (stdout_b or b"").decode("utf-8", errors="replace")
-    text, vault_id = sanitize_and_vault_output(
-        full_text, "run_command", str(workspace_root)
-    )
+    text, vault_id = sanitize_and_vault_output(full_text, "run_command", str(workspace_root))
     if len(text.encode("utf-8")) > max_output_bytes:
         text = text.encode("utf-8")[:max_output_bytes].decode("utf-8", errors="ignore")
         text += f"\n[... output truncated at {max_output_bytes} bytes]"
