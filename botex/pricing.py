@@ -18,11 +18,11 @@ Router/meta models (``openrouter/auto``, ``openrouter/auto-beta``,
 the ``on_unknown`` policy ("allow" by default). A router can still pick an
 expensive underlying model internally; the cap cannot see inside it.
 """
+
 import json
 import sys
 import time
 import urllib.request
-from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from botex.config import PROJECT_ROOT

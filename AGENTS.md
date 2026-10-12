@@ -39,11 +39,17 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
 
 *   **Testing (Pytest):** To run the full test suite, use the following command with the environment variable set:
     ```bash
-    PYTHONPATH=. python -m pytest tests/test_botex.py
+    PYTHONPATH=. python -m pytest tests/
     ```
-*   **Linting and Formatting (Ruff):** The project uses Ruff. To check the code:
+*   **Linting and Formatting (Ruff):** The project uses Ruff. Always run both check and format validation before committing changes:
     ```bash
     ruff check .
+    ruff format --check .
+    ```
+    To automatically fix lint issues and reformat:
+    ```bash
+    ruff check --fix .
+    ruff format .
     ```
 *   **Installation:** The application is defined in `pyproject.toml`. To install in development mode, you can use:
     ```bash

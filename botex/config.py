@@ -13,6 +13,7 @@ Layered configuration for the BoteX harness. Resolution order
 All paths declared in the config are resolved against the project root
 (the directory containing this ``botex`` package) unless absolute.
 """
+
 import fnmatch
 import json
 import os
@@ -220,15 +221,45 @@ DEFAULTS: Dict[str, Any] = {
         # Single-word entries match whole argument tokens; multi-word entries
         # match "<binary> <args>". Keep eval-style flags and git mutations out.
         "deny_args": [
-            "python -c", "python3 -c", "py -c", "node -e", "node --eval",
-            "node -p", "npm exec", "npx",
-            "pip install", "pip uninstall",
-            "git push", "git commit", "git clean", "git reset", "git checkout",
-            "git switch", "git restore", "git rm", "git config", "git rebase",
-            "git merge", "git pull", "git fetch", "git clone", "git apply",
-            "git stash", "git tag", "git branch -d", "git branch -D",
-            "sudo", "rm", "del", "format", "shutdown", "reboot",
-            "curl", "wget", "iex", "invoke-expression",
+            "python -c",
+            "python3 -c",
+            "py -c",
+            "node -e",
+            "node --eval",
+            "node -p",
+            "npm exec",
+            "npx",
+            "pip install",
+            "pip uninstall",
+            "git push",
+            "git commit",
+            "git clean",
+            "git reset",
+            "git checkout",
+            "git switch",
+            "git restore",
+            "git rm",
+            "git config",
+            "git rebase",
+            "git merge",
+            "git pull",
+            "git fetch",
+            "git clone",
+            "git apply",
+            "git stash",
+            "git tag",
+            "git branch -d",
+            "git branch -D",
+            "sudo",
+            "rm",
+            "del",
+            "format",
+            "shutdown",
+            "reboot",
+            "curl",
+            "wget",
+            "iex",
+            "invoke-expression",
         ],
         "timeout_s": 120,
         "max_output_bytes": 20000,
@@ -450,12 +481,8 @@ def resolve_model(model: str = "", profile: str = "", provider: str = "") -> str
     if model:
         return model
     if not profile:
-        profile = (
-            load_config().get("engine", {}).get("default_profile") or "default"
-        )
-    env_override = os.environ.get(
-        f"BOTEX_{profile.upper().replace('-', '_')}_MODEL"
-    )
+        profile = load_config().get("engine", {}).get("default_profile") or "default"
+    env_override = os.environ.get(f"BOTEX_{profile.upper().replace('-', '_')}_MODEL")
     if env_override:
         return env_override
     _pname, pcfg = resolve_provider(provider)
@@ -493,8 +520,7 @@ def is_decisions_model(model: str, provider_cfg: Dict[str, Any]) -> bool:
     patterns = (provider_cfg or {}).get("decisions_models") or []
     if isinstance(patterns, str):
         patterns = [patterns]
-    return any(
-        fnmatch.fnmatchcase(model, str(p)) for p in patterns if p)
+    return any(fnmatch.fnmatchcase(model, str(p)) for p in patterns if p)
 
 
 def engine_setting(key: str, override: Optional[Any] = None) -> Any:
@@ -550,9 +576,11 @@ def resolve_workspace_source(value: str = "") -> tuple:
         if p.is_dir():
             return str(p.resolve()), "default_workspace"
         import sys
+
         sys.stderr.write(
             f"[botex] engine.default_workspace '{default}' is not an existing "
-            "directory; falling back to the current directory.\n")
+            "directory; falling back to the current directory.\n"
+        )
     return ".", "cwd"
 
 

@@ -8,6 +8,7 @@ applied only at the presentation layer (CLI prints). Strings returned by MCP
 tools stay plain. Degrades gracefully: disabled when stdout is not a TTY or
 when NO_COLOR is set.
 """
+
 import os
 import sys
 
@@ -73,11 +74,17 @@ def mark_status(text: str) -> str:
     if not colors_enabled():
         return text
     for token, style in (
-        ("[SUKCES]", "green"), ("[SUCCESS]", "green"), ("[OK]", "green"),
+        ("[SUKCES]", "green"),
+        ("[SUCCESS]", "green"),
+        ("[OK]", "green"),
         ("DONE", "green"),
-        ("[BŁĄD]", "red"), ("[FAILURE]", "red"), ("[BRAK]", "red"),
-        ("[MISSING]", "red"), ("ERROR", "red"),
-        ("STAGNANT", "yellow"), ("[default]", "cyan"),
+        ("[BŁĄD]", "red"),
+        ("[FAILURE]", "red"),
+        ("[BRAK]", "red"),
+        ("[MISSING]", "red"),
+        ("ERROR", "red"),
+        ("STAGNANT", "yellow"),
+        ("[default]", "cyan"),
     ):
         text = text.replace(token, f"{_CODES[style]}{token}{_RESET}")
     return text

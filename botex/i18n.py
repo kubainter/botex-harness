@@ -10,8 +10,9 @@ surface for agents, not a UI for operators.
 Resolution order: explicit set_language() > config ui.language /
 BOTEX_LANG env > auto-detect from OS locale > "en" fallback.
 """
-import os
+
 import locale
+import os
 
 _LANG = "en"
 SUPPORTED = ("en", "pl")
