@@ -41,7 +41,13 @@ __all__ = [
     "MAX_MEMORY_BYTES",
 ]
 
-VALID_KINDS = frozenset({"context", "decision", "handoff", "lesson"})
+_VALID_KINDS_MAP: dict[str, str] = {
+    "context": "context",
+    "decision": "decision",
+    "handoff": "handoff",
+    "lesson": "lesson",
+}
+VALID_KINDS = frozenset(_VALID_KINDS_MAP.keys())
 MEMORY_DIR_NAME = ".botex/memory"
 SCHEMA_VERSION = "ecc.memory.v1"
 MAX_MEMORY_BYTES = 1_048_576  # 1 MB cap
@@ -215,9 +221,7 @@ def save_memory(
         if not root_path.exists():
             return {"ok": False, "error": f"Workspace directory '{workspace_dir}' does not exist."}
 
-        norm_kind = str(kind).strip().lower()
-        if norm_kind not in VALID_KINDS:
-            norm_kind = "context"
+        norm_kind = _VALID_KINDS_MAP.get(str(kind).strip().lower(), "context")
 
         clean_tags = [sanitize_for_storage(str(t).strip()) for t in (tags or []) if str(t).strip()]
         masked_title = sanitize_for_storage(title.strip() or "Untitled Memory")
