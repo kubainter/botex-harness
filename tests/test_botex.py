@@ -2580,6 +2580,41 @@ def test_memory_sanitize_and_legacy_source():
         assert meta["kind"] == "decision"
         assert meta["tags"] == ["token: abc"]
         assert meta["source"] == "botex"
+
+        # 4. _VALID_KINDS_MAP and sever_taint_numeric verification
+        from botex.security import sever_taint_numeric
+
+        assert sever_taint_numeric("") == ""
+        assert sever_taint_numeric(None) == ""
+        assert sever_taint_numeric(0) == "0"
+        assert sever_taint_numeric(False) == "False"
+        test_text = "Zażółć gęślą jaźń 🚀\n---\ntitle: Safe\n"
+        assert sever_taint_numeric(test_text) == test_text
+
+        assert memory.VALID_KINDS == frozenset(memory._VALID_KINDS_MAP.keys())
+        assert memory._VALID_KINDS_MAP["context"] == "context"
+        assert memory._VALID_KINDS_MAP["decision"] == "decision"
+        assert memory._VALID_KINDS_MAP["handoff"] == "handoff"
+        assert memory._VALID_KINDS_MAP["lesson"] == "lesson"
+
+        # Case normalization and fallback to static constants
+        res_case = memory.save_memory(
+            workspace_dir=tmpdir,
+            title="Case Kind Entry",
+            content="case test",
+            kind="  LESSON  ",
+        )
+        assert res_case["ok"] is True
+        assert res_case["kind"] == "lesson"
+
+        res_fallback = memory.save_memory(
+            workspace_dir=tmpdir,
+            title="Fallback Kind Entry",
+            content="fallback test",
+            kind="invalid_unknown_kind",
+        )
+        assert res_fallback["ok"] is True
+        assert res_fallback["kind"] == "context"
     print("[PASS] Memory Sanitize & Legacy Source Tests")
 
 

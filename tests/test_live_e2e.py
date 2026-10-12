@@ -13,6 +13,7 @@ Safety & Isolation:
 - Automatically skipped if `OPENROUTER_API_TESTS_KEY` is not set.
 - All file operations run in isolated temporary workspace directories.
 """
+
 import asyncio
 import json
 import os
@@ -44,7 +45,9 @@ DEFAULT_TEST_MODEL = _explicit_model or "openrouter/free"
 # Candidate models tried in order when BOTEX_TEST_MODEL is not set explicitly.
 # All are $0.00/M tokens with tool-calling support per the OpenRouter catalog.
 MODEL_CANDIDATES = (
-    [_explicit_model] if _explicit_model else [
+    [_explicit_model]
+    if _explicit_model
+    else [
         "openrouter/free",
         "qwen/qwen3.8-27b:free",
         "nvidia/nemotron-3-super-120b-a12b:free",
@@ -103,6 +106,7 @@ def _setup_test_config():
     # reference too so MCP tools see the same test config.
     try:
         import server as server_module
+
         server_module.load_config = patched_load_config
     except ImportError:
         pass
@@ -242,7 +246,9 @@ async def run_live_read_before_write_patch():
 
         # Verify on-disk file was actually modified and syntax is valid
         content = math_file.read_text(encoding="utf-8")
-        assert "a * b" in content or "a*b" in content, f"Expected fix 'a * b' in file, got: {content}"
+        assert "a * b" in content or "a*b" in content, (
+            f"Expected fix 'a * b' in file, got: {content}"
+        )
         print("  -> Read-before-write patch verified successfully on disk!")
 
 
@@ -320,7 +326,9 @@ async def run_live_destructive_ops():
         (root / "draft.txt").write_text("Draft notes\n", encoding="utf-8")
         (root / "obsolete.tmp").write_text("junk\n", encoding="utf-8")
 
-        print(f"\n[E2E] Running destructive ops (move_file + delete_file) with model: {ACTIVE_MODEL}...")
+        print(
+            f"\n[E2E] Running destructive ops (move_file + delete_file) with model: {ACTIVE_MODEL}..."
+        )
         res = await run_botex_task(
             task=(
                 "Rename draft.txt to final.txt using move_file, then delete "
@@ -389,8 +397,7 @@ async def run_live_read_url():
         print(f"\n[E2E] Running read_url (net) with model: {ACTIVE_MODEL}...")
         res = await run_botex_task(
             task=(
-                "Use read_url to fetch https://example.com/ and report the "
-                "page's <title> content."
+                "Use read_url to fetch https://example.com/ and report the page's <title> content."
             ),
             workspace_dir=tmpdir,
             model=ACTIVE_MODEL,
@@ -544,7 +551,9 @@ def main():
 
     print(f"[INFO] Using test key from '{TEST_KEY_ENV}'")
     print(f"[INFO] Candidate models: {', '.join(MODEL_CANDIDATES)}")
-    print("[INFO] Zero Data Retention (ZDR) disabled specifically for test provider to allow free-tier models.")
+    print(
+        "[INFO] Zero Data Retention (ZDR) disabled specifically for test provider to allow free-tier models."
+    )
 
     _setup_test_config()
 
@@ -559,8 +568,10 @@ def main():
             if res.get("ok"):
                 break
             if _is_rate_limited(res):
-                print("\n[SKIP] Provider rate limit reached (free daily quota) — "
-                      "live suite cannot run right now.")
+                print(
+                    "\n[SKIP] Provider rate limit reached (free daily quota) — "
+                    "live suite cannot run right now."
+                )
                 print("       Wait for the daily reset or set BOTEX_TEST_MODEL to a paid model.")
                 sys.exit(0)
             if not _is_model_unavailable(res):
@@ -569,9 +580,7 @@ def main():
         _assert_recon(res)
 
         # The model that passed the probe goes first for every later scenario.
-        MODEL_CANDIDATES[:] = (
-            [ACTIVE_MODEL] + [m for m in MODEL_CANDIDATES if m != ACTIVE_MODEL]
-        )
+        MODEL_CANDIDATES[:] = [ACTIVE_MODEL] + [m for m in MODEL_CANDIDATES if m != ACTIVE_MODEL]
 
         _drive(run_live_read_before_write_patch, "read-before-write patch")
         _drive(run_live_recipe_explorer, "recipe code-explorer")
@@ -583,8 +592,10 @@ def main():
         print("\n" + "=" * 60)
         print("[SUCCESS] ALL LIVE E2E TESTS PASSED!")
         if RATE_LIMITED:
-            print(f"[INFO] {len(RATE_LIMITED)} scenario(s) skipped — provider rate "
-                  f"limit: {', '.join(RATE_LIMITED)}")
+            print(
+                f"[INFO] {len(RATE_LIMITED)} scenario(s) skipped — provider rate "
+                f"limit: {', '.join(RATE_LIMITED)}"
+            )
         print("=" * 60)
     except Exception as exc:
         print(f"\n[FAILURE] E2E test execution error: {exc}")
