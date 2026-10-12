@@ -84,10 +84,10 @@ def _get_regex_outline(content: str) -> List[Dict[str, Any]]:
 
     class_pat = re.compile(r"^(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z0-9_]+)")
     fn_pat = re.compile(
-        r"^(?:\s*(?:public|private|protected|static|async|function|def|fn|func)\s+)+([A-Za-z0-9_]+)\s*\("
+        r"^(?:(?:public|private|protected|static|async|function|def|fn|func)\s+)+([A-Za-z0-9_]+)\s*\("
     )
     arrow_pat = re.compile(
-        r"^(?:\s*(?:const|let|var)\s+)+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>"
+        r"^(?:(?:const|let|var)\s+)+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>"
     )
     header_pat = re.compile(r"^(#{1,4})\s+(.+)")
 
