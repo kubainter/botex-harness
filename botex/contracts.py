@@ -8,10 +8,11 @@ policy and (later) the MCP result layer. A run's public ``status`` stays
 stable for consumers; ``failure_kind`` explains *why* it ended that way and
 drives the fallback decision.
 """
+
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from openai import APITimeoutError, APIConnectionError
+from openai import APIConnectionError, APITimeoutError
 
 # Public status -> default failure kind. Sites that can disambiguate further
 # (tool-call preflight, prose-refusal strikes, provider exceptions) set
@@ -40,33 +41,37 @@ STATUS_FAILURE_KIND: Dict[str, Optional[str]] = {
 # provider-side failures, semantic refusals and tool-call misuse (a
 # stronger candidate forms valid calls). Caller/config/workspace
 # errors can never be fixed by a different model.
-FALLBACKABLE_KINDS = frozenset({
-    "capability_missing",
-    "tool_call_unsupported",
-    "model_tool_misuse",
-    "model_refusal",
-    "no_progress",
-    "token_exhausted",
-    "request_timeout",
-    "time_exhausted",
-    "turns_exhausted",
-    "provider_policy_denied",
-    "provider_unavailable",
-    "provider_error",
-    "budget_or_price_block",
-    "security_or_policy_block",
-    "contract_failed",
-})
+FALLBACKABLE_KINDS = frozenset(
+    {
+        "capability_missing",
+        "tool_call_unsupported",
+        "model_tool_misuse",
+        "model_refusal",
+        "no_progress",
+        "token_exhausted",
+        "request_timeout",
+        "time_exhausted",
+        "turns_exhausted",
+        "provider_policy_denied",
+        "provider_unavailable",
+        "provider_error",
+        "budget_or_price_block",
+        "security_or_policy_block",
+        "contract_failed",
+    }
+)
 
 # Statuses that must never fall back regardless of their kind — the kind
 # alone cannot distinguish them (BUDGET_EXCEEDED shares budget_or_price_block
 # with PRICE_EXCEEDED; VERIFICATION_FAILED shares contract_failed).
-NEVER_FALLBACK_STATUSES = frozenset({
-    "BUDGET_EXCEEDED",
-    "VERIFICATION_FAILED",
-    "CONFIG_ERROR",
-    "ERROR",
-})
+NEVER_FALLBACK_STATUSES = frozenset(
+    {
+        "BUDGET_EXCEEDED",
+        "VERIFICATION_FAILED",
+        "CONFIG_ERROR",
+        "ERROR",
+    }
+)
 
 
 def classify_api_error(exc: BaseException) -> str:
@@ -129,7 +134,8 @@ class TaskContract:
     - ``file_output`` — ``required_output_path`` exists on disk as a
                         non-empty, syntax-valid file.
     """
-    kind: str                      # "analysis" | "edit" | "file_output"
+
+    kind: str  # "analysis" | "edit" | "file_output"
     required_output_path: str = ""
     min_summary_chars: int = 0
 
@@ -145,9 +151,7 @@ def resolve_task_contract(
     everything else is an edit contract.
     """
     if output_path:
-        return TaskContract(
-            kind="file_output", required_output_path=output_path)
+        return TaskContract(kind="file_output", required_output_path=output_path)
     if resolved_mode == "readonly":
-        return TaskContract(
-            kind="analysis", min_summary_chars=ANALYSIS_MIN_SUMMARY_CHARS)
+        return TaskContract(kind="analysis", min_summary_chars=ANALYSIS_MIN_SUMMARY_CHARS)
     return TaskContract(kind="edit")

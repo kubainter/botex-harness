@@ -8,21 +8,46 @@ Supports context notes, architectural decisions, task handoffs, and lessons lear
 Format: Markdown with YAML frontmatter (compatible with ecc.memory.v1).
 Location: <workspace_dir>/.botex/memory/
 """
+
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+import warnings
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from .security import resolve_safe_path, mask_secrets, wrap_untrusted_content, SecurityError
+    from .security import (
+        SecurityError,
+        resolve_safe_path,
+        sanitize_for_storage,
+        wrap_untrusted_content,
+    )
 except (ImportError, ValueError):
-    from security import resolve_safe_path, mask_secrets, wrap_untrusted_content, SecurityError
+    from security import (
+        SecurityError,
+        resolve_safe_path,
+        sanitize_for_storage,
+        wrap_untrusted_content,
+    )
 
-__all__ = ["save_memory", "search_memory", "read_memory", "VALID_KINDS", "MAX_MEMORY_BYTES"]
+__all__ = [
+    "save_memory",
+    "search_memory",
+    "read_memory",
+    "purge_ephemeral_memories",
+    "VALID_KINDS",
+    "MAX_MEMORY_BYTES",
+]
 
-VALID_KINDS = frozenset({"context", "decision", "handoff", "lesson"})
+_VALID_KINDS_MAP: dict[str, str] = {
+    "context": "context",
+    "decision": "decision",
+    "handoff": "handoff",
+    "lesson": "lesson",
+}
+VALID_KINDS = frozenset(_VALID_KINDS_MAP.keys())
 MEMORY_DIR_NAME = ".botex/memory"
 SCHEMA_VERSION = "ecc.memory.v1"
 MAX_MEMORY_BYTES = 1_048_576  # 1 MB cap
@@ -34,7 +59,9 @@ def _sanitize_id(memory_id: str) -> str:
     if clean.endswith(".md"):
         clean = clean[:-3]
     if not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
-        raise SecurityError(f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed.")
+        raise SecurityError(
+            f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed."
+        )
     return clean
 
 
@@ -48,7 +75,12 @@ def _serialize_val(val: Any) -> str:
         return str(val)
     s = str(val).replace("\r", "").replace("\n", " ")
     # Quote strings that contain special characters or might be misinterpreted
-    if any(c in s for c in (":", "#", "[", "]", "{", "}", "'", '"', "\\")) or s.lower() in ("true", "false", "null", "none"):
+    if any(c in s for c in (":", "#", "[", "]", "{", "}", "'", '"', "\\")) or s.lower() in (
+        "true",
+        "false",
+        "null",
+        "none",
+    ):
         return json.dumps(s, ensure_ascii=False)
     return s
 
@@ -163,24 +195,37 @@ def save_memory(
     kind: str = "context",
     tags: Optional[List[str]] = None,
     memory_id: Optional[str] = None,
-    source: str = "botex",
+    origin: str = "botex",
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """
     Save a context, decision, handoff, or lesson entry to the workspace Memory Vault.
     Masks secrets and ensures directory isolation.
+
+    ``origin`` labels the writer; the legacy ``source=`` keyword is still accepted.
     """
     try:
+        legacy_origin = kwargs.pop("source", None)
+        if kwargs:
+            raise TypeError(f"Unexpected arguments: {', '.join(sorted(kwargs))}")
+        if legacy_origin is not None:
+            warnings.warn(
+                "The 'source' keyword argument is deprecated; use 'origin' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if origin == "botex":
+                origin = legacy_origin
+
         root_path = Path(workspace_dir).resolve()
         if not root_path.exists():
             return {"ok": False, "error": f"Workspace directory '{workspace_dir}' does not exist."}
 
-        norm_kind = str(kind).strip().lower()
-        if norm_kind not in VALID_KINDS:
-            norm_kind = "context"
+        norm_kind = _VALID_KINDS_MAP.get(str(kind).strip().lower(), "context")
 
-        clean_tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
-        masked_title = mask_secrets(title.strip() or "Untitled Memory")
-        masked_content = mask_secrets(content.strip())
+        clean_tags = [sanitize_for_storage(str(t).strip()) for t in (tags or []) if str(t).strip()]
+        masked_title = sanitize_for_storage(title.strip() or "Untitled Memory")
+        masked_content = sanitize_for_storage(content.strip())
 
         if len(masked_content.encode("utf-8")) > MAX_MEMORY_BYTES:
             return {
@@ -200,11 +245,15 @@ def save_memory(
             "kind": norm_kind,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "tags": clean_tags,
-            "source": source,
+            "source": sanitize_for_storage(str(origin)),
         }
 
-        full_text = _serialize_frontmatter(metadata, masked_content)
-        file_path.write_text(full_text, encoding="utf-8")
+        # Final barrier: the serialized document is sanitized again before the file sink.
+        full_text = sanitize_for_storage(_serialize_frontmatter(metadata, masked_content))
+        # codeql[py/clear-text-storage-sensitive-data]
+        file_path.write_text(
+            full_text, encoding="utf-8"
+        )  # lgtm[py/clear-text-storage-sensitive-data]
 
         rel_path = f".botex/memory/{mid}.md"
         return {
@@ -270,15 +319,17 @@ def search_memory(
                         continue
 
                 preview = body[:200] + ("…" if len(body) > 200 else "")
-                results.append({
-                    "id": entry_id,
-                    "title": entry_title,
-                    "kind": entry_kind,
-                    "tags": entry_tags,
-                    "timestamp": entry_ts,
-                    "preview": preview,
-                    "path": f".botex/memory/{file_p.name}",
-                })
+                results.append(
+                    {
+                        "id": entry_id,
+                        "title": entry_title,
+                        "kind": entry_kind,
+                        "tags": entry_tags,
+                        "timestamp": entry_ts,
+                        "preview": preview,
+                        "path": f".botex/memory/{file_p.name}",
+                    }
+                )
             except Exception:
                 continue
 
@@ -320,3 +371,36 @@ def read_memory(
         return {"ok": False, "error": f"Security violation: {se}"}
     except Exception as exc:
         return {"ok": False, "error": f"Failed to read memory: {exc}"}
+
+
+def purge_ephemeral_memories(workspace_dir: str = ".", max_age_days: int = 3) -> int:
+    """
+    Delete Memory Vault entries tagged ``ephemeral`` that are older than
+    ``max_age_days``. Entries without that tag (user notes, decisions,
+    handoffs, lessons) are never touched. Returns the number of deleted files.
+    """
+    deleted = 0
+    try:
+        mem_dir = Path(workspace_dir).resolve() / ".botex" / "memory"
+        if not mem_dir.is_dir():
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(int(max_age_days), 0))
+        for file_p in mem_dir.glob("*.md"):
+            try:
+                if not file_p.is_file():
+                    continue
+                meta, _ = _parse_frontmatter(file_p.read_text(encoding="utf-8", errors="replace"))
+                tags = [str(t).lower() for t in (meta.get("tags") or [])]
+                if "ephemeral" not in tags:
+                    continue
+                ts = datetime.fromisoformat(str(meta.get("timestamp") or ""))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts <= cutoff:
+                    file_p.unlink()
+                    deleted += 1
+            except Exception:
+                continue
+    except Exception:
+        return deleted
+    return deleted

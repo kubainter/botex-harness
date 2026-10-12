@@ -2,6 +2,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
+[![CI](https://github.com/kubainter/botex-harness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kubainter/botex-harness/actions/workflows/ci.yml)
 [![BoteX MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/kubainter/botex-harness/badges/card.svg)](https://glama.ai/mcp/servers/kubainter/botex-harness)
 
 Giving an LLM direct, unrestricted access to your repository usually ends the same way: it hallucinates line numbers, corrupts indentation, writes broken syntax, eats your token budget reading thousands of irrelevant lines, or gets stuck in an infinite fix-break loop.

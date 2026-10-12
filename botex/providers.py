@@ -12,10 +12,11 @@ Security boundary: provider-scoped request fields (``extra_body``,
 attribution headers) and API-key resolution live here; secrets never enter
 normalized responses or error strings.
 """
+
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from openai import AsyncOpenAI
 
@@ -67,6 +68,7 @@ class NormalizedResponse:
     provider_error | unknown. ``raw_finish_reason`` keeps the provider's
     original string for diagnostics.
     """
+
     finish_reason: str
     raw_finish_reason: str
     content: str
@@ -121,9 +123,7 @@ def normalize_response(response: Any) -> NormalizedResponse:
         finish_kind = "provider_error"
         raw_fr = "no_choices"
     else:
-        finish_kind = (
-            "tool_call" if tool_calls else _FINISH_KIND.get(raw_fr, "unknown")
-        )
+        finish_kind = "tool_call" if tool_calls else _FINISH_KIND.get(raw_fr, "unknown")
 
     usage = _get(response, "usage")
     prompt_details = _get(usage, "prompt_tokens_details") if usage else None
@@ -159,8 +159,7 @@ def build_async_client(
     ``client_factory`` is injectable so tests can substitute a fake client
     without touching this module.
     """
-    send_headers = provider_cfg.get(
-        "attribution_headers", provider_name == "openrouter")
+    send_headers = provider_cfg.get("attribution_headers", provider_name == "openrouter")
     return client_factory(
         base_url=provider_cfg.get("base_url") or "https://openrouter.ai/api/v1",
         api_key=api_key,
@@ -178,11 +177,7 @@ def resolve_api_key(
     if explicit:
         return explicit
     key_env = provider_cfg.get("api_key_env") or "OPENROUTER_API_KEY"
-    return (
-        os.environ.get(key_env)
-        or secrets_cfg.get(f"{provider_name}_api_key")
-        or ""
-    )
+    return os.environ.get(key_env) or secrets_cfg.get(f"{provider_name}_api_key") or ""
 
 
 def sanitize_provider_error(exc: BaseException, max_chars: int = 1024) -> str:
