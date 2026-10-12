@@ -147,7 +147,7 @@ def _offload_report(res: dict, workspace: str) -> dict:
         kind="context",
         tags=["ephemeral", "context_guard", "task_report"],
         memory_id=mem_id,
-        source="context_guard:run_subagent",
+        origin="context_guard:run_subagent",
     )
     if not saved.get("ok"):
         return res  # offload failed — keep the full inline report

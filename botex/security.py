@@ -117,6 +117,18 @@ def mask_secrets(text: str) -> str:
     return text
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def sanitize_for_storage(text: str) -> str:
+    """
+    Sanitization barrier for text persisted to disk: redacts secrets via
+    ``mask_secrets`` and strips non-printable control characters. Registered as a
+    CodeQL barrier in ``.github/codeql/extensions/sanitizers.yml``.
+    """
+    return mask_secrets(_CONTROL_CHARS.sub("", str(text)))
+
+
 def wrap_untrusted_content(content: str, tag: str = "untrusted_content", **attrs: str) -> str:
     """
     Wrap untrusted content in XML-like boundary tags to mitigate Prompt Injection (OWASP LLM01: Prompt Injection).
