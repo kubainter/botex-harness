@@ -27,7 +27,11 @@ _CODES = {
 def colors_enabled() -> bool:
     global _enabled
     if _enabled is None:
-        ok = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        force = os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE")
+        if force is not None and force != "0":
+            ok = True
+        else:
+            ok = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
         if ok and os.name == "nt":
             # Enable ANSI VT processing on Windows 10+ consoles.
             try:
