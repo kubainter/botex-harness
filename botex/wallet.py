@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import logging
 import os
 import time
@@ -306,15 +305,15 @@ class WalletService:
         self._cache: Dict[str, Tuple[float, CreditsInfo]] = {}
 
     def _build_cache_key(self, provider_name: str, auth_token: Optional[str] = None) -> str:
-        """Derive a taint-safe cache tag using keyed HMAC-SHA256 (CodeQL CWE-327/CWE-312)."""
+        """Derive a taint-safe cache tag using keyed BLAKE2b (CodeQL CWE-327/CWE-312)."""
         prov = mask_secrets((provider_name or "").strip()).lower()
         if auth_token:
             secret_salt = os.environ.get(
                 "BOTEX_KEY_HASH_SECRET", "botex-wallet-cache-salt-default"
-            ).encode("utf-8")
-            fingerprint = hmac.new(
-                secret_salt, auth_token.encode("utf-8"), hashlib.sha256
-            ).hexdigest()[:16]
+            ).encode("utf-8")[:64]
+            fingerprint = hashlib.blake2b(
+                auth_token.encode("utf-8"), key=secret_salt, digest_size=8
+            ).hexdigest()
             return f"{prov}:{fingerprint}"
         return f"{prov}:default"
 

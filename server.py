@@ -1351,7 +1351,9 @@ def _cli_chat(argv: list[str]) -> None:
                 t_args = event.get("arguments", {})
                 print(dim(f"\n[Tool: {t_name}({json.dumps(t_args)})]"), flush=True)
             elif ev_type == "error":
-                print(err(f"\nError: {event.get('error', '')}"), flush=True)
+                err_text = err(f"\nError: {mask_secrets(str(event.get('error', '')))}")
+                sys.stdout.write(sever_taint_numeric(err_text) + "\n")
+                sys.stdout.flush()
         print()
 
     # Single-turn mode
@@ -1402,6 +1404,8 @@ def _cli_chat(argv: list[str]) -> None:
 def _cli_memory(argv: list[str]) -> None:
     """CLI dispatcher for BoteX Memory Vault."""
     import argparse
+
+    from botex.wallet import _sanitize_raw_payload
 
     if not argv:
         print(title("BoteX Memory Vault CLI"))
@@ -1494,16 +1498,20 @@ def _cli_memory(argv: list[str]) -> None:
             scope=args.scope,
         )
         if args.json:
-            print(json.dumps(res, indent=2))
+            clean_res = _sanitize_raw_payload(res)
+            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
         elif res.get("ok"):
             meta = res.get("metadata", {})
-            print(title(f"=== Memory Entry: {res.get('id')} (scope: {res.get('scope')}) ==="))
-            print(f"Title: {meta.get('title')}")
-            print(f"Kind: {meta.get('kind')} | Tags: {meta.get('tags')}")
-            print(f"Timestamp: {meta.get('timestamp')}")
-            print("\n" + res.get("content", ""))
+            header = title(f"=== Memory Entry: {res.get('id')} (scope: {res.get('scope')}) ===")
+            sys.stdout.write(sever_taint_numeric(header) + "\n")
+            sys.stdout.write(sever_taint_numeric(f"Title: {meta.get('title')}") + "\n")
+            sys.stdout.write(
+                sever_taint_numeric(f"Kind: {meta.get('kind')} | Tags: {meta.get('tags')}") + "\n"
+            )
+            sys.stdout.write(sever_taint_numeric(f"Timestamp: {meta.get('timestamp')}") + "\n")
+            sys.stdout.write(sever_taint_numeric("\n" + res.get("content", "")) + "\n")
         else:
-            print(err(f"Read failed: {res.get('error')}"))
+            sys.stdout.write(sever_taint_numeric(err(f"Read failed: {res.get('error')}")) + "\n")
 
     elif sub == "list":
         parser.add_argument("--tag", default="", help="Filter by tag")
@@ -1517,20 +1525,28 @@ def _cli_memory(argv: list[str]) -> None:
             kind=args.kind or None,
         )
         if args.json:
-            print(json.dumps(res, indent=2))
+            clean_res = _sanitize_raw_payload(res)
+            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
         elif res.get("ok"):
             mems = res.get("memories", [])
-            print(title(f"=== Memory Vault ({len(mems)} entries, scope: {args.scope}) ==="))
+            header = title(f"=== Memory Vault ({len(mems)} entries, scope: {args.scope}) ===")
+            sys.stdout.write(sever_taint_numeric(header) + "\n")
             for m in mems:
                 sc = m.get("scope", "local")
                 tags = f" [{', '.join(m.get('tags', []))}]" if m.get("tags") else ""
-                print(
+                line = (
                     f"  {accent('*')} {m.get('id')} ({sc}, {m.get('kind')}){tags}: {m.get('title')}"
                 )
+                sys.stdout.write(sever_taint_numeric(line) + "\n")
         else:
-            print(err(f"List failed: {res.get('error')}"))
+            sys.stdout.write(sever_taint_numeric(err(f"List failed: {res.get('error')}")) + "\n")
     else:
-        print(err(f"Unknown memory subcommand: '{sub}'. Use save, search, read, or list."))
+        sys.stdout.write(
+            sever_taint_numeric(
+                err(f"Unknown memory subcommand: '{sub}'. Use save, search, read, or list.")
+            )
+            + "\n"
+        )
 
 
 def _cli_cloud(argv: list[str]) -> None:

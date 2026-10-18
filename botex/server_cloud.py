@@ -611,7 +611,7 @@ async def get_memory(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Memory entry '{clean_mid}' not found.",
             )
-        return res
+        return botex_server.mask_secrets_recursive(res)
 
     res = search_memory(
         workspace_dir=ws,
@@ -626,7 +626,7 @@ async def get_memory(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to search memory entries.",
         )
-    return res
+    return botex_server.mask_secrets_recursive(res)
 
 
 @app.post("/api/memory")
@@ -655,7 +655,7 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to save memory entry.",
         )
-    return res
+    return botex_server.mask_secrets_recursive(res)
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +736,7 @@ async def save_chat_session_to_memory(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to save chat transcript to memory vault.",
         )
-    return res
+    return botex_server.mask_secrets_recursive(res)
 
 
 # ---------------------------------------------------------------------------
