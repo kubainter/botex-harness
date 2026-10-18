@@ -17,6 +17,10 @@ dependencies = [
     "python-dotenv>=1.0",
     "mcp>=2.0",
     "typing_extensions>=4.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "websockets>=12.0",
+    "sse-starlette>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +34,7 @@ exclude = [
     "typing_extensions.py",
     ".snapshots",
     ".botex",
+    ".agents",
     "build",
     "dist",
 ]
