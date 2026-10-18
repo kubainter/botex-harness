@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 try:
     from .security import (
         SecurityError,
+        mask_secrets,
         resolve_safe_path,
         sanitize_for_storage,
         sever_taint_numeric,
@@ -29,6 +30,7 @@ try:
 except (ImportError, ValueError):
     from security import (
         SecurityError,
+        mask_secrets,
         resolve_safe_path,
         sanitize_for_storage,
         sever_taint_numeric,
@@ -346,9 +348,15 @@ def save_memory(
             "scope": norm_scope,
         }
     except SecurityError as se:
-        return {"ok": False, "error": f"Security violation: {se}"}
+        return {
+            "ok": False,
+            "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+        }
     except Exception as exc:
-        return {"ok": False, "error": f"Failed to save memory: {exc}"}
+        return {
+            "ok": False,
+            "error": f"Failed to save memory: {sever_taint_numeric(mask_secrets(str(exc)))}",
+        }
 
 
 def search_memory(
@@ -442,7 +450,10 @@ def search_memory(
         results.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         return {"ok": True, "count": len(results), "memories": results}
     except Exception as exc:
-        return {"ok": False, "error": f"Failed to search memory: {exc}"}
+        return {
+            "ok": False,
+            "error": f"Failed to search memory: {sever_taint_numeric(mask_secrets(str(exc)))}",
+        }
 
 
 def read_memory(
@@ -497,9 +508,15 @@ def read_memory(
             "scope": found_scope,
         }
     except SecurityError as se:
-        return {"ok": False, "error": f"Security violation: {se}"}
+        return {
+            "ok": False,
+            "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+        }
     except Exception as exc:
-        return {"ok": False, "error": f"Failed to read memory: {exc}"}
+        return {
+            "ok": False,
+            "error": f"Failed to read memory: {sever_taint_numeric(mask_secrets(str(exc)))}",
+        }
 
 
 def list_memories(
