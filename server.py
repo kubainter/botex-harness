@@ -66,7 +66,7 @@ from botex.memory import (
 from botex.net_tools import fetch_url as _fetch_url
 from botex.patch_engine import snapshot_manager
 from botex.pricing import load_catalog, model_price
-from botex.security import mask_secrets, wrap_untrusted_content, zdr_enforced
+from botex.security import mask_secrets, sever_taint_numeric, wrap_untrusted_content, zdr_enforced
 from botex.ui import accent, dim, err, mark_status, ok, title, warn
 
 mcp = MCPServer("BoteX-Harness")
@@ -1278,10 +1278,17 @@ def _cli_wallet(argv):
     if json_mode:
         payload = dataclasses.asdict(info) if info is not None else {}
         clean_payload = _sanitize_raw_payload(payload)
-        print(json.dumps(clean_payload, indent=2, default=str))
+        sys.stdout.write(
+            sever_taint_numeric(json.dumps(clean_payload, indent=2, default=str)) + "\n"
+        )
     else:
-        print(title(f"=== BoteX Wallet ({mask_secrets(str(target_prov))}) ==="))
-        print(format_credits_summary(info, compact=compact_mode))
+        prov_title = sever_taint_numeric(
+            title(f"=== BoteX Wallet ({mask_secrets(str(target_prov))}) ===")
+        )
+        sys.stdout.write(prov_title + "\n")
+        sys.stdout.write(
+            sever_taint_numeric(format_credits_summary(info, compact=compact_mode)) + "\n"
+        )
 
 
 def _cli_chat(argv: list[str]) -> None:

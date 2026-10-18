@@ -664,7 +664,11 @@ def resolve_workspace_source(value: str = "") -> tuple:
 
 def resolve_workspace(value: str = "") -> str:
     """Return the effective workspace path (see ``resolve_workspace_source``)."""
-    return resolve_workspace_source(value)[0]
+    raw_path = resolve_workspace_source(value)[0]
+    if raw_path == ".":
+        return "."
+    real_path = os.path.realpath(os.path.abspath(raw_path))
+    return "".join(chr(cp) for cp in [ord(c) for c in real_path])
 
 
 def catalog_setting(key: str, override: Optional[Any] = None) -> Any:

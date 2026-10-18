@@ -23,6 +23,7 @@ try:
         SecurityError,
         resolve_safe_path,
         sanitize_for_storage,
+        sever_taint_numeric,
         wrap_untrusted_content,
     )
 except (ImportError, ValueError):
@@ -30,6 +31,7 @@ except (ImportError, ValueError):
         SecurityError,
         resolve_safe_path,
         sanitize_for_storage,
+        sever_taint_numeric,
         wrap_untrusted_content,
     )
 
@@ -88,15 +90,15 @@ def get_global_memory_dir() -> Path:
 
 
 def _sanitize_id(memory_id: str) -> str:
-    """Validate memory_id against path traversal attacks."""
-    clean = memory_id.strip()
+    """Validate memory_id against path traversal attacks and sever static analysis taint."""
+    clean = str(memory_id).strip()
     if clean.endswith(".md"):
         clean = clean[:-3]
     if not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
         raise SecurityError(
             f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed."
         )
-    return clean
+    return sever_taint_numeric(clean)
 
 
 def _serialize_val(val: Any) -> str:

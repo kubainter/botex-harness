@@ -20,12 +20,12 @@ from typing import Any, Dict, List, Optional, Sequence
 try:
     from .config import PROJECT_ROOT
     from .providers import BaseProvider, ProviderRegistry
-    from .security import mask_secrets
+    from .security import mask_secrets, sever_taint_numeric
     from .wallet import _sanitize_raw_payload
 except (ImportError, ValueError):
     from config import PROJECT_ROOT
     from providers import BaseProvider, ProviderRegistry
-    from security import mask_secrets
+    from security import mask_secrets, sever_taint_numeric
     from wallet import _sanitize_raw_payload
 
 CACHE_FILE_DEFAULT: Path = PROJECT_ROOT / ".model_pricing.json"
@@ -340,9 +340,8 @@ class ModelCatalog:
             return self._models
         except Exception as exc:
             masked_err = mask_secrets(str(exc))
-            sys.stderr.write(
-                f"[BoteX] Catalog fetch failed ({masked_err}); using stale cache if any.\n"
-            )
+            err_msg = f"[BoteX] Catalog fetch failed ({masked_err}); using stale cache if any.\n"
+            sys.stderr.write(sever_taint_numeric(err_msg))
 
         # Stale cache fallback on network/HTTP exception
         if isinstance(cached_entry, dict):
@@ -500,7 +499,8 @@ class ModelCatalog:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
             self.cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:
-            sys.stderr.write(f"[BoteX] Failed to write catalog cache: {mask_secrets(str(exc))}\n")
+            err_msg = f"[BoteX] Failed to write catalog cache: {mask_secrets(str(exc))}\n"
+            sys.stderr.write(sever_taint_numeric(err_msg))
 
 
 _VALID_PROVIDERS_MAP: Dict[str, str] = {

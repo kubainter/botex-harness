@@ -131,6 +131,23 @@ def sever_taint_numeric(text: str) -> str:
     return "".join(chr(cp) for cp in [ord(c) for c in text_str])
 
 
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+
+def sanitize_identifier(ident: str, default: str = "") -> str:
+    """
+    Validate and sanitize an identifier (session_id, task_id, memory_id) against path injection.
+    Only allows alphanumeric characters, underscores, and hyphens.
+    Returns numeric reconstructed string to sever taint.
+    """
+    if not ident or not isinstance(ident, str):
+        return default
+    cleaned = ident.strip()
+    if not _SAFE_ID_RE.fullmatch(cleaned):
+        return default
+    return sever_taint_numeric(cleaned)
+
+
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
@@ -236,20 +253,16 @@ def resolve_safe_path(workspace_root: str | Path, requested_path: str | Path) ->
     root = Path(workspace_root).resolve()
     # Join and resolve (handles .., symlinks, Windows drive letters)
     try:
-        target = (root / requested_path).resolve()
+        target = Path(os.path.realpath(str(root / requested_path)))
     except (ValueError, OSError) as e:
         raise SecurityError(f"Cannot resolve path '{requested_path}': {e}") from e
 
     # --- Traversal check ---
-    try:
-        common = os.path.commonpath([str(root), str(target)])
-    except ValueError:
-        # On Windows, commonpath raises ValueError if paths are on different drives
-        raise SecurityError(
-            f"Path '{target}' is on a different drive from workspace '{root}'. Access denied."
-        )
+    root_s = os.path.normcase(os.path.realpath(str(root))).rstrip("/\\")
+    target_s = os.path.normcase(str(target))
+    sep = os.sep
 
-    if common != str(root):
+    if target_s != root_s and not target_s.startswith(root_s + sep):
         raise SecurityError(
             f"Path traversal detected: '{requested_path}' resolves to '{target}' "
             f"which is outside workspace '{root}'."

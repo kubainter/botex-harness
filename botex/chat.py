@@ -48,6 +48,7 @@ try:
         SecurityError,
         check_model_zdr,
         mask_secrets,
+        sanitize_identifier,
         sever_taint_numeric,
     )
 except (ImportError, ValueError):
@@ -79,6 +80,7 @@ except (ImportError, ValueError):
         SecurityError,
         check_model_zdr,
         mask_secrets,
+        sanitize_identifier,
         sever_taint_numeric,
     )
 
@@ -416,10 +418,11 @@ class ChatSession:
         if not self.workspace_dir or not self.messages:
             return
         try:
-            safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "", self.session_id)
+            safe_id = sanitize_identifier(self.session_id)
             if not safe_id:
                 return
-            sessions_dir = os.path.join(self.workspace_dir, ".botex", "chat_sessions")
+            ws = resolve_workspace(self.workspace_dir)
+            sessions_dir = os.path.join(ws, ".botex", "chat_sessions")
             os.makedirs(sessions_dir, exist_ok=True)
             file_path = os.path.join(sessions_dir, f"{safe_id}.json")
             data = self.to_dict()
@@ -441,7 +444,7 @@ class ChatManager:
         self._sessions: Dict[str, ChatSession] = {}
 
     def _load_session_from_disk(self, session_id: str, workspace_dir: str) -> Optional[ChatSession]:
-        safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "", session_id)
+        safe_id = sanitize_identifier(session_id)
         if not safe_id:
             return None
         ws = resolve_workspace(workspace_dir)
@@ -541,7 +544,7 @@ class ChatManager:
 
     def delete_session(self, session_id: str, workspace_dir: str = "") -> bool:
         removed = self._sessions.pop(session_id, None) is not None
-        safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "", session_id)
+        safe_id = sanitize_identifier(session_id)
         if safe_id:
             ws = resolve_workspace(workspace_dir)
             file_path = os.path.join(ws, ".botex", "chat_sessions", f"{safe_id}.json")

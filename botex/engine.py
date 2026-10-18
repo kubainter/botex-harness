@@ -80,6 +80,7 @@ try:
         SecurityError,
         check_model_zdr,
         resolve_safe_path,
+        sever_taint_numeric,
         zdr_enforced,
     )
 except (ImportError, ValueError):
@@ -142,6 +143,7 @@ except (ImportError, ValueError):
         SecurityError,
         check_model_zdr,
         resolve_safe_path,
+        sever_taint_numeric,
         zdr_enforced,
     )
 
@@ -2106,9 +2108,8 @@ async def _run_botex_task_once_impl(
                             if models_used and not actual_model:
                                 actual_model = str(models_used[-1])
                     except Exception as exc:
-                        sys.stderr.write(
-                            f"OpenRouter generation telemetry skipped: {sanitize_provider_error(exc)}\n"
-                        )
+                        telemetry_err = f"OpenRouter generation telemetry skipped: {sanitize_provider_error(exc)}\n"
+                        sys.stderr.write(sever_taint_numeric(telemetry_err))
 
                 log_entry = log_run(
                     task_id=task_id,

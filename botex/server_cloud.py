@@ -50,7 +50,7 @@ from botex.chat import default_chat_manager, stream_chat_turn
 from botex.config import resolve_workspace
 from botex.engine import run_botex_task
 from botex.memory import read_memory, save_memory, search_memory
-from botex.security import mask_secrets
+from botex.security import mask_secrets, sanitize_identifier, sever_taint_numeric
 from botex.wallet import default_wallet_service
 
 logger = logging.getLogger(__name__)
@@ -489,11 +489,12 @@ async def list_tasks() -> Dict[str, Any]:
 @app.get("/api/tasks/{task_id}")
 async def get_task(task_id: str) -> Dict[str, Any]:
     """Get status and structured result of a background task."""
-    if task_id not in _TASKS:
+    clean_tid = sanitize_identifier(task_id)
+    if not clean_tid or clean_tid not in _TASKS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    entry = _TASKS[task_id]
+    entry = _TASKS[clean_tid]
     return {
-        "task_id": task_id,
+        "task_id": clean_tid,
         "status": entry.get("status"),
         "created_at": entry.get("created_at"),
         "finished_at": entry.get("finished_at"),
@@ -505,21 +506,22 @@ async def get_task(task_id: str) -> Dict[str, Any]:
 @app.post("/api/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str) -> Dict[str, Any]:
     """Abort a running background task and cancel any pending operator approvals."""
-    if task_id not in _TASKS:
+    clean_tid = sanitize_identifier(task_id)
+    if not clean_tid or clean_tid not in _TASKS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    entry = _TASKS[task_id]
+    entry = _TASKS[clean_tid]
 
     current_status = entry.get("status")
     if current_status in {"DONE", "FAILED", "CANCELLED"}:
         return {
             "ok": False,
-            "task_id": task_id,
+            "task_id": clean_tid,
             "status": current_status,
             "message": f"Task already in terminal state '{current_status}'.",
         }
 
     # Abort pending approval actions for this task
-    default_approval_manager.abort_task(task_id, reason="Task cancelled via API")
+    default_approval_manager.abort_task(clean_tid, reason="Task cancelled via API")
 
     # Cancel background worker task if active
     worker = entry.get("async_task")
@@ -534,7 +536,7 @@ async def cancel_task(task_id: str) -> Dict[str, Any]:
         "message": "Task cancelled by operator.",
     }
     entry["finished_at"] = time.time()
-    return {"ok": True, "task_id": task_id, "status": "CANCELLED"}
+    return {"ok": True, "task_id": clean_tid, "status": "CANCELLED"}
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +547,8 @@ async def cancel_task(task_id: str) -> Dict[str, Any]:
 @app.get("/api/approvals")
 async def list_approvals(task_id: Optional[str] = Query(default=None)) -> Dict[str, Any]:
     """List pending actions awaiting human operator decision."""
-    actions = default_approval_manager.get_pending_actions(task_id=task_id)
+    clean_tid = sanitize_identifier(task_id) if task_id else None
+    actions = default_approval_manager.get_pending_actions(task_id=clean_tid)
     masked_actions = [botex_server.mask_secrets_recursive(a) for a in actions]
     return {"pending_actions": masked_actions, "count": len(masked_actions)}
 
@@ -553,8 +556,14 @@ async def list_approvals(task_id: Optional[str] = Query(default=None)) -> Dict[s
 @app.post("/api/approvals/{action_id}/decide")
 async def decide_approval(action_id: str, body: ApprovalDecisionRequest) -> Dict[str, Any]:
     """Submit operator decision for a pending action."""
+    clean_aid = sanitize_identifier(action_id)
+    if not clean_aid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid action_id format.",
+        )
     resolved = default_approval_manager.resolve(
-        action_id=action_id,
+        action_id=clean_aid,
         approved=body.approved,
         reason=body.reason,
         remember=body.remember,
@@ -566,7 +575,7 @@ async def decide_approval(action_id: str, body: ApprovalDecisionRequest) -> Dict
         )
     return {
         "ok": True,
-        "action_id": action_id,
+        "action_id": clean_aid,
         "approved": body.approved,
         "reason": mask_secrets(body.reason),
     }
@@ -589,36 +598,63 @@ async def get_memory(
     """Search or read entries from the Memory Vault across local, global, or all scopes."""
     ws = resolve_workspace(workspace_dir)
     if memory_id:
-        res = read_memory(workspace_dir=ws, memory_id=memory_id, scope=scope)
+        clean_mid = sanitize_identifier(memory_id)
+        if not clean_mid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid memory_id format.",
+            )
+        res = read_memory(workspace_dir=ws, memory_id=clean_mid, scope=scope)
         if not res.get("ok"):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=res.get("error"))
+            logger.warning("Memory read failed for ID '%s': %s", clean_mid, res.get("error"))
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Memory entry '{clean_mid}' not found.",
+            )
         return res
 
-    return search_memory(
+    res = search_memory(
         workspace_dir=ws,
         query=query,
         tag=tag,
         kind=kind,
         scope=scope,
     )
+    if not res.get("ok"):
+        logger.warning("Memory search failed: %s", res.get("error"))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to search memory entries.",
+        )
+    return res
 
 
 @app.post("/api/memory")
 async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
     """Save an entry to the Memory Vault."""
     ws = resolve_workspace(body.workspace_dir)
+    clean_mid = sanitize_identifier(body.memory_id) if body.memory_id else None
+    if body.memory_id and not clean_mid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid memory_id format.",
+        )
     res = save_memory(
         workspace_dir=ws,
         title=body.title,
         content=body.content,
         kind=body.kind,
         tags=body.tags,
-        memory_id=body.memory_id,
+        memory_id=clean_mid,
         origin=body.origin,
         scope=body.scope,
     )
     if not res.get("ok"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=res.get("error"))
+        logger.warning("Memory save failed: %s", res.get("error"))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to save memory entry.",
+        )
     return res
 
 
@@ -638,12 +674,18 @@ async def list_chat_sessions(workspace_dir: str = Query("")) -> Dict[str, Any]:
 @app.get("/api/chat/sessions/{session_id}")
 async def get_chat_session(session_id: str, workspace_dir: str = Query("")) -> Dict[str, Any]:
     """Retrieve full transcript and metadata for a specific chat session."""
+    clean_sid = sanitize_identifier(session_id)
+    if not clean_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session_id format.",
+        )
     ws = resolve_workspace(workspace_dir)
-    sess = default_chat_manager.get_session(session_id, workspace_dir=ws)
+    sess = default_chat_manager.get_session(clean_sid, workspace_dir=ws)
     if not sess:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Chat session '{session_id}' not found.",
+            detail=f"Chat session '{clean_sid}' not found.",
         )
     return sess.to_dict()
 
@@ -651,14 +693,20 @@ async def get_chat_session(session_id: str, workspace_dir: str = Query("")) -> D
 @app.delete("/api/chat/sessions/{session_id}")
 async def delete_chat_session(session_id: str, workspace_dir: str = Query("")) -> Dict[str, Any]:
     """Delete a chat session from memory and disk."""
+    clean_sid = sanitize_identifier(session_id)
+    if not clean_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session_id format.",
+        )
     ws = resolve_workspace(workspace_dir)
-    ok = default_chat_manager.delete_session(session_id, workspace_dir=ws)
+    ok = default_chat_manager.delete_session(clean_sid, workspace_dir=ws)
     if not ok:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Chat session '{session_id}' not found.",
+            detail=f"Chat session '{clean_sid}' not found.",
         )
-    return {"ok": True, "session_id": session_id}
+    return {"ok": True, "session_id": clean_sid}
 
 
 @app.post("/api/chat/sessions/{session_id}/save_to_memory")
@@ -666,9 +714,15 @@ async def save_chat_session_to_memory(
     session_id: str, body: SaveChatToMemoryRequest
 ) -> Dict[str, Any]:
     """Export and store conversation transcript or summary into Workspace Memory Vault (.botex/memory/)."""
+    clean_sid = sanitize_identifier(session_id)
+    if not clean_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session_id format.",
+        )
     ws = resolve_workspace(body.workspace_dir)
     res = default_chat_manager.save_chat_to_memory(
-        session_id=session_id,
+        session_id=clean_sid,
         workspace_dir=ws,
         title=body.title,
         kind=body.kind,
@@ -677,9 +731,10 @@ async def save_chat_session_to_memory(
         tags=body.tags,
     )
     if not res.get("ok"):
+        logger.warning("Save chat to memory failed for '%s': %s", clean_sid, res.get("error"))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=res.get("error", "Failed to save chat transcript to memory vault."),
+            detail="Failed to save chat transcript to memory vault.",
         )
     return res
 
@@ -692,8 +747,14 @@ async def save_chat_session_to_memory(
 @app.post("/api/chat")
 async def post_chat(body: ChatRequest) -> EventSourceResponse:
     """Stream conversational chat turns using Server-Sent Events with periodic keepalives."""
+    clean_sid = sanitize_identifier(body.session_id) if body.session_id else None
+    if body.session_id and not clean_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session_id format.",
+        )
     session = default_chat_manager.get_or_create_session(
-        session_id=body.session_id,
+        session_id=clean_sid,
         workspace_dir=body.workspace_dir,
         model=body.model,
         provider=body.provider,
@@ -797,7 +858,8 @@ async def chat_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        logger.warning(f"WebSocket session terminated: {mask_secrets(str(exc))}")
+        clean_err = sever_taint_numeric(mask_secrets(str(exc)))
+        logger.warning("WebSocket session terminated: %s", clean_err)
     finally:
         heartbeat_task.cancel()
         _ACTIVE_WEBSOCKETS.pop(websocket, None)

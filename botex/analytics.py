@@ -24,7 +24,7 @@ try:
         snapshot_dir as _cfg_snapshot_dir,
     )
     from .contracts import STATUS_FAILURE_KIND
-    from .security import mask_secrets
+    from .security import mask_secrets, sever_taint_numeric
 except (ImportError, ValueError):
     from config import (
         analytics_file as _cfg_analytics_file,
@@ -36,7 +36,7 @@ except (ImportError, ValueError):
         snapshot_dir as _cfg_snapshot_dir,
     )
     from contracts import STATUS_FAILURE_KIND
-    from security import mask_secrets
+    from security import mask_secrets, sever_taint_numeric
 
 ANALYTICS_FILE = _cfg_analytics_file()
 SNAPSHOT_DIR = _cfg_snapshot_dir()
@@ -214,7 +214,8 @@ def print_run_summary(entry: Dict[str, Any]):
             f"Summary: {entry.get('summary', '')}",
             "=" * 40,
         ]
-        sys.stderr.write("\n".join(lines) + "\n")
+        output_str = "\n".join(lines) + "\n"
+        sys.stderr.write(sever_taint_numeric(output_str))
 
 
 def cli_stats(period: str = "week"):
