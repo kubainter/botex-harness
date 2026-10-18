@@ -30,6 +30,7 @@ exclude = [
     "typing_extensions.py",
     ".snapshots",
     ".botex",
+    ".agents",
     "build",
     "dist",
 ]
