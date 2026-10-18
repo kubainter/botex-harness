@@ -17,6 +17,7 @@ Comprehensive unit and integration test suite covering:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -465,7 +466,14 @@ def test_cli_cloud_parser():
 # 10. Progressive Web App (PWA) Static Shell & Manifest
 # ---------------------------------------------------------------------------
 
+# web/dist is a gitignored build artifact: these tests only run when the PWA was built.
+_requires_pwa_build = pytest.mark.skipif(
+    not (Path(__file__).resolve().parent.parent / "web" / "dist" / "index.html").is_file(),
+    reason="web/dist not built (run `npm run build` in web/)",
+)
 
+
+@_requires_pwa_build
 def test_pwa_static_shell_served(client, monkeypatch):
     """PWA static entrypoint index.html is served at root / even in Strict Cloud Mode."""
     monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "strict-token-abc")
@@ -475,6 +483,7 @@ def test_pwa_static_shell_served(client, monkeypatch):
     assert '<div id="app"></div>' in resp.text
 
 
+@_requires_pwa_build
 def test_pwa_manifest_and_sw(client, monkeypatch):
     """PWA manifest and Service Worker are publicly accessible for offline installation."""
     monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "strict-token-abc")
