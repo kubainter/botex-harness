@@ -24,7 +24,7 @@ try:
         snapshot_dir as _cfg_snapshot_dir,
     )
     from .contracts import STATUS_FAILURE_KIND
-    from .security import mask_secrets
+    from .security import mask_secrets, sever_taint_numeric
 except (ImportError, ValueError):
     from config import (
         analytics_file as _cfg_analytics_file,
@@ -36,7 +36,7 @@ except (ImportError, ValueError):
         snapshot_dir as _cfg_snapshot_dir,
     )
     from contracts import STATUS_FAILURE_KIND
-    from security import mask_secrets
+    from security import mask_secrets, sever_taint_numeric
 
 ANALYTICS_FILE = _cfg_analytics_file()
 SNAPSHOT_DIR = _cfg_snapshot_dir()
@@ -44,6 +44,7 @@ SNAPSHOT_DIR = _cfg_snapshot_dir()
 # Approximate pricing per 1M tokens for common OpenRouter models (fallback estimates)
 MODEL_PRICING_ESTIMATES = {
     "openrouter/auto": {"prompt": 0.20, "completion": 0.80},
+    "openrouter/pareto-code": {"prompt": 0.25, "completion": 1.00},
     "qwen/qwen-2.5-coder-32b-instruct": {"prompt": 0.07, "completion": 0.16},
     "deepseek/deepseek-chat": {"prompt": 0.14, "completion": 0.28},
     "anthropic/claude-3.7-sonnet": {"prompt": 3.00, "completion": 15.00},
@@ -95,6 +96,9 @@ def log_run(
     cost_usd: Optional[float] = None,
     failure_kind: Optional[str] = None,
     provider: Optional[str] = None,
+    cache_write_tokens: int = 0,
+    queue_time_ms: Optional[float] = None,
+    generation_time_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Record a completed BoteX run into the ledger.
 
@@ -104,6 +108,8 @@ def log_run(
     """
     if cost_usd is None:
         cost_usd = calculate_cost_usd(model, prompt_tokens, completion_tokens)
+    else:
+        cost_usd = round(float(cost_usd), 6)
 
     masked_summary = mask_secrets(summary or "")
     stored_summary = masked_summary
@@ -116,7 +122,7 @@ def log_run(
     if failure_kind is None:
         failure_kind = STATUS_FAILURE_KIND.get(status)
 
-    entry = {
+    entry: Dict[str, Any] = {
         "task_id": task_id,
         "timestamp": datetime.now().isoformat(),
         "model": model,
@@ -127,6 +133,7 @@ def log_run(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "cached_tokens": cached_tokens,
+        "cache_write_tokens": int(cache_write_tokens or 0),
         "cost_usd": cost_usd,
         "files_touched": files_touched,
         "lines_added": lines_added,
@@ -135,6 +142,10 @@ def log_run(
         "summary": stored_summary,
         "summary_sha256": hashlib.sha256(masked_summary.encode("utf-8")).hexdigest(),
     }
+    if queue_time_ms is not None:
+        entry["queue_time_ms"] = round(float(queue_time_ms), 2)
+    if generation_time_ms is not None:
+        entry["generation_time_ms"] = round(float(generation_time_ms), 2)
 
     records = load_analytics()
     records.append(entry)
@@ -203,7 +214,8 @@ def print_run_summary(entry: Dict[str, Any]):
             f"Summary: {entry.get('summary', '')}",
             "=" * 40,
         ]
-        sys.stderr.write("\n".join(lines) + "\n")
+        output_str = "\n".join(lines) + "\n"
+        sys.stderr.write(sever_taint_numeric(output_str))
 
 
 def cli_stats(period: str = "week"):

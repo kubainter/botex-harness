@@ -1,4 +1,4 @@
-# BoteX — Execution Harness for AI Coding Agents
+# BoteX: Execution Harness for AI Coding Agents
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
@@ -54,15 +54,32 @@ OPENROUTER_API_KEY=sk-or-v1-...
 
 ### 3. Connect to your MCP client
 
-You can register BoteX using the included zero-install launchers (`botex.cmd` on Windows, `botex.sh` on Linux/macOS) or directly with Python.
+You can run BoteX as a local stdio process or as a remote service over SSE.
 
-Add this snippet to your client's MCP configuration (e.g. `claude_desktop_config.json` or Antigravity's `mcp_config.json`):
+#### Option A: Local Process (stdio)
+Register BoteX using the included zero-install launchers (`botex.cmd` on Windows, `botex.sh` on Linux/macOS) or directly with Python:
 
 ```json
 {
   "mcpServers": {
     "botex": {
       "command": "C:/path/to/harness/botex.cmd"
+    }
+  }
+}
+```
+
+#### Option B: Remote MCP via SSE (Cloud or VPS)
+Start the gateway with `botex cloud` and connect via Server-Sent Events (SSE):
+
+```json
+{
+  "mcpServers": {
+    "botex-cloud": {
+      "url": "http://127.0.0.1:8000/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer <your_token>"
+      }
     }
   }
 }
@@ -101,16 +118,16 @@ BoteX exposes a focused set of MCP tools:
 * **`start_task(task, ...)`**: Launches a task asynchronously in the background and returns a `task_id`.
 * **`get_task_status(task_id)`**: Polls progress, logs, and results for a background task.
 
-### Workspace Memory Vault
-* **`save_memory(title, content, workspace_dir, kind, tags, memory_id)`**: Saves persistent notes, decisions, handoffs, or lessons to the workspace Memory Vault (`<workspace_dir>/.botex/memory/`).
-* **`read_memory(memory_id, workspace_dir)`** / **`search_memory(workspace_dir, query, tag, kind)`**: Retrieves saved workspace memory.
+### Two-Tier Memory Vault
+* **`save_memory(title, content, workspace_dir, kind, tags, memory_id, scope)`**: Saves persistent notes, decisions, handoffs, or lessons. Scope can be `"local"` (`<workspace_dir>/.botex/memory/`) or `"global"` (`~/.botex/memory/`).
+* **`read_memory(memory_id, workspace_dir, scope)`** / **`search_memory(workspace_dir, query, tag, kind, scope)`**: Retrieves saved memory across local or global storage (`scope="all"` searches both).
 
 ### Diagnostics & Utility
 * **`get_outline(path, workspace_dir)`**: Returns a high-level symbol outline of a file without reading all lines.
 * **`get_stats(period)`**: Generates token usage and cost reports from the local analytics ledger.
 * **`check_health()`**: Checks readiness of providers, models, keys, and budget limits.
 * **`clean_snapshots(max_age_days, max_total_mb)`**: Prunes old workspace backup snapshots.
-* **`recommend_models(task_type, limit, include_free)`**: Queries live OpenRouter pricing/quality rankings for coding tasks. `include_free=true` also admits `:free` variants.
+* **`recommend_models(task_type, limit, include_free, provider, profile, tier)`**: Queries `/api/v1/models` with authenticated headers, classifies models into `high` / `standard` / `budget` tiers, filters for tool-calling support (`require_tools=true`) and interactive endpoints (excluding `:batch`), and ranks models by task aptitude and token cost. `include_free=true` admits `:free` variants.
 * **`fetch_url(url, max_bytes)`**: Safe, caller-side URL fetching with strict host and size filters.
 
 ---
@@ -208,19 +225,37 @@ BoteX is **not a full OS sandbox**. When `allow_exec` is granted, processes run 
 3. **Deny rules**: Blocks dangerous arguments (`python -c`, `git push`, `rm`, shell piping, network downloads).
 4. **Isolated environment**: Executes directly (`shell=False`), workspace set as cwd, secret environment variables stripped, and execution timeouts strictly enforced.
 
+### Human-in-the-Loop (HITL) Approvals
+
+BoteX integrates an interactive approval manager for high-risk operations. Configure the policy in `botex.config.json` under `approval.policy`:
+* `NONE`: Auto-approves operations permitted by the capability mode.
+* `HIGH_RISK` *(default)*: Blocks destructive actions (`delete_file`, `move_file`) and shell execution (`run_command`) until an operator approves.
+* `MUTATIONS`: Requires operator approval for any file modifications (`create_file`, `apply_patch`).
+* `ALL_RISKY`: Intercepts all mutating tools and system execution commands.
+
+In REPL mode, BoteX prompts for interactive confirmation. In Cloud Gateway mode, actions enter a pending approval queue and can be approved or rejected via REST API (`POST /api/approvals/{id}/decide`).
+
 ---
 
-## Model Fallbacks (`model_fallbacks`)
+## Model Fallbacks & OpenRouter Live Routing
 
-If a model refuses a task, burns its token limit without output, or hits provider rate limits, BoteX automatically falls back to alternative models defined in `botex.config.json`:
+If a model refuses a task, burns its token limit without output, or hits provider rate limits, BoteX falls back to alternative models defined in `botex.config.json`:
 
 ```json
 "model_fallbacks": {
-  "coding": ["qwen/qwen3-coder", "deepseek/deepseek-v3.2", "google/gemini-2.5-flash"]
+  "default": ["deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4", "openai/gpt-5.4-mini"],
+  "coding": ["deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4", "openai/gpt-5.4-mini"],
+  "auto-beta": ["qwen/qwen3-coder", "deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4"],
+  "fast": ["google/gemini-2.5-flash-lite", "deepseek/deepseek-v3.2"]
 }
 ```
 
-Before handing off the workspace to the next candidate model, **BoteX verifies that any partial changes from the failed attempt were completely rolled back**. A candidate never inherits a dirty or half-broken workspace.
+BoteX uses two complementary failover layers:
+
+1. **In-Payload OpenRouter Failovers (`extra_body.models`)**: Before sending the first turn to OpenRouter, BoteX runs each fallback candidate through all five safety gates (`Denylist`, `Decisions`, `ZDR`, `Price`, `Tools`) and passes up to three validated slugs in `extra_body["models"]`. If the primary endpoint is overloaded on the initial request, OpenRouter switches to the next validated model on the wire without an extra client round-trip. Meta-routers (`openrouter/auto`, `openrouter/pareto-code`, `openrouter/free`) are excluded from `models: [...]`, and once a run modifies any file (`files_touched`) or executes a command (`exec_ran`), BoteX strips `models` from subsequent turns so a different model never takes over a mutated workspace mid-task.
+2. **Engine-Level Rollback & Retry**: If an attempt fails mid-run, **BoteX verifies that all partial file changes from the failed attempt were rolled back** before starting the next candidate model. A fallback model never inherits a dirty workspace.
+
+For OpenRouter runs, BoteX also sets `extra_body.provider` (`data_collection: "deny"` when ZDR is active, `require_parameters: true` when tools or `response_format` are present, `allow_fallbacks: true`, and `sort: "throughput"`), automatically stripping `reasoning` parameters for non-reasoning model slugs so `require_parameters: true` never triggers HTTP 404 rejections. On `DONE`, BoteX queries `GET /api/v1/generation?id=...` in parallel (with a short 404 retry) to record official billing (`total_cost`), queue latency (`queue_time_ms`), inference time (`generation_time_ms`), and prompt cache read/write tokens in `.agent_analytics.json` and `.botex/memory/` task receipts.
 
 ---
 
@@ -313,10 +348,34 @@ botex run "Fix the failing auth test" --files tests/test_auth.py --max-turns 15
 botex run "Clean up legacy modules" -w ./my-project --allow-destructive
 ```
 
+### Conversational Chat Mode
+
+Multi-turn discussion with token streaming, read-only tools, and automatic context pruning:
+
+```bash
+# Start interactive chat in the terminal
+botex chat --model openrouter/auto
+
+# With a custom system prompt and temperature
+botex chat --system "Focus on security analysis" --temp 0.2
+```
+*In-chat commands: `/clear` (reset session), `/history` (review transcript), `/help`, `/exit`.*
+
+### Cloud Gateway & Remote MCP (FastAPI)
+
+Run BoteX as a background cloud daemon with SSE transport, WebSocket chat, and REST endpoints:
+
+```bash
+# Start cloud server on default port 8000
+botex cloud --host 0.0.0.0 --port 8000
+```
+*Zero-Friction Local mode runs unauthenticated when `BOTEX_ACCESS_TOKEN` is unset. Set `BOTEX_ACCESS_TOKEN` in `.env` to enforce Bearer token verification on all protected endpoints.*
+
 ### Maintenance & Observability
 
 ```bash
 botex health               # Verify API keys, provider connectivity, and model pricing
+botex wallet               # Check OpenRouter balance, key limits, and daily query caps
 botex config               # Inspect or modify local configuration defaults
 botex --stats              # View weekly token consumption and spend per model
 botex --stats --month      # Monthly cost report
@@ -339,6 +398,12 @@ requirements.txt       Runtime dependencies
 botex.config.json      Committed defaults (providers, engine limits, exec/net policy)
 ROADMAP.md             Deferred features & technical rationale
 botex/
+  approval.py          Human-in-the-loop approval manager, async actions, and rollback integration
+  chat.py              Conversational chat sessions, token streaming, and read-only sandbox
+  server_cloud.py      FastAPI cloud gateway, Remote MCP SSE, WebSocket chat, and REST API
+  catalog.py           Dynamic model catalog, TTL caching, and live provider query
+  denylist.py          Hierarchical model exclusions (globs and regex)
+  wallet.py            Key credits, spend analytics, and daily query limits
   engine.py            Autonomous execution loop, context management & rollback triggers
   file_tools.py        Safe outline-first reading, file creation, moving & deletion
   patch_engine.py      Fuzzy patch matching, syntax validation & snapshot management
@@ -347,7 +412,7 @@ botex/
   capabilities.py      Permission presets (readonly, edit, destructive, full)
   config.py            Layered config loader (defaults < local < env)
   net_tools.py         Net policy enforcement (read_url / fetch_url)
-  memory.py            Workspace memory vault (.botex/memory/)
+  memory.py            Two-tier memory vault (local .botex/memory/ and global ~/.botex/memory/)
   analytics.py         Cost/token ledger, budgeting & summary reporting
   pricing.py           Live model price guardrail & catalog checks
   providers.py         Provider adapters (OpenRouter, NVIDIA, etc.) & request normalizer
@@ -357,9 +422,7 @@ botex/
   i18n.py / ui.py      CLI language & status rendering
   recipes/             Specialized agent personas (planner, reviewer, tdd, etc.)
 skills/botex/          Caller-side SKILL.md (delegation patterns)
-tests/
-  test_botex.py        Test suite (33 unit & integration test groups)
-  test_live_e2e.py     Live end-to-end integration suite against OpenRouter
+tests/                 Comprehensive test suite (unit, cloud gateway, chat, approvals)
 docs/
   TUTORIAL.md          Architecture deep dive and technical walkthrough
 ```
@@ -371,13 +434,10 @@ docs/
 Run the full local test suite (no API key required):
 
 ```bash
-python -m pytest tests/test_botex.py
+python -m pytest tests/
 ```
 
-Expected result:
-```
-============================= 33 passed in ~10s ==============================
-```
+All unit, approval, chat, memory, and cloud gateway tests run hermetically in offline mode.
 
 ---
 

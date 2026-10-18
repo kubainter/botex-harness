@@ -108,6 +108,14 @@ now triggers at most one fallback per chain — the second candidate gets
 the same budget and typically starves the same way, so repeat retries
 just re-burned the read budget (the observed double-burn).
 
+### 10. Skill Vault, Remote AI Skill Installer & Workspace Root Normalization (Stage 4.7)
+When BoteX runs as a remote gateway over VPN/VPS, worker models execute in an isolated system prompt and cannot see caller-side skills unless the caller pastes the full skill instructions into `task`. At the same time, built-in `recipes` (`botex/recipes/`) define engine execution personas (`planner`, `reviewer`, `tdd`) and should stay separate from domain/style skills (`humanizer`, `miodkuj`, `impeccable`, or third-party GitHub skills).
+
+Stage 4.7 introduces a dedicated **Skill Vault** (`~/.botex/skills/<slug>/` with `SKILL.md` and `manifest.json`) managed directly from a new **Skills** tab in the PWA without SSH access:
+- **Two-phase remote installation (zero-RCE):** Python deterministically fetches only Markdown files (`SKILL.md`, `README.md`) via SSRF-safe `net_tools` (rejecting scripts and binaries), then delegates metadata extraction (`repo_url`, `version`, `summary`, `commands`, `tags`), Markdown normalization, and a Prompt Injection security check to a user-selected free model (`openrouter :free` or `nvidia`).
+- **Centralized Skill Hub:** Installed skills can be attached to BoteX tasks (`skills=[...]`) alongside a `recipe`, and are also exposed via MCP (`list_skills`, `read_skill`) so any agent connecting over VPN shares one skill library.
+- **Workspace root normalization:** Keep the PWA bound to the server's configured workspace (no raw host path picker over HTTP) while normalizing self-referential workspace root paths (e.g. `list_dir("harness")` inside `.../harness` -> `"."`).
+
 ## Later — needs design or an external dependency
 
 ### Plan / dry-run mode (`mode="plan"`)
@@ -132,10 +140,8 @@ tasks instead of the full message history.
 `pytest && ruff && mypy`. Extend to `verify_commands: list[str]` with a
 per-command report, each gated by the same exec policy.
 
-### Cost from the provider catalog, not the static table
-`analytics.MODEL_PRICING_ESTIMATES` drifts from real prices; `log_run`
-could price runs from `pricing.load_catalog` (cached per provider) with the
-static table as fallback.
+### Cost from the provider catalog, not the static table — implemented for OpenRouter
+OpenRouter runs reconcile USD spend directly from `GET /api/v1/generation?id=...` (`total_cost`, `queue_time_ms`, `generation_time_ms`, `cached_tokens`, `cache_write_tokens`) with fallback to inline `usage.cost` and `analytics.MODEL_PRICING_ESTIMATES` for offline or non-OpenRouter providers.
 
 ### Symlink-safe writes (TOCTOU)
 `resolve_safe_path` validates before use, but a race remains between path
@@ -309,7 +315,7 @@ output) return to the model as tool output and it self-corrects within the
 same `max_turns` budget — no separate correction loop needed. The remaining
 sliver ("force verification before DONE") is now covered by the optional
 `verify_command` parameter. It runs through the existing exec allowlist,
-allows two attempts, and rolls back on final failure.
+allows three attempts, and rolls back on final failure.
 
 ### Streaming early-abort on runaway reasoning — superseded
 Idea: watch the reasoning stream and cut the response once thinking exceeds
@@ -332,6 +338,7 @@ rest.
 
 ## Done recently (for reference)
 
+- OpenRouter Live Intelligence & Routing (Stage 4.6): parallel `/api/v1/generation` telemetry reconciliation with 404 retry, `/api/key/status` budget health & PWA low-budget warnings, 5-gate in-payload `extra_body.models` failovers (stripped after first workspace mutation), `require_parameters: true` with non-reasoning slug protection, strict `TASK_COMPLETION_JSON_SCHEMA`, and authenticated tier-aware `recommend_models`
 - Per-mode step budgets (`engine.mode_max_turns`, `readonly` = 30) +
   `turns_exhausted` fallback capped at one retry per chain + bulk-read
   guidance in prompt/recipes (`STEP BUDGET` line in task prompt)

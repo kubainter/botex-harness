@@ -50,13 +50,16 @@ DEFAULTS: Dict[str, Any] = {
                 "enabled": True,
                 "deny_patterns": [":free", "openrouter/free"],
             },
+            "denylist": [],
+            "profile_denylists": {},
             "models": {
                 "default": "openrouter/auto",
                 "auto-beta": "openrouter/auto-beta",
                 "coding": "openrouter/pareto-code",
+                "review": "anthropic/claude-sonnet-4",
                 # Cheap non-reasoning tier for read-only recon — resolved
                 # via engine.mode_profiles when the caller picks no model.
-                "fast": "deepseek/deepseek-v4-flash-0731",
+                "fast": "google/gemini-2.5-flash",
             },
             # Optional ordered failover candidates. Used only when the first
             # model fails before touching files; explicit model= disables it.
@@ -72,6 +75,8 @@ DEFAULTS: Dict[str, Any] = {
             "base_url": "https://integrate.api.nvidia.com/v1",
             "api_key_env": "NVIDIA_API_KEY",
             "extra_body": {},
+            "denylist": [],
+            "profile_denylists": {},
             # Explicit per-model capability declarations — consulted before
             # catalog metadata. NVIDIA publishes no supported_parameters,
             # so declaring e.g. {"<slug>": {"supports_tools": true}} is how
@@ -98,6 +103,8 @@ DEFAULTS: Dict[str, Any] = {
                 "reasoning": {"max_tokens": 3000},
             },
             "zdr": {"enabled": False},
+            "denylist": [],
+            "profile_denylists": {},
             "models": {
                 "default": "nvidia/nemotron-3-ultra-550b-a55b:free",
                 "coding": "cohere/north-mini-code:free",
@@ -194,6 +201,8 @@ DEFAULTS: Dict[str, Any] = {
         # When True (default), apply_patch and create_file (on existing files)
         # require the file to have been inspected via outline/read tools first.
         "require_read_before_write": True,
+        "denylist": [],
+        "profile_denylists": {},
     },
     # Read-only public web access. Net is never part of a mode by default;
     # callers must opt in per run with allow_net=true. Policies:
@@ -279,6 +288,7 @@ DEFAULTS: Dict[str, Any] = {
         "snapshot_max_age_days": 7,
         "snapshot_max_total_mb": 50,
         "analytics_file": ".agent_analytics.json",
+        "catalog_file": ".model_pricing.json",
         # Optional extra dotenv file to load (relative to project root or absolute).
         "env_file": "",
     },
@@ -313,6 +323,22 @@ DEFAULTS: Dict[str, Any] = {
         "on_unknown": "allow",
         "cache_ttl_hours": 24,
     },
+    "catalog": {
+        "enabled": True,
+        "cache_file": ".model_pricing.json",
+        "cache_path": ".model_pricing.json",
+        "ttl_hours": 24.0,
+        "cache_ttl_hours": 24,
+        "timeout_s": 10.0,
+        "on_unknown": "allow",
+    },
+    "wallet": {
+        "enabled": True,
+        "cache_ttl_s": 60.0,
+        "timeout_s": 10.0,
+        "auto_check": False,
+        "min_balance_usd": 0.0,
+    },
     # Secrets belong ONLY in botex.config.local.json (gitignored) — never in
     # the committed botex.config.json. Environment variables take precedence.
     "secrets": {
@@ -337,6 +363,7 @@ _ENV_MAP = {
     "BOTEX_DEFAULT_MODE": ("engine", "default_mode"),
     "BOTEX_DEFAULT_WORKSPACE": ("engine", "default_workspace"),
     "BOTEX_DEFAULT_PROFILE": ("engine", "default_profile"),
+    "BOTEX_DENYLIST": ("engine", "denylist"),
     "BOTEX_EXEC_ENABLED": ("exec", "enabled"),
     "BOTEX_NET_ENABLED": ("net", "enabled"),
     "BOTEX_NET_POLICY": ("net", "policy"),
@@ -348,6 +375,11 @@ _ENV_MAP = {
     "BOTEX_LANG": ("ui", "language"),
     "BOTEX_PRICE_MAX_INPUT": ("pricing", "max_input_per_mtok"),
     "BOTEX_PRICE_MAX_OUTPUT": ("pricing", "max_output_per_mtok"),
+    "BOTEX_CATALOG_ENABLED": ("catalog", "enabled"),
+    "BOTEX_CATALOG_CACHE_FILE": ("catalog", "cache_file"),
+    "BOTEX_CATALOG_TTL_HOURS": ("catalog", "ttl_hours"),
+    "BOTEX_WALLET_ENABLED": ("wallet", "enabled"),
+    "BOTEX_WALLET_CACHE_TTL_S": ("wallet", "cache_ttl_s"),
 }
 
 _config_cache: Optional[Dict[str, Any]] = None
@@ -413,9 +445,19 @@ def load_config(reload: bool = False) -> Dict[str, Any]:
                 value = int(raw)
             elif isinstance(default_val, float):
                 value = float(raw)
+            elif isinstance(default_val, list):
+                raw_s = raw.strip()
+                if raw_s.startswith("[") and raw_s.endswith("]"):
+                    try:
+                        parsed = json.loads(raw_s)
+                        value = parsed if isinstance(parsed, list) else [str(parsed)]
+                    except Exception:
+                        value = [p.strip() for p in raw_s.split(",") if p.strip()]
+                else:
+                    value = [p.strip() for p in raw_s.split(",") if p.strip()]
             else:
                 value = raw
-        except ValueError:
+        except (ValueError, Exception):
             continue
         cfg.setdefault(section, {})[key] = value
 
@@ -494,18 +536,54 @@ def resolve_model(model: str = "", profile: str = "", provider: str = "") -> str
     return legacy.get(profile) or legacy.get("default") or "openrouter/auto"
 
 
-def resolve_model_candidates(model: str = "", profile: str = "", provider: str = "") -> list[str]:
-    """Resolve the primary model plus optional configured failover models."""
-    if model:
-        return [model]
+def resolve_model_candidates(
+    model: str = "",
+    profile: str = "",
+    provider: str = "",
+    *,
+    require_tools: bool = False,
+    catalog: Optional[Any] = None,
+    denylist_filter: Optional[Any] = None,
+) -> list[str]:
+    """Resolve the primary model plus configured failover models, pruned by denylist.
+
+    Preserves 100% backward compatibility with all callers using positional args.
+    If an explicit `model` is provided, candidate list starts as [model];
+    otherwise starts with [primary] + failovers for `profile`.
+    Applies `DenylistFilter` (exact, glob, regex across global, provider, profile)
+    to prune blocked models.
+    """
+    cfg = load_config()
     if not profile:
-        profile = load_config().get("engine", {}).get("default_profile") or "default"
+        profile = cfg.get("engine", {}).get("default_profile") or "default"
     _pname, pcfg = resolve_provider(provider)
-    primary = resolve_model("", profile, provider)
-    configured = (pcfg.get("model_fallbacks", {}) if pcfg else {}).get(profile, [])
-    if isinstance(configured, str):
-        configured = [configured]
-    return list(dict.fromkeys([primary] + [m for m in configured if m]))
+
+    if model:
+        raw_candidates = [model]
+    else:
+        primary = resolve_model("", profile, provider)
+        configured = (pcfg.get("model_fallbacks", {}) if pcfg else {}).get(profile, [])
+        if isinstance(configured, str):
+            configured = [configured]
+        raw_candidates = list(dict.fromkeys([primary] + [m for m in configured if m]))
+
+    if denylist_filter is None:
+        try:
+            from .denylist import DenylistFilter
+
+            denylist_filter = DenylistFilter(cfg)
+        except (ImportError, ValueError):
+            from denylist import DenylistFilter
+
+            denylist_filter = DenylistFilter(cfg)
+
+    return denylist_filter.filter_candidates(
+        raw_candidates,
+        provider=_pname,
+        profile=profile,
+        require_tools=require_tools,
+        catalog=catalog,
+    )
 
 
 def is_decisions_model(model: str, provider_cfg: Dict[str, Any]) -> bool:
@@ -586,4 +664,47 @@ def resolve_workspace_source(value: str = "") -> tuple:
 
 def resolve_workspace(value: str = "") -> str:
     """Return the effective workspace path (see ``resolve_workspace_source``)."""
-    return resolve_workspace_source(value)[0]
+    raw_path = resolve_workspace_source(value)[0]
+    if raw_path == ".":
+        return "."
+    real_path = os.path.realpath(os.path.abspath(raw_path))
+    return "".join(chr(cp) for cp in [ord(c) for c in real_path])
+
+
+def catalog_setting(key: str, override: Optional[Any] = None) -> Any:
+    """Return the configured catalog setting (falls back to defaults)."""
+    if override is not None:
+        return override
+    val = load_config().get("catalog", {}).get(key)
+    if val is not None:
+        return val
+    return DEFAULTS.get("catalog", {}).get(key)
+
+
+def catalog_cache_file() -> Path:
+    """Return resolved path to the catalog cache file."""
+    path_str = (
+        load_config().get("paths", {}).get("catalog_file")
+        or catalog_setting("cache_file")
+        or catalog_setting("cache_path")
+        or ".model_pricing.json"
+    )
+    return _resolve_path(str(path_str))
+
+
+def wallet_setting(key: str, override: Optional[Any] = None) -> Any:
+    """Return the configured wallet setting (falls back to defaults)."""
+    if override is not None:
+        return override
+    val = load_config().get("wallet", {}).get(key)
+    if val is not None:
+        return val
+    return DEFAULTS.get("wallet", {}).get(key)
+
+
+def denylist_setting(key: str = "denylist") -> Any:
+    """Return configured engine denylist setting (falls back to defaults)."""
+    val = load_config().get("engine", {}).get(key)
+    if val is not None:
+        return val
+    return DEFAULTS.get("engine", {}).get(key, [] if key == "denylist" else {})

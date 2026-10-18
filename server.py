@@ -37,6 +37,10 @@ from mcp.types import CallToolResult, TextContent
 
 from botex.analytics import cli_history, cli_stats, load_analytics
 from botex.benchmarks import get_recommended_models
+from botex.chat import (
+    default_chat_manager,
+    stream_chat_turn,
+)
 from botex.config import (
     load_config,
     resolve_provider,
@@ -47,6 +51,9 @@ from botex.config import (
 from botex.engine import run_botex_task
 from botex.file_tools import get_file_outline as _get_file_outline
 from botex.i18n import SUPPORTED, init_language, set_language, t
+from botex.memory import (
+    list_memories as _list_memories,
+)
 from botex.memory import (
     read_memory as _read_memory,
 )
@@ -59,7 +66,7 @@ from botex.memory import (
 from botex.net_tools import fetch_url as _fetch_url
 from botex.patch_engine import snapshot_manager
 from botex.pricing import load_catalog, model_price
-from botex.security import mask_secrets, wrap_untrusted_content, zdr_enforced
+from botex.security import mask_secrets, sever_taint_numeric, wrap_untrusted_content, zdr_enforced
 from botex.ui import accent, dim, err, mark_status, ok, title, warn
 
 mcp = MCPServer("BoteX-Harness")
@@ -112,13 +119,20 @@ class SubagentTaskResult(TypedDict, total=False):
     vault_memory_id: Optional[str]
 
 
+def mask_secrets_recursive(val: Any) -> Any:
+    """Recursively mask secrets across dictionaries, lists, and strings."""
+    if isinstance(val, str):
+        return mask_secrets(val)
+    elif isinstance(val, dict):
+        return {k: mask_secrets_recursive(v) for k, v in val.items()}
+    elif isinstance(val, list):
+        return [mask_secrets_recursive(item) for item in val]
+    return val
+
+
 def _masked_result(res: dict) -> dict:
-    """Copy an engine result with secret patterns redacted from text fields."""
-    masked = dict(res)
-    for key in ("summary", "message"):
-        if isinstance(masked.get(key), str):
-            masked[key] = mask_secrets(masked[key])
-    return masked
+    """Copy an engine result with secret patterns recursively redacted."""
+    return mask_secrets_recursive(res)
 
 
 REPORT_OFFLOAD_BYTES = 2048
@@ -219,8 +233,10 @@ async def _background_task(task_id: str, kwargs: dict) -> None:
             tool_result = await run_subagent(**kwargs)
             # `result` keeps the legacy pretty-text report; `result_data`
             # carries the full structured engine result.
-            entry["result"] = tool_result.content[0].text if tool_result.content else ""
-            entry["result_data"] = tool_result.structured_content or {}
+            entry["result"] = (
+                mask_secrets(tool_result.content[0].text) if tool_result.content else ""
+            )
+            entry["result_data"] = mask_secrets_recursive(tool_result.structured_content or {})
             entry["status"] = "DONE"
     except asyncio.CancelledError:
         entry["status"] = "CANCELLED"
@@ -236,10 +252,8 @@ def _cleanup_tasks() -> None:
     ttl = int(load_config().get("engine", {}).get("task_result_ttl_s", 3600))
     now = time.time()
     for task_id, entry in list(_TASKS.items()):
-        if (
-            entry.get("status") in {"DONE", "FAILED", "CANCELLED"}
-            and now - entry.get("finished_at", now) > ttl
-        ):
+        fin = entry.get("finished_at") or entry.get("created_at") or 0
+        if entry.get("status") in {"DONE", "FAILED", "CANCELLED"} and (now - fin) > ttl:
             _TASKS.pop(task_id, None)
 
 
@@ -403,7 +417,12 @@ async def fetch_url(url: str, max_bytes: int = 0) -> dict[str, Any]:
 
 @mcp.tool()
 async def recommend_models(
-    task_type: str = "coding", limit: int = 5, include_free: bool = False
+    task_type: str = "coding",
+    limit: int = 5,
+    include_free: bool = False,
+    provider: str = "",
+    profile: str = "",
+    tier: str = "auto",
 ) -> str:
     """
     [EN] Fetches the most cost-effective and capable models from OpenRouter based on live benchmarks.
@@ -418,7 +437,14 @@ async def recommend_models(
     logowane/trenowane); do uruchomienia wymagają allow_non_zdr albo
     providera openrouter-free.
     """
-    results = get_recommended_models(task_type, limit, include_free=include_free)
+    results = get_recommended_models(
+        task_type,
+        limit,
+        include_free=include_free,
+        provider=provider or "openrouter",
+        profile=profile or None,
+        tier=tier or "auto",
+    )
     return json.dumps(results, indent=2)
 
 
@@ -445,6 +471,7 @@ async def run_subagent(
     verify_command: str = "",
     recipe: str = "",
     allow_non_zdr: bool = False,
+    approval_policy: str = "",
 ) -> Annotated[CallToolResult, SubagentTaskResult]:
     """
     Runs BoteX — an autonomous code execution engine (agent-agnostic harness).
@@ -528,6 +555,8 @@ async def run_subagent(
                the operator's consent; the result carries
                zdr_enforced=false. The openrouter-free provider preset is
                the persistent config-level alternative.
+        approval_policy: Operator approval policy for risky operations: 'none',
+               'high_risk' (default), 'mutations', 'all_risky'.
 
     Returns:
         A pretty-text report in the text content (unchanged format for legacy
@@ -558,6 +587,7 @@ async def run_subagent(
         verify_command=verify_command,
         recipe=recipe,
         allow_non_zdr=True if allow_non_zdr else None,
+        approval_policy=approval_policy or None,
     )
 
     res = _masked_result(res)
@@ -585,10 +615,11 @@ async def save_memory(
     kind: str = "context",
     tags: Optional[list[str]] = None,
     memory_id: str = "",
+    scope: str = "local",
 ) -> dict[str, Any]:
     """
     Saves a persistent context note, architectural decision, task handoff, or lesson
-    into the workspace Memory Vault (<workspace_dir>/.botex/memory/).
+    into the workspace or global shared Memory Vault.
     Masks secrets and provides directory isolation.
 
     Args:
@@ -599,6 +630,7 @@ async def save_memory(
         kind: Entry category ('context' | 'decision' | 'handoff' | 'lesson').
         tags: Optional list of keyword tags for filtering and discovery.
         memory_id: Optional custom identifier (alphanumeric/hyphen/underscore). Auto-generated if omitted.
+        scope: Storage scope ('local' for workspace, 'global' for cross-workspace). Default is 'local'.
     """
     return _save_memory(
         workspace_dir=resolve_workspace(workspace_dir),
@@ -607,6 +639,7 @@ async def save_memory(
         kind=kind,
         tags=tags,
         memory_id=memory_id or None,
+        scope=scope,
     )
 
 
@@ -616,10 +649,11 @@ async def search_memory(
     query: str = "",
     tag: str = "",
     kind: str = "",
+    scope: str = "local",
 ) -> dict[str, Any]:
     """
-    Searches the workspace Memory Vault (<workspace_dir>/.botex/memory/)
-    by keyword query, tag, or entry kind (context, decision, handoff, lesson).
+    Searches the Memory Vault by keyword query, tag, or entry kind
+    (context, decision, handoff, lesson) across local, global, or all scopes.
 
     Args:
         workspace_dir: Workspace root directory. Empty = engine.default_workspace
@@ -627,12 +661,14 @@ async def search_memory(
         query: Free-text search string matched against title, content, and tags.
         tag: Filter by specific tag.
         kind: Filter by entry kind ('context', 'decision', 'handoff', 'lesson').
+        scope: Search scope ('local', 'global', or 'all'). Default is 'local'.
     """
     return _search_memory(
         workspace_dir=resolve_workspace(workspace_dir),
         query=query,
         tag=tag or None,
         kind=kind or None,
+        scope=scope,
     )
 
 
@@ -640,18 +676,21 @@ async def search_memory(
 async def read_memory(
     memory_id: str,
     workspace_dir: str = "",
+    scope: str = "local",
 ) -> dict[str, Any]:
     """
-    Reads the full content and metadata of a specific memory entry by ID from the workspace Memory Vault.
+    Reads the full content and metadata of a specific memory entry by ID from the Memory Vault.
 
     Args:
         memory_id: The ID of the memory entry to retrieve (e.g. 'mem_a1b2c3d4').
         workspace_dir: Workspace root directory. Empty = engine.default_workspace
                from the config, else the server's current directory.
+        scope: Lookup scope ('local', 'global', or 'all'). Default is 'local'.
     """
     return _read_memory(
         workspace_dir=resolve_workspace(workspace_dir),
         memory_id=memory_id,
+        scope=scope,
     )
 
 
@@ -763,21 +802,41 @@ async def clean_snapshots(max_age_days: float = 7.0, max_total_mb: float = 50.0)
 # ---------------------------------------------------------------------------
 # CLI Runner
 # ---------------------------------------------------------------------------
-def _interactive_confirm(operation: str, path: str) -> bool:
-    """Prompt the terminal operator before a destructive file operation."""
+def _interactive_confirm(
+    operation: str,
+    path: str = "",
+    params: Optional[dict] = None,
+    task_id: str = "",
+) -> bool:
+    """Prompt the terminal operator before a destructive or gated file/command operation."""
     try:
-        answer = (
-            input(
-                warn(f"[BoteX] {t('confirm.req')} '{operation}' {t('confirm.on')} '{path}'. ")
-                + t("confirm.ask")
-                + " "
-            )
-            .strip()
-            .lower()
-        )
-        return answer in ("y", "yes")
-    except (EOFError, KeyboardInterrupt):
+        from botex.approval import TaskAbortedError, default_approval_manager, format_action_preview
+    except (ImportError, ValueError):
+        from approval import TaskAbortedError, default_approval_manager, format_action_preview
+
+    if params:
+        preview = format_action_preview(operation, params)
+        print(f"\n{warn('[BoteX Action Confirmation Required]')}\n{preview}")
+    else:
+        print(warn(f"\n[BoteX] {t('confirm.req')} '{operation}' {t('confirm.on')} '{path}'. "))
+
+    prompt_str = (
+        f"{accent('[y]')} {t('confirm.ask')} / {accent('[n]')} reject / "
+        f"{accent('[a]')} allow always / {accent('[c]')} abort task: "
+    )
+    try:
+        answer = input(prompt_str).strip().lower()
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("a", "always"):
+            if task_id:
+                default_approval_manager.preapprove_tool(task_id, operation)
+            return True
+        if answer in ("c", "cancel", "abort"):
+            raise TaskAbortedError(f"Task cancelled by operator during '{operation}'")
         return False
+    except (EOFError, KeyboardInterrupt):
+        raise TaskAbortedError(f"Task interrupted by operator during '{operation}'")
 
 
 def _print_usage():
@@ -802,9 +861,13 @@ def _print_usage():
   {c("botex config mode <preset>")}          {d(t("usage.config.mode"))}
   {c("botex config zdr <on|off> [prov]")}    {d(t("usage.config.zdr"))}
   {c("botex models [--refresh]")}            {d(t("usage.models"))}
+  {c("botex wallet [--refresh] [prov]")}     {d("Show provider credit balance and limits")}
+  {c("botex chat [prompt] [-w DIR]")}        {d("Read-only conversational engineering assistant")}
+  {c("botex memory <cmd> [flags]")}          {d("Workspace & global Memory Vault (save, search, read, list)")}
+  {c("botex cloud [--host H] [--port P]")}   {d("FastAPI Cloud Gateway & Remote MCP SSE server")}
 
 {title(t("usage.repl_cmds"))}
-  {c("health, stats [month], history <id>, snapshots, clean-snapshots,")}
+  {c("chat, memory, wallet, credits, health, stats [month], history <id>, snapshots, clean-snapshots,")}
   {c("models, config [...], mode <preset>, help, exit")}
 
 {d(t("usage.no_args"))}
@@ -863,6 +926,7 @@ def _print_repl_help():
   {c("config provider|model|profile|mode|workspace|language|price|zdr <value>")}
                       {d(t("repl.config.set"))}
   {c("models [--refresh]")}      {d(t("usage.models"))}
+  {c("wallet [--refresh]")}      {d("Show provider credit balance and limits")}
   {c("mode <preset>")}           {d(t("repl.mode"))}
   {c("workspace [DIR]")} / {c("cd [DIR]")}  {d(t("repl.workspace"))}
   {c("botex repl --allow-non-zdr")} {d(t("repl.allow_non_zdr"))}
@@ -929,6 +993,12 @@ def _try_local_command(line: str) -> bool:
         _cli_config(parts[1:])
     elif cmd == "models":
         _cli_models(parts[1:])
+    elif cmd in ("wallet", "credits"):
+        _cli_wallet(parts[1:])
+    elif cmd == "chat":
+        _cli_chat(parts[1:])
+    elif cmd == "memory":
+        _cli_memory(parts[1:])
     elif cmd in ("serve", "server"):
         print(warn(f"[BoteX] {t('lc.serve_warn')}"))
     elif cmd == "repl":
@@ -1118,6 +1188,13 @@ def _cli_models(argv):
     cfg = load_config()
     pricing_cfg = cfg.get("pricing", {})
     refresh = "--refresh" in argv
+    try:
+        from botex.denylist import DenylistFilter
+
+        dfilter = DenylistFilter(cfg)
+    except Exception:
+        dfilter = None
+
     print(title(t("models.title")))
     for pname, pcfg in cfg.get("providers", {}).items():
         marker = accent(" [default]") if pcfg.get("default") else ""
@@ -1134,10 +1211,374 @@ def _cli_models(argv):
                 price_str = f"in ${pin:.2f} · out ${pout:.2f}"
             else:
                 price_str = dim(t("models.dynamic"))
+            if dfilter and not dfilter.is_allowed(slug, provider=pname, profile=prof):
+                rec = dfilter.get_denial_record(slug, provider=pname, profile=prof)
+                scope_tag = rec.scope if rec else "policy"
+                price_str += warn(f" [DENIED: {scope_tag}]")
             print(f"  {accent(prof):<12} {slug:<48} {price_str}")
     pin_cap = pricing_cfg.get("max_input_per_mtok", 0)
     pout_cap = pricing_cfg.get("max_output_per_mtok", 0)
     print(dim("\n" + t("models.caps", pin=f"{pin_cap}", pout=f"{pout_cap}")))
+
+
+def _cli_wallet(argv):
+    """`botex wallet` / `botex credits` — display provider credits and balances.
+
+    Supports subcommands `check`, `summary`, flags `--json`, `--refresh`, `--compact`,
+    and explicit provider flags `--provider <name>`, `-p <name>`, `--provider=<name>`.
+    """
+    import dataclasses
+    import json
+
+    from botex.wallet import _sanitize_raw_payload, format_credits_summary, get_credits
+
+    refresh = "--refresh" in argv
+    json_mode = "--json" in argv
+    compact_mode = "--compact" in argv
+    target_prov = ""
+    subcommand = "summary"
+
+    # 1. Parse flags: extract explicit provider flag and collect non-flag positionals
+    i = 0
+    clean_positionals = []
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("--provider", "-p") and i + 1 < len(argv):
+            target_prov = argv[i + 1]
+            i += 2
+            continue
+        elif arg.startswith("--provider="):
+            target_prov = arg.split("=", 1)[1]
+            i += 1
+            continue
+        elif not arg.startswith("-"):
+            clean_positionals.append(arg)
+        i += 1
+
+    # 2. Inspect positional arguments for subcommands or positional provider
+    for a in clean_positionals:
+        lower = a.lower()
+        if lower in ("check", "summary"):
+            subcommand = lower
+        elif lower in ("wallet", "credits"):
+            # Redundant command alias passed from CLI or test harnesses
+            continue
+        elif not target_prov:
+            target_prov = a
+
+    _ = subcommand
+
+    # 3. Fallback to active configured provider if not explicitly specified
+    if not target_prov:
+        target_prov, _prov_cfg = resolve_provider()
+
+    info = get_credits(target_prov, force_refresh=refresh)
+
+    # 4. Render output: JSON mode vs human-readable CLI summary
+    if json_mode:
+        payload = dataclasses.asdict(info) if info is not None else {}
+        clean_payload = _sanitize_raw_payload(payload)
+        sys.stdout.write(
+            sever_taint_numeric(json.dumps(clean_payload, indent=2, default=str)) + "\n"
+        )
+    else:
+        prov_title = sever_taint_numeric(
+            title(f"=== BoteX Wallet ({mask_secrets(str(target_prov))}) ===")
+        )
+        sys.stdout.write(prov_title + "\n")
+        sys.stdout.write(
+            sever_taint_numeric(format_credits_summary(info, compact=compact_mode)) + "\n"
+        )
+
+
+def _cli_chat(argv: list[str]) -> None:
+    """CLI dispatcher for BoteX Chat Mode."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="botex chat",
+        description="Conversational software engineering assistant (strictly read-only).",
+    )
+    parser.add_argument(
+        "prompt",
+        nargs="?",
+        default="",
+        help="Optional initial prompt/question (if omitted, starts interactive chat REPL).",
+    )
+    parser.add_argument(
+        "--workspace",
+        "-w",
+        default="",
+        help="Project working directory (default: engine.default_workspace, else cwd)",
+    )
+    parser.add_argument(
+        "--profile", default="fast", help="Model profile from config (default: fast)"
+    )
+    parser.add_argument("--model", default="", help="Explicit provider model (overrides profile)")
+    parser.add_argument(
+        "--provider", default="", help="API provider (openrouter/nvidia; empty = config default)"
+    )
+    parser.add_argument("--session-id", default="", help="Resume or label specific chat session")
+    parser.add_argument(
+        "--allow-non-zdr",
+        action="store_true",
+        help="Relaxes Zero Data Retention for this session",
+    )
+    args = parser.parse_args(argv)
+
+    workspace, ws_source = _resolve_workspace_abs(args.workspace)
+    session = default_chat_manager.get_or_create_session(
+        session_id=args.session_id or None,
+        workspace_dir=workspace,
+        model=args.model,
+        provider=args.provider,
+        profile=args.profile,
+    )
+
+    async def _run_stream(user_text: str):
+        async for event in stream_chat_turn(
+            session=session,
+            user_input=user_text,
+            allow_non_zdr=args.allow_non_zdr,
+        ):
+            ev_type = event.get("type")
+            if ev_type == "content_chunk":
+                delta = event.get("delta", "")
+                sys.stdout.write(delta)
+                sys.stdout.flush()
+            elif ev_type == "tool_call_start":
+                t_name = event.get("name", "")
+                t_args = event.get("arguments", {})
+                tool_line = dim(f"\n[Tool: {t_name}({json.dumps(t_args)})]")
+                sys.stdout.write(sever_taint_numeric(mask_secrets(tool_line)) + "\n")
+                sys.stdout.flush()
+            elif ev_type == "error":
+                err_text = err(f"\nError: {mask_secrets(str(event.get('error', '')))}")
+                sys.stdout.write(sever_taint_numeric(err_text) + "\n")
+                sys.stdout.flush()
+        print()
+
+    # Single-turn mode
+    if args.prompt.strip():
+        asyncio.run(_run_stream(args.prompt.strip()))
+        return
+
+    # Interactive mode
+    print(title("BoteX Chat") + " — " + dim("Read-only conversational exploration"))
+    print(
+        f"{accent(t('ws.label'))} {workspace} {dim('(' + ws_source + ')')} | "
+        f"{accent('Provider:')} {args.provider or 'default'} | {accent('Profile:')} {args.profile}"
+    )
+    _warn_if_harness(workspace)
+
+    while True:
+        try:
+            line = input(accent("chat> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line:
+            continue
+        low = line.lower()
+        if low in ("exit", "quit"):
+            break
+        if low in ("clear", "reset"):
+            session.clear()
+            print(dim("Chat session history cleared."))
+            continue
+        if low in ("help", "?"):
+            print(
+                dim(
+                    "Chat commands: 'clear' to reset history, 'exit' to quit.\n"
+                    "Tools: get_file_outline, read_file_lines, read_file, list_dir, search_memory, read_memory.\n"
+                    "To make code edits or run commands, switch to Agent Mode ('botex run ...')."
+                )
+            )
+            continue
+        try:
+            asyncio.run(_run_stream(line))
+        except KeyboardInterrupt:
+            print(warn("\n" + t("repl.interrupted")))
+        except Exception as exc:
+            err_line = err(f"\nChat failure: {mask_secrets(str(exc))}")
+            sys.stdout.write(sever_taint_numeric(err_line) + "\n")
+            sys.stdout.flush()
+
+
+def _cli_memory(argv: list[str]) -> None:
+    """CLI dispatcher for BoteX Memory Vault."""
+    import argparse
+
+    from botex.wallet import _sanitize_raw_payload
+
+    if not argv:
+        print(title("BoteX Memory Vault CLI"))
+        print("Usage:")
+        print(
+            "  botex memory save <title> <content> [--scope local|global] [--kind KIND] [--tags TAGS] [--id ID] [-w DIR]"
+        )
+        print(
+            "  botex memory search [query] [--scope local|global|all] [--tag TAG] [--kind KIND] [-w DIR]"
+        )
+        print("  botex memory read <id> [--scope local|global|all] [-w DIR]")
+        print("  botex memory list [--scope local|global|all] [--tag TAG] [--kind KIND] [-w DIR]")
+        return
+
+    sub = argv[0].lower()
+    rest = argv[1:]
+
+    parser = argparse.ArgumentParser(prog=f"botex memory {sub}")
+    parser.add_argument("--workspace", "-w", default="", help="Workspace directory")
+    parser.add_argument("--scope", default="local", help="Memory scope: local, global, or all")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    if sub == "save":
+        parser.add_argument("title", help="Title of the memory entry")
+        parser.add_argument("content", help="Markdown body content")
+        parser.add_argument(
+            "--kind", default="context", help="Kind (context/decision/handoff/lesson)"
+        )
+        parser.add_argument("--tags", default="", help="Comma-separated tags")
+        parser.add_argument("--id", default="", help="Optional custom memory ID")
+        args = parser.parse_args(rest)
+        tags_list = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
+        ws = resolve_workspace(args.workspace)
+        res = _save_memory(
+            workspace_dir=ws,
+            title=args.title,
+            content=args.content,
+            kind=args.kind,
+            tags=tags_list,
+            memory_id=args.id or None,
+            scope=args.scope,
+        )
+        if args.json:
+            clean_res = _sanitize_raw_payload(res)
+            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
+        elif res.get("ok"):
+            msg = ok(
+                f"[OK] Saved memory '{res.get('id')}' in {res.get('scope', 'local')} scope: {res.get('path')}"
+            )
+            sys.stdout.write(sever_taint_numeric(msg) + "\n")
+        else:
+            sys.stdout.write(
+                sever_taint_numeric(err(f"Failed to save memory: {res.get('error')}")) + "\n"
+            )
+
+    elif sub in ("search", "find"):
+        parser.add_argument("query", nargs="?", default="", help="Search query string")
+        parser.add_argument("--tag", default="", help="Filter by tag")
+        parser.add_argument("--kind", default="", help="Filter by kind")
+        args = parser.parse_args(rest)
+        ws = resolve_workspace(args.workspace)
+        res = _search_memory(
+            workspace_dir=ws,
+            query=args.query,
+            tag=args.tag or None,
+            kind=args.kind or None,
+            scope=args.scope,
+        )
+        if args.json:
+            clean_res = _sanitize_raw_payload(res)
+            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
+        elif res.get("ok"):
+            mems = res.get("memories", [])
+            header = title(f"=== Memory Search ({len(mems)} entries, scope: {args.scope}) ===")
+            sys.stdout.write(sever_taint_numeric(header) + "\n")
+            for m in mems:
+                sc = m.get("scope", "local")
+                tags = f" [{', '.join(m.get('tags', []))}]" if m.get("tags") else ""
+                line = (
+                    f"  {accent('*')} {m.get('id')} ({sc}, {m.get('kind')}){tags}: {m.get('title')}"
+                )
+                sys.stdout.write(sever_taint_numeric(line) + "\n")
+                if m.get("preview"):
+                    sys.stdout.write(
+                        sever_taint_numeric(f"    {dim(m.get('preview')[:120])}") + "\n"
+                    )
+        else:
+            sys.stdout.write(sever_taint_numeric(err(f"Search failed: {res.get('error')}")) + "\n")
+
+    elif sub in ("read", "get", "show"):
+        parser.add_argument("memory_id", help="Memory entry ID")
+        args = parser.parse_args(rest)
+        ws = resolve_workspace(args.workspace)
+        res = _read_memory(
+            workspace_dir=ws,
+            memory_id=args.memory_id,
+            scope=args.scope,
+        )
+        if args.json:
+            clean_res = _sanitize_raw_payload(res)
+            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
+        elif res.get("ok"):
+            meta = res.get("metadata", {})
+            header = title(f"=== Memory Entry: {res.get('id')} (scope: {res.get('scope')}) ===")
+            sys.stdout.write(sever_taint_numeric(header) + "\n")
+            sys.stdout.write(sever_taint_numeric(f"Title: {meta.get('title')}") + "\n")
+            sys.stdout.write(
+                sever_taint_numeric(f"Kind: {meta.get('kind')} | Tags: {meta.get('tags')}") + "\n"
+            )
+            sys.stdout.write(sever_taint_numeric(f"Timestamp: {meta.get('timestamp')}") + "\n")
+            sys.stdout.write(sever_taint_numeric("\n" + res.get("content", "")) + "\n")
+        else:
+            sys.stdout.write(sever_taint_numeric(err(f"Read failed: {res.get('error')}")) + "\n")
+
+    elif sub == "list":
+        parser.add_argument("--tag", default="", help="Filter by tag")
+        parser.add_argument("--kind", default="", help="Filter by kind")
+        args = parser.parse_args(rest)
+        ws = resolve_workspace(args.workspace)
+        res = _list_memories(
+            workspace_dir=ws,
+            scope=args.scope,
+            tag=args.tag or None,
+            kind=args.kind or None,
+        )
+        if args.json:
+            clean_res = _sanitize_raw_payload(res)
+            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
+        elif res.get("ok"):
+            mems = res.get("memories", [])
+            header = title(f"=== Memory Vault ({len(mems)} entries, scope: {args.scope}) ===")
+            sys.stdout.write(sever_taint_numeric(header) + "\n")
+            for m in mems:
+                sc = m.get("scope", "local")
+                tags = f" [{', '.join(m.get('tags', []))}]" if m.get("tags") else ""
+                line = (
+                    f"  {accent('*')} {m.get('id')} ({sc}, {m.get('kind')}){tags}: {m.get('title')}"
+                )
+                sys.stdout.write(sever_taint_numeric(line) + "\n")
+        else:
+            sys.stdout.write(sever_taint_numeric(err(f"List failed: {res.get('error')}")) + "\n")
+    else:
+        sys.stdout.write(
+            sever_taint_numeric(
+                err(f"Unknown memory subcommand: '{sub}'. Use save, search, read, or list.")
+            )
+            + "\n"
+        )
+
+
+def _cli_cloud(argv: list[str]) -> None:
+    """CLI dispatcher to launch BoteX FastAPI Cloud Gateway & Remote MCP SSE server."""
+    import argparse
+
+    import uvicorn
+
+    from botex.server_cloud import app
+
+    parser = argparse.ArgumentParser(
+        prog="botex cloud",
+        description="Launch BoteX FastAPI Cloud Gateway & Remote MCP SSE server.",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
+    parser.add_argument("--log-level", default="info", help="Log level (default: info)")
+    args = parser.parse_args(argv)
+
+    print(title(f"BoteX FastAPI Cloud Gateway & Remote MCP SSE on http://{args.host}:{args.port}"))
+    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level, workers=1)
 
 
 def _repl(argv):
@@ -1351,6 +1792,12 @@ def main():
             action="store_true",
             help="Relaxes Zero Data Retention for this run (needed for :free models; provider may log/train on prompts)",
         )
+        parser.add_argument(
+            "--approval-policy",
+            choices=["none", "high_risk", "mutations", "all_risky"],
+            default="",
+            help="Operator approval policy (none, high_risk, mutations, all_risky)",
+        )
         args = parser.parse_args(sys.argv[2:])
 
         # Destructive ops: pre-authorized via flag/config, or gated per-op by an
@@ -1387,6 +1834,7 @@ def main():
                 output_path=args.output_path,
                 verify_command=args.verify_command,
                 allow_non_zdr=True if args.allow_non_zdr else None,
+                approval_policy=args.approval_policy or None,
             )
         )
         status_str = ok(t("repl.success")) if res.get("ok") else err(t("repl.failure"))
@@ -1429,6 +1877,14 @@ def main():
         _cli_config(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "models":
         _cli_models(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] in ("wallet", "credits"):
+        _cli_wallet(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "chat":
+        _cli_chat(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "memory":
+        _cli_memory(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "cloud":
+        _cli_cloud(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] in ("serve", "server", "--serve"):
         # Force MCP stdio server mode even on an interactive terminal
         _start_mcp_server()
