@@ -86,7 +86,7 @@ _SECRET_PATTERNS = [
         re.DOTALL,
     ),
     # OpenRouter / OpenAI style keys
-    re.compile(r"sk-[a-zA-Z0-9\-_]{20,}"),
+    re.compile(r"\bsk-[a-zA-Z0-9\-_]{10,}"),
     # AWS
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"(?i)aws[_\-]?secret[_\-]?access[_\-]?key\s*[=:]\s*\S+"),
@@ -94,8 +94,8 @@ _SECRET_PATTERNS = [
     re.compile(
         r'(?i)(password|passwd|token|secret|api[_\-]?key|auth[_\-]?key)\s*[=:]\s*["\']?[^\s"\']{6,}["\']?'
     ),
-    # Bearer tokens
-    re.compile(r"Bearer\s+[a-zA-Z0-9\-_\.]{20,}"),
+    # Bearer tokens (case-insensitive for HTTP authorization headers and error traces)
+    re.compile(r"(?i)bearer\s+[a-zA-Z0-9\-_\.]{20,}"),
     # Provider-prefixed tokens (GitHub, GitLab, Slack, Stripe, GCP, npm, PyPI, NVIDIA)
     re.compile(
         r"\b(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[bapors]-|"
@@ -129,6 +129,23 @@ def sever_taint_numeric(text: str) -> str:
     if not text_str:
         return ""
     return "".join(chr(cp) for cp in [ord(c) for c in text_str])
+
+
+_SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+
+def sanitize_identifier(ident: str, default: str = "") -> str:
+    """
+    Validate and sanitize an identifier (session_id, task_id, memory_id) against path injection.
+    Only allows alphanumeric characters, underscores, and hyphens.
+    Returns numeric reconstructed string to sever taint.
+    """
+    if not ident or not isinstance(ident, str):
+        return default
+    cleaned = ident.strip()
+    if not _SAFE_ID_RE.fullmatch(cleaned):
+        return default
+    return sever_taint_numeric(cleaned)
 
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -236,20 +253,16 @@ def resolve_safe_path(workspace_root: str | Path, requested_path: str | Path) ->
     root = Path(workspace_root).resolve()
     # Join and resolve (handles .., symlinks, Windows drive letters)
     try:
-        target = (root / requested_path).resolve()
+        target = Path(os.path.realpath(str(root / requested_path)))
     except (ValueError, OSError) as e:
         raise SecurityError(f"Cannot resolve path '{requested_path}': {e}") from e
 
     # --- Traversal check ---
-    try:
-        common = os.path.commonpath([str(root), str(target)])
-    except ValueError:
-        # On Windows, commonpath raises ValueError if paths are on different drives
-        raise SecurityError(
-            f"Path '{target}' is on a different drive from workspace '{root}'. Access denied."
-        )
+    root_s = os.path.normcase(os.path.realpath(str(root))).rstrip("/\\")
+    target_s = os.path.normcase(str(target))
+    sep = os.sep
 
-    if common != str(root):
+    if target_s != root_s and not target_s.startswith(root_s + sep):
         raise SecurityError(
             f"Path traversal detected: '{requested_path}' resolves to '{target}' "
             f"which is outside workspace '{root}'."

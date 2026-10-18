@@ -13,25 +13,33 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `pyproject.toml` / `requirements.txt` - Project packaging and dependencies.
     *   `ROADMAP.md` - Technical roadmap, deferred features, and architecture rationale.
 *   **`botex/`** - Main application package.
-    *   `engine.py` - Autonomous execution loop, context management, and rollback triggers.
-    *   `contracts.py` - Task completion contract verification and status taxonomy.
+    *   `engine.py` - Autonomous execution loop, 5-gate in-payload failovers, context management, deterministic task receipts, and rollback triggers.
+    *   `contracts.py` - Task completion contract verification, strict JSON Schema (`TASK_COMPLETION_JSON_SCHEMA`), and status taxonomy.
     *   `patch_engine.py` - Fuzzy patch mechanism, in-memory syntax validation, and snapshot management.
     *   `file_tools.py` - Safe file reading (outline-first), creation, moving, and deletion.
     *   `security.py` - Protections against Path Traversal attacks, secret masking, and `.gitignore` filtering.
     *   `exec_tools.py` - Command execution with policy control and argument filtering.
-    *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`).
+    *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`) and agency middleware.
+    *   `approval.py` - Human-in-the-Loop approval manager, async pending actions, and risk policies.
+    *   `chat.py` - Conversational chat sessions, SSE/WebSocket token streaming, and read-only sandbox.
+    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE server, and REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/chat`).
     *   `pricing.py` - Model pricing guardrail, live catalog checks, and cost caps.
-    *   `analytics.py` - Cost/token ledger, budget tracking, and CLI reports.
-    *   `providers.py` - Provider adapters (OpenRouter, NVIDIA, etc.) and request normalizer.
-    *   `benchmarks.py` - Live model recommendations (`recommend_models`) and benchmark rankings.
+    *   `analytics.py` - Cost/token ledger, generation latency/cache telemetry, budget tracking, and CLI reports.
+    *   `providers.py` - Provider registry, adapters (`OpenRouterProvider`, `NvidiaProvider`, `GenericOpenAIProvider`), `/api/v1/generation` telemetry reconciliation, and request normalizer.
+    *   `catalog.py` - Dynamic model catalog service with TTL caching and ZDR checks.
+    *   `denylist.py` - Hierarchical model denylist filter (exact, glob, regex).
+    *   `wallet.py` - Credit balance, key budget status (`get_key_status`), and low-budget warnings.
+    *   `benchmarks.py` - Authenticated live model recommendations (`recommend_models`) and tier-aware (`high` / `standard` / `budget`) rankings.
+    *   `context_guard.py` - Context compaction and verification output pruning.
     *   `net_tools.py` - SSRF-safe network fetching tools (`read_url`, `fetch_url`).
-    *   `memory.py` - Persistent workspace Memory Vault (`.botex/memory/`).
+    *   `memory.py` - Persistent two-tier Memory Vault (local `.botex/memory/` and global `~/.botex/memory/`).
     *   `recipes.py` - Recipe loader and system-prompt injection.
-    *   `config.py` - Layered configuration loader (defaults < local < env).
+    *   `config.py` - Layered configuration loader (defaults < local < env) with `mtime` hot-reload.
     *   `i18n.py` - CLI localization (EN/PL).
     *   `ui.py` - ANSI styling helpers with plain-text fallback.
     *   `recipes/` - Bundled persona prompts (`planner`, `reviewer`, `tdd`, `build-resolver`, `security-reviewer`, `code-explorer`).
-*   **`tests/`** - Test suite (unit tests in `test_botex.py` and live integration tests in `test_live_e2e.py`).
+*   **`web/`** - Vue 3 + Vite + Pinia + Tailwind CSS PWA frontend for the Cloud Gateway.
+*   **`tests/`** - Test suite (`test_botex.py`, `test_stage_4_6.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_context_guard.py`, and live integration tests in `test_live_e2e.py`).
 *   **`docs/`** - Documentation (`TUTORIAL.md`).
 *   **`skills/`** - Caller-side skill definitions (`skills/botex/SKILL.md`).
 
@@ -87,4 +95,28 @@ Under no circumstances should you modify the following locations:
 *   **Repository-wide Linting & Formatting:** Always run `ruff check .` and `ruff format --check .` across the entire repository root (`.`), not on scoped subsets of files, matching Section 2 conventions.
 *   **Falsy & Scalar Edge Cases:** Avoid naive `if not value:` checks on polymorphic values, as they conflate legitimate values (`0`, `False`) with missing data (`None`). Use explicit guards (`if value is None:`) and account for `bool` being a subclass of `int` in Python.
 *   **I/O & Buffer Deadlock Pitfalls:** Avoid sequential single-threaded `os.write()` followed by `os.read()` on `os.pipe()` for payloads exceeding the operating system pipe buffer (>64 KB). Use `tempfile.TemporaryFile`, `io.BytesIO`, or thread/event loops for large in-process data transfers.
+
+---
+
+## 6. Context Management & Knowledge Search (Toolport & context-mode)
+
+This repository is fully indexed in the local FTS5 knowledge base of the `context-mode` plugin.
+External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge) are served via **Toolport MCP Gateway** in **Lazy Discovery** mode, while autonomous harnesses (`botex`, `agy`) are connected directly:
+- Search tools on-demand via `toolport_search_tools(query: "...")` (e.g. `query: "ctx"`).
+- Execute tools via `toolport_call_tool(name: "<server>__<tool>", arguments: {...})` (e.g. `context_mode__ctx_execute`).
+
+### 6.1. Knowledge Search (`context_mode__ctx_search`)
+- Instead of repeatedly walking directories or executing multiple grep commands across modules, query `context_mode__ctx_search` first via Toolport.
+- Designated source:
+  - `source: "ai-harness"` — complete architecture, engine modules, security barriers, recipes, memory vault, and tests.
+- Batch questions into a single `queries` array: `toolport_call_tool(name: "context_mode__ctx_search", arguments: {"queries": ["..."], "source": "ai-harness"})`.
+
+### 6.2. In-Sandbox File Inspection (`context_mode__ctx_execute_file`)
+- **NEVER dump entire files into the conversation** (neither via `view_file` over 100 lines nor shell commands).
+- For summarizing, parsing AST, inspecting test matrices, or filtering configurations, use `context_mode__ctx_execute_file` (or `context_mode__ctx_execute` with Python/JS) and return only the derived answer.
+- Reserve native `view_file` strictly for small, exact byte-ranges immediately preceding code modifications.
+
+### 6.3. Heavy Command Output Sandboxing (`context_mode__ctx_execute` / `context_mode__ctx_batch_execute`)
+- When running full pytest suites, CodeQL traces, or coverage matrices that produce extensive logs, execute or filter them through `context-mode` via Toolport to prevent raw byte flooding into the context window.
+
 

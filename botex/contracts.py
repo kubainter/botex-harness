@@ -34,6 +34,7 @@ STATUS_FAILURE_KIND: Dict[str, Optional[str]] = {
     "DONE_WITHOUT_WRITE": "contract_failed",
     "VERIFICATION_FAILED": "contract_failed",
     "CONFIG_ERROR": "config_error",
+    "ABORTED": "task_aborted",
     "ERROR": "workspace_or_security",
 }
 
@@ -152,6 +153,108 @@ def resolve_task_contract(
     """
     if output_path:
         return TaskContract(kind="file_output", required_output_path=output_path)
-    if resolved_mode == "readonly":
+    if resolved_mode in ("readonly", "chat"):
         return TaskContract(kind="analysis", min_summary_chars=ANALYSIS_MIN_SUMMARY_CHARS)
     return TaskContract(kind="edit")
+
+
+# Canonical status mapping for structured JSON outputs (CodeQL CWE-312 compliant)
+_VALID_STRUCTURED_STATUS_MAP: Dict[str, str] = {
+    "done": "DONE",
+    "incomplete": "INCOMPLETE",
+    "unsupported": "UNSUPPORTED",
+    "blocked": "INCOMPLETE",
+}
+
+TASK_COMPLETION_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "botex_task_completion",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["DONE", "INCOMPLETE", "UNSUPPORTED"],
+                },
+                "summary": {
+                    "type": "string",
+                },
+                "files_modified": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["status", "summary"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def parse_structured_completion(text: str) -> Optional[Dict[str, Any]]:
+    """Parse a structured JSON task completion response if present.
+
+    Accepts raw JSON objects or ```json fenced payloads containing a valid
+    ``status`` ("DONE", "INCOMPLETE", "UNSUPPORTED", "BLOCKED") and a
+    ``summary`` (or ``plan`` / ``findings`` / ``result``) field.
+    Returns ``{"status": str, "summary": str, "data": dict}`` or ``None``.
+    """
+    import json
+    import re
+
+    if not text or not isinstance(text, str):
+        return None
+    raw = text.strip()
+    if not raw:
+        return None
+
+    candidates = [raw]
+    fenced = re.search(r"```(?:json)?\s*\n(.*?)```", raw, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidates.insert(0, fenced.group(1).strip())
+
+    parsed: Optional[Dict[str, Any]] = None
+    for cand in candidates:
+        if not (cand.startswith("{") and cand.endswith("}")):
+            continue
+        try:
+            obj = json.loads(cand)
+            if isinstance(obj, dict):
+                parsed = obj
+                break
+        except Exception:
+            continue
+
+    if parsed is None:
+        return None
+
+    raw_status = parsed.get("status")
+    if not isinstance(raw_status, str):
+        return None
+    mapped_status = _VALID_STRUCTURED_STATUS_MAP.get(raw_status.strip().lower())
+    if mapped_status is None:
+        return None
+
+    summary_val = (
+        parsed.get("summary")
+        if parsed.get("summary") is not None
+        else parsed.get("plan")
+        if parsed.get("plan") is not None
+        else parsed.get("findings")
+        if parsed.get("findings") is not None
+        else parsed.get("result")
+    )
+    if isinstance(summary_val, (list, dict)):
+        summary_str = json.dumps(summary_val, ensure_ascii=False)
+    elif summary_val is not None:
+        summary_str = str(summary_val).strip()
+    else:
+        summary_str = ""
+
+    return {
+        "status": mapped_status,
+        "summary": summary_str,
+        "data": parsed,
+    }
