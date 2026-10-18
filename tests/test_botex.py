@@ -2559,6 +2559,29 @@ def test_pick():
         mock_input.return_value = "3"
         assert _pick("test", ["a", "b"], "a") == None
 
+
+def test_ui_force_color():
+    import os
+    import botex.ui as ui
+    from unittest.mock import patch
+
+    # 1. Test FORCE_COLOR=1
+    with patch.dict(os.environ, {"FORCE_COLOR": "1"}, clear=True):
+        ui._enabled = None
+        assert ui.colors_enabled() is True
+
+    # 2. Test CLICOLOR_FORCE=1
+    with patch.dict(os.environ, {"CLICOLOR_FORCE": "1"}, clear=True):
+        ui._enabled = None
+        assert ui.colors_enabled() is True
+
+    # 3. Test FORCE_COLOR=0 reverts to default tty check
+    with patch.dict(os.environ, {"FORCE_COLOR": "0"}, clear=True), patch("sys.stdout.isatty", return_value=False):
+        ui._enabled = None
+        assert ui.colors_enabled() is False
+
+    ui._enabled = None
+
 def test_interactive_config():
     from unittest.mock import patch, MagicMock
     from server import _interactive_config
@@ -3453,6 +3476,7 @@ if __name__ == "__main__":
     test_try_local_command()
     test_normalize_cli_style()
     test_pick()
+    test_ui_force_color()
     test_mark_status()
     test_interactive_config()
     test_cli_config()
