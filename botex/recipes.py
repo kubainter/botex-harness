@@ -5,6 +5,7 @@ BoteX Recipes & Personas Registry
 =================================
 Predefined operational personas and specialized task workflows.
 """
+
 import re
 from pathlib import Path
 from typing import List, Optional

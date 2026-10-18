@@ -8,14 +8,15 @@ harness. Exposes an autonomous code-editing agent with outline-first I/O,
 in-memory syntax validation, fuzzy patching, snapshot rollbacks, and quota
 optimization to any MCP-compatible client.
 """
-import sys
-import os
-from pathlib import Path
+
 import asyncio
 import json
+import os
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Optional
 
 from typing_extensions import TypedDict
@@ -34,31 +35,39 @@ if current_dir not in sys.path:
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 
-from botex.engine import run_botex_task
-from botex.security import mask_secrets, zdr_enforced
-from botex.file_tools import get_file_outline as _get_file_outline
-from botex.analytics import cli_stats, cli_history, load_analytics
-from botex.patch_engine import snapshot_manager
-from botex.config import (
-    load_config, set_local_config, resolve_provider,
-    resolve_workspace, resolve_workspace_source,
-)
-from botex.ui import title, accent, ok, warn, err, dim, mark_status
-from botex.i18n import t, init_language, set_language, SUPPORTED
-from botex.pricing import load_catalog, model_price
+from botex.analytics import cli_history, cli_stats, load_analytics
 from botex.benchmarks import get_recommended_models
-from botex.net_tools import fetch_url as _fetch_url
+from botex.config import (
+    load_config,
+    resolve_provider,
+    resolve_workspace,
+    resolve_workspace_source,
+    set_local_config,
+)
+from botex.engine import run_botex_task
+from botex.file_tools import get_file_outline as _get_file_outline
+from botex.i18n import SUPPORTED, init_language, set_language, t
 from botex.memory import (
-    save_memory as _save_memory,
-    search_memory as _search_memory,
     read_memory as _read_memory,
 )
+from botex.memory import (
+    save_memory as _save_memory,
+)
+from botex.memory import (
+    search_memory as _search_memory,
+)
+from botex.net_tools import fetch_url as _fetch_url
+from botex.patch_engine import snapshot_manager
+from botex.pricing import load_catalog, model_price
+from botex.security import mask_secrets, wrap_untrusted_content, zdr_enforced
+from botex.ui import accent, dim, err, mark_status, ok, title, warn
 
 mcp = MCPServer("BoteX-Harness")
 
 
 class SubagentAttemptResult(TypedDict, total=False):
     """One model-candidate outcome inside the fallback chain."""
+
     model: str
     task_id: str
     status: str
@@ -82,6 +91,7 @@ class SubagentTaskResult(TypedDict, total=False):
     provider_error, ...).
     `ok` is true only when the task contract was fulfilled (status == DONE).
     """
+
     ok: bool
     task_id: str
     status: str
@@ -99,6 +109,7 @@ class SubagentTaskResult(TypedDict, total=False):
     attempts: list[SubagentAttemptResult]
     fallback_from: str
     zdr_enforced: bool
+    vault_memory_id: Optional[str]
 
 
 def _masked_result(res: dict) -> dict:
@@ -110,10 +121,59 @@ def _masked_result(res: dict) -> dict:
     return masked
 
 
+REPORT_OFFLOAD_BYTES = 2048
+_REPORT_ABSTRACT_CHARS = 400
+
+
+def _offload_report(res: dict, workspace: str) -> dict:
+    """Context-Guard: when summary exceeds 2 KB, store the full (masked)
+    report in the Memory Vault as ``mem_task_<id>_report`` and return a copy
+    whose summary/message are a compact abstract + ``vault_memory_id``."""
+    summary = res.get("summary") or res.get("message") or ""
+    if not isinstance(summary, str) or len(summary.encode("utf-8")) <= REPORT_OFFLOAD_BYTES:
+        return res
+    if not load_config().get("context_guard", {}).get("enabled", True):
+        return res
+    safe_id = "".join(
+        c if (c.isalnum() or c in "_-") else "_" for c in str(res.get("task_id") or "unknown")
+    )
+    mem_id = f"mem_task_{safe_id}_report"
+    saved = _save_memory(
+        workspace_dir=workspace,
+        title=f"Task {res.get('task_id')} audit report",
+        content=wrap_untrusted_content(
+            summary, tag="untrusted_command_output", source="subagent_report"
+        ),
+        kind="context",
+        tags=["ephemeral", "context_guard", "task_report"],
+        memory_id=mem_id,
+        origin="context_guard:run_subagent",
+    )
+    if not saved.get("ok"):
+        return res  # offload failed — keep the full inline report
+    abstract = summary[:_REPORT_ABSTRACT_CHARS].rstrip()
+    compact = (
+        f"{abstract}…\n[Report truncated; full text in Memory Vault: "
+        f"'{mem_id}'. read_memory(memory_id='{mem_id}')]"
+    )
+    out = dict(res)
+    out["summary"] = compact
+    if isinstance(out.get("message"), str):
+        out["message"] = compact
+    out["vault_memory_id"] = mem_id
+    return out
+
+
 def _format_result_text(res: dict) -> str:
-    """Human-readable task report (kept as TextContent for legacy clients)."""
+    """Human-readable task report (kept as TextContent for legacy clients).
+    When the report was offloaded to the Memory Vault this is a compact
+    Task Scorecard (< 1 KB) with a read_memory pointer."""
     status_str = "SUCCESS" if res.get("ok") else "FAILURE"
-    files_str = ", ".join(res.get("files_touched", [])) or "(none)"
+    files = list(res.get("files_touched", []))
+    offloaded = res.get("vault_memory_id")
+    if offloaded and len(files) > 5:
+        files = files[:5] + [f"... (+{len(res.get('files_touched', [])) - 5} more)"]
+    files_str = ", ".join(files) or "(none)"
     cost_str = f"${res.get('cost_usd', 0.0):.5f} USD"
     summary_text = res.get("summary") or res.get("message", "")
     lines = [
@@ -124,8 +184,7 @@ def _format_result_text(res: dict) -> str:
         lines.append(f"- Failure kind: {res['failure_kind']}")
     attempts = res.get("attempts") or []
     if len(attempts) > 1:
-        chain = " -> ".join(
-            f"{a.get('model')}({a.get('status')})" for a in attempts)
+        chain = " -> ".join(f"{a.get('model')}({a.get('status')})" for a in attempts)
         lines.append(f"- Model chain: {chain}")
     if res.get("rollback_verified") is False:
         lines.append("- WARNING: rollback could not be verified — workspace may be dirty")
@@ -135,8 +194,14 @@ def _format_result_text(res: dict) -> str:
         f"- Duration: {res.get('duration_s', 0)}s | Cost: {cost_str}",
         f"- Modified files: {files_str}",
         f"- Line balance: +{res.get('lines_added', 0)} / -{res.get('lines_removed', 0)}",
-        f"\nChange summary:\n{summary_text}"
     ]
+    if offloaded:
+        lines.append(
+            "- Full audit report saved to Memory Vault. "
+            f"Run read_memory(memory_id='{offloaded}') for complete diff."
+        )
+        return "\n".join(lines)
+    lines.append(f"\nChange summary:\n{summary_text}")
     return "\n".join(lines)
 
 
@@ -154,9 +219,7 @@ async def _background_task(task_id: str, kwargs: dict) -> None:
             tool_result = await run_subagent(**kwargs)
             # `result` keeps the legacy pretty-text report; `result_data`
             # carries the full structured engine result.
-            entry["result"] = (
-                tool_result.content[0].text if tool_result.content else ""
-            )
+            entry["result"] = tool_result.content[0].text if tool_result.content else ""
             entry["result_data"] = tool_result.structured_content or {}
             entry["status"] = "DONE"
     except asyncio.CancelledError:
@@ -164,9 +227,7 @@ async def _background_task(task_id: str, kwargs: dict) -> None:
         raise
     except Exception as exc:
         entry["status"] = "FAILED"
-        entry["result"] = (
-            f"Background task failed: {mask_secrets(str(exc))[:500]}"
-        )
+        entry["result"] = f"Background task failed: {mask_secrets(str(exc))[:500]}"
     finally:
         entry["finished_at"] = time.time()
 
@@ -175,14 +236,17 @@ def _cleanup_tasks() -> None:
     ttl = int(load_config().get("engine", {}).get("task_result_ttl_s", 3600))
     now = time.time()
     for task_id, entry in list(_TASKS.items()):
-        if (entry.get("status") in {"DONE", "FAILED", "CANCELLED"}
-                and now - entry.get("finished_at", now) > ttl):
+        if (
+            entry.get("status") in {"DONE", "FAILED", "CANCELLED"}
+            and now - entry.get("finished_at", now) > ttl
+        ):
             _TASKS.pop(task_id, None)
 
 
 # ---------------------------------------------------------------------------
 # Public MCP Tools (Exposed to MCP clients)
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 async def start_task(
@@ -249,33 +313,42 @@ async def start_task(
     """
     _cleanup_tasks()
     max_queued = int(load_config().get("engine", {}).get("max_queued_tasks", 32))
-    active_count = sum(
-        entry.get("status") in {"QUEUED", "RUNNING"}
-        for entry in _TASKS.values()
-    )
+    active_count = sum(entry.get("status") in {"QUEUED", "RUNNING"} for entry in _TASKS.values())
     if active_count >= max_queued:
         return {
-            "ok": False, "status": "TOO_MANY_QUEUED",
+            "ok": False,
+            "status": "TOO_MANY_QUEUED",
             "message": f"Task queue limit reached ({max_queued}).",
         }
     task_id = uuid.uuid4().hex[:12]
     kwargs = {
-        "task": task, "files": files,
+        "task": task,
+        "files": files,
         "workspace_dir": resolve_workspace(workspace_dir),
-        "model": model, "profile": profile, "provider": provider,
-        "mode": mode, "max_turns": max_turns, "max_tokens": max_tokens,
-        "max_duration_s": max_duration_s, "budget_limit_usd": budget_limit_usd,
-        "allow_destructive": allow_destructive, "allow_exec": allow_exec,
-        "allow_net": allow_net, "net_allowed_hosts": net_allowed_hosts,
+        "model": model,
+        "profile": profile,
+        "provider": provider,
+        "mode": mode,
+        "max_turns": max_turns,
+        "max_tokens": max_tokens,
+        "max_duration_s": max_duration_s,
+        "budget_limit_usd": budget_limit_usd,
+        "allow_destructive": allow_destructive,
+        "allow_exec": allow_exec,
+        "allow_net": allow_net,
+        "net_allowed_hosts": net_allowed_hosts,
         "net_allowed_urls": net_allowed_urls,
-        "api_key": api_key, "output_path": output_path,
+        "api_key": api_key,
+        "output_path": output_path,
         "verify_command": verify_command,
         "recipe": recipe,
         "allow_non_zdr": allow_non_zdr,
     }
     task_obj = asyncio.create_task(_background_task(task_id, kwargs))
     _TASKS[task_id] = {
-        "status": "QUEUED", "created_at": time.time(), "task": task_obj,
+        "status": "QUEUED",
+        "created_at": time.time(),
+        "task": task_obj,
     }
     return {"task_id": task_id, "status": "QUEUED"}
 
@@ -296,7 +369,9 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
     if not entry:
         return {"ok": False, "status": "NOT_FOUND", "task_id": task_id}
     result: dict[str, Any] = {
-        "ok": True, "task_id": task_id, "status": entry["status"],
+        "ok": True,
+        "task_id": task_id,
+        "status": entry["status"],
     }
     if entry.get("status") in {"DONE", "FAILED", "CANCELLED"}:
         # `result` is the pretty-text report (legacy); `result_data` is the
@@ -327,7 +402,9 @@ async def fetch_url(url: str, max_bytes: int = 0) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def recommend_models(task_type: str = "coding", limit: int = 5, include_free: bool = False) -> str:
+async def recommend_models(
+    task_type: str = "coding", limit: int = 5, include_free: bool = False
+) -> str:
     """
     [EN] Fetches the most cost-effective and capable models from OpenRouter based on live benchmarks.
     USE THIS TOOL BEFORE calling `run_subagent` if you are unsure which model ID to use or want to optimize for cost/quality.
@@ -343,6 +420,7 @@ async def recommend_models(task_type: str = "coding", limit: int = 5, include_fr
     """
     results = get_recommended_models(task_type, limit, include_free=include_free)
     return json.dumps(results, indent=2)
+
 
 @mcp.tool()
 async def run_subagent(
@@ -371,7 +449,7 @@ async def run_subagent(
     """
     Runs BoteX — an autonomous code execution engine (agent-agnostic harness).
     BoteX performs multi-step tasks on local files inside workspace_dir.
-    
+
     TIP: If the user didn't specify a model, DO NOT guess. Use the `recommend_models` tool first to find the best model for this task!
 
     Key engine features:
@@ -483,6 +561,7 @@ async def run_subagent(
     )
 
     res = _masked_result(res)
+    res = _offload_report(res, resolve_workspace(workspace_dir))
     return CallToolResult(
         content=[TextContent(type="text", text=_format_result_text(res))],
         structured_content=res,
@@ -586,10 +665,7 @@ async def get_stats(period: str = "week") -> str:
     """
     days = 30 if period == "month" else 7
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-    records = [
-        r for r in load_analytics()
-        if r.get("timestamp", "") >= cutoff
-    ]
+    records = [r for r in load_analytics() if r.get("timestamp", "") >= cutoff]
     if not records:
         return f"No BoteX analytics data recorded in the last {days} days."
 
@@ -617,8 +693,14 @@ async def get_stats(period: str = "week") -> str:
     model_lines = []
     for m, s in sorted(by_model.items(), key=lambda x: x[1]["cost"], reverse=True):
         rate = (s["done"] / s["runs"] * 100) if s["runs"] > 0 else 0.0
-        top_f = f" (top failure: {max(s['failures'].items(), key=lambda x: x[1])[0]})" if s["failures"] else ""
-        model_lines.append(f"  * {m}: {s['runs']} runs | DONE rate: {rate:.1f}%{top_f} | ${s['cost']:.4f} USD")
+        top_f = (
+            f" (top failure: {max(s['failures'].items(), key=lambda x: x[1])[0]})"
+            if s["failures"]
+            else ""
+        )
+        model_lines.append(
+            f"  * {m}: {s['runs']} runs | DONE rate: {rate:.1f}%{top_f} | ${s['cost']:.4f} USD"
+        )
 
     models_section = ("\n\nModel Efficiency:\n" + "\n".join(model_lines)) if model_lines else ""
 
@@ -652,8 +734,7 @@ async def check_health() -> str:
     snaps = snapshot_manager.list_snapshots()
     total_mb = sum(s["size_kb"] for s in snaps) / 1024
     def_pname, def_pcfg = resolve_provider()
-    zdr_state = ("ACTIVE" if zdr_enforced(def_pcfg)
-                 else "OFF — provider may log/train on prompts")
+    zdr_state = "ACTIVE" if zdr_enforced(def_pcfg) else "OFF — provider may log/train on prompts"
 
     return (
         "=== BOTEX HARNESS HEALTH CHECK ===\n"
@@ -673,8 +754,10 @@ async def clean_snapshots(max_age_days: float = 7.0, max_total_mb: float = 50.0)
         max_total_mb=max_total_mb,
         protected_task_ids=set(snapshot_manager.active_task_ids),
     )
-    return (f"[OK] Purged old snapshots: removed {res['deleted_dirs']} folders, "
-            f"freed {res['freed_mb']} MB. Remaining: {res['remaining_mb']} MB.")
+    return (
+        f"[OK] Purged old snapshots: removed {res['deleted_dirs']} folders, "
+        f"freed {res['freed_mb']} MB. Remaining: {res['remaining_mb']} MB."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -683,10 +766,15 @@ async def clean_snapshots(max_age_days: float = 7.0, max_total_mb: float = 50.0)
 def _interactive_confirm(operation: str, path: str) -> bool:
     """Prompt the terminal operator before a destructive file operation."""
     try:
-        answer = input(
-            warn(f"[BoteX] {t('confirm.req')} '{operation}' {t('confirm.on')} '{path}'. ")
-            + t("confirm.ask") + " "
-        ).strip().lower()
+        answer = (
+            input(
+                warn(f"[BoteX] {t('confirm.req')} '{operation}' {t('confirm.on')} '{path}'. ")
+                + t("confirm.ask")
+                + " "
+            )
+            .strip()
+            .lower()
+        )
         return answer in ("y", "yes")
     except (EOFError, KeyboardInterrupt):
         return False
@@ -694,33 +782,33 @@ def _interactive_confirm(operation: str, path: str) -> bool:
 
 def _print_usage():
     c = accent  # command names
-    d = dim     # descriptions
-    print(f"""{title('BoteX')} — {t('usage.tagline')}
+    d = dim  # descriptions
+    print(f"""{title("BoteX")} — {t("usage.tagline")}
 
-{title(t('usage.commands'))}
-  {c('botex repl [-w DIR] [--profile P]')}   {d(t('usage.repl'))}
-  {c('botex run "task" [flags]')}            {d(t('usage.run'))}
-  {c('    --allow-non-zdr')}                 {d(t('usage.allow_non_zdr'))}
-  {c('botex --stats [--month]')}             {d(t('usage.stats'))}
-  {c('botex --history <task_id>')}           {d(t('usage.history'))}
-  {c('botex --snapshots')}                   {d(t('usage.snapshots'))}
-  {c('botex --clean-snapshots')}             {d(t('usage.clean'))}
-  {c('botex health')}                        {d(t('usage.health'))}
-  {c('botex serve')}                         {d(t('usage.serve'))}
-  {c('botex config')}                        {d(t('usage.config'))}
-  {c('botex config provider <name>')}        {d(t('usage.config.provider'))}
-  {c('botex config model [prov] <slug>')}    {d(t('usage.config.model'))}
-  {c('botex config profile <name>')}         {d(t('usage.config.profile'))}
-  {c('botex config mode <preset>')}          {d(t('usage.config.mode'))}
-  {c('botex config zdr <on|off> [prov]')}    {d(t('usage.config.zdr'))}
-  {c('botex models [--refresh]')}            {d(t('usage.models'))}
+{title(t("usage.commands"))}
+  {c("botex repl [-w DIR] [--profile P]")}   {d(t("usage.repl"))}
+  {c('botex run "task" [flags]')}            {d(t("usage.run"))}
+  {c("    --allow-non-zdr")}                 {d(t("usage.allow_non_zdr"))}
+  {c("botex --stats [--month]")}             {d(t("usage.stats"))}
+  {c("botex --history <task_id>")}           {d(t("usage.history"))}
+  {c("botex --snapshots")}                   {d(t("usage.snapshots"))}
+  {c("botex --clean-snapshots")}             {d(t("usage.clean"))}
+  {c("botex health")}                        {d(t("usage.health"))}
+  {c("botex serve")}                         {d(t("usage.serve"))}
+  {c("botex config")}                        {d(t("usage.config"))}
+  {c("botex config provider <name>")}        {d(t("usage.config.provider"))}
+  {c("botex config model [prov] <slug>")}    {d(t("usage.config.model"))}
+  {c("botex config profile <name>")}         {d(t("usage.config.profile"))}
+  {c("botex config mode <preset>")}          {d(t("usage.config.mode"))}
+  {c("botex config zdr <on|off> [prov]")}    {d(t("usage.config.zdr"))}
+  {c("botex models [--refresh]")}            {d(t("usage.models"))}
 
-{title(t('usage.repl_cmds'))}
-  {c('health, stats [month], history <id>, snapshots, clean-snapshots,')}
-  {c('models, config [...], mode <preset>, help, exit')}
+{title(t("usage.repl_cmds"))}
+  {c("health, stats [month], history <id>, snapshots, clean-snapshots,")}
+  {c("models, config [...], mode <preset>, help, exit")}
 
-{d(t('usage.no_args'))}
-{d(t('usage.no_args2'))}""")
+{d(t("usage.no_args"))}
+{d(t("usage.no_args2"))}""")
 
 
 def _resolve_workspace_abs(value: str) -> tuple:
@@ -732,6 +820,7 @@ def _resolve_workspace_abs(value: str) -> tuple:
 def _warn_if_harness(workspace: str) -> None:
     """Warn when the target workspace is the BoteX repository itself."""
     from botex.config import PROJECT_ROOT
+
     try:
         same = Path(workspace).resolve() == PROJECT_ROOT.resolve()
     except OSError:
@@ -762,25 +851,25 @@ def _repl_workspace(args, arg: str) -> None:
 def _print_repl_help():
     c = accent
     d = dim
-    print(f"""{title(t('repl.title'))}
+    print(f"""{title(t("repl.title"))}
 
-{title(t('repl.local'))}
-  {c('health')}                  {d(t('repl.health'))}
-  {c('stats [--month]')}         {d(t('repl.stats'))}
-  {c('history <task_id>')}       {d(t('repl.history'))}
-  {c('snapshots')}               {d(t('repl.snapshots'))}
-  {c('clean-snapshots')}         {d(t('repl.clean'))}
-  {c('config')}                  {d(t('repl.config'))}
-  {c('config provider|model|profile|mode|workspace|language|price|zdr <value>')}
-                      {d(t('repl.config.set'))}
-  {c('models [--refresh]')}      {d(t('usage.models'))}
-  {c('mode <preset>')}           {d(t('repl.mode'))}
-  {c('workspace [DIR]')} / {c('cd [DIR]')}  {d(t('repl.workspace'))}
-  {c('botex repl --allow-non-zdr')} {d(t('repl.allow_non_zdr'))}
-  {c('help')}                    {d(t('repl.help'))}
-  {c('exit')}                    {d(t('repl.exit'))}
+{title(t("repl.local"))}
+  {c("health")}                  {d(t("repl.health"))}
+  {c("stats [--month]")}         {d(t("repl.stats"))}
+  {c("history <task_id>")}       {d(t("repl.history"))}
+  {c("snapshots")}               {d(t("repl.snapshots"))}
+  {c("clean-snapshots")}         {d(t("repl.clean"))}
+  {c("config")}                  {d(t("repl.config"))}
+  {c("config provider|model|profile|mode|workspace|language|price|zdr <value>")}
+                      {d(t("repl.config.set"))}
+  {c("models [--refresh]")}      {d(t("usage.models"))}
+  {c("mode <preset>")}           {d(t("repl.mode"))}
+  {c("workspace [DIR]")} / {c("cd [DIR]")}  {d(t("repl.workspace"))}
+  {c("botex repl --allow-non-zdr")} {d(t("repl.allow_non_zdr"))}
+  {c("help")}                    {d(t("repl.help"))}
+  {c("exit")}                    {d(t("repl.exit"))}
 
-{d(t('repl.shell_note'))}""")
+{d(t("repl.shell_note"))}""")
 
 
 def _start_mcp_server():
@@ -824,12 +913,18 @@ def _try_local_command(line: str) -> bool:
         total_mb = sum(s["size_kb"] for s in snaps) / 1024
         print(f"{t('lc.snaps_title')} ({len(snaps)} {t('lc.tasks')}, {total_mb:.2f} MB) ===")
         for s in snaps:
-            print(f"  {accent('*')} {s['task_id']:<10} | {s['created_at']} | {s['files_count']} {t('lc.files')} | {s['size_kb']} KB ({s['age_days']} {t('lc.days')})")
+            print(
+                f"  {accent('*')} {s['task_id']:<10} | {s['created_at']} | {s['files_count']} {t('lc.files')} | {s['size_kb']} KB ({s['age_days']} {t('lc.days')})"
+            )
     elif cmd == "clean-snapshots":
         res = snapshot_manager.clean_old_snapshots(
             protected_task_ids=set(snapshot_manager.active_task_ids)
         )
-        print(ok(f"[OK] {res['deleted_dirs']} {t('lc.cleaned')} {res['freed_mb']} MB. {t('lc.remaining')} {res['remaining_mb']} MB."))
+        print(
+            ok(
+                f"[OK] {res['deleted_dirs']} {t('lc.cleaned')} {res['freed_mb']} MB. {t('lc.remaining')} {res['remaining_mb']} MB."
+            )
+        )
     elif cmd == "config":
         _cli_config(parts[1:])
     elif cmd == "models":
@@ -866,6 +961,7 @@ def _pick(label: str, options: list, current: str):
 def _interactive_config():
     """Selector-based config picker for interactive terminals."""
     from botex.capabilities import MODES
+
     cfg = load_config()
     providers = cfg.get("providers", {})
     cur_provider, _ = resolve_provider()
@@ -895,6 +991,7 @@ def _interactive_config():
         set_local_config("engine.default_mode", m)
 
     from botex.i18n import get_language
+
     lang = _pick(t("cfg.lang_label"), list(SUPPORTED), get_language())
     if lang:
         set_local_config("ui.language", lang)
@@ -907,6 +1004,7 @@ def _interactive_config():
 def _cli_config(argv):
     """`botex config` — inspect or persist defaults into botex.config.local.json."""
     from botex.capabilities import MODES
+
     cfg = load_config()
     providers = cfg.get("providers", {})
 
@@ -918,7 +1016,9 @@ def _cli_config(argv):
         for name, p in providers.items():
             marker = accent(" [default]") if p.get("default") else ""
             zdr_state = "ZDR:on" if zdr_enforced(p) else "ZDR:off"
-            print(f"{accent('provider ' + name)}{marker}: {dim(p.get('base_url', ''))} {dim('[' + zdr_state + ']')}")
+            print(
+                f"{accent('provider ' + name)}{marker}: {dim(p.get('base_url', ''))} {dim('[' + zdr_state + ']')}"
+            )
             for prof, mdl in p.get("models", {}).items():
                 print(f"    {accent(prof)}: {mdl}")
         eng = cfg.get("engine", {})
@@ -1042,34 +1142,56 @@ def _cli_models(argv):
 
 def _repl(argv):
     import argparse
-    parser = argparse.ArgumentParser(
-        prog="botex repl",
-        description="Interactive BoteX task loop."
+
+    parser = argparse.ArgumentParser(prog="botex repl", description="Interactive BoteX task loop.")
+    parser.add_argument(
+        "--workspace",
+        "-w",
+        default="",
+        help="Project working directory (default: engine.default_workspace, else cwd)",
     )
     parser.add_argument(
-        "--workspace", "-w", default="",
-        help="Project working directory (default: engine.default_workspace, else cwd)")
-    parser.add_argument("--profile", default="default", help="Model profile (default/coding/auto-beta)")
-    parser.add_argument("--provider", default="", help="API provider (openrouter/nvidia; empty = config default)")
-    parser.add_argument("--mode", default="", help="Capability preset (readonly/edit/destructive/full; empty = config)")
-    parser.add_argument("--recipe", default="", help="Operational persona / recipe workflow prompt (planner, reviewer, ...)")
+        "--profile", default="default", help="Model profile (default/coding/auto-beta)"
+    )
+    parser.add_argument(
+        "--provider", default="", help="API provider (openrouter/nvidia; empty = config default)"
+    )
+    parser.add_argument(
+        "--mode",
+        default="",
+        help="Capability preset (readonly/edit/destructive/full; empty = config)",
+    )
+    parser.add_argument(
+        "--recipe",
+        default="",
+        help="Operational persona / recipe workflow prompt (planner, reviewer, ...)",
+    )
     parser.add_argument("--model", default="", help="Explicit provider model (overrides profile)")
     parser.add_argument("--max-turns", type=int, default=0, help="Step limit (0 = config value)")
-    parser.add_argument("--max-tokens", type=int, default=0, help="Per-turn completion cap (0 = config; reasoning models need ~8000+)")
-    parser.add_argument("--max-duration", type=int, default=0, help="Wall-clock limit in seconds (0 = config)")
     parser.add_argument(
-        "--allow-non-zdr", action="store_true",
-        help="Relaxes Zero Data Retention for this session (needed for :free models; provider may log/train on prompts)"
+        "--max-tokens",
+        type=int,
+        default=0,
+        help="Per-turn completion cap (0 = config; reasoning models need ~8000+)",
+    )
+    parser.add_argument(
+        "--max-duration", type=int, default=0, help="Wall-clock limit in seconds (0 = config)"
+    )
+    parser.add_argument(
+        "--allow-non-zdr",
+        action="store_true",
+        help="Relaxes Zero Data Retention for this session (needed for :free models; provider may log/train on prompts)",
     )
     args = parser.parse_args(argv)
     args.workspace, ws_source = _resolve_workspace_abs(args.workspace)
 
-    print(title("BoteX REPL") + " — " + t("repl.banner") + " "
-          + dim("(" + t("repl.banner2") + ")"))
-    print(f"{accent(t('ws.label'))} {args.workspace} {dim('(' + ws_source + ')')} | {accent('Provider:')} "
-          f"{args.provider or 'default'} | {accent('Profile:')} {args.profile} "
-          f"| {accent('Mode:')} {args.mode or 'default'}"
-          + (f" | {accent('Recipe:')} {args.recipe}" if args.recipe else ""))
+    print(title("BoteX REPL") + " — " + t("repl.banner") + " " + dim("(" + t("repl.banner2") + ")"))
+    print(
+        f"{accent(t('ws.label'))} {args.workspace} {dim('(' + ws_source + ')')} | {accent('Provider:')} "
+        f"{args.provider or 'default'} | {accent('Profile:')} {args.profile} "
+        f"| {accent('Mode:')} {args.mode or 'default'}"
+        + (f" | {accent('Recipe:')} {args.recipe}" if args.recipe else "")
+    )
     _warn_if_harness(args.workspace)
     while True:
         try:
@@ -1098,20 +1220,22 @@ def _repl(argv):
         if _try_local_command(task):
             continue
         try:
-            res = asyncio.run(run_botex_task(
-                task=task,
-                workspace_dir=args.workspace,
-                model=args.model,
-                profile=args.profile,
-                provider=args.provider,
-                mode=args.mode,
-                recipe=args.recipe,
-                max_turns=args.max_turns or None,
-                max_tokens=args.max_tokens or None,
-                max_duration_s=args.max_duration or None,
-                allow_non_zdr=True if args.allow_non_zdr else None,
-                confirm_fn=_interactive_confirm
-            ))
+            res = asyncio.run(
+                run_botex_task(
+                    task=task,
+                    workspace_dir=args.workspace,
+                    model=args.model,
+                    profile=args.profile,
+                    provider=args.provider,
+                    mode=args.mode,
+                    recipe=args.recipe,
+                    max_turns=args.max_turns or None,
+                    max_tokens=args.max_tokens or None,
+                    max_duration_s=args.max_duration or None,
+                    allow_non_zdr=True if args.allow_non_zdr else None,
+                    confirm_fn=_interactive_confirm,
+                )
+            )
         except KeyboardInterrupt:
             print(warn("\n" + t("repl.interrupted")))
             continue
@@ -1119,8 +1243,10 @@ def _repl(argv):
             print(err(f"{t('repl.failure')} {e}"))
             continue
         status_str = ok(t("repl.success")) if res.get("ok") else err(t("repl.failure"))
-        print(f"{status_str} {res.get('status')} | {t('repl.cost')} ${res.get('cost_usd', 0.0):.5f} USD"
-              f" | {accent(t('ws.label'))} {args.workspace}")
+        print(
+            f"{status_str} {res.get('status')} | {t('repl.cost')} ${res.get('cost_usd', 0.0):.5f} USD"
+            f" | {accent(t('ws.label'))} {args.workspace}"
+        )
         print(res.get("summary") or res.get("message", ""))
 
 
@@ -1130,50 +1256,100 @@ def main():
         _repl(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "run":
         import argparse
+
         parser = argparse.ArgumentParser(
             prog="server.py run",
-            description="Runs a BoteX task directly from the CLI (no MCP client)."
+            description="Runs a BoteX task directly from the CLI (no MCP client).",
         )
         parser.add_argument("task", help="Description of the task to perform")
-        parser.add_argument("--files", nargs="*", default=[], help="Primary files affected by the task")
         parser.add_argument(
-            "--workspace", "-w", default="",
-            help="Project working directory (default: engine.default_workspace, else cwd)")
-        parser.add_argument("--model", default="", help="Explicit provider model (overrides profile)")
-        parser.add_argument("--profile", default="default", help="Model profile from botex.config.json (default/coding/auto-beta)")
-        parser.add_argument("--provider", default="", help="API provider (openrouter/nvidia; empty = config default)")
-        parser.add_argument("--mode", default="", help="Capability preset (readonly/edit/destructive/full; empty = config)")
-        parser.add_argument("--recipe", default="", help="Operational persona / recipe workflow prompt (planner, reviewer, ...)")
-        parser.add_argument("--max-turns", type=int, default=0, help="Step limit (0 = config value)")
-        parser.add_argument("--max-tokens", type=int, default=0, help="Per-turn completion cap (0 = config; reasoning models need ~8000+)")
-        parser.add_argument("--max-duration", type=int, default=0, help="Wall-clock limit in seconds (0 = config)")
-        parser.add_argument("--budget", type=float, default=-1.0, help="Daily USD limit (negative = config, 0 = none)")
-        parser.add_argument("--api-key", default="", help="Provider API key per-call (overrides env/.env/config)")
-        parser.add_argument(
-            "--allow-destructive", action="store_true",
-            help="Authorizes delete_file/move_file without prompting (without it, on an interactive terminal the agent asks per operation)"
+            "--files", nargs="*", default=[], help="Primary files affected by the task"
         )
         parser.add_argument(
-            "--allow-exec", action="store_true",
-            help="Authorizes run_command without prompting (requires exec.enabled=true in config; THIS IS NOT A SANDBOX)"
+            "--workspace",
+            "-w",
+            default="",
+            help="Project working directory (default: engine.default_workspace, else cwd)",
         )
         parser.add_argument(
-            "--allow-net", action="store_true",
-            help="Authorizes read_url for configured public hosts"
+            "--model", default="", help="Explicit provider model (overrides profile)"
         )
         parser.add_argument(
-            "--net-host", action="append", default=[],
-            help="Authorize a public host for this run (repeatable)"
+            "--profile",
+            default="default",
+            help="Model profile from botex.config.json (default/coding/auto-beta)",
         )
         parser.add_argument(
-            "--net-url", action="append", default=[],
-            help="Authorize an exact public URL or trailing-slash subtree (repeatable)"
+            "--provider",
+            default="",
+            help="API provider (openrouter/nvidia; empty = config default)",
+        )
+        parser.add_argument(
+            "--mode",
+            default="",
+            help="Capability preset (readonly/edit/destructive/full; empty = config)",
+        )
+        parser.add_argument(
+            "--recipe",
+            default="",
+            help="Operational persona / recipe workflow prompt (planner, reviewer, ...)",
+        )
+        parser.add_argument(
+            "--max-turns", type=int, default=0, help="Step limit (0 = config value)"
+        )
+        parser.add_argument(
+            "--max-tokens",
+            type=int,
+            default=0,
+            help="Per-turn completion cap (0 = config; reasoning models need ~8000+)",
+        )
+        parser.add_argument(
+            "--max-duration", type=int, default=0, help="Wall-clock limit in seconds (0 = config)"
+        )
+        parser.add_argument(
+            "--budget",
+            type=float,
+            default=-1.0,
+            help="Daily USD limit (negative = config, 0 = none)",
+        )
+        parser.add_argument(
+            "--api-key", default="", help="Provider API key per-call (overrides env/.env/config)"
+        )
+        parser.add_argument(
+            "--allow-destructive",
+            action="store_true",
+            help="Authorizes delete_file/move_file without prompting (without it, on an interactive terminal the agent asks per operation)",
+        )
+        parser.add_argument(
+            "--allow-exec",
+            action="store_true",
+            help="Authorizes run_command without prompting (requires exec.enabled=true in config; THIS IS NOT A SANDBOX)",
+        )
+        parser.add_argument(
+            "--allow-net",
+            action="store_true",
+            help="Authorizes read_url for configured public hosts",
+        )
+        parser.add_argument(
+            "--net-host",
+            action="append",
+            default=[],
+            help="Authorize a public host for this run (repeatable)",
+        )
+        parser.add_argument(
+            "--net-url",
+            action="append",
+            default=[],
+            help="Authorize an exact public URL or trailing-slash subtree (repeatable)",
         )
         parser.add_argument("--output-path", default="", help="Required output file")
-        parser.add_argument("--verify-command", default="", help="Allowlisted command required to pass after writes")
         parser.add_argument(
-            "--allow-non-zdr", action="store_true",
-            help="Relaxes Zero Data Retention for this run (needed for :free models; provider may log/train on prompts)"
+            "--verify-command", default="", help="Allowlisted command required to pass after writes"
+        )
+        parser.add_argument(
+            "--allow-non-zdr",
+            action="store_true",
+            help="Relaxes Zero Data Retention for this run (needed for :free models; provider may log/train on prompts)",
         )
         args = parser.parse_args(sys.argv[2:])
 
@@ -1187,33 +1363,37 @@ def main():
         args.workspace, _ws_src = _resolve_workspace_abs(args.workspace)
         print(f"{accent(t('ws.label'))} {args.workspace} {dim('(' + _ws_src + ')')}")
         _warn_if_harness(args.workspace)
-        res = asyncio.run(run_botex_task(
-            task=args.task,
-            files=args.files,
-            workspace_dir=args.workspace,
-            model=args.model,
-            profile=args.profile,
-            provider=args.provider,
-            mode=args.mode,
-            recipe=args.recipe,
-            max_turns=args.max_turns or None,
-            max_tokens=args.max_tokens or None,
-            max_duration_s=args.max_duration or None,
-            budget_limit_usd=args.budget if args.budget >= 0 else None,
-            allow_destructive=True if args.allow_destructive else None,
-            allow_exec=True if args.allow_exec else None,
-            allow_net=True if args.allow_net else None,
-            net_allowed_hosts=args.net_host or None,
-            net_allowed_urls=args.net_url or None,
-            confirm_fn=confirm_fn,
-            api_key=args.api_key,
-            output_path=args.output_path,
-            verify_command=args.verify_command,
-            allow_non_zdr=True if args.allow_non_zdr else None,
-        ))
+        res = asyncio.run(
+            run_botex_task(
+                task=args.task,
+                files=args.files,
+                workspace_dir=args.workspace,
+                model=args.model,
+                profile=args.profile,
+                provider=args.provider,
+                mode=args.mode,
+                recipe=args.recipe,
+                max_turns=args.max_turns or None,
+                max_tokens=args.max_tokens or None,
+                max_duration_s=args.max_duration or None,
+                budget_limit_usd=args.budget if args.budget >= 0 else None,
+                allow_destructive=True if args.allow_destructive else None,
+                allow_exec=True if args.allow_exec else None,
+                allow_net=True if args.allow_net else None,
+                net_allowed_hosts=args.net_host or None,
+                net_allowed_urls=args.net_url or None,
+                confirm_fn=confirm_fn,
+                api_key=args.api_key,
+                output_path=args.output_path,
+                verify_command=args.verify_command,
+                allow_non_zdr=True if args.allow_non_zdr else None,
+            )
+        )
         status_str = ok(t("repl.success")) if res.get("ok") else err(t("repl.failure"))
-        print(f"{status_str} {t('run.status')} {res.get('status')} | {t('run.task')} {res.get('task_id')} | "
-              f"{t('run.steps')} {res.get('steps')} | {t('repl.cost')} ${res.get('cost_usd', 0.0):.5f} USD")
+        print(
+            f"{status_str} {t('run.status')} {res.get('status')} | {t('run.task')} {res.get('task_id')} | "
+            f"{t('run.steps')} {res.get('steps')} | {t('repl.cost')} ${res.get('cost_usd', 0.0):.5f} USD"
+        )
         print(f"{accent(t('ws.label'))} {args.workspace}")
         print(f"{accent(t('repl.files'))} {', '.join(res.get('files_touched', [])) or '(none)'}")
         print(res.get("summary") or res.get("message", ""))
@@ -1229,14 +1409,20 @@ def main():
         total_mb = sum(s["size_kb"] for s in snaps) / 1024
         print(f"{t('lc.snaps_title')} (total: {len(snaps)} {t('lc.tasks')}, {total_mb:.2f} MB) ===")
         for s in snaps:
-            print(f"  * Task: {s['task_id']:<10} | {s['created_at']} | {s['files_count']} {t('lc.files')} | {s['size_kb']} KB ({s['age_days']} {t('lc.days')})")
+            print(
+                f"  * Task: {s['task_id']:<10} | {s['created_at']} | {s['files_count']} {t('lc.files')} | {s['size_kb']} KB ({s['age_days']} {t('lc.days')})"
+            )
     elif len(sys.argv) > 1 and sys.argv[1] == "--clean-snapshots":
         res = snapshot_manager.clean_old_snapshots(
             max_age_days=7.0,
             max_total_mb=50.0,
             protected_task_ids=set(snapshot_manager.active_task_ids),
         )
-        print(ok(f"[OK] {res['deleted_dirs']} {t('lc.cleaned')} {res['freed_mb']} MB. {t('lc.remaining')} {res['remaining_mb']} MB."))
+        print(
+            ok(
+                f"[OK] {res['deleted_dirs']} {t('lc.cleaned')} {res['freed_mb']} MB. {t('lc.remaining')} {res['remaining_mb']} MB."
+            )
+        )
     elif len(sys.argv) > 1 and sys.argv[1] == "health":
         print(mark_status(asyncio.run(check_health())))
     elif len(sys.argv) > 1 and sys.argv[1] == "config":

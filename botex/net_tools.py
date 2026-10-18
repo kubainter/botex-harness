@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """Restricted, read-only public web access for BoteX."""
+
 import asyncio
 import http.client
 import ipaddress
@@ -14,8 +15,12 @@ except (ImportError, ValueError):
     from security import mask_secrets, wrap_untrusted_content
 
 _TEXT_CONTENT_TYPES = {
-    "text/html", "text/plain", "text/markdown", "application/json",
-    "application/xml", "text/xml",
+    "text/html",
+    "text/plain",
+    "text/markdown",
+    "application/json",
+    "application/xml",
+    "text/xml",
 }
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
 NET_POLICIES = {"allowlist", "caller", "public", "off"}
@@ -40,9 +45,7 @@ def _clean_host_entries(values) -> list[str]:
         if not value:
             continue
         if value == "*":
-            raise ValueError(
-                "Wildcard '*' is not an allowlist entry; use net.policy='public'."
-            )
+            raise ValueError("Wildcard '*' is not an allowlist entry; use net.policy='public'.")
         if "://" in value:
             parts = _parse_url(value)
             value = parts.hostname or ""
@@ -86,9 +89,11 @@ def _url_allowed(parts, allowed_urls: list[str]) -> bool:
             rule = _parse_url(raw)
         except ValueError:
             continue
-        if (rule.scheme != parts.scheme
-                or _normalize_host(rule.hostname) != current_host
-                or _effective_port(rule) != current_port):
+        if (
+            rule.scheme != parts.scheme
+            or _normalize_host(rule.hostname) != current_host
+            or _effective_port(rule) != current_port
+        ):
             continue
         rule_path = rule.path or "/"
         if rule.query or not (rule_path == "/" or rule_path.endswith("/")):
@@ -149,8 +154,7 @@ def resolve_net_scope(net_cfg: dict, request_hosts=None, request_urls=None) -> d
     policy = str(net_cfg.get("policy", "caller")).strip().lower()
     if policy not in NET_POLICIES:
         raise ValueError(
-            "Unknown net.policy "
-            f"'{policy}'. Expected one of: allowlist, caller, public, off."
+            f"Unknown net.policy '{policy}'. Expected one of: allowlist, caller, public, off."
         )
     if policy == "off":
         return {"enabled": True, "policy": "off", "allowed_hosts": [], "allowed_urls": []}
@@ -166,11 +170,10 @@ def resolve_net_scope(net_cfg: dict, request_hosts=None, request_urls=None) -> d
         if urls:
             for rule in urls:
                 parts = _parse_url(rule)
-                if not (_host_allowed(parts.hostname, config_hosts)
-                        or _url_allowed(parts, config_urls)):
-                    raise ValueError(
-                        "Per-run URL is outside the configured net scope."
-                    )
+                if not (
+                    _host_allowed(parts.hostname, config_hosts) or _url_allowed(parts, config_urls)
+                ):
+                    raise ValueError("Per-run URL is outside the configured net scope.")
         # Per-run grants replace the configured defaults for this run, but have
         # already been validated as a subset of the configured scope above.
         if hosts or urls:
@@ -193,9 +196,7 @@ def resolve_net_scope(net_cfg: dict, request_hosts=None, request_urls=None) -> d
         allowed_urls = urls
 
     if policy != "public" and not allowed_hosts and not allowed_urls:
-        raise ValueError(
-            "read_url is enabled but no host or URL authorization was provided."
-        )
+        raise ValueError("read_url is enabled but no host or URL authorization was provided.")
     return {
         "enabled": True,
         "policy": policy,
@@ -204,39 +205,44 @@ def resolve_net_scope(net_cfg: dict, request_hosts=None, request_urls=None) -> d
     }
 
 
-def _validate_url_parts(url: str, allowed_hosts: list[str], *,
-                        policy: str = "allowlist",
-                        allowed_urls: list[str] | None = None):
+def _validate_url_parts(
+    url: str,
+    allowed_hosts: list[str],
+    *,
+    policy: str = "allowlist",
+    allowed_urls: list[str] | None = None,
+):
     if policy not in NET_POLICIES:
         raise ValueError(
-            f"Unknown net.policy '{policy}'. Expected one of: "
-            "allowlist, caller, public, off."
+            f"Unknown net.policy '{policy}'. Expected one of: allowlist, caller, public, off."
         )
     parts = _parse_url(url)
     if policy == "public":
         if allowed_hosts or allowed_urls:
-            allowed = (_host_allowed(parts.hostname, allowed_hosts)
-                       or _url_allowed(parts, allowed_urls or []))
+            allowed = _host_allowed(parts.hostname, allowed_hosts) or _url_allowed(
+                parts, allowed_urls or []
+            )
         else:
             allowed = True
     elif policy == "off":
         raise ValueError("Network access is disabled by net.policy=off.")
     else:
-        allowed = (_host_allowed(parts.hostname, allowed_hosts)
-                   or _url_allowed(parts, allowed_urls or []))
-    if not allowed:
-        raise ValueError(
-            f"Host or URL is not authorized for this run: {parts.hostname}"
+        allowed = _host_allowed(parts.hostname, allowed_hosts) or _url_allowed(
+            parts, allowed_urls or []
         )
+    if not allowed:
+        raise ValueError(f"Host or URL is not authorized for this run: {parts.hostname}")
     return parts
 
 
-def _validate_url(url: str, allowed_hosts: list[str], *,
-                  policy: str = "allowlist",
-                  allowed_urls: list[str] | None = None) -> str:
-    parts = _validate_url_parts(
-        url, allowed_hosts, policy=policy, allowed_urls=allowed_urls
-    )
+def _validate_url(
+    url: str,
+    allowed_hosts: list[str],
+    *,
+    policy: str = "allowlist",
+    allowed_urls: list[str] | None = None,
+) -> str:
+    parts = _validate_url_parts(url, allowed_hosts, policy=policy, allowed_urls=allowed_urls)
     _public_ips(parts.hostname, parts.scheme)
     return url
 
@@ -262,8 +268,7 @@ def _connection(parts, ip: str, timeout_s: int):
     port = parts.port or (443 if parts.scheme == "https" else 80)
     if parts.scheme == "https":
         return _PinnedHTTPSConnection(
-            _normalize_host(parts.hostname), ip, port, timeout_s,
-            ssl.create_default_context()
+            _normalize_host(parts.hostname), ip, port, timeout_s, ssl.create_default_context()
         )
     return _PinnedHTTPConnection(ip, port, timeout_s)
 
@@ -277,9 +282,16 @@ def _host_header(parts) -> str:
     return host
 
 
-def _read_url_sync(url: str, *, allowed_hosts: list[str], allowed_urls: list[str],
-                   policy: str, timeout_s: int, max_bytes: int,
-                   max_redirects: int) -> dict:
+def _read_url_sync(
+    url: str,
+    *,
+    allowed_hosts: list[str],
+    allowed_urls: list[str],
+    policy: str,
+    timeout_s: int,
+    max_bytes: int,
+    max_redirects: int,
+) -> dict:
     current = url
     for _ in range(max_redirects + 1):
         try:
@@ -299,7 +311,8 @@ def _read_url_sync(url: str, *, allowed_hosts: list[str], allowed_urls: list[str
             if parts.query:
                 path += "?" + parts.query
             connection.request(
-                "GET", path,
+                "GET",
+                path,
                 headers={
                     "Host": _host_header(parts),
                     "User-Agent": "BoteX-read_url/1",
@@ -314,7 +327,10 @@ def _read_url_sync(url: str, *, allowed_hosts: list[str], allowed_urls: list[str
                 continue
             content_type = (response.getheader("Content-Type") or "").split(";", 1)[0].lower()
             if content_type not in _TEXT_CONTENT_TYPES:
-                return {"ok": False, "error": f"Unsupported content type: {content_type or 'unknown'}"}
+                return {
+                    "ok": False,
+                    "error": f"Unsupported content type: {content_type or 'unknown'}",
+                }
             data = response.read(max_bytes + 1)
             text = data[:max_bytes].decode("utf-8", errors="replace")
             safe_url = mask_secrets(current)
@@ -326,8 +342,13 @@ def _read_url_sync(url: str, *, allowed_hosts: list[str], allowed_urls: list[str
                 "truncated": len(data) > max_bytes,
                 "content": wrap_untrusted_content(text, tag="untrusted_web_content", url=safe_url),
             }
-        except (http.client.HTTPException, ssl.SSLError, UnicodeError,
-                TimeoutError, OSError) as exc:
+        except (
+            http.client.HTTPException,
+            ssl.SSLError,
+            UnicodeError,
+            TimeoutError,
+            OSError,
+        ) as exc:
             return {
                 "ok": False,
                 "error": f"Request failed: {exc}",
@@ -338,21 +359,29 @@ def _read_url_sync(url: str, *, allowed_hosts: list[str], allowed_urls: list[str
     return {"ok": False, "error": f"Too many redirects (limit {max_redirects})."}
 
 
-async def read_url(url: str, *, allowed_hosts: list[str] | None = None,
-                   allowed_urls: list[str] | None = None,
-                   policy: str = "allowlist", timeout_s: int = 20,
-                   max_bytes: int = 200000, max_redirects: int = 3) -> dict:
+async def read_url(
+    url: str,
+    *,
+    allowed_hosts: list[str] | None = None,
+    allowed_urls: list[str] | None = None,
+    policy: str = "allowlist",
+    timeout_s: int = 20,
+    max_bytes: int = 200000,
+    max_redirects: int = 3,
+) -> dict:
     """Fetch bounded, public, text-only content without forwarding secrets."""
     if timeout_s <= 0 or max_bytes <= 0 or max_redirects < 0:
         return {"ok": False, "error": "Invalid network limits."}
     return await asyncio.to_thread(
-        _read_url_sync, url,
+        _read_url_sync,
+        url,
         allowed_hosts=allowed_hosts or [],
         allowed_urls=allowed_urls or [],
         policy=policy,
         timeout_s=timeout_s,
         max_bytes=max_bytes,
-        max_redirects=max_redirects)
+        max_redirects=max_redirects,
+    )
 
 
 async def fetch_url(url: str, *, net_cfg: dict, max_bytes: int | None = None) -> dict:

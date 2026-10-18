@@ -7,6 +7,7 @@ Multi-tier Fuzzy Patching, In-Memory Syntax Validation, and Snapshot Rollback.
 Ensures file modifications are resilient to CRLF/whitespace differences and
 never corrupt source code on disk.
 """
+
 import ast
 import hashlib
 import json
@@ -17,14 +18,15 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from .security import resolve_safe_path, SecurityError
     from .config import snapshot_dir as _default_snapshot_dir
+    from .security import SecurityError, resolve_safe_path
 except (ImportError, ValueError):
-    from security import resolve_safe_path, SecurityError
     from config import snapshot_dir as _default_snapshot_dir
+    from security import SecurityError, resolve_safe_path
+
 
 # ---------------------------------------------------------------------------
 # Snapshot Manager (Rollback & Anti-Bloat)
@@ -55,8 +57,9 @@ class SnapshotManager:
         with self._mutation_lock:
             yield
 
-    def _register_path(self, task_id: str, file_path: Path,
-                       workspace_root: Optional[Path] = None) -> Path:
+    def _register_path(
+        self, task_id: str, file_path: Path, workspace_root: Optional[Path] = None
+    ) -> Path:
         resolved = Path(file_path).resolve()
         root = (
             Path(workspace_root).resolve()
@@ -97,14 +100,14 @@ class SnapshotManager:
         ``a/b`` and ``a_b`` mapped to the same backup file; the readable
         tail is kept only for debuggability."""
         digest = hashlib.sha256(str(file_path).encode("utf-8")).hexdigest()[:16]
-        tail = "".join(
-            c if c.isalnum() or c in ("_", "-", ".") else "_"
-            for c in file_path.name
-        )[:40]
+        tail = "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in file_path.name)[
+            :40
+        ]
         return f"{digest}_{tail}"
 
-    def snapshot_file(self, task_id: str, file_path: Path,
-                      workspace_root: Optional[Path] = None) -> Path:
+    def snapshot_file(
+        self, task_id: str, file_path: Path, workspace_root: Optional[Path] = None
+    ) -> Path:
         """Create a backup of a file before modifying it."""
         file_path = self._register_path(task_id, file_path, workspace_root)
         task_dir = self._task_dir(task_id)
@@ -118,8 +121,9 @@ class SnapshotManager:
             meta.write_text(str(file_path), encoding="utf-8")
         return dest
 
-    def record_created_file(self, task_id: str, file_path: Path,
-                            workspace_root: Optional[Path] = None) -> None:
+    def record_created_file(
+        self, task_id: str, file_path: Path, workspace_root: Optional[Path] = None
+    ) -> None:
         """Record a newly-created file so rollback can remove it."""
         file_path = self._register_path(task_id, file_path, workspace_root)
         task_dir = self._task_dir(task_id)
@@ -151,12 +155,10 @@ class SnapshotManager:
                     expected = self._expected_states.get((task_id, safe_path))
                     current = (
                         hashlib.sha256(safe_path.read_bytes()).hexdigest()
-                        if safe_path.exists() else None
+                        if safe_path.exists()
+                        else None
                     )
-                    if (
-                        (task_id, safe_path) in self._expected_states
-                        and current != expected
-                    ):
+                    if (task_id, safe_path) in self._expected_states and current != expected:
                         continue
                     if safe_path.is_file():
                         safe_path.unlink()
@@ -175,12 +177,10 @@ class SnapshotManager:
                     expected = self._expected_states.get((task_id, safe_path))
                     current = (
                         hashlib.sha256(safe_path.read_bytes()).hexdigest()
-                        if safe_path.exists() else None
+                        if safe_path.exists()
+                        else None
                     )
-                    if (
-                        (task_id, safe_path) in self._expected_states
-                        and current != expected
-                    ):
+                    if (task_id, safe_path) in self._expected_states and current != expected:
                         continue
                     safe_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(backup_file, safe_path)
@@ -200,7 +200,9 @@ class SnapshotManager:
         paths: List[Path] = []
         for marker in list(task_dir.glob("*.created")) + list(task_dir.glob("*.meta")):
             try:
-                path = self._safe_task_path(task_id, Path(marker.read_text(encoding="utf-8").strip()))
+                path = self._safe_task_path(
+                    task_id, Path(marker.read_text(encoding="utf-8").strip())
+                )
                 if path is not None:
                     paths.append(path)
             except (OSError, ValueError):
@@ -223,9 +225,7 @@ class SnapshotManager:
         created_paths = set()
         for marker in task_dir.glob("*.created"):
             try:
-                p = self._safe_task_path(
-                    task_id, Path(marker.read_text(encoding="utf-8").strip())
-                )
+                p = self._safe_task_path(task_id, Path(marker.read_text(encoding="utf-8").strip()))
                 if p is None:
                     unconfirmed.append("<unsafe snapshot path>")
                     continue
@@ -236,9 +236,7 @@ class SnapshotManager:
                 unconfirmed.append(str(p))
         for meta in task_dir.glob("*.meta"):
             try:
-                orig = self._safe_task_path(
-                    task_id, Path(meta.read_text(encoding="utf-8").strip())
-                )
+                orig = self._safe_task_path(task_id, Path(meta.read_text(encoding="utf-8").strip()))
                 if orig is None:
                     unconfirmed.append("<unsafe snapshot path>")
                     continue
@@ -248,8 +246,11 @@ class SnapshotManager:
                 continue
             backup = task_dir / meta.stem
             try:
-                if (not orig.exists() or not backup.exists()
-                        or orig.read_bytes() != backup.read_bytes()):
+                if (
+                    not orig.exists()
+                    or not backup.exists()
+                    or orig.read_bytes() != backup.read_bytes()
+                ):
                     unconfirmed.append(str(orig))
             except OSError:
                 unconfirmed.append(str(orig))
@@ -265,18 +266,22 @@ class SnapshotManager:
                 files = list(item.glob("*.meta")) + list(item.glob("*.created"))
                 total_bytes = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
                 mtime = item.stat().st_mtime
-                snapshots.append({
-                    "task_id": item.name,
-                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime)),
-                    "files_count": len(files),
-                    "size_kb": round(total_bytes / 1024, 2),
-                    "age_days": round((time.time() - mtime) / 86400, 1),
-                })
+                snapshots.append(
+                    {
+                        "task_id": item.name,
+                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime)),
+                        "files_count": len(files),
+                        "size_kb": round(total_bytes / 1024, 2),
+                        "age_days": round((time.time() - mtime) / 86400, 1),
+                    }
+                )
         snapshots.sort(key=lambda s: s["created_at"], reverse=True)
         return snapshots
 
     def clean_old_snapshots(
-        self, max_age_days: float = 7.0, max_total_mb: float = 50.0,
+        self,
+        max_age_days: float = 7.0,
+        max_total_mb: float = 50.0,
         protected_task_ids: Optional[set[str]] = None,
     ) -> Dict[str, Any]:
         """Prune old/large snapshots, never removing protected in-flight tasks."""
@@ -322,11 +327,12 @@ class SnapshotManager:
         return {
             "deleted_dirs": deleted_dirs,
             "freed_mb": round(freed_bytes / (1024 * 1024), 2),
-            "remaining_mb": round(sum(s["size_kb"] for s in self.list_snapshots()) / 1024, 2)
+            "remaining_mb": round(sum(s["size_kb"] for s in self.list_snapshots()) / 1024, 2),
         }
 
 
 snapshot_manager = SnapshotManager()
+
 
 # ---------------------------------------------------------------------------
 # Pre-write Syntax Validation
@@ -356,7 +362,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
                     input=content,
                     text=True,
                     capture_output=True,
-                    timeout=5
+                    timeout=5,
                 )
                 if proc.returncode != 0:
                     err = proc.stdout.strip() or proc.stderr.strip()
@@ -379,11 +385,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
         if php_bin:
             try:
                 proc = subprocess.run(
-                    [php_bin, "-l"],
-                    input=content,
-                    text=True,
-                    capture_output=True,
-                    timeout=5
+                    [php_bin, "-l"], input=content, text=True, capture_output=True, timeout=5
                 )
                 if proc.returncode != 0:
                     first_err = proc.stdout.splitlines()[0] if proc.stdout else proc.stderr
@@ -398,11 +400,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
         if node_bin:
             try:
                 proc = subprocess.run(
-                    [node_bin, "--check"],
-                    input=content,
-                    text=True,
-                    capture_output=True,
-                    timeout=5
+                    [node_bin, "--check"], input=content, text=True, capture_output=True, timeout=5
                 )
                 if proc.returncode != 0:
                     return False, f"JavaScript SyntaxError: {proc.stderr.strip()}"
@@ -416,11 +414,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
         if bash_bin:
             try:
                 proc = subprocess.run(
-                    [bash_bin, "-n"],
-                    input=content,
-                    text=True,
-                    capture_output=True,
-                    timeout=5
+                    [bash_bin, "-n"], input=content, text=True, capture_output=True, timeout=5
                 )
                 if proc.returncode != 0:
                     return False, f"Bash SyntaxError: {proc.stderr.strip()}"
@@ -444,9 +438,7 @@ def _strip_trailing_spaces(text: str) -> str:
 
 
 def apply_fuzzy_patch(
-    original: str,
-    search_block: str,
-    replace_block: str
+    original: str, search_block: str, replace_block: str
 ) -> Tuple[bool, str, int]:
     """
     Attempts to replace search_block with replace_block in original using 3 levels:
@@ -486,7 +478,7 @@ def apply_fuzzy_patch(
             for i in range(len(orig_lines) - len(search_lines) + 1):
                 window = [line.rstrip() for line in orig_lines[i : i + len(search_lines)]]
                 if window == search_lines:
-                    new_lines = orig_lines[:i] + replace_lines + orig_lines[i + len(search_lines):]
+                    new_lines = orig_lines[:i] + replace_lines + orig_lines[i + len(search_lines) :]
                     out = "\n".join(new_lines)
                     if crlf_mode:
                         out = out.replace("\n", "\r\n")
@@ -511,7 +503,10 @@ def apply_fuzzy_patch(
                     # Skip empty lines in original
                     while curr_orig_idx < len(orig_lines) and not orig_lines[curr_orig_idx].strip():
                         curr_orig_idx += 1
-                    if curr_orig_idx >= len(orig_lines) or orig_lines[curr_orig_idx].strip() != s_line:
+                    if (
+                        curr_orig_idx >= len(orig_lines)
+                        or orig_lines[curr_orig_idx].strip() != s_line
+                    ):
                         matched = False
                         break
                     matching_end_idx = curr_orig_idx
@@ -527,12 +522,11 @@ def apply_fuzzy_patch(
             for r_line in replace_lines:
                 if r_line.strip():
                     adapted_replace.append(
-                        lead_indent + r_line
-                        if not r_line.startswith((" ", "\t")) else r_line
+                        lead_indent + r_line if not r_line.startswith((" ", "\t")) else r_line
                     )
                 else:
                     adapted_replace.append("")
-            new_lines = orig_lines[:i] + adapted_replace + orig_lines[matching_end_idx + 1:]
+            new_lines = orig_lines[:i] + adapted_replace + orig_lines[matching_end_idx + 1 :]
             out = "\n".join(new_lines)
             if crlf_mode:
                 out = out.replace("\n", "\r\n")
@@ -549,7 +543,7 @@ def apply_patch(
     search_block: str,
     replace_block: str,
     workspace_root: str | Path,
-    task_id: str = "default"
+    task_id: str = "default",
 ) -> Dict[str, Any]:
     """
     Safely applies a search-and-replace patch to a file.
@@ -579,7 +573,7 @@ def apply_patch(
                 "error": (
                     f"Search block could not be located in '{path}'. Make sure the "
                     "search block matches existing code and is unique."
-                )
+                ),
             }
 
         is_valid, syntax_err = validate_syntax(new_content, safe_path)
@@ -589,7 +583,7 @@ def apply_patch(
                 "error": (
                     f"Patch rejected: {syntax_err}. "
                     "The file was NOT modified. Please correct the code syntax in your patch."
-                )
+                ),
             }
 
         try:
@@ -610,5 +604,5 @@ def apply_patch(
         "level_used": level,
         "lines_added": lines_added,
         "lines_removed": lines_removed,
-        "message": f"Successfully patched '{path}' (Fuzzy level: L{level}, +{lines_added}/-{lines_removed} lines)."
+        "message": f"Successfully patched '{path}' (Fuzzy level: L{level}, +{lines_added}/-{lines_removed} lines).",
     }

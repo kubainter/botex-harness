@@ -6,23 +6,34 @@ BoteX Analytics & Quota Ledger
 Tracks token consumption, estimated USD costs, lines modified, and enforces daily budget limits.
 Provides rich CLI reporting and snapshot storage inspection.
 """
+
 import hashlib
 import json
 import sys
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from .config import (
-        analytics_file as _cfg_analytics_file, snapshot_dir as _cfg_snapshot_dir,
+        analytics_file as _cfg_analytics_file,
+    )
+    from .config import (
         analytics_setting,
+    )
+    from .config import (
+        snapshot_dir as _cfg_snapshot_dir,
     )
     from .contracts import STATUS_FAILURE_KIND
     from .security import mask_secrets
 except (ImportError, ValueError):
     from config import (
-        analytics_file as _cfg_analytics_file, snapshot_dir as _cfg_snapshot_dir,
+        analytics_file as _cfg_analytics_file,
+    )
+    from config import (
         analytics_setting,
+    )
+    from config import (
+        snapshot_dir as _cfg_snapshot_dir,
     )
     from contracts import STATUS_FAILURE_KIND
     from security import mask_secrets
@@ -142,9 +153,7 @@ def check_budget_limit(daily_limit_usd: float) -> tuple[bool, float]:
     today_str = datetime.now().strftime("%Y-%m-%d")
     records = load_analytics()
     today_spend = sum(
-        r.get("cost_usd", 0.0)
-        for r in records
-        if r.get("timestamp", "").startswith(today_str)
+        r.get("cost_usd", 0.0) for r in records if r.get("timestamp", "").startswith(today_str)
     )
     return today_spend >= daily_limit_usd, round(today_spend, 4)
 
@@ -156,8 +165,8 @@ def print_run_summary(entry: Dict[str, Any]):
     """Pretty print run stats to stderr."""
     try:
         from rich.console import Console
-        from rich.table import Table
         from rich.panel import Panel
+        from rich.table import Table
 
         console = Console(stderr=True)
         table = Table(title=f"BoteX Run Summary — Task: {entry['task_id']}", show_header=True)
@@ -171,13 +180,13 @@ def print_run_summary(entry: Dict[str, Any]):
             "Tokens",
             f"Prompt: {entry.get('prompt_tokens', 0):,} | "
             f"Comp: {entry.get('completion_tokens', 0):,} | "
-            f"Cached: {entry.get('cached_tokens', 0):,}"
+            f"Cached: {entry.get('cached_tokens', 0):,}",
         )
         table.add_row("Cost (USD)", f"${entry.get('cost_usd', 0.0):.5f}")
         table.add_row("Files Modified", ", ".join(entry.get("files_touched", [])) or "(none)")
         table.add_row(
             "Line Balance",
-            f"[green]+{entry.get('lines_added', 0)}[/green] / [red]-{entry.get('lines_removed', 0)}[/red]"
+            f"[green]+{entry.get('lines_added', 0)}[/green] / [red]-{entry.get('lines_removed', 0)}[/red]",
         )
 
         console.print(table)
@@ -192,7 +201,7 @@ def print_run_summary(entry: Dict[str, Any]):
             f"Cost: ${entry.get('cost_usd'):.5f} | Lines: +{entry.get('lines_added')}/-{entry.get('lines_removed')}",
             f"Files: {', '.join(entry.get('files_touched', [])) or '(none)'}",
             f"Summary: {entry.get('summary', '')}",
-            "=" * 40
+            "=" * 40,
         ]
         sys.stderr.write("\n".join(lines) + "\n")
 
@@ -200,6 +209,7 @@ def print_run_summary(entry: Dict[str, Any]):
 def cli_stats(period: str = "week"):
     """CLI stats view: weekly or monthly aggregation."""
     from botex.i18n import t
+
     records = load_analytics()
     if not records:
         print(t("an.no_data"))
@@ -208,10 +218,7 @@ def cli_stats(period: str = "week"):
     days = 30 if period == "month" else 7
     cutoff = datetime.now() - timedelta(days=days)
 
-    filtered = [
-        r for r in records
-        if datetime.fromisoformat(r["timestamp"]) >= cutoff
-    ]
+    filtered = [r for r in records if datetime.fromisoformat(r["timestamp"]) >= cutoff]
 
     total_runs = len(filtered)
     total_cost = sum(r.get("cost_usd", 0.0) for r in filtered)
@@ -235,7 +242,7 @@ def cli_stats(period: str = "week"):
             fk = r.get("failure_kind") or st or "unknown"
             by_model[m]["failures"][fk] = by_model[m]["failures"].get(fk, 0) + 1
         by_model[m]["cost"] += r.get("cost_usd", 0.0)
-        by_model[m]["tokens"] += (r.get("prompt_tokens", 0) + r.get("completion_tokens", 0))
+        by_model[m]["tokens"] += r.get("prompt_tokens", 0) + r.get("completion_tokens", 0)
 
     try:
         from rich.console import Console
@@ -265,9 +272,7 @@ def cli_stats(period: str = "week"):
         for m, stats in sorted(by_model.items(), key=lambda x: x[1]["cost"], reverse=True):
             done_pct = (stats["done_runs"] / stats["runs"] * 100) if stats["runs"] > 0 else 0.0
             top_fail = (
-                max(stats["failures"].items(), key=lambda x: x[1])[0]
-                if stats["failures"]
-                else "-"
+                max(stats["failures"].items(), key=lambda x: x[1])[0] if stats["failures"] else "-"
             )
             m_table.add_row(
                 m,
@@ -282,29 +287,43 @@ def cli_stats(period: str = "week"):
         print(f"=== {t('an.title', days=days, period=period.upper())} ===")
         print(f"{t('an.tasks')}: {total_runs}")
         print(f"{t('an.total_cost')}: ${total_cost:.4f} USD")
-        print(f"{t('an.tokens')}: prompt={total_prompt:,}, comp={total_comp:,}, cached={total_cached:,}")
+        print(
+            f"{t('an.tokens')}: prompt={total_prompt:,}, comp={total_comp:,}, cached={total_cached:,}"
+        )
         print(f"{t('an.line_bal')}: +{total_added:,} / -{total_removed:,}")
         print("\n" + t("an.models"))
         for m, stats in by_model.items():
             done_pct = (stats["done_runs"] / stats["runs"] * 100) if stats["runs"] > 0 else 0.0
             top_fail = (
-                max(stats["failures"].items(), key=lambda x: x[1])[0]
-                if stats["failures"]
-                else "-"
+                max(stats["failures"].items(), key=lambda x: x[1])[0] if stats["failures"] else "-"
             )
-            print(f"  * {m}: " + t("an.runs_fmt", runs=stats['runs'], tokens=f"{stats['tokens']:,}", cost=f"{stats['cost']:.4f}") + f" | DONE rate: {done_pct:.1f}% | Top failure: {top_fail}")
+            print(
+                f"  * {m}: "
+                + t(
+                    "an.runs_fmt",
+                    runs=stats["runs"],
+                    tokens=f"{stats['tokens']:,}",
+                    cost=f"{stats['cost']:.4f}",
+                )
+                + f" | DONE rate: {done_pct:.1f}% | Top failure: {top_fail}"
+            )
 
 
 def cli_history(task_id: Optional[str] = None):
     """View task history or details of a specific task."""
     from botex.i18n import t
+
     records = load_analytics()
     if not records:
         print(t("an.no_history"))
         return
 
     if task_id:
-        match = [r for r in records if r.get("task_id") == task_id or r.get("task_id", "").startswith(task_id)]
+        match = [
+            r
+            for r in records
+            if r.get("task_id") == task_id or r.get("task_id", "").startswith(task_id)
+        ]
         if not match:
             print(t("an.not_found", id=task_id))
             return
@@ -318,4 +337,6 @@ def cli_history(task_id: Optional[str] = None):
     print(t("an.recent"))
     for r in recent:
         ts = r.get("timestamp", "")[:16].replace("T", " ")
-        print(f"[{r.get('task_id')}] {ts} | {r.get('model')} | {r.get('status')} | ${r.get('cost_usd', 0):.4f} | {r.get('summary', '')[:60]}")
+        print(
+            f"[{r.get('task_id')}] {ts} | {r.get('model')} | {r.get('status')} | ${r.get('cost_usd', 0):.4f} | {r.get('summary', '')[:60]}"
+        )
