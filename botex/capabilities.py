@@ -76,6 +76,7 @@ GATED_BY_CONFIRM = {CAP_DESTRUCTIVE, CAP_EXEC}
 
 MODES = {
     "readonly": {CAP_READ},
+    "chat": {CAP_READ},
     "edit": {CAP_READ, CAP_WRITE},
     "destructive": {CAP_READ, CAP_WRITE, CAP_DESTRUCTIVE},
     "full": {CAP_READ, CAP_WRITE, CAP_DESTRUCTIVE, CAP_EXEC},
@@ -149,10 +150,26 @@ def tool_allowed(tool_name: str, caps: Set[str], can_confirm: bool = False) -> b
     return False
 
 
-def check_agency_policy(tool_name: str, caps: Set[str], confirm_fn=None, op_path: str = "") -> str:
+try:
+    from .approval import ApprovalPolicy, TaskAbortedError, default_approval_manager
+except (ImportError, ValueError):
+    from approval import ApprovalPolicy, TaskAbortedError, default_approval_manager
+
+
+def check_agency_policy(
+    tool_name: str,
+    caps: Set[str],
+    confirm_fn=None,
+    op_path: str = "",
+    *,
+    params: Optional[dict] = None,
+    task_id: str = "",
+    approval_policy: Optional[ApprovalPolicy] = None,
+) -> str:
     """
     Agency Middleware (OWASP LLM03: Excessive Agency, 2026 edition). Evaluates ToolPolicy before executing the tool.
     Returns an error string if blocked, or an empty string if allowed.
+    Synchronous version for unit tests and legacy callers.
     """
     policy = TOOL_REGISTRY.get(tool_name)
     if not policy:
@@ -160,24 +177,154 @@ def check_agency_policy(tool_name: str, caps: Set[str], confirm_fn=None, op_path
 
     # Check scopes
     missing_scopes = set(policy.required_scopes) - caps
-    # Gated capabilities (like destructive or exec) can be granted dynamically via confirm_fn
-    # For capabilities missing from statically-granted caps, if they are gated,
-    # we enforce interactive approval below. If a missing capability is not interactive,
-    # the operation is blocked.
     if missing_scopes and not (confirm_fn and missing_scopes.issubset(GATED_BY_CONFIRM)):
         return f"Missing required scopes for {tool_name}: {', '.join(sorted(missing_scopes))}"
 
-    # Risk and approval middleware:
-    # If missing scopes can be dynamically granted by confirm_fn, or policy requires approval:
-    requires_approval = policy.approval_required or bool(missing_scopes)
+    mgr = (
+        confirm_fn
+        if hasattr(confirm_fn, "is_action_requiring_approval")
+        else default_approval_manager
+    )
+
+    # If confirm_fn is a synchronous callable callback (e.g. CLI prompt or lambda in tests)
+    if (
+        confirm_fn
+        and not hasattr(confirm_fn, "request_approval")
+        and not hasattr(confirm_fn, "is_action_requiring_approval")
+    ):
+        if (
+            policy.approval_required
+            or bool(missing_scopes)
+            or (
+                approval_policy
+                and mgr.is_action_requiring_approval(
+                    tool_name, policy=approval_policy, task_id=task_id
+                )
+            )
+        ):
+            try:
+                confirmed = confirm_fn(tool_name, op_path)
+            except Exception as exc:
+                import sys
+
+                sys.stderr.write(f"[BoteX] confirm_fn error: {exc}\n")
+                confirmed = False
+            if not confirmed:
+                return f"Operation '{tool_name}' was not confirmed by the operator."
+        return ""
+
+    if approval_policy is not None and approval_policy != ApprovalPolicy.NONE:
+        requires_approval = (
+            bool(missing_scopes)
+            or policy.approval_required
+            or mgr.is_action_requiring_approval(tool_name, policy=approval_policy, task_id=task_id)
+        )
+    else:
+        requires_approval = bool(missing_scopes)
+
+    # Check session pre-approvals
+    if task_id and hasattr(mgr, "is_action_requiring_approval"):
+        if not mgr.is_action_requiring_approval(tool_name, policy=approval_policy, task_id=task_id):
+            requires_approval = False
 
     if requires_approval:
-        if confirm_fn:
-            # We pass the op_path (e.g. command or path) to confirm_fn
-            if not confirm_fn(tool_name, op_path):
-                return f"Operation '{tool_name}' was not confirmed by the operator."
-        elif bool(missing_scopes):
-            # Headless run without confirm_fn cannot grant missing scopes dynamically
-            return f"Operation '{tool_name}' requires operator confirmation, but none is available."
+        if hasattr(confirm_fn, "is_action_requiring_approval"):
+            if not confirm_fn.is_action_requiring_approval(
+                tool_name, policy=approval_policy, task_id=task_id
+            ):
+                return ""
+            return f"Operation '{tool_name}' requires async operator confirmation."
+        else:
+            pol_desc = (
+                f" under policy '{getattr(approval_policy, 'value', approval_policy)}'"
+                if approval_policy
+                else ""
+            )
+            return f"Operation '{tool_name}' requires operator confirmation{pol_desc}, but none is available."
+
+    return ""
+
+
+async def async_check_agency_policy(
+    tool_name: str,
+    caps: Set[str],
+    confirm_fn=None,
+    op_path: str = "",
+    *,
+    params: Optional[dict] = None,
+    task_id: str = "",
+    approval_policy: Optional[ApprovalPolicy] = None,
+) -> str:
+    """
+    Asynchronous Agency Middleware supporting blocking asyncio.Future approvals,
+    ApprovalManager, and per-session pre-authorizations.
+    """
+    policy = TOOL_REGISTRY.get(tool_name)
+    if not policy:
+        return f"Unknown tool '{tool_name}'."
+
+    # Check scopes
+    missing_scopes = set(policy.required_scopes) - caps
+    if missing_scopes and not (confirm_fn and missing_scopes.issubset(GATED_BY_CONFIRM)):
+        return f"Missing required scopes for {tool_name}: {', '.join(sorted(missing_scopes))}"
+
+    # Check if action requires approval
+    mgr = (
+        confirm_fn
+        if hasattr(confirm_fn, "is_action_requiring_approval")
+        else default_approval_manager
+    )
+    if approval_policy is not None and approval_policy != ApprovalPolicy.NONE:
+        requires_approval = (
+            bool(missing_scopes)
+            or policy.approval_required
+            or mgr.is_action_requiring_approval(tool_name, policy=approval_policy, task_id=task_id)
+        )
+    else:
+        requires_approval = bool(missing_scopes)
+
+    # Check session pre-approvals
+    if task_id and hasattr(mgr, "is_action_requiring_approval"):
+        if not mgr.is_action_requiring_approval(tool_name, policy=approval_policy, task_id=task_id):
+            requires_approval = False
+
+    if not requires_approval:
+        return ""
+
+    actual_params = params or {}
+    if not actual_params and op_path:
+        actual_params = {"target": op_path}
+
+    # If no interactive confirm_fn or ApprovalManager is attached (headless mode)
+    if confirm_fn is None:
+        pol_desc = (
+            f" under policy '{getattr(approval_policy, 'value', approval_policy)}'"
+            if approval_policy
+            else ""
+        )
+        return f"Operation '{tool_name}' requires operator confirmation{pol_desc}, but none is available."
+
+    # Evaluate approval
+    try:
+        if hasattr(confirm_fn, "request_approval"):
+            approved = await confirm_fn.request_approval(
+                task_id=task_id,
+                tool_name=tool_name,
+                params=actual_params,
+                policy=approval_policy,
+            )
+        else:
+            approved = await default_approval_manager.request_approval(
+                task_id=task_id,
+                tool_name=tool_name,
+                params=actual_params,
+                policy=approval_policy,
+                custom_confirm_fn=confirm_fn,
+            )
+    except TaskAbortedError as exc:
+        return f"Operation '{tool_name}' was aborted by the operator: {exc}"
+
+    if not approved:
+        return f"Operation '{tool_name}' was not confirmed by the operator."
 
     return ""

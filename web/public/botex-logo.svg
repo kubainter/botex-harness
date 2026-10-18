@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="128" fill="#0f172a"/>
+  <rect x="32" y="32" width="448" height="448" rx="96" stroke="#1e293b" stroke-width="8"/>
+  <path d="M140 160C140 148.954 148.954 140 160 140H260C315.228 140 360 184.772 360 240C360 270.669 346.195 298.118 324.47 316.517C348.877 334.821 364 363.639 364 396C364 433.555 333.555 464 296 464H160C148.954 464 140 455.046 140 444V160Z" fill="url(#botex-grad)" fill-opacity="0.15"/>
+  <path d="M180 180H260C293.137 180 320 206.863 320 240C320 273.137 293.137 300 260 300H180V180Z" stroke="url(#botex-cyan)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M180 300H270C305.899 300 335 329.101 335 365C335 400.899 305.899 430 270 430H180V300Z" stroke="url(#botex-blue)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="260" cy="240" r="16" fill="#06b6d4"/>
+  <circle cx="270" cy="365" r="16" fill="#3b82f6"/>
+  <defs>
+    <linearGradient id="botex-grad" x1="140" y1="140" x2="364" y2="464" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="botex-cyan" x1="180" y1="180" x2="320" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="botex-blue" x1="180" y1="300" x2="335" y2="430" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+  </defs>
+</svg>

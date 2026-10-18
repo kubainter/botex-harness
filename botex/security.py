@@ -86,7 +86,7 @@ _SECRET_PATTERNS = [
         re.DOTALL,
     ),
     # OpenRouter / OpenAI style keys
-    re.compile(r"sk-[a-zA-Z0-9\-_]{20,}"),
+    re.compile(r"\bsk-[a-zA-Z0-9\-_]{10,}"),
     # AWS
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"(?i)aws[_\-]?secret[_\-]?access[_\-]?key\s*[=:]\s*\S+"),
@@ -94,8 +94,8 @@ _SECRET_PATTERNS = [
     re.compile(
         r'(?i)(password|passwd|token|secret|api[_\-]?key|auth[_\-]?key)\s*[=:]\s*["\']?[^\s"\']{6,}["\']?'
     ),
-    # Bearer tokens
-    re.compile(r"Bearer\s+[a-zA-Z0-9\-_\.]{20,}"),
+    # Bearer tokens (case-insensitive for HTTP authorization headers and error traces)
+    re.compile(r"(?i)bearer\s+[a-zA-Z0-9\-_\.]{20,}"),
     # Provider-prefixed tokens (GitHub, GitLab, Slack, Stripe, GCP, npm, PyPI, NVIDIA)
     re.compile(
         r"\b(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[bapors]-|"

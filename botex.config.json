@@ -9,18 +9,22 @@
         "enabled": true,
         "deny_patterns": [":free", "openrouter/free"]
       },
+      "denylist": [],
+      "profile_denylists": {},
       "decisions_models": ["typesafe/jev-*", "~typesafe/jev-*"],
       "models": {
         "default": "openrouter/auto",
         "auto-beta": "openrouter/auto-beta",
         "coding": "openrouter/pareto-code",
-        "fast": "deepseek/deepseek-v4-flash-0731"
+        "review": "anthropic/claude-sonnet-4",
+        "fast": "google/gemini-2.5-flash"
       },
       "model_fallbacks": {
-        "default": ["google/gemini-2.5-flash", "deepseek/deepseek-v3.2"],
-        "auto-beta": ["google/gemini-2.5-flash", "deepseek/deepseek-v3.2"],
-        "coding": ["qwen/qwen3-coder", "qwen/qwen3-coder-flash", "deepseek/deepseek-v3.2"],
-        "fast": ["google/gemini-2.5-flash-lite", "openai/gpt-4o-mini", "deepseek/deepseek-v3.2"]
+        "default": ["anthropic/claude-sonnet-4", "qwen/qwen3-coder", "deepseek/deepseek-v3.2"],
+        "auto-beta": ["anthropic/claude-sonnet-4", "qwen/qwen3-coder", "deepseek/deepseek-v3.2"],
+        "coding": ["anthropic/claude-sonnet-4", "qwen/qwen3-coder", "deepseek/deepseek-v3.2"],
+        "review": ["openai/gpt-5.4", "google/gemini-2.5-pro", "deepseek/deepseek-r1"],
+        "fast": ["qwen/qwen3-coder-flash", "openai/gpt-4o-mini", "deepseek/deepseek-v3.2"]
       }
     },
     "nvidia": {
@@ -28,6 +32,8 @@
       "base_url": "https://integrate.api.nvidia.com/v1",
       "api_key_env": "NVIDIA_API_KEY",
       "extra_body": {},
+      "denylist": [],
+      "profile_denylists": {},
       "capabilities": {},
       "models": {
         "default": "meta/llama-3.3-70b-instruct",
@@ -41,6 +47,8 @@
       "api_key_env": "OPENROUTER_API_FREE_KEY",
       "extra_body": {"provider": {"data_collection": "allow"}, "reasoning": {"max_tokens": 4000}},
       "zdr": {"enabled": false},
+      "denylist": [],
+      "profile_denylists": {},
       "models": {
         "default": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "coding": "cohere/north-mini-code:free",
@@ -68,6 +76,7 @@
     "default_mode": "edit",
     "allow_destructive": false,
     "require_read_before_write": true,
+    "approval_policy": "high_risk",
     "mode_profiles": {
       "readonly": "fast",
       "edit": "",
@@ -79,7 +88,9 @@
       "edit": 0,
       "destructive": 0,
       "full": 0
-    }
+    },
+    "denylist": [],
+    "profile_denylists": {}
   },
   "net": {
     "enabled": true,
@@ -119,11 +130,13 @@
     "snapshot_auto_prune": true,
     "snapshot_max_age_days": 7,
     "snapshot_max_total_mb": 50,
+    "global_memory_dir": "~/.botex/memory",
     "analytics_file": ".agent_analytics.json",
+    "catalog_file": ".model_pricing.json",
     "env_file": ""
   },
   "app": {
-    "referer": ""
+    "referer": "https://github.com/kubainter/botex-harness"
   },
   "analytics": {
     "store_full_text": false,
@@ -138,6 +151,22 @@
     "max_output_per_mtok": 4.0,
     "on_unknown": "allow",
     "cache_ttl_hours": 24
+  },
+  "catalog": {
+    "enabled": true,
+    "cache_file": ".model_pricing.json",
+    "cache_path": ".model_pricing.json",
+    "ttl_hours": 24.0,
+    "cache_ttl_hours": 24,
+    "timeout_s": 10.0,
+    "on_unknown": "allow"
+  },
+  "wallet": {
+    "enabled": true,
+    "cache_ttl_s": 60.0,
+    "timeout_s": 10.0,
+    "auto_check": false,
+    "min_balance_usd": 0.0
   }
 }
 

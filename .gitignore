@@ -93,3 +93,8 @@ tmp/
 # Local diagnostic and personal scripts
 inspect_sessions.py
 .coverage
+
+# Internal agent tracking & implementation status
+BOTEX_IMPLEMENTATION_STATUS.md
+.agents/
+

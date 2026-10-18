@@ -1,10 +1,9 @@
 # BoteX Technical Tutorial
 
-BoteX is an MCP-native execution harness for autonomous code-editing subagents.
-It runs as a standalone stdio MCP server and can also be driven directly from
-the command line. Any MCP client can delegate a bounded file task to it.
+BoteX is an MCP-native execution harness for autonomous code-editing subagents and conversational engineering assistance.
+It runs as a standalone stdio MCP server, a remote Server-Sent Events (SSE) cloud gateway, or directly from the command line. Any MCP client can delegate bounded file tasks to it.
 
-Entry point: `server.py`.
+Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.py` (FastAPI Cloud Gateway).
 
 ## 1. Architecture
 
@@ -15,24 +14,41 @@ Entry point: `server.py`.
 │   ├── engine.py          tool loop, context pruning, termination statuses
 │   ├── contracts.py       task contract verification & status taxonomy
 │   ├── config.py          layered config loader (defaults < local < env)
-│   ├── capabilities.py    capability presets (readonly/edit/destructive/full)
+│   ├── capabilities.py    capability presets & agency middleware
+│   ├── approval.py        Human-in-the-Loop approval manager & policies
+│   ├── chat.py            conversational chat loop & read-only tool sandbox
+│   ├── server_cloud.py    FastAPI Cloud Gateway & Remote MCP SSE server
 │   ├── exec_tools.py      run_command policy implementation
 │   ├── file_tools.py      outline-first file I/O tools
 │   ├── patch_engine.py    fuzzy patching, in-memory syntax check, snapshots
 │   ├── pricing.py         pre-flight price and capability guardrails
 │   ├── security.py        path traversal guard, blocked files, secret masking
 │   ├── analytics.py       cost ledger, budget checks, CLI reports
-│   ├── providers.py       provider adapters (OpenRouter, NVIDIA, etc.)
+│   ├── providers.py       provider registry & adapters (OpenRouter, NVIDIA, etc.)
+│   ├── catalog.py         dynamic model catalog with TTL caching & ZDR checks
+│   ├── denylist.py        hierarchical model denylist (glob & regex)
+│   ├── wallet.py          credit balance, usage, and limit checker
 │   ├── benchmarks.py      live model benchmarks & recommend_models
 │   ├── net_tools.py       SSRF-safe network fetching (read_url, fetch_url)
-│   ├── memory.py          workspace Memory Vault (.botex/memory/)
+│   ├── memory.py          two-tier Memory Vault (local & global scopes)
 │   ├── recipes.py         recipe loader & system prompt injection
 │   ├── i18n.py            CLI localization (EN/PL); MCP responses are always EN
 │   ├── ui.py              ANSI helpers with plain-text fallback
 │   └── recipes/           bundled markdown persona prompts
+├── web/                   Vue 3 + Vite + Pinia + Tailwind PWA frontend
 ├── tests/
-│   ├── test_botex.py      unit and integration suite (33 test groups)
-│   └── test_live_e2e.py   live end-to-end integration suite (OpenRouter)
+│   ├── test_botex.py          core unit and integration suite
+│   ├── test_stage_4_6.py      OpenRouter live telemetry, routing & JSON schema tests
+│   ├── test_approval.py       HITL approval and policy tests
+│   ├── test_chat.py           streaming chat and sandbox tests
+│   ├── test_memory_twotier.py two-tier memory vault scoping tests
+│   ├── test_server_cloud.py   FastAPI, SSE, and WebSocket tests
+│   ├── test_providers.py      provider registry and adapter tests
+│   ├── test_catalog.py        dynamic catalog and ZDR tests
+│   ├── test_denylist.py       hierarchical denylist tests
+│   ├── test_wallet.py         wallet and credit query tests
+│   ├── test_context_guard.py  context pruning and compaction tests
+│   └── test_live_e2e.py       live end-to-end integration suite
 ├── docs/
 │   └── TUTORIAL.md        this file
 ├── skills/botex/SKILL.md  agent-facing usage contract
@@ -43,20 +59,15 @@ Entry point: `server.py`.
 └── botex.config.json      committed defaults
 ```
 
-Runtime artifacts: `.snapshots/`, `.agent_analytics.json`, `.model_pricing.json`;
-all are gitignored.
+Runtime artifacts: `.snapshots/`, `.agent_analytics.json`, `.model_pricing.json`; all are gitignored.
 
 ## 2. Core mechanisms
 
 ### A. Outline-first file access
-Agents never read whole large files at once. They call `get_file_outline`
-to see top-level symbols and line ranges, then `read_file_lines(path, start, end)`
-for the exact slice they need.
+Agents never read whole large files at once. They call `get_file_outline` to inspect top-level symbols and line ranges, then `read_file_lines(path, start, end)` for the exact slice they need.
 
 ### B. Context pruning
-After a patch is accepted, earlier full-file reads in the conversation history
-are replaced with a short placeholder. This prevents the message history from
-growing quadratically during multi-step edits.
+After a patch is accepted, earlier full-file reads in the conversation history are replaced with a short placeholder. This prevents the message history from growing quadratically during multi-step edits.
 
 ### C. Pre-write syntax check
 Before disk is touched, modified content is linted in memory:
@@ -75,29 +86,19 @@ Three matching levels for `apply_patch`:
 3. Indentation-agnostic block match.
 
 ### E. Snapshot rollback
-Every mutating tool snapshots the target file to `.snapshots/<task_id>/` first.
-If the engine detects a no-progress loop or hits a fatal error, it restores the
-original files. The CLI provides `--snapshots` and `--clean-snapshots` for
-maintenance.
+Every mutating tool snapshots the target file to `.snapshots/<task_id>/` first. If the engine detects a no-progress loop or hits a fatal error, it restores the original files. The CLI provides `--snapshots` and `--clean-snapshots` for maintenance.
 
 ### F. Security boundaries
 
-* `resolve_safe_path()` blocks path traversal outside `workspace_dir`.
-* Read/write of `.env*`, `*.pem`, `*.key`, `id_rsa`, and similar patterns is blocked.
-* Secret-like strings are masked in file reads, command output, and analytics.
-* OpenRouter requests include `provider: {"data_collection": "deny"}` while
-  ZDR is enforced. Both the local model gate and this wire flag derive from
-  one predicate (`zdr_enforced`): a provider with `zdr.enabled: false` or a
-  run with `allow_non_zdr` relaxes both — `:free` models then route
-  normally. Relaxed runs print a stderr warning and report
-  `zdr_enforced: false`.
-* `reasoning.max_tokens` (in `extra_body`) caps hidden thinking so reasoning
-  models cannot consume the entire `max_tokens` budget before emitting output.
+* `resolve_safe_path()` blocks path traversal outside `workspace_dir` and validates boundaries across both local and global memory vaults.
+* Read/write of `.env*`, `*.pem`, `*.key`, `id_rsa`, and similar credential patterns is blocked.
+* Secret-like strings are recursively masked in file reads, command output, streaming chunks, and analytics (CWE-312).
+* OpenRouter requests include `provider: {"data_collection": "deny"}` while ZDR is enforced. Both the local model gate and this wire flag derive from one predicate (`zdr_enforced`). Relaxed runs print a stderr warning and report `zdr_enforced: false`.
+* `reasoning.max_tokens` (in `extra_body`) caps hidden thinking so reasoning models cannot consume the entire `max_tokens` budget before emitting output.
 
-## 3. Capability modes
+## 3. Capability modes & Agency Middleware
 
-`run_subagent` accepts a `mode` parameter. Presets are fail-closed; an unknown
-mode returns `CONFIG_ERROR`.
+`run_subagent` accepts a `mode` parameter. Presets are fail-closed; an unknown mode returns `CONFIG_ERROR`.
 
 | Mode | Tools exposed |
 |---|---|
@@ -106,51 +107,78 @@ mode returns `CONFIG_ERROR`.
 | `destructive` | edit + delete_file, move_file |
 | `full` | destructive + run_command |
 
-Explicit flags (`allow_destructive`, `allow_exec`, `allow_net`) can only widen a
-preset, never narrow it. `run_command` additionally requires
-`exec.enabled: true` in the config; without it `CAP_EXEC` is removed regardless
-of mode/flags.
+Explicit flags (`allow_destructive`, `allow_exec`, `allow_net`) can only widen a preset, never narrow it. `run_command` additionally requires `exec.enabled: true` in the config; without it `CAP_EXEC` is removed regardless of mode/flags.
 
-`net` is deliberately **not** part of any preset — it is an exfiltration and
-prompt-injection axis, so it requires a separate `allow_net=true` opt-in. It
-exposes the restricted, read-only `read_url` tool, scoped by `net.policy`
-(`caller` / `allowlist` / `public` / `off`) plus per-run `net_allowed_hosts` /
-`net_allowed_urls` grants. All modes keep SSRF/IP-pinning, redirect, port, size,
-and text-only guards.
+`net` is deliberately **not** part of any preset: it is an exfiltration and prompt-injection axis, so it requires a separate `allow_net=true` opt-in. It exposes the restricted, read-only `read_url` tool, scoped by `net.policy` (`caller` / `allowlist` / `public` / `off`) plus per-run `net_allowed_hosts` / `net_allowed_urls` grants.
 
-## 4. Cost and capability guardrails
+## 4. Human-in-the-Loop (HITL) & Approval System
 
-* **Pricing guardrail** — before the first API call the resolved model is checked
-  against the provider's `/models` catalog (cached per provider in
-  `.model_pricing.json`). Models above `pricing.max_*_per_mtok` are rejected
-  locally with `PRICE_EXCEEDED`.
-* **Capability guardrail** — models marked by the catalog as not supporting
-  tool calls are rejected with `UNSUPPORTED`. For providers that publish no
-  capability metadata, set `providers.<name>.capabilities.<slug> =
-  {"supports_tools": true}`; this declaration overrides the catalog.
-* **Budget** — `budget_limit_usd` is checked at the start of each task.
-  Exceeding it returns `BUDGET_EXCEEDED`.
-* **Limits** — `max_turns` (steps; per-mode override via
-  `engine.mode_max_turns`, e.g. `readonly` defaults to 30 since review passes
-  need more read steps), `max_tokens` (per-turn completion ceiling),
-  `max_duration_s` (wall-clock limit, checked between turns).
+BoteX provides a policy-driven approval manager (`botex/approval.py`):
 
-Router profiles such as `openrouter/auto` and `openrouter/auto-beta` can route
-to reasoning backends unpredictably and may burn the whole `max_tokens` budget
-on reasoning. Prefer an explicit `model` or a non-reasoning profile for
-repeatable tasks.
+- **Approval Policies**:
+  - `none`: Disables interactive approval checks.
+  - `high_risk` (default): `delete_file`, `move_file`, and `run_command` require confirmation.
+  - `mutations`: All disk writes and execution require confirmation.
+  - `all_risky`: Mutations, execution, and external network reads require confirmation.
+- **Fail-Closed in Headless Mode**: When running headlessly (no operator or confirmation handler connected), tools requiring approval fail closed unless covered by an explicit session pre-approval.
+- **Interactive Prompts**: Terminal runs prompt the operator with `(y)es`, `(n)o`, `(a)lways allow for this task`, or `(c)ancel task`.
+- **Task Abort & Rollback**: Cancelling an action immediately halts execution and verifies that any partial workspace changes are safely rolled back.
 
-## 5. Termination statuses
+## 5. Chat Mode & Conversational Sandbox
 
-`ok` is `true` **only** when `status == "DONE"` — it certifies that the task
-contract was verified (required output exists on disk / report delivered), not
-that the model claimed success or that bytes changed.
+BoteX includes a conversational mode (`botex/chat.py`):
+
+- **Command**: `botex chat` launches an interactive REPL with real-time token streaming.
+- **Strict Read-Only Sandbox**: Only non-mutating inspection tools (`get_file_outline`, `read_file_lines`, `read_file`, `list_dir`, `search_memory`, `read_memory`) are exposed. File mutations and shell commands are blocked.
+- **Context Management**: Automatically prunes large tool outputs and strips dangling tool calls when context windows compress.
+
+## 6. Two-Tier Memory Vault
+
+Persistent Memory Vault (`botex/memory.py`) supports two distinct scopes:
+
+1. **Local Scope (`scope="local"`)**: Stored at `<workspace_dir>/.botex/memory/`. Holds project-specific architecture notes, decisions, and deterministic task receipts (`_save_task_receipt` written automatically at 0 LLM tokens upon `DONE`, enriched with live OpenRouter `/api/v1/generation` telemetry when available).
+2. **Global Scope (`scope="global"`)**: Stored centrally at `~/.botex/memory/` (or `paths.global_memory_dir`). Shared across projects and VPS sessions.
+3. **Consolidated Search (`scope="all"`)**: Searches across both local and global memory entries concurrently using outline-first FTS5 retrieval.
+
+MCP tools: `save_memory`, `read_memory`, `search_memory`.
+
+## 7. FastAPI Cloud Gateway & Remote MCP
+
+BoteX can operate as a central HTTP/SSE daemon (`botex/server_cloud.py`):
+
+- **Command**: `botex cloud --host 0.0.0.0 --port 8000`
+- **Zero Friction Local / Strict Cloud**:
+  - Unauthenticated local mode when `BOTEX_ACCESS_TOKEN` is unset or empty.
+  - Constant-time `hmac.compare_digest` Bearer token authentication when `BOTEX_ACCESS_TOKEN` is configured.
+  - Public `GET /api/health` endpoint for Docker and proxy health checks.
+- **Remote MCP via SSE**: Exposes `GET /mcp/sse` and `POST /mcp/messages/` with keepalive comments, allowing remote IDEs (Cursor, Windsurf, Claude Desktop, Antigravity) to connect over WAN.
+- **REST & WebSocket API**:
+  - `/api/wallet` & `/api/key/status`: Live credit balance, API key budget limits (`limit_usd`, `spend_usd`, `remaining_usd`, `resets_at`, `free_model_daily_requests`), and `low_budget_warning` (`remaining_usd < $1.00`).
+  - `/api/tasks`: Background task delegation, status polling, and cancellation.
+  - `/api/approvals`: Real-time decision queue for Human-in-the-Loop operators.
+  - `/api/memory`: REST interface for two-tier memory vault.
+  - `/api/chat` (SSE streaming) & `/api/chat/ws` (WebSocket with 15s ping heartbeat).
+
+## 8. Cost, routing, and capability guardrails
+
+* **Pricing guardrail**: before the first API call the resolved model is checked against the provider's `/models` catalog (cached in `.model_pricing.json`). Models above `pricing.max_*_per_mtok` are rejected locally with `PRICE_EXCEEDED`.
+* **Capability guardrail**: models marked by the catalog as lacking tool calling are rejected with `UNSUPPORTED`.
+* **5-gate in-payload failovers (`extra_body.models`)**: for OpenRouter, fallback models are validated through all five safety gates (`Denylist`, `Decisions`, `ZDR`, `Price`, `Tools`) and passed in `extra_body["models"]` (capped at 3 models, disabled for meta-routers like `openrouter/auto` and `openrouter/pareto-code`, and stripped after the first file write or command execution).
+* **Provider routing (`extra_body.provider`)**: sets `data_collection: "deny"` (when ZDR is active), `require_parameters: true` (when tools or `response_format` are used, automatically stripping `reasoning` for non-reasoning slugs), `allow_fallbacks: true`, and `sort: "throughput"`.
+* **Live cost reconciliation**: upon `DONE`, OpenRouter runs query `GET /api/v1/generation?id=...` in parallel (with a short 404 retry) to record official billing (`total_cost`), queue latency (`queue_time_ms`), generation time (`generation_time_ms`), and cache read/write tokens, falling back to inline `usage.cost` or `MODEL_PRICING_ESTIMATES`.
+* **Strict JSON Schema completion**: supports `TASK_COMPLETION_JSON_SCHEMA` (`strict: true`, `additionalProperties: false`) via `response_format` and `parse_structured_completion`, alongside `additionalProperties: false` on all tool parameter schemas.
+* **Budget**: `budget_limit_usd` is checked at the start of each task and mid-loop. Exceeding it returns `BUDGET_EXCEEDED`.
+* **Limits**: `max_turns` (steps), `max_tokens` (completion cap), `max_duration_s` (wall-clock limit).
+
+## 9. Termination statuses
+
+`ok` is `true` **only** when `status == "DONE"`: it certifies that the task contract was verified (required output exists on disk or report delivered), not merely that the model claimed success.
 
 | Status | Meaning |
 |---|---|
 | `DONE` | Task contract verified |
-| `UNSUPPORTED` | Explicit `STATUS: UNSUPPORTED` marker, or the model lacks tool calls |
-| `INCOMPLETE` | No useful output after strikes/nudges |
+| `UNSUPPORTED` | Explicit `STATUS: UNSUPPORTED` marker, or model lacks tool calls |
+| `INCOMPLETE` | No useful output after strikes and nudges |
 | `TOKEN_LIMIT` | `max_tokens` exhausted without visible output; common with reasoning models |
 | `TIME_LIMIT` | `max_duration_s` exceeded between turns |
 | `MAX_TURNS_REACHED` | Step limit reached; partial progress stays in `files_touched` |
@@ -160,144 +188,42 @@ that the model claimed success or that bytes changed.
 | `REQUEST_TIMEOUT` | A single provider request exceeded `request_timeout_s` |
 | `BUDGET_EXCEEDED` | Daily spend cap exceeded |
 | `PRICE_EXCEEDED` | Model over the configured price cap; rejected locally |
-| `ZDR_VIOLATION` | Model matched the ZDR deny list (:free/openrouter/free) — requires allow_non_zdr or openrouter-free |
+| `ZDR_VIOLATION` | Model matched the ZDR deny list; requires allow_non_zdr or openrouter-free |
 | `CONFIG_ERROR` | Invalid provider, mode, policy, or parameters |
 | `API_ERROR` | Provider call failed; rollback attempted if changes existed |
 | `ERROR` | Pre-run failure such as missing `workspace_dir` |
 
-Each failure also carries a machine-readable `failure_kind` (e.g.
-`model_refusal`, `no_progress`, `provider_auth_error`, `contract_failed`) that
-drives the `model_fallbacks` retry policy.
-
-## 6. Using BoteX through MCP
-
-### Available MCP tools
-
-* `run_subagent(task, ...)` — run a bounded editing task; blocks until done
-* `start_task(task, ...)` — detached execution; returns a `task_id`
-* `get_task_status(task_id)` — poll a detached task (`result` text + `result_data` dict)
-* `save_memory(title, content, workspace_dir, kind, tags, memory_id)` / `search_memory(workspace_dir, query, tag, kind)` / `read_memory(memory_id, workspace_dir)` — per-workspace Memory Vault
-* `fetch_url(url, max_bytes)` — caller-side URL fetch (not exposed to the internal loop)
-* `get_outline(path, workspace_dir)` — symbol skeleton of a file
-* `get_stats(period)` — cost/token report from analytics
-* `check_health()` — provider, key, model, and budget readiness
-* `clean_snapshots(max_age_days, max_total_mb)` — prune old snapshots
-* `recommend_models(task_type, limit, include_free)` — live OpenRouter cost/quality ranking (`include_free=True` also admits non-ZDR `:free` variants)
-
-`run_subagent` is a single blocking call; for long runs prefer `start_task` +
-`get_task_status`. Clients can also issue multiple independent `tools/call`
-requests in parallel to fan out work. For large repositories, prefer several
-narrow tasks with explicit `files` over one broad "review everything" request.
-
-### `run_subagent` parameters
-
-```json
-{
-  "task": "Add email validation to auth/validators.py and add tests",
-  "files": ["auth/validators.py"],
-  "workspace_dir": "./your-project",
-  "mode": "edit",
-  "recipe": "",
-  "profile": "coding",
-  "provider": "",
-  "model": "",
-  "max_turns": 0,
-  "max_tokens": 0,
-  "max_duration_s": 0,
-  "budget_limit_usd": -1,
-  "allow_destructive": false,
-  "allow_exec": false,
-  "allow_net": false,
-  "net_allowed_hosts": [],
-  "net_allowed_urls": [],
-  "output_path": "",
-  "verify_command": "",
-  "allow_non_zdr": false,
-  "api_key": ""
-}
-```
-
-Model resolution priority: `model` > `profile` > `mode_profiles[mode]` >
-`default_profile`. Zeros and empty strings fall back to configured defaults.
-
-Workspace resolution: an explicit `workspace_dir` (including `.`) always wins; when it is
-empty, `engine.default_workspace` is used (if it is an existing directory), otherwise the
-server's current directory. This applies to `run_subagent`, `start_task`, `get_outline` and
-the memory tools. MCP hosts usually start the server with an arbitrary working directory,
-so pass `workspace_dir` explicitly or set `engine.default_workspace`.
-
-### Using Recipes as System Prompts
-
-BoteX dynamically constructs the `system` message for every task. It starts with a hardcoded operational prompt (which enforces the BoteX protocol, file tool rules, and termination formats). If the `recipe` parameter is specified (e.g. `"recipe": "reviewer"`), BoteX loads the corresponding file from the `recipes/` directory and injects its content directly into the system prompt.
-
-This mechanism acts as BoteX's native **System Prompt injection**. Instead of writing ad-hoc prompt blocks, you can curate reusable markdown files that define the agent's persona, its objectives, and specific coding constraints. For example, if you are analyzing an Unreal Engine 4 game mod, you could pass `"recipe": "ue4"` pointing to a custom `recipes/ue4.md` file, which configures the LLM to focus on memory leaks and UE4 Blueprint behaviors.
-
-## 7. Configuration
-
-Resolution order (lowest to highest priority):
-
-1. `botex.config.json` — committed defaults
-2. `botex.config.local.json` — gitignored local overrides
-3. `BOTEX_*` environment variables
-
-The two config files are hot-reloaded: `load_config()` compares their modification times
-(including creation/deletion of the local file) on every call and re-reads on change, so a
-running MCP server picks up edits and `botex config ...` writes without a restart.
-Environment variables are only read from the process environment, so changing them needs a restart.
-
-Key sections:
-
-* `providers.<name>` — `base_url`, `api_key_env`, `extra_body`, `zdr`
-  (`enabled` + `deny_patterns`), `decisions_models`, `capabilities`, `models` profiles, and
-  per-profile `model_fallbacks` retry chains. The bundled `openrouter-free`
-  preset ships `zdr.enabled: false` with `:free` tool-capable models for
-  operators without a paid subscription — select it per run, via
-  `BOTEX_PROVIDER`, or via `botex config provider openrouter-free`.
-* `engine.default_profile`, `engine.mode_profiles`, `engine.mode_max_turns`,
-  `engine.max_turns`,
-  `engine.max_tokens`, `engine.reasoning_max_tokens`, `engine.request_timeout_s`,
-  `engine.max_duration_s`, `engine.max_task_duration_s`, `engine.temperature`,
-  `engine.budget_limit_usd`, `engine.allow_destructive`, `engine.default_mode`,
-  `engine.default_workspace` (default project directory when no workspace is given;
-  env `BOTEX_DEFAULT_WORKSPACE`),
-  `engine.require_read_before_write`, `engine.max_concurrent_tasks`,
-  `engine.max_queued_tasks`, `engine.task_result_ttl_s`.
-* `net.policy`, `net.allowed_hosts`, `net.allowed_urls`, `net.timeout_s`,
-  `net.max_bytes`, `net.max_requests_per_task`, `net.max_redirects` —
-  `read_url`/`fetch_url` destination policy.
-* `exec.enabled`, `exec.allowlist`, `exec.deny_args`, `exec.timeout_s`,
-  `exec.max_output_bytes` — `run_command` master switch and policy.
-* `pricing.enabled`, `pricing.max_input_per_mtok`, `pricing.max_output_per_mtok`,
-  `pricing.on_unknown`, `pricing.cache_ttl_hours`.
-* `paths.snapshot_dir`, `paths.analytics_file`, `paths.env_file`,
-  `paths.snapshot_auto_prune`, `paths.snapshot_max_age_days`,
-  `paths.snapshot_max_total_mb`.
-* `app.referer` — your attribution URL; the name "BoteX" is fixed.
-* `analytics.store_full_text`, `analytics.preview_chars`.
-* `ui.language` — `en`, `pl`, or `auto` (OS locale; `BOTEX_LANG` overrides);
-  affects CLI only.
-
-## 8. CLI usage
+## 10. CLI usage
 
 ```bash
-# interactive REPL (in-session: `workspace` / `cd [DIR]` shows or switches the target project)
+# interactive REPL (in-session: `workspace` or `cd [DIR]` switches target project)
 botex repl -w ./my-project --profile coding
+
+# conversational engineering chat
+botex chat -w ./my-project --model deepseek/deepseek-chat
+
+# cloud gateway / remote MCP server
+botex cloud --host 0.0.0.0 --port 8000
+
+# wallet & credit monitoring
+botex wallet
+botex wallet --refresh openrouter
 
 # one-shot tasks
 botex run "Add a --verbose flag to cli.py" -w ./project --profile coding
 botex run "Fix failing test" --files tests/test_app.py --max-turns 25 --budget 0.50
-botex run "Remove the legacy module" -w ./project --mode destructive
+botex run "Remove the legacy module" -w ./project --mode destructive --approval-policy high_risk
 botex run "Quick code review" -w ./project --mode readonly --max-duration 300 --max-tokens 4000
 
 # free models (non-ZDR opt-in)
-botex run "task" --provider openrouter-free                 # preset, per-run
+botex run "task" --provider openrouter-free
 botex run "task" --model qwen/qwen3.8-27b:free --allow-non-zdr
-botex config provider openrouter-free                       # persistent switch
-botex config zdr off                                        # relax ZDR on current provider
+botex config provider openrouter-free
+botex config zdr off
 
-# default project directory (used when -w / workspace_dir is not given)
-botex config workspace ./my-project                         # stored as an absolute path
-botex config workspace none                                 # clear (falls back to cwd)
+# default project directory
+botex config workspace ./my-project
+botex config workspace none
 
 # maintenance
 botex --stats
@@ -311,25 +237,11 @@ botex models [--refresh]
 botex serve
 ```
 
-`botex` with no arguments starts the MCP server when stdin is a pipe; on an
-interactive terminal it enters the REPL. Use `botex serve` to force server mode.
-
-## 9. Test suite
+## 11. Test suite
 
 ```bash
-python tests/test_botex.py
+python -m pytest tests/
 ```
 
-Expected output — one `[PASS]` line per suite (security, syntax validation,
-fuzzy patching & rollback, file tools, destructive ops, capability modes, exec
-policy, pricing, network guards, fetch policy, fallback & verify, async task
-registry, write-guard, provider adapter, analytics, MCP structured output, ZDR,
-review regression, tool-misuse guards, read-before-write, memory vault, recipes,
-MCP memory & stats, MCP tool surface), ending with:
-
-```
-[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!
-```
-
-A second, opt-in suite `tests/test_live_e2e.py` runs against the real OpenRouter
-API; it requires `OPENROUTER_API_TESTS_KEY` and skips itself otherwise.
+Runs the complete hermetic test suite (377 tests across 14 test modules). All socket access is hermetically mocked.
+A secondary, opt-in suite `tests/test_live_e2e.py` runs against live provider APIs when `OPENROUTER_API_TESTS_KEY` is provided.
