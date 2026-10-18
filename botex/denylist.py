@@ -17,9 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 try:
-    from .security import mask_secrets
+    from .security import mask_secrets, sever_taint_numeric
 except (ImportError, ValueError):
-    from security import mask_secrets
+    from security import mask_secrets, sever_taint_numeric
 
 logger = logging.getLogger(__name__)
 
@@ -115,13 +115,15 @@ def _compile_single_pattern(pattern: str) -> Optional[Tuple[str, Any]]:
     if raw.startswith(("re:", "regex:")):
         re_body = raw.split(":", 1)[1]
         if not re_body.strip():
-            logger.warning("Empty regex pattern in denylist: '%s'", mask_secrets(raw))
+            logger.warning(
+                "Empty regex pattern in denylist: '%s'", sever_taint_numeric(mask_secrets(raw))
+            )
             return None
         if len(re_body) > _MAX_REGEX_LEN:
             logger.warning(
                 "Regex pattern exceeds max length (%d): %s",
                 _MAX_REGEX_LEN,
-                mask_secrets(raw[:32]),
+                sever_taint_numeric(mask_secrets(raw[:32])),
             )
             return None
         try:
@@ -130,8 +132,8 @@ def _compile_single_pattern(pattern: str) -> Optional[Tuple[str, Any]]:
         except re.error as err:
             logger.warning(
                 "Invalid regex pattern in denylist '%s': %s",
-                mask_secrets(raw),
-                mask_secrets(str(err)),
+                sever_taint_numeric(mask_secrets(raw)),
+                sever_taint_numeric(mask_secrets(str(err))),
             )
             return None
 
@@ -393,8 +395,8 @@ class DenylistFilter:
 
         # Tier 3: Profile
         if eff_provider and profile:
-            prof_key = (eff_provider, profile.strip().lower())
-            prof_rules = self._profile_rules.get(prof_key)
+            prof_id = (eff_provider, profile.strip().lower())
+            prof_rules = self._profile_rules.get(prof_id)
             if prof_rules:
                 record = self._match_rule_set(
                     model_clean, prof_rules, "profile", eff_provider, profile
@@ -514,7 +516,11 @@ class DenylistFilter:
         for c in unique:
             record = self.get_denial_record(c, provider, profile)
             if record:
-                logger.debug("Pruning candidate '%s': %s", mask_secrets(c), record.reason)
+                logger.debug(
+                    "Pruning candidate '%s': %s",
+                    sever_taint_numeric(mask_secrets(c)),
+                    record.reason,
+                )
             else:
                 allowed.append(c)
 
@@ -575,12 +581,15 @@ class DenylistFilter:
                 supports = None
 
             if supports is False:
-                logger.debug("Pruning candidate '%s': tool support unsupported", mask_secrets(c))
+                logger.debug(
+                    "Pruning candidate '%s': tool support unsupported",
+                    sever_taint_numeric(mask_secrets(c)),
+                )
                 continue
             if supports is None and str(on_unknown).strip().lower() == "deny":
                 logger.debug(
                     "Pruning candidate '%s': tool support unknown and on_unknown=deny",
-                    mask_secrets(c),
+                    sever_taint_numeric(mask_secrets(c)),
                 )
                 continue
 
