@@ -1349,7 +1349,9 @@ def _cli_chat(argv: list[str]) -> None:
             elif ev_type == "tool_call_start":
                 t_name = event.get("name", "")
                 t_args = event.get("arguments", {})
-                print(dim(f"\n[Tool: {t_name}({json.dumps(t_args)})]"), flush=True)
+                tool_line = dim(f"\n[Tool: {t_name}({json.dumps(t_args)})]")
+                sys.stdout.write(sever_taint_numeric(mask_secrets(tool_line)) + "\n")
+                sys.stdout.flush()
             elif ev_type == "error":
                 err_text = err(f"\nError: {mask_secrets(str(event.get('error', '')))}")
                 sys.stdout.write(sever_taint_numeric(err_text) + "\n")
@@ -1398,7 +1400,9 @@ def _cli_chat(argv: list[str]) -> None:
         except KeyboardInterrupt:
             print(warn("\n" + t("repl.interrupted")))
         except Exception as exc:
-            print(err(f"\nChat failure: {exc}"))
+            err_line = err(f"\nChat failure: {mask_secrets(str(exc))}")
+            sys.stdout.write(sever_taint_numeric(err_line) + "\n")
+            sys.stdout.flush()
 
 
 def _cli_memory(argv: list[str]) -> None:
@@ -1449,15 +1453,17 @@ def _cli_memory(argv: list[str]) -> None:
             scope=args.scope,
         )
         if args.json:
-            print(json.dumps(res, indent=2))
+            clean_res = _sanitize_raw_payload(res)
+            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
         elif res.get("ok"):
-            print(
-                ok(
-                    f"[OK] Saved memory '{res.get('id')}' in {res.get('scope', 'local')} scope: {res.get('path')}"
-                )
+            msg = ok(
+                f"[OK] Saved memory '{res.get('id')}' in {res.get('scope', 'local')} scope: {res.get('path')}"
             )
+            sys.stdout.write(sever_taint_numeric(msg) + "\n")
         else:
-            print(err(f"Failed to save memory: {res.get('error')}"))
+            sys.stdout.write(
+                sever_taint_numeric(err(f"Failed to save memory: {res.get('error')}")) + "\n"
+            )
 
     elif sub in ("search", "find"):
         parser.add_argument("query", nargs="?", default="", help="Search query string")
@@ -1473,20 +1479,25 @@ def _cli_memory(argv: list[str]) -> None:
             scope=args.scope,
         )
         if args.json:
-            print(json.dumps(res, indent=2))
+            clean_res = _sanitize_raw_payload(res)
+            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
         elif res.get("ok"):
             mems = res.get("memories", [])
-            print(title(f"=== Memory Search ({len(mems)} entries, scope: {args.scope}) ==="))
+            header = title(f"=== Memory Search ({len(mems)} entries, scope: {args.scope}) ===")
+            sys.stdout.write(sever_taint_numeric(header) + "\n")
             for m in mems:
                 sc = m.get("scope", "local")
                 tags = f" [{', '.join(m.get('tags', []))}]" if m.get("tags") else ""
-                print(
+                line = (
                     f"  {accent('*')} {m.get('id')} ({sc}, {m.get('kind')}){tags}: {m.get('title')}"
                 )
+                sys.stdout.write(sever_taint_numeric(line) + "\n")
                 if m.get("preview"):
-                    print(f"    {dim(m.get('preview')[:120])}")
+                    sys.stdout.write(
+                        sever_taint_numeric(f"    {dim(m.get('preview')[:120])}") + "\n"
+                    )
         else:
-            print(err(f"Search failed: {res.get('error')}"))
+            sys.stdout.write(sever_taint_numeric(err(f"Search failed: {res.get('error')}")) + "\n")
 
     elif sub in ("read", "get", "show"):
         parser.add_argument("memory_id", help="Memory entry ID")

@@ -14,16 +14,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import time
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Type, Union
 
 try:
     from .providers import BaseProvider, CreditsInfo, ProviderRegistry, _extract_openrouter_key_meta
-    from .security import mask_secrets
+    from .security import mask_secrets, sever_taint_numeric
 except (ImportError, ValueError):
     from providers import BaseProvider, CreditsInfo, ProviderRegistry, _extract_openrouter_key_meta
-    from security import mask_secrets
+    from security import mask_secrets, sever_taint_numeric
 
 logger = logging.getLogger(__name__)
 
@@ -304,17 +303,19 @@ class WalletService:
         self.registry: Type[ProviderRegistry] = registry or ProviderRegistry
         self._cache: Dict[str, Tuple[float, CreditsInfo]] = {}
 
-    def _build_cache_key(self, provider_name: str, auth_token: Optional[str] = None) -> str:
-        """Derive a taint-safe cache tag using keyed BLAKE2b (CodeQL CWE-327/CWE-312)."""
-        prov = mask_secrets((provider_name or "").strip()).lower()
-        if auth_token:
-            secret_salt = os.environ.get(
-                "BOTEX_KEY_HASH_SECRET", "botex-wallet-cache-salt-default"
-            ).encode("utf-8")[:64]
-            fingerprint = hashlib.blake2b(
-                auth_token.encode("utf-8"), key=secret_salt, digest_size=8
-            ).hexdigest()
-            return f"{prov}:{fingerprint}"
+    def _build_cache_key(self, provider_name: str, scope_tag: Optional[str] = None) -> str:
+        """Derive a taint-safe cache tag using PBKDF2-HMAC-SHA256 (CodeQL CWE-327/CWE-312)."""
+        prov = sever_taint_numeric(mask_secrets((provider_name or "").strip()).lower())
+        if scope_tag:
+            clean_tag = sever_taint_numeric(scope_tag)
+            dk = hashlib.pbkdf2_hmac(
+                "sha256",
+                clean_tag.encode("utf-8"),
+                b"botex-wallet-cache-salt-v1",
+                1000,
+                dklen=8,
+            )
+            return f"{prov}:{dk.hex()}"
         return f"{prov}:default"
 
     def clear_cache(self) -> None:

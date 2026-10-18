@@ -13,9 +13,9 @@ RECIPES_DIR = Path(__file__).resolve().parent / "recipes"
 
 
 try:
-    from .security import resolve_safe_path, sanitize_identifier
+    from .security import sanitize_identifier
 except (ImportError, ValueError):
-    from security import resolve_safe_path, sanitize_identifier
+    from security import sanitize_identifier
 
 
 def list_recipes() -> List[str]:
@@ -29,14 +29,17 @@ def load_recipe(name: str) -> Optional[str]:
     """Load recipe markdown content by name. Returns None if not found."""
     if not name or not isinstance(name, str):
         return None
-    clean_name = sanitize_identifier(name[:-3] if name.strip().endswith(".md") else name.strip())
-    if not clean_name:
+    raw = name.strip()
+    if raw.endswith(".md"):
+        raw = raw[:-3]
+    clean_name = sanitize_identifier(raw)
+    if not clean_name or not RECIPES_DIR.exists() or not RECIPES_DIR.is_dir():
         return None
 
-    try:
-        target = resolve_safe_path(RECIPES_DIR, f"{clean_name}.md")
-        if target.exists() and target.is_file():
-            return target.read_text(encoding="utf-8", errors="replace").strip()
-    except Exception:
-        return None
+    for entry in RECIPES_DIR.glob("*.md"):
+        if entry.stem == clean_name and entry.is_file():
+            try:
+                return entry.read_text(encoding="utf-8", errors="replace").strip()
+            except Exception:
+                return None
     return None
