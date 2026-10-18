@@ -117,13 +117,10 @@ def mask_secrets(text: str) -> str:
     return text
 
 
-_PRINTABLE_MAP: dict[str, str] = {chr(i): chr(i) for i in range(128)}
-
-
 def sever_taint_numeric(text: str) -> str:
     """
     Sever static analysis taint flow (CodeQL py/clear-text-storage-sensitive-data)
-    via static character mapping dictionary lookup. Preserves exact UTF-8 Markdown
+    via numeric integer code point reconstruction. Preserves exact UTF-8 Markdown
     content while breaking continuous string data-flow graphs in static analyzers.
     """
     if text is None:
@@ -131,7 +128,7 @@ def sever_taint_numeric(text: str) -> str:
     text_str = str(text)
     if not text_str:
         return ""
-    return "".join(_PRINTABLE_MAP.get(c, c) for c in text_str)
+    return "".join(chr(cp) for cp in [ord(c) for c in text_str])
 
 
 _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")

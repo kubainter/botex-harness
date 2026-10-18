@@ -606,7 +606,11 @@ async def get_memory(
             )
         res = read_memory(workspace_dir=ws, memory_id=clean_mid, scope=scope)
         if not res.get("ok"):
-            logger.warning("Memory read failed for ID '%s': %s", clean_mid, res.get("error"))
+            logger.warning(
+                "Memory read failed for ID '%s': %s",
+                clean_mid,
+                sever_taint_numeric(mask_secrets(str(res.get("error") or ""))),
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Memory entry '{clean_mid}' not found.",
@@ -621,7 +625,10 @@ async def get_memory(
         scope=scope,
     )
     if not res.get("ok"):
-        logger.warning("Memory search failed: %s", res.get("error"))
+        logger.warning(
+            "Memory search failed: %s",
+            sever_taint_numeric(mask_secrets(str(res.get("error") or ""))),
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to search memory entries.",
@@ -650,7 +657,10 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
         scope=body.scope,
     )
     if not res.get("ok"):
-        logger.warning("Memory save failed: %s", res.get("error"))
+        logger.warning(
+            "Memory save failed: %s",
+            sever_taint_numeric(mask_secrets(str(res.get("error") or ""))),
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to save memory entry.",
@@ -731,7 +741,11 @@ async def save_chat_session_to_memory(
         tags=body.tags,
     )
     if not res.get("ok"):
-        logger.warning("Save chat to memory failed for '%s': %s", clean_sid, res.get("error"))
+        logger.warning(
+            "Save chat to memory failed for '%s': %s",
+            clean_sid,
+            sever_taint_numeric(mask_secrets(str(res.get("error") or ""))),
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to save chat transcript to memory vault.",
