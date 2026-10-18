@@ -145,7 +145,8 @@ def test_stage_4_6_extract_openrouter_key_meta_and_wallet_parsing():
     assert info.free_model_daily_requests == 1000
 
 
-def test_stage_4_6_wallet_service_key_status_and_cloud_endpoint():
+def test_stage_4_6_wallet_service_key_status_and_cloud_endpoint(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key")
     svc = WalletService(cache_ttl_seconds=60.0)
 
     def _fake_urlopen(req, timeout=10):
