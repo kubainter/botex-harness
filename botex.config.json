@@ -1,4 +1,4 @@
-﻿{
+{
   "providers": {
     "openrouter": {
       "default": true,
@@ -106,6 +106,13 @@
     ],
     "timeout_s": 120,
     "max_output_bytes": 20000
+  },
+  "context_guard": {
+    "enabled": true,
+    "threshold_bytes": 2048,
+    "max_preview_bytes": 3072,
+    "auto_vault_logs": true,
+    "vault_retention_days": 3
   },
   "paths": {
     "snapshot_dir": ".snapshots",
