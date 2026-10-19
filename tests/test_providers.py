@@ -646,3 +646,27 @@ def test_provider_whitespace_name_secret_resolution():
             base_p.resolve_api_key(secrets_cfg={"custom_service_api_key": "tok-custom"})
             == "tok-custom"
         )
+
+
+def test_provider_local_api_key_fallback():
+    """Verify local providers (Ollama / Bielik) resolve api_key_fallback without requiring env secrets."""
+    with patch.dict(os.environ, {}, clear=True):
+        p = ProviderRegistry.get(
+            "ollama",
+            {
+                "base_url": "http://127.0.0.1:11434/v1",
+                "api_key_fallback": "ollama",
+                "local": True,
+            },
+        )
+        assert p.resolve_api_key() == "ollama"
+
+        p_local = ProviderRegistry.get(
+            "ollama-custom", {"base_url": "http://127.0.0.1:11434/v1", "local": True}
+        )
+        assert p_local.resolve_api_key() == "ollama"
+
+        assert p.resolve_api_key(explicit_key="custom-key") == "custom-key"
+
+        p_remote = ProviderRegistry.get("generic", {"base_url": "https://api.example.com/v1"})
+        assert p_remote.resolve_api_key() == ""

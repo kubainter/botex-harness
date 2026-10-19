@@ -31,9 +31,12 @@ export function applyDomTheme(mode: UiTheme) {
     if (mode === 'light') {
       root.classList.remove('dark')
       root.classList.add('light')
+      root.setAttribute('data-skin', 'studio-light')
     } else {
       root.classList.remove('light')
       root.classList.add('dark')
+      const skin = (typeof localStorage !== 'undefined' ? localStorage.getItem('botex_skin') : null) || 'cyber-slate'
+      root.setAttribute('data-skin', skin === 'studio-light' ? 'cyber-slate' : skin)
     }
   }
 }
@@ -45,6 +48,14 @@ export function setTheme(mode: UiTheme) {
   currentTheme.value = mode
   if (typeof localStorage !== 'undefined') {
     localStorage.setItem(STORAGE_KEY_THEME, mode)
+    if (mode === 'light') {
+      localStorage.setItem('botex_skin', 'studio-light')
+    } else {
+      const skin = localStorage.getItem('botex_skin')
+      if (skin === 'studio-light' || !skin) {
+        localStorage.setItem('botex_skin', 'cyber-slate')
+      }
+    }
   }
   applyDomTheme(mode)
 }

@@ -1366,6 +1366,12 @@ async def _run_botex_task_once_impl(
         api_key, provider_name, provider_cfg, load_config().get("secrets", {})
     )
     if not api_key:
+        fallback = provider_cfg.get("api_key_fallback") or (
+            "ollama" if provider_cfg.get("local") else ""
+        )
+        if fallback:
+            api_key = fallback
+    if not api_key:
         return {
             "ok": False,
             "task_id": task_id,
