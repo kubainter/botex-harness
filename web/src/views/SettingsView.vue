@@ -145,33 +145,48 @@
         </div>
       </div>
 
-      <div class="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-botex-800">
+      <!-- Skin Selector (Operate Modes) -->
+      <div class="pt-3 border-t border-botex-800 space-y-3">
         <div>
-          <span class="text-xs font-medium text-slate-100">{{ locale === 'pl' ? 'Motyw kolorystyczny' : 'Color Theme' }}</span>
+          <span class="text-xs font-medium text-slate-100">{{ locale === 'pl' ? 'Motyw i Skin Operacyjny' : 'Operational Skin & Theme' }}</span>
           <p class="text-[11px] text-slate-300">
-            {{ locale === 'pl' ? 'Wysokokontrastowy motyw ciemny lub jasny.' : 'High-contrast dark or light workspace palette.' }}
+            {{ locale === 'pl' ? 'Wybierz jeden z 5 zoptymalizowanych skinów środowiska BoteX.' : 'Select one of 5 tailored operating skins for BoteX.' }}
           </p>
         </div>
-        <div class="flex items-center bg-botex-950 p-1 rounded-lg border border-botex-800 space-x-1">
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
           <button
+            v-for="s in themeStore.skins"
+            :key="s.id"
             type="button"
             :class="[
-              'min-h-[34px] px-3 py-1 rounded text-xs font-medium transition',
-              theme === 'dark' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
+              'p-3 rounded-lg border text-left transition relative flex flex-col justify-between space-y-2',
+              themeStore.currentSkinId === s.id
+                ? 'bg-botex-800 border-cyan-400/80 shadow-sm ring-1 ring-cyan-500/20'
+                : 'bg-botex-950 border-botex-800 hover:border-botex-700 hover:bg-botex-900/50'
             ]"
-            @click="setTheme('dark')"
+            @click="themeStore.setSkin(s.id)"
           >
-            Dark
-          </button>
-          <button
-            type="button"
-            :class="[
-              'min-h-[34px] px-3 py-1 rounded text-xs font-medium transition',
-              theme === 'light' ? 'bg-botex-800 text-amber-200 border border-amber-500/30' : 'text-slate-300 hover:text-white'
-            ]"
-            @click="setTheme('light')"
-          >
-            Light
+            <div class="flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <span
+                  class="w-3.5 h-3.5 rounded-full border border-white/20 shrink-0"
+                  :style="{ backgroundColor: s.accentColor }"
+                ></span>
+                <span class="text-xs font-semibold text-slate-100">
+                  {{ locale === 'pl' ? s.namePl : s.name }}
+                </span>
+              </div>
+              <span
+                v-if="themeStore.currentSkinId === s.id"
+                class="text-[10px] font-mono font-bold text-cyan-300"
+              >
+                ACTIVE
+              </span>
+            </div>
+            <p class="text-[11px] text-slate-300 leading-relaxed">
+              {{ locale === 'pl' ? s.descriptionPl : s.description }}
+            </p>
           </button>
         </div>
       </div>
@@ -207,6 +222,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
+import { useThemeStore } from '../stores/theme'
 import { useI18n } from '../i18n'
 import { api } from '../api/client'
 import Badge from '../components/common/Badge.vue'
@@ -221,7 +237,8 @@ import {
 } from 'lucide-vue-next'
 
 const authStore = useAuthStore()
-const { locale, theme, setLocale, setTheme, t } = useI18n()
+const themeStore = useThemeStore()
+const { locale, setLocale, t } = useI18n()
 
 const urlInput = ref(authStore.backendUrl)
 const tokenInput = ref(authStore.accessToken)

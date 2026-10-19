@@ -8,6 +8,17 @@ export default {
   theme: {
     extend: {
       colors: {
+        ground: 'var(--surface-ground)',
+        panel: 'var(--surface-panel)',
+        'panel-hover': 'var(--surface-panel-hover)',
+        card: 'var(--surface-card)',
+        'fg-primary': 'var(--fg-primary)',
+        'fg-secondary': 'var(--fg-secondary)',
+        'fg-muted': 'var(--fg-muted)',
+        'border-subtle': 'var(--border-subtle)',
+        'border-focus': 'var(--border-focus)',
+        accent: 'var(--accent-primary)',
+        'accent-hover': 'var(--accent-hover)',
         botex: {
           50: 'rgb(var(--botex-50) / <alpha-value>)',
           100: 'rgb(var(--botex-100) / <alpha-value>)',
