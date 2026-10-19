@@ -177,6 +177,28 @@
         </span>
       </div>
 
+      <!-- Low Balance Warning Banner -->
+      <div
+        v-if="isBudgetLow"
+        class="bg-rose-950/90 border-b border-rose-500/40 text-rose-200 text-xs px-4 py-1.5 flex items-center justify-between shrink-0"
+      >
+        <div class="flex items-center space-x-2 truncate">
+          <AlertTriangleIcon class="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          <span class="truncate">
+            {{ lang === 'pl' ? 'Niski stan portfela OpenRouter' : 'Low OpenRouter Balance' }}:
+            <strong class="font-mono text-white">${{ (walletStore.walletInfo?.balance_usd ?? walletStore.keyStatus?.balance_usd ?? 0).toFixed(2) }}</strong>
+            ({{ lang === 'pl' ? 'wymagane zasilenie lub przełączenie na darmowy model :free' : 'top-up required or switch to free model' }})
+          </span>
+        </div>
+        <button
+          type="button"
+          class="underline text-xs text-rose-300 hover:text-white shrink-0 ml-2 font-mono"
+          @click="currentView = 'wallet'"
+        >
+          {{ lang === 'pl' ? 'Szczegóły' : 'Details' }} &rarr;
+        </button>
+      </div>
+
       <!-- Dynamic Views -->
       <div class="flex-1 overflow-hidden relative">
         <ChatView
@@ -243,6 +265,7 @@ import { useAuthStore } from './stores/auth'
 import { useApprovalsStore } from './stores/approvals'
 import { useChatStore } from './stores/chat'
 import { useWalletStore } from './stores/wallet'
+import { useThemeStore } from './stores/theme'
 import { useI18n } from './i18n'
 import ChatView from './views/ChatView.vue'
 import TasksView from './views/TasksView.vue'
@@ -267,7 +290,8 @@ const authStore = useAuthStore()
 const approvalsStore = useApprovalsStore()
 const chatStore = useChatStore()
 const walletStore = useWalletStore()
-const { lang, theme, setUiLang, toggleTheme, t } = useI18n()
+const themeStore = useThemeStore()
+const { lang, theme, setUiLang, t } = useI18n()
 
 const { count: approvalsCount, activeModalAction } = storeToRefs(approvalsStore)
 const { wsStatus } = storeToRefs(authStore)
@@ -305,11 +329,15 @@ function toggleLang() {
   setUiLang(lang.value === 'en' ? 'pl' : 'en')
 }
 
+function toggleTheme() {
+  themeStore.toggleMode()
+}
+
 onMounted(() => {
   authStore.init()
   approvalsStore.init()
   chatStore.init()
-  walletStore.fetchKeyStatus()
+  walletStore.fetchWallet()
 })
 
 function onNavigate(viewName: string) {

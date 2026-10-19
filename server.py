@@ -423,6 +423,7 @@ async def recommend_models(
     provider: str = "",
     profile: str = "",
     tier: str = "auto",
+    recipe: str = "",
 ) -> str:
     """
     [EN] Fetches the most cost-effective and capable models from OpenRouter based on live benchmarks.
@@ -444,6 +445,7 @@ async def recommend_models(
         provider=provider or "openrouter",
         profile=profile or None,
         tier=tier or "auto",
+        recipe=recipe or None,
     )
     return json.dumps(results, indent=2)
 

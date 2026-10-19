@@ -17,10 +17,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 try:
     from .config import (
+        get_chat_sessions_dir,
         load_config,
         resolve_model,
         resolve_provider,
@@ -53,6 +55,7 @@ try:
     )
 except (ImportError, ValueError):
     from config import (
+        get_chat_sessions_dir,
         load_config,
         resolve_model,
         resolve_provider,
@@ -414,17 +417,15 @@ class ChatSession:
         }
 
     def save_to_disk(self) -> None:
-        """Persist session JSON to <workspace_dir>/.botex/chat_sessions/."""
+        """Persist session JSON to configured chat sessions directory."""
         if not self.workspace_dir or not self.messages:
             return
         try:
             safe_id = sanitize_identifier(self.session_id)
             if not safe_id:
                 return
-            ws = resolve_workspace(self.workspace_dir)
-            sessions_dir = os.path.join(ws, ".botex", "chat_sessions")
-            os.makedirs(sessions_dir, exist_ok=True)
-            file_path = os.path.join(sessions_dir, f"{safe_id}.json")
+            sessions_dir = get_chat_sessions_dir(self.workspace_dir)
+            file_path = sessions_dir / f"{safe_id}.json"
             data = self.to_dict()
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -448,9 +449,14 @@ class ChatManager:
         if not safe_id:
             return None
         ws = resolve_workspace(workspace_dir)
-        file_path = os.path.join(ws, ".botex", "chat_sessions", f"{safe_id}.json")
-        if not os.path.isfile(file_path):
-            return None
+        sessions_dir = get_chat_sessions_dir(ws)
+        file_path = sessions_dir / f"{safe_id}.json"
+        if not file_path.is_file():
+            legacy_path = Path(ws) / ".botex" / "chat_sessions" / f"{safe_id}.json"
+            if legacy_path.is_file():
+                file_path = legacy_path
+            else:
+                return None
         try:
             with open(file_path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -547,10 +553,18 @@ class ChatManager:
         safe_id = sanitize_identifier(session_id)
         if safe_id:
             ws = resolve_workspace(workspace_dir)
-            file_path = os.path.join(ws, ".botex", "chat_sessions", f"{safe_id}.json")
-            if os.path.isfile(file_path):
+            sessions_dir = get_chat_sessions_dir(ws)
+            file_path = sessions_dir / f"{safe_id}.json"
+            if file_path.is_file():
                 try:
-                    os.remove(file_path)
+                    file_path.unlink()
+                    removed = True
+                except Exception:
+                    pass
+            legacy_path = Path(ws) / ".botex" / "chat_sessions" / f"{safe_id}.json"
+            if legacy_path.is_file():
+                try:
+                    legacy_path.unlink()
                     removed = True
                 except Exception:
                     pass
@@ -559,18 +573,22 @@ class ChatManager:
     def list_sessions(self, workspace_dir: str = "") -> List[Dict[str, Any]]:
         ws = resolve_workspace(workspace_dir) if workspace_dir else ""
         if ws:
-            sessions_dir = os.path.join(ws, ".botex", "chat_sessions")
-            if os.path.isdir(sessions_dir):
-                try:
-                    for fname in os.listdir(sessions_dir):
-                        if fname.endswith(".json"):
-                            sid = fname[:-5]
+            sessions_dir = get_chat_sessions_dir(ws)
+            dirs_to_scan = [sessions_dir]
+            legacy_dir = Path(ws) / ".botex" / "chat_sessions"
+            if legacy_dir.is_dir() and legacy_dir.resolve() != sessions_dir.resolve():
+                dirs_to_scan.append(legacy_dir)
+            for sdir in dirs_to_scan:
+                if sdir.is_dir():
+                    try:
+                        for entry in sdir.glob("*.json"):
+                            sid = entry.stem
                             if sid not in self._sessions:
                                 loaded = self._load_session_from_disk(sid, ws)
                                 if loaded:
                                     self._sessions[loaded.session_id] = loaded
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
         results = []
         for s in self._sessions.values():

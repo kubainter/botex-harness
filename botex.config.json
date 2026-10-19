@@ -59,6 +59,22 @@
         "coding": ["poolside/laguna-s-2.1:free", "qwen/qwen3.8-27b:free"],
         "fast": ["nvidia/nemotron-3.5-lightning:free", "liquid/lfm-2.5-2.6b:free"]
       }
+    },
+    "ollama": {
+      "default": false,
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key_env": "OLLAMA_API_KEY",
+      "api_key_fallback": "ollama",
+      "local": true,
+      "extra_body": {},
+      "zdr": {"enabled": false},
+      "denylist": [],
+      "profile_denylists": {},
+      "models": {
+        "default": "bielik:11b",
+        "coding": "bielik:11b",
+        "fast": "bielik:11b"
+      }
     }
   },
   "engine": {

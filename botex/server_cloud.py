@@ -167,14 +167,34 @@ class SaveChatToMemoryRequest(BaseModel):
     tags: Optional[List[str]] = None
 
 
+from contextlib import asynccontextmanager
+
 # ---------------------------------------------------------------------------
 # FastAPI Application & Middlewares
 # ---------------------------------------------------------------------------
+
+
+async def _warmup_caches() -> None:
+    try:
+        from botex.benchmarks import fetch_openrouter_benchmarks
+
+        await asyncio.to_thread(fetch_openrouter_benchmarks)
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Non-blocking background warmup
+    asyncio.create_task(_warmup_caches())
+    yield
+
 
 app = FastAPI(
     title="BoteX Cloud Gateway & Remote MCP",
     description="FastAPI service for autonomous code harness, Remote MCP SSE, and interactive chat.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -377,6 +397,45 @@ async def get_models(
         providers=providers_seq,
         config=cfg,
         force_refresh=force_refresh,
+    )
+
+
+@app.get("/api/recipes")
+async def get_recipes() -> List[Dict[str, Any]]:
+    """Return available recipes with metadata."""
+    from botex.recipes import list_recipes, load_recipe_metadata
+
+    results = []
+    for r in list_recipes():
+        meta = load_recipe_metadata(r)
+        results.append(
+            {
+                "name": r,
+                "preferred_tier": meta.get("preferred_tier", "standard"),
+                "weights": meta.get("weights", {}),
+            }
+        )
+    return results
+
+
+@app.get("/api/models/recommended")
+async def get_recommended_models_endpoint(
+    task_type: str = Query(default="coding"),
+    limit: int = Query(default=5),
+    tier: str = Query(default="auto"),
+    recipe: Optional[str] = Query(default=None),
+    include_free: bool = Query(default=False),
+) -> List[Dict[str, Any]]:
+    """Return dynamic model recommendations based on task, tier, recipe and benchmarks."""
+    from botex.benchmarks import get_recommended_models
+
+    return await asyncio.to_thread(
+        get_recommended_models,
+        task_type=task_type,
+        limit=limit,
+        tier=tier,
+        recipe=recipe,
+        include_free=include_free,
     )
 
 

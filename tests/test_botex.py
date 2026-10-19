@@ -2629,12 +2629,15 @@ def test_recipes_and_rationalization_heuristics():
     # 1. Recipes registry
     avail = recipes.list_recipes()
     assert set(avail) == {
+        "architecture-adr",
         "build-resolver",
         "code-explorer",
         "planner",
         "reviewer",
         "security-reviewer",
+        "security-taint-hardener",
         "tdd",
+        "ui-craftsman",
     }
     for name in avail:
         content = recipes.load_recipe(name)

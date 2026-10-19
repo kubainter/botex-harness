@@ -22,6 +22,7 @@ from botex.chat import (
     execute_chat_tool,
     stream_chat_turn,
 )
+from botex.config import get_chat_sessions_dir
 
 
 class MockChoiceDelta:
@@ -331,9 +332,9 @@ def test_cli_chat_single_turn_and_help(tmp_path: Path, capsys: pytest.CaptureFix
     assert "Hello from mocked chat!" in captured.out
 
 
-def test_chat_history_slicing_turn_boundary():
+def test_chat_history_slicing_turn_boundary(tmp_path):
     """Verify get_history strips leading orphan tool messages when slicing."""
-    sess = ChatSession()
+    sess = ChatSession(workspace_dir=str(tmp_path))
     sess.add_user_message("u1")
     sess.add_assistant_message("a1")
     sess.add_user_message("u2")
@@ -478,7 +479,7 @@ def test_chat_session_persistence_and_title(tmp_path: Path):
     )
     session.save_to_disk()
 
-    disk_file = tmp_path / ".botex" / "chat_sessions" / "test-session-123.json"
+    disk_file = get_chat_sessions_dir(str(tmp_path)) / "test-session-123.json"
     assert disk_file.exists()
     assert session.get_title().startswith("How do we configure WebSockets")
 
@@ -548,7 +549,7 @@ def test_chat_manager_delete_session(tmp_path: Path):
     session.messages.append(ChatMessage(role="user", content="Temporary question"))
     session.save_to_disk()
 
-    disk_file = tmp_path / ".botex" / "chat_sessions" / "delete-me-session.json"
+    disk_file = get_chat_sessions_dir(str(tmp_path)) / "delete-me-session.json"
     assert disk_file.exists()
 
     del_res = manager.delete_session("delete-me-session", str(tmp_path))
@@ -581,7 +582,7 @@ def test_tool_call_id_persistence_and_history_sanitization(tmp_path: Path):
     session.save_to_disk()
 
     # Verify JSON file has tool_call_id
-    disk_file = tmp_path / ".botex" / "chat_sessions" / "tool-persistence-test.json"
+    disk_file = get_chat_sessions_dir(str(tmp_path)) / "tool-persistence-test.json"
     assert disk_file.exists()
     data = json.loads(disk_file.read_text(encoding="utf-8"))
     tool_msg = next(m for m in data["messages"] if m["role"] == "tool")

@@ -41,3 +41,40 @@ def block_live_sockets():
 
     with patch.object(socket.socket, "connect", blocked_connect):
         yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_botex_test_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
+    """Hermetically isolate filesystem state during test execution.
+
+    Redirects snapshots, analytics, catalog cache, benchmarks cache, chat sessions,
+    and global memory away from developer environment and git working tree into tmp_path.
+    """
+    from pathlib import Path
+
+    t_path = Path(str(tmp_path))
+    snapshots_dir = t_path / ".test_env_snapshots"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    analytics_file = t_path / ".test_env_analytics.json"
+    catalog_file = t_path / ".test_env_pricing.json"
+    benchmarks_file = t_path / ".test_env_benchmarks.json"
+    chat_sessions_dir = t_path / ".test_env_chat_sessions"
+    chat_sessions_dir.mkdir(parents=True, exist_ok=True)
+    global_memory_dir = t_path / ".test_env_global_memory"
+    global_memory_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("BOTEX_SNAPSHOT_DIR", str(snapshots_dir))
+    monkeypatch.setenv("BOTEX_ANALYTICS_FILE", str(analytics_file))
+    monkeypatch.setenv("BOTEX_CATALOG_CACHE_FILE", str(catalog_file))
+    monkeypatch.setenv("BOTEX_BENCHMARKS_CACHE_FILE", str(benchmarks_file))
+    monkeypatch.setenv("BOTEX_CHAT_SESSIONS_DIR", str(chat_sessions_dir))
+    monkeypatch.setenv("BOTEX_GLOBAL_MEMORY_DIR", str(global_memory_dir))
+
+    try:
+        from botex.config import load_config
+
+        load_config(reload=True)
+    except Exception:
+        pass
+
+    yield

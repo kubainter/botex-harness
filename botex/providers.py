@@ -435,7 +435,19 @@ class BaseProvider(ABC):
             or sec_dict.get(f"{norm_name}_api_key")
             or ""
         )
-        return str(found) if found else ""
+        if found:
+            return str(found)
+
+        # Fallback for local providers (e.g. Ollama / Bielik)
+        fallback = (cfg.get("api_key_fallback") if cfg else None) or self.config.get(
+            "api_key_fallback"
+        )
+        if fallback:
+            return str(fallback)
+        if (cfg.get("local") if cfg else None) or self.config.get("local"):
+            return "ollama"
+
+        return ""
 
     def get_default_headers(self) -> Optional[Dict[str, str]]:
         """Return provider-specific HTTP headers."""

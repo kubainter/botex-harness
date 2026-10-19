@@ -125,6 +125,21 @@ DEFAULTS: Dict[str, Any] = {
                 ],
             },
         },
+        "ollama": {
+            "default": False,
+            "base_url": "http://127.0.0.1:11434/v1",
+            "api_key_env": "OLLAMA_API_KEY",
+            "api_key_fallback": "ollama",
+            "local": True,
+            "extra_body": {},
+            "denylist": [],
+            "profile_denylists": {},
+            "models": {
+                "default": "bielik:11b",
+                "coding": "bielik:11b",
+                "fast": "bielik:11b",
+            },
+        },
     },
     "engine": {
         "max_turns": 15,
@@ -289,6 +304,8 @@ DEFAULTS: Dict[str, Any] = {
         "snapshot_max_total_mb": 50,
         "analytics_file": ".agent_analytics.json",
         "catalog_file": ".model_pricing.json",
+        "global_memory_dir": "~/.botex/memory",
+        "chat_sessions_dir": "",
         # Optional extra dotenv file to load (relative to project root or absolute).
         "env_file": "",
     },
@@ -331,6 +348,12 @@ DEFAULTS: Dict[str, Any] = {
         "cache_ttl_hours": 24,
         "timeout_s": 10.0,
         "on_unknown": "allow",
+    },
+    "benchmarks": {
+        "enabled": True,
+        "cache_file": "",
+        "ttl_hours": 24,
+        "timeout_s": 10.0,
     },
     "wallet": {
         "enabled": True,
@@ -380,6 +403,9 @@ _ENV_MAP = {
     "BOTEX_CATALOG_TTL_HOURS": ("catalog", "ttl_hours"),
     "BOTEX_WALLET_ENABLED": ("wallet", "enabled"),
     "BOTEX_WALLET_CACHE_TTL_S": ("wallet", "cache_ttl_s"),
+    "BOTEX_GLOBAL_MEMORY_DIR": ("paths", "global_memory_dir"),
+    "BOTEX_CHAT_SESSIONS_DIR": ("paths", "chat_sessions_dir"),
+    "BOTEX_BENCHMARKS_CACHE_FILE": ("benchmarks", "cache_file"),
 }
 
 _config_cache: Optional[Dict[str, Any]] = None
@@ -708,3 +734,46 @@ def denylist_setting(key: str = "denylist") -> Any:
     if val is not None:
         return val
     return DEFAULTS.get("engine", {}).get(key, [] if key == "denylist" else {})
+
+
+def get_chat_sessions_dir(workspace_dir: str = "") -> Path:
+    """Resolve directory for storing chat sessions.
+
+    Resolution:
+    1. paths.chat_sessions_dir or BOTEX_CHAT_SESSIONS_DIR if configured.
+    2. Legacy check: If <workspace_dir>/.botex/chat_sessions/ exists and has JSON files, use it.
+    3. Global ~/.botex/chat_sessions/<ws_hash>/ where ws_hash is 12-char SHA-256 of canonical workspace path.
+    """
+    configured = (
+        os.environ.get("BOTEX_CHAT_SESSIONS_DIR", "").strip()
+        or str(load_config().get("paths", {}).get("chat_sessions_dir") or "").strip()
+    )
+    if configured:
+        p = Path(os.path.expanduser(configured)).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    ws = resolve_workspace(workspace_dir) if workspace_dir else resolve_workspace("")
+    canonical_ws = os.path.realpath(os.path.abspath(ws))
+
+    legacy_dir = Path(canonical_ws) / ".botex" / "chat_sessions"
+    if legacy_dir.is_dir() and any(legacy_dir.glob("*.json")):
+        return legacy_dir
+
+    import hashlib
+
+    ws_hash = hashlib.sha256(canonical_ws.encode("utf-8")).hexdigest()[:12]
+    target_dir = Path.home().resolve() / ".botex" / "chat_sessions" / ws_hash
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
+
+
+def benchmarks_cache_file() -> Path:
+    """Return resolved path to the OpenRouter benchmarks cache file."""
+    env_override = os.environ.get("BOTEX_BENCHMARKS_CACHE_FILE", "").strip()
+    if env_override:
+        return _resolve_path(env_override)
+    path_str = str(load_config().get("benchmarks", {}).get("cache_file") or "").strip()
+    if path_str:
+        return _resolve_path(path_str)
+    return Path.home().resolve() / ".botex" / "cache" / "benchmarks.json"
