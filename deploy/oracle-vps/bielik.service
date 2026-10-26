@@ -1,0 +1,50 @@
+# Bielik-11B-v3.0-Instruct (Q8_0, ~11.05 GiB) served by llama.cpp.
+# Background one-shot LLM: chat auto-titler, Memory Vault compaction,
+# intent classification, privacy pre-flight, Oracle Reclamation Shield.
+# Install: /etc/systemd/system/bielik.service
+[Unit]
+Description=Bielik-11B-v3.0 (Q8_0) llama.cpp inference server
+Documentation=https://github.com/speakleash/Bielik-11B-v3.0-Instruct
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botex
+Group=botex
+
+# Adjust paths to your build and model file (see README.md).
+Environment=BIELIK_BIN=/opt/llama.cpp/build/bin/llama-server
+Environment=BIELIK_MODEL=/opt/bielik/models/bielik-11b-v3.0-instruct.Q8_0.gguf
+
+# -c 8192: 8k context for Memory Vault compaction & local Polish chat.
+# Loopback only: consumed by BoteX on the same host, never exposed publicly.
+# --mlock keeps the ~11 GiB model resident (backed by LimitMEMLOCK=infinity).
+ExecStart=${BIELIK_BIN} --model ${BIELIK_MODEL} --host 127.0.0.1 --port 8080 -c 8192 --threads 3 --mlock
+
+Restart=on-failure
+RestartSec=10
+
+# OCPUs 1-3 at idle scheduling priority: inference yields to BoteX (OCPU 0)
+# and to any regular-priority work on its own cores.
+CPUAffinity=1-3
+CPUSchedulingPolicy=idle
+CPUWeight=1
+Nice=19
+IOSchedulingClass=idle
+IOWeight=7
+
+# Model ~11.05 GiB + 8k context + runtime scratch (~14 GiB total, safe in 24 GiB RAM).
+MemoryMax=16G
+LimitMEMLOCK=infinity
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/bielik
+ProtectHome=true
+
+SyslogIdentifier=bielik
+
+[Install]
+WantedBy=multi-user.target
