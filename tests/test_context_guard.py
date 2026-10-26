@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Context-Guard tests: failure-aware slicing, Unicode safety, Vault offload,
-engine history folding, MCP report offload, ephemeral retention."""
+"""Context-Guard tests: failure-aware slicing, Unicode safety, scratchpad
+offload, engine history folding, MCP report offload, ephemeral retention."""
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from botex.context_guard import (  # noqa: E402
     compact_verification_summary,
+    read_scratchpad,
     sanitize_and_vault_output,
     smart_slice_output,
 )
@@ -53,7 +55,8 @@ def test_failure_aware_slicing():
     assert "1 failed, 120 passed" in out
     assert "test_ok_60 PASSED" not in out  # green noise collapsed/dropped
     assert "mem_exec_deadbeef" in out
-    assert "read_memory(memory_id='mem_exec_deadbeef')" in out
+    assert "read_scratchpad(memory_id='mem_exec_deadbeef')" in out
+    assert ".botex/scratchpad/mem_exec_deadbeef.log" in out
     assert "Key failure tracebacks preserved below" in out
     # small text is untouched
     assert smart_slice_output("ok\n") == ("ok\n", False)
@@ -100,7 +103,7 @@ def test_unicode_safety():
         assert "Zażółć" in r["stdout"]
 
 
-def test_vault_offload_and_readback():
+def test_scratchpad_offload_and_readback():
     with tempfile.TemporaryDirectory() as tmp:
         sk_pref = "".join(["s", "k", "-"])
         dummy_api_key = sk_pref + "abcdefghij1234567890abcdefghij"
@@ -109,21 +112,47 @@ def test_vault_offload_and_readback():
         assert mem_id and mem_id.startswith("mem_exec_")
         assert dummy_api_key not in preview
         assert mem_id in preview
-        got = read_memory(tmp, mem_id)
+        # full log lands in .botex/scratchpad/, NOT in the Memory Vault
+        log_path = Path(tmp) / ".botex" / "scratchpad" / f"{mem_id}.log"
+        assert log_path.is_file()
+        raw_log = log_path.read_text(encoding="utf-8")
+        assert dummy_api_key not in raw_log
+        assert "Error: boom" in raw_log
+        assert read_memory(tmp, mem_id)["ok"] is False  # vault stays clean
+        got = read_scratchpad(mem_id, tmp)
         assert got["ok"]
+        assert got["path"] == f".botex/scratchpad/{mem_id}.log"
         assert dummy_api_key not in got["content"]
         assert "<untrusted_command_output" in got["content"]
-        assert "<untrusted_memory_content" in got["content"]
         assert "Error: boom" in got["content"]
-        assert "ephemeral" in got["metadata"]["tags"]
-        assert "context_guard" in got["metadata"]["tags"]
-        assert got["metadata"]["title"] == "Context-Guard Exec Log"
-        # below threshold: untouched, no vault entry
+        # invalid / missing ids fail cleanly
+        assert read_scratchpad("../evil", tmp)["ok"] is False
+        assert read_scratchpad("mem_missing", tmp)["ok"] is False
+        # below threshold: untouched, no scratchpad entry
         small, none_id = sanitize_and_vault_output("hello", "run_command", tmp)
         assert small == "hello" and none_id is None
         # disabled -> pass-through (masked)
         same, nid = sanitize_and_vault_output(big, "x", tmp, guard_cfg={"enabled": False})
         assert nid is None and dummy_api_key not in same and len(same) > 10000
+
+
+def test_scratchpad_retention_purge():
+    with tempfile.TemporaryDirectory() as tmp:
+        pad = Path(tmp) / ".botex" / "scratchpad"
+        pad.mkdir(parents=True)
+        old_log = pad / "mem_exec_ancient.log"
+        old_log.write_text("ancient log\n", encoding="utf-8")
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=10)).timestamp()
+        os.utime(old_log, (old_ts, old_ts))
+        fresh_log = pad / "mem_exec_fresh.log"
+        fresh_log.write_text("fresh log\n", encoding="utf-8")
+        # a new offload purges scratchpad logs older than retention (default 3d)
+        big = "line of log output\n" * 800
+        _, mem_id = sanitize_and_vault_output(big, "run_command", tmp)
+        assert mem_id
+        assert not old_log.exists()
+        assert fresh_log.exists()
+        assert (pad / f"{mem_id}.log").is_file()
 
 
 def test_run_command_exposes_vault_id():
@@ -142,7 +171,7 @@ def test_run_command_exposes_vault_id():
             )
         )
         assert r["ok"] and r["vault_memory_id"] in r["stdout"]
-        full = read_memory(tmp, r["vault_memory_id"])["content"]
+        full = read_scratchpad(r["vault_memory_id"], tmp)["content"]
         assert "noise line 799" in full and "noise line 0" in full
 
 
