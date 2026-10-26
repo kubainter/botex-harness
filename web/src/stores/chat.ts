@@ -5,7 +5,11 @@ import { wsManager } from '../api/ws'
 import type { ChatMessage, ChatChunk, CatalogModel, ChatSessionSummary } from '../api/types'
 
 function generateId(): string {
-  return Math.random().toString(36).substring(2, 10) + Date.now().toString(36)
+  const c = globalThis.crypto
+  if (typeof c?.randomUUID === 'function') return c.randomUUID()
+  const buf = new Uint8Array(16)
+  c.getRandomValues(buf)
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 const FALLBACK_CATALOG_MODELS: CatalogModel[] = [
