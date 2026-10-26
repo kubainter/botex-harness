@@ -108,7 +108,9 @@ now triggers at most one fallback per chain — the second candidate gets
 the same budget and typically starves the same way, so repeat retries
 just re-burned the read budget (the observed double-burn).
 
-### 10. Skill Vault, Remote AI Skill Installer & Workspace Root Normalization (Stage 4.7)
+### 10. Skill Vault, Remote AI Skill Installer & Workspace Root Normalization (Stage 4.7) — partially implemented
+Already shipped: recipes split & metadata, `/api/recipes` + `/api/models/recommended` endpoints, meta-lessons engine (`meta_harness.py`), and the Obsidian/wikilink memory graph (`obsidian.py`, `embeddings.py`, graph MCP tools). Still open: the Skill Vault itself (`~/.botex/skills/<slug>/`), the two-phase remote installer, the Skills PWA tab, `list_skills`/`read_skill` MCP tools, and workspace root normalization.
+
 When BoteX runs as a remote gateway over VPN/VPS, worker models execute in an isolated system prompt and cannot see caller-side skills unless the caller pastes the full skill instructions into `task`. At the same time, built-in `recipes` (`botex/recipes/`) define engine execution personas (`planner`, `reviewer`, `tdd`) and should stay separate from domain/style skills (`humanizer`, `miodkuj`, `impeccable`, or third-party GitHub skills).
 
 Stage 4.7 introduces a dedicated **Skill Vault** (`~/.botex/skills/<slug>/` with `SKILL.md` and `manifest.json`) managed directly from a new **Skills** tab in the PWA without SSH access:
@@ -338,6 +340,11 @@ rest.
 
 ## Done recently (for reference)
 
+- Memory knowledge graph (Stage 4.7 partial): `[[wikilinks]]` between notes, `get_backlinks`, `patch_memory_section`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` with per-kind graph colors + `_GRAPH_INDEX.md`, `read_scratchpad` for offloaded execution logs
+- Meta-lessons layer: `botex/meta_harness.py` (task taxonomy classification, patch probing, meta-lesson extraction & recommendations)
+- Analytics & stats: `aggregate_stats()` shared by CLI and `GET /api/analytics?period=`, per-model/daily aggregates with cache-hit metrics, `POST /api/analytics/digest` + optional local-LLM (Bielik) digest loop writing to the Memory Vault, SVG stats panel inside WalletView
+- Task retry/clone: persisted `request` in task entries, `GET /api/tasks/{id}` returns saved request, PWA "Ponów" prefill action for terminal tasks
+- PWA mobile overhaul: collapsible memory filters (collapsed by default), Polish default locale with reactive `document.lang`, skin persistence (`botex_skin` + `theme-color` meta), 44px touch targets, zero horizontal overflow at 320-1024px
 - OpenRouter Live Intelligence & Routing (Stage 4.6): parallel `/api/v1/generation` telemetry reconciliation with 404 retry, `/api/key/status` budget health & PWA low-budget warnings, 5-gate in-payload `extra_body.models` failovers (stripped after first workspace mutation), `require_parameters: true` with non-reasoning slug protection, strict `TASK_COMPLETION_JSON_SCHEMA`, and authenticated tier-aware `recommend_models`
 - Per-mode step budgets (`engine.mode_max_turns`, `readonly` = 30) +
   `turns_exhausted` fallback capped at one retry per chain + bulk-read
