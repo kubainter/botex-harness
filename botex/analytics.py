@@ -21,6 +21,9 @@ try:
         analytics_setting,
     )
     from .config import (
+        resolve_provider as _resolve_provider,
+    )
+    from .config import (
         snapshot_dir as _cfg_snapshot_dir,
     )
     from .contracts import STATUS_FAILURE_KIND
@@ -31,6 +34,9 @@ except (ImportError, ValueError):
     )
     from config import (
         analytics_setting,
+    )
+    from config import (
+        resolve_provider as _resolve_provider,
     )
     from config import (
         snapshot_dir as _cfg_snapshot_dir,
@@ -53,20 +59,80 @@ MODEL_PRICING_ESTIMATES = {
 }
 
 
-def calculate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    """Estimate cost in USD based on model pricing."""
+_FREE_MODEL_MARKERS = (":free", "openrouter/free")
+_FREE_MODEL_PREFIXES = ("openrouter-free/", "ollama/", "nvidia/")
+_FREE_PROVIDER_NAMES = frozenset({"ollama"})
+
+
+def is_free_model(
+    model: str,
+    provider_cfg: Optional[Dict[str, Any]] = None,
+    provider_name: str = "",
+) -> bool:
+    """Whether a model run is guaranteed zero-cost.
+
+    Covers free-tier slugs (``:free``, ``openrouter/free``, ``openrouter-free/``),
+    zero-cost namespaces (``ollama/``, ``nvidia/``), and providers that cannot
+    bill per request — ``local: true`` endpoints (e.g. local Ollama / Bielik)
+    or any provider carrying a static ``api_key_fallback``.
+    """
+    slug = (model or "").strip().lower()
+    if any(marker in slug for marker in _FREE_MODEL_MARKERS):
+        return True
+    if slug.startswith(_FREE_MODEL_PREFIXES):
+        return True
+    if (provider_name or "").strip().lower() in _FREE_PROVIDER_NAMES:
+        return True
+    cfg = provider_cfg if isinstance(provider_cfg, dict) else {}
+    return bool(cfg.get("local") or cfg.get("api_key_fallback"))
+
+
+# Cached prompt reads are billed at a discount on OpenAI-compatible endpoints
+# (~50% on OpenAI upstreams; varies by provider). Free models and providers
+# that never price cached reads (NVIDIA NIM, local) yield $0 savings.
+CACHE_READ_DISCOUNT = 0.50
+
+
+def calculate_cost_usd(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    provider_name: str = "",
+) -> float:
+    """Estimate cost in USD based on model pricing.
+
+    Full-price fallback: cached prompt reads (billed at ~50% on supporting
+    providers) are not discounted here — the authoritative amount comes from
+    generation telemetry when available.
+    """
+    if is_free_model(model, provider_name=provider_name):
+        return 0.0
     pricing = MODEL_PRICING_ESTIMATES.get(model, {"prompt": 0.20, "completion": 0.80})
     p_cost = (prompt_tokens / 1_000_000) * pricing["prompt"]
     c_cost = (completion_tokens / 1_000_000) * pricing["completion"]
     return round(p_cost + c_cost, 6)
 
 
+def _cache_savings_usd(
+    model: str,
+    cached_tokens: int,
+    provider_name: str = "",
+    provider_cfg: Optional[Dict[str, Any]] = None,
+) -> float:
+    """Estimated USD saved by cached prompt reads for one model."""
+    if cached_tokens <= 0 or is_free_model(model, provider_cfg, provider_name):
+        return 0.0
+    pricing = MODEL_PRICING_ESTIMATES.get(model, {"prompt": 0.20, "completion": 0.80})
+    return (cached_tokens / 1_000_000) * pricing["prompt"] * CACHE_READ_DISCOUNT
+
+
 def load_analytics() -> List[Dict[str, Any]]:
     """Load all run records from .agent_analytics.json."""
-    if not ANALYTICS_FILE.exists():
+    target_file = _cfg_analytics_file()
+    if not target_file.exists():
         return []
     try:
-        data = json.loads(ANALYTICS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(target_file.read_text(encoding="utf-8"))
         if isinstance(data, list):
             return data
     except Exception:
@@ -76,8 +142,9 @@ def load_analytics() -> List[Dict[str, Any]]:
 
 def save_analytics(records: List[Dict[str, Any]]):
     """Persist records to .agent_analytics.json."""
-    ANALYTICS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ANALYTICS_FILE.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
+    target_file = _cfg_analytics_file()
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def log_run(
@@ -107,7 +174,7 @@ def log_run(
     stored; the complete text survives solely as ``summary_sha256``.
     """
     if cost_usd is None:
-        cost_usd = calculate_cost_usd(model, prompt_tokens, completion_tokens)
+        cost_usd = calculate_cost_usd(model, prompt_tokens, completion_tokens, provider or "")
     else:
         cost_usd = round(float(cost_usd), 6)
 
@@ -169,6 +236,146 @@ def check_budget_limit(daily_limit_usd: float) -> tuple[bool, float]:
     return today_spend >= daily_limit_usd, round(today_spend, 4)
 
 
+def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -> Dict[str, Any]:
+    """Pure aggregation over run records — shared by CLI reports and the REST API.
+
+    ``days=None`` aggregates all records; a positive value keeps only runs newer
+    than ``now - days``. Returns JSON-serializable totals, per-model breakdown,
+    daily time series, and the most recent runs.
+    """
+    cutoff = datetime.now() - timedelta(days=days) if days and days > 0 else None
+    filtered: List[Dict[str, Any]] = []
+    for r in records:
+        if cutoff is None:
+            filtered.append(r)
+            continue
+        try:
+            if datetime.fromisoformat(r.get("timestamp", "")) >= cutoff:
+                filtered.append(r)
+        except (TypeError, ValueError):
+            continue
+
+    by_model: Dict[str, Dict[str, Any]] = {}
+    daily: Dict[str, Dict[str, Any]] = {}
+    status_counts: Dict[str, int] = {}
+    durations: List[float] = []
+    gen_times: List[float] = []
+    prov_cfgs: Dict[str, Dict[str, Any]] = {}
+
+    for r in filtered:
+        st = r.get("status") or "UNKNOWN"
+        status_counts[st] = status_counts.get(st, 0) + 1
+
+        m = r.get("model") or "other"
+        bm = by_model.setdefault(
+            m,
+            {
+                "model": m,
+                "runs": 0,
+                "done_runs": 0,
+                "cost_usd": 0.0,
+                "tokens": 0,
+                "prompt_tokens": 0,
+                "cached_tokens": 0,
+                "cache_savings_usd": 0.0,
+                "failures": {},
+            },
+        )
+        bm["runs"] += 1
+        if st == "DONE":
+            bm["done_runs"] += 1
+        else:
+            fk = r.get("failure_kind") or st or "unknown"
+            bm["failures"][fk] = bm["failures"].get(fk, 0) + 1
+        cost = r.get("cost_usd", 0.0) or 0.0
+        toks = (r.get("prompt_tokens", 0) or 0) + (r.get("completion_tokens", 0) or 0)
+        bm["cost_usd"] += cost
+        bm["tokens"] += toks
+        bm["prompt_tokens"] += r.get("prompt_tokens", 0) or 0
+        cached_i = r.get("cached_tokens", 0) or 0
+        bm["cached_tokens"] += cached_i
+        pname = (r.get("provider") or "").strip().lower()
+        if pname and pname not in prov_cfgs:
+            try:
+                _pname, pcfg = _resolve_provider(pname)
+                prov_cfgs[pname] = pcfg if isinstance(pcfg, dict) else {}
+            except Exception:
+                prov_cfgs[pname] = {}
+        bm["cache_savings_usd"] += _cache_savings_usd(
+            m, cached_i, pname, prov_cfgs.get(pname) if pname else None
+        )
+
+        day = str(r.get("timestamp", ""))[:10]
+        if day:
+            d = daily.setdefault(day, {"date": day, "runs": 0, "cost_usd": 0.0, "tokens": 0})
+            d["runs"] += 1
+            d["cost_usd"] += cost
+            d["tokens"] += toks
+
+        if isinstance(r.get("duration_s"), (int, float)):
+            durations.append(float(r["duration_s"]))
+        if isinstance(r.get("generation_time_ms"), (int, float)):
+            gen_times.append(float(r["generation_time_ms"]))
+
+    models_out: List[Dict[str, Any]] = []
+    for bm in sorted(by_model.values(), key=lambda x: x["cost_usd"], reverse=True):
+        bm["done_pct"] = round(bm["done_runs"] / bm["runs"] * 100, 1) if bm["runs"] else 0.0
+        bm["cache_hit_pct"] = (
+            round(min(bm["cached_tokens"] / bm["prompt_tokens"], 1.0) * 100, 1)
+            if bm["prompt_tokens"]
+            else 0.0
+        )
+        bm["cost_usd"] = round(bm["cost_usd"], 6)
+        bm["top_failure"] = (
+            max(bm["failures"].items(), key=lambda x: x[1])[0] if bm["failures"] else None
+        )
+        bm["cache_savings_usd"] = round(bm["cache_savings_usd"], 6)
+        models_out.append(bm)
+
+    prompt_tok = sum(r.get("prompt_tokens", 0) or 0 for r in filtered)
+    cached_tok = sum(r.get("cached_tokens", 0) or 0 for r in filtered)
+    done = status_counts.get("DONE", 0)
+
+    recent = sorted(filtered, key=lambda r: str(r.get("timestamp", "")), reverse=True)[:12]
+    recent_out = [
+        {
+            "task_id": r.get("task_id"),
+            "timestamp": r.get("timestamp"),
+            "model": r.get("model"),
+            "provider": r.get("provider"),
+            "status": r.get("status"),
+            "failure_kind": r.get("failure_kind"),
+            "cost_usd": r.get("cost_usd", 0.0),
+            "duration_s": r.get("duration_s"),
+            "tokens": (r.get("prompt_tokens", 0) or 0) + (r.get("completion_tokens", 0) or 0),
+        }
+        for r in recent
+    ]
+
+    return {
+        "runs": len(filtered),
+        "done_runs": done,
+        "failed_runs": len(filtered) - done,
+        "done_pct": round(done / len(filtered) * 100, 1) if filtered else 0.0,
+        "cost_usd": round(sum(r.get("cost_usd", 0.0) or 0.0 for r in filtered), 6),
+        "prompt_tokens": prompt_tok,
+        "completion_tokens": sum(r.get("completion_tokens", 0) or 0 for r in filtered),
+        "cached_tokens": cached_tok,
+        "cache_savings_usd": round(sum(bm["cache_savings_usd"] for bm in models_out), 6),
+        # prompt_tokens already includes cached reads for OpenAI-schema providers;
+        # clamped at 100% for providers that report prompt excluding cached.
+        "cache_hit_pct": (round(min(cached_tok / prompt_tok, 1.0) * 100, 1) if prompt_tok else 0.0),
+        "lines_added": sum(r.get("lines_added", 0) or 0 for r in filtered),
+        "lines_removed": sum(r.get("lines_removed", 0) or 0 for r in filtered),
+        "avg_duration_s": round(sum(durations) / len(durations), 2) if durations else None,
+        "avg_generation_ms": round(sum(gen_times) / len(gen_times), 1) if gen_times else None,
+        "status_counts": status_counts,
+        "by_model": models_out,
+        "daily": [daily[k] for k in sorted(daily)],
+        "recent": recent_out,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI Presentation (Rich or Clean ASCII)
 # ---------------------------------------------------------------------------
@@ -228,33 +435,16 @@ def cli_stats(period: str = "week"):
         return
 
     days = 30 if period == "month" else 7
-    cutoff = datetime.now() - timedelta(days=days)
+    stats = aggregate_stats(records, days)
 
-    filtered = [r for r in records if datetime.fromisoformat(r["timestamp"]) >= cutoff]
-
-    total_runs = len(filtered)
-    total_cost = sum(r.get("cost_usd", 0.0) for r in filtered)
-    total_prompt = sum(r.get("prompt_tokens", 0) for r in filtered)
-    total_comp = sum(r.get("completion_tokens", 0) for r in filtered)
-    total_cached = sum(r.get("cached_tokens", 0) for r in filtered)
-    total_added = sum(r.get("lines_added", 0) for r in filtered)
-    total_removed = sum(r.get("lines_removed", 0) for r in filtered)
-
-    # Per model breakdown
-    by_model = {}
-    for r in filtered:
-        m = r.get("model", "other")
-        if m not in by_model:
-            by_model[m] = {"runs": 0, "done_runs": 0, "cost": 0.0, "tokens": 0, "failures": {}}
-        by_model[m]["runs"] += 1
-        st = r.get("status", "")
-        if st == "DONE":
-            by_model[m]["done_runs"] += 1
-        else:
-            fk = r.get("failure_kind") or st or "unknown"
-            by_model[m]["failures"][fk] = by_model[m]["failures"].get(fk, 0) + 1
-        by_model[m]["cost"] += r.get("cost_usd", 0.0)
-        by_model[m]["tokens"] += r.get("prompt_tokens", 0) + r.get("completion_tokens", 0)
+    total_runs = stats["runs"]
+    total_cost = stats["cost_usd"]
+    total_prompt = stats["prompt_tokens"]
+    total_comp = stats["completion_tokens"]
+    total_cached = stats["cached_tokens"]
+    total_added = stats["lines_added"]
+    total_removed = stats["lines_removed"]
+    by_model = {m["model"]: m for m in stats["by_model"]}
 
     try:
         from rich.console import Console
@@ -281,18 +471,15 @@ def cli_stats(period: str = "week"):
         m_table.add_column(t("an.tokens"), justify="right")
         m_table.add_column(t("an.cost"), justify="right")
 
-        for m, stats in sorted(by_model.items(), key=lambda x: x[1]["cost"], reverse=True):
-            done_pct = (stats["done_runs"] / stats["runs"] * 100) if stats["runs"] > 0 else 0.0
-            top_fail = (
-                max(stats["failures"].items(), key=lambda x: x[1])[0] if stats["failures"] else "-"
-            )
+        for m, stats in by_model.items():
+            top_fail = stats["top_failure"] or "-"
             m_table.add_row(
                 m,
                 str(stats["runs"]),
-                f"{done_pct:.1f}%",
+                f"{stats['done_pct']:.1f}%",
                 top_fail,
                 f"{stats['tokens']:,}",
-                f"${stats['cost']:.4f}",
+                f"${stats['cost_usd']:.4f}",
             )
         console.print(m_table)
     except ImportError:
@@ -315,7 +502,7 @@ def cli_stats(period: str = "week"):
                     "an.runs_fmt",
                     runs=stats["runs"],
                     tokens=f"{stats['tokens']:,}",
-                    cost=f"{stats['cost']:.4f}",
+                    cost=f"{stats['cost_usd']:.4f}",
                 )
                 + f" | DONE rate: {done_pct:.1f}% | Top failure: {top_fail}"
             )

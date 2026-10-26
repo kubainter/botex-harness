@@ -25,6 +25,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Ensure repository root is on sys.path
@@ -35,7 +36,7 @@ if _root_dir not in sys.path:
 
 from urllib.parse import parse_qs
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mcp.server.transport_security import TransportSecuritySettings
@@ -44,13 +45,24 @@ from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 import server as botex_server
+from botex.analytics import aggregate_stats, load_analytics
 from botex.approval import PendingAction, default_approval_manager
 from botex.catalog import get_consolidated_models
 from botex.chat import default_chat_manager, stream_chat_turn
-from botex.config import resolve_workspace
+from botex.config import analytics_setting, get_tasks_dir, resolve_workspace
 from botex.engine import run_botex_task
-from botex.memory import read_memory, save_memory, search_memory
+from botex.memory import (
+    _get_index_db,
+    _resolve_scope_dirs,
+    delete_memory,
+    find_graph_health,
+    get_backlinks,
+    read_memory,
+    save_memory,
+    search_memory,
+)
 from botex.security import mask_secrets, sanitize_identifier, sever_taint_numeric
+from botex.skills import delete_skill, get_skill, install_skill_async, list_skills
 from botex.wallet import default_wallet_service
 
 logger = logging.getLogger(__name__)
@@ -62,8 +74,113 @@ START_TIME: float = time.time()
 # Shared reference to task repository in server
 _TASKS: Dict[str, Dict[str, Any]] = botex_server._TASKS
 
+
+def _save_task_persistent(task_id: str, entry: Dict[str, Any], workspace_dir: str = "") -> None:
+    """Persist task metadata and receipt to .botex/tasks/<task_id>.json across server restarts."""
+    try:
+        tasks_dir = get_tasks_dir(workspace_dir)
+        p = tasks_dir / f"{task_id}.json"
+        clean = {k: v for k, v in entry.items() if k != "async_task"}
+        p.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.warning(f"Failed to persist task {task_id}: {exc}")
+
+
+def _load_tasks_persistent(workspace_dir: str = "") -> None:
+    """Restore historical background tasks from disk into memory cache."""
+    try:
+        tasks_dir = get_tasks_dir(workspace_dir)
+        for f in tasks_dir.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                tid = data.get("task_id") or f.stem
+                if tid not in _TASKS:
+                    data["async_task"] = None
+                    _TASKS[tid] = data
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning(f"Failed to load persistent tasks: {exc}")
+
+
+# WAN Reliability: Idempotency Cache & SSE Event Replay Buffer
+_IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
+_SSE_REPLAY_BUFFER: Dict[str, List[Dict[str, Any]]] = {}
+_MAX_REPLAY_EVENTS_PER_SESSION: int = 100
+_IDEMPOTENCY_TTL_SECONDS: float = 86400.0
+
+
+def _cleanup_idempotency_cache() -> None:
+    """Evict expired idempotency keys older than TTL."""
+    now = time.time()
+    expired = [
+        k
+        for k, v in _IDEMPOTENCY_CACHE.items()
+        if now - v.get("created_at", 0) > _IDEMPOTENCY_TTL_SECONDS
+    ]
+    for k in expired:
+        _IDEMPOTENCY_CACHE.pop(k, None)
+
+
+def _record_sse_event(
+    session_id: str, event_id: str, event_type: str, data: Dict[str, Any]
+) -> None:
+    """Store SSE event in session replay ring buffer."""
+    buf = _SSE_REPLAY_BUFFER.setdefault(session_id, [])
+    buf.append(
+        {
+            "id": event_id,
+            "event": event_type,
+            "data": data,
+            "timestamp": time.time(),
+        }
+    )
+    if len(buf) > _MAX_REPLAY_EVENTS_PER_SESSION:
+        _SSE_REPLAY_BUFFER[session_id] = buf[-_MAX_REPLAY_EVENTS_PER_SESSION:]
+
+
+def _get_sse_replay_events(session_id: str, last_event_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Return missed SSE events occurring after last_event_id."""
+    buf = _SSE_REPLAY_BUFFER.get(session_id, [])
+    if not buf or not last_event_id:
+        return []
+    # Find index of last_event_id
+    idx = -1
+    for i, ev in enumerate(buf):
+        if ev["id"] == last_event_id:
+            idx = i
+            break
+    if idx != -1 and idx + 1 < len(buf):
+        return buf[idx + 1 :]
+    return []
+
+
 # Connected WebSockets for real-time push notifications with serialization locks
 _ACTIVE_WEBSOCKETS: Dict[WebSocket, asyncio.Lock] = {}
+
+
+_active_chat_tasks: dict[str, asyncio.Task] = {}
+
+
+def _unload_ollama_model_sync(model_name: str = "") -> None:
+    """Best-effort async/sync unload of an Ollama model from VRAM."""
+    import urllib.request
+
+    try:
+        cfg = botex_server.load_config().get("providers", {}).get("ollama", {})
+        base_url = cfg.get("base_url", "http://127.0.0.1:11434/v1")
+        clean_base = base_url.rstrip("/").removesuffix("/v1")
+        endpoint = f"{clean_base}/api/generate"
+        payload = json.dumps(
+            {"model": model_name or "bielik-direct:latest", "keep_alive": 0}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint, data=payload, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=3):
+            pass
+    except Exception:
+        pass
 
 
 async def _send_ws_json_safe(ws: WebSocket, payload: Dict[str, Any]) -> bool:
@@ -167,7 +284,18 @@ class SaveChatToMemoryRequest(BaseModel):
     tags: Optional[List[str]] = None
 
 
-from contextlib import asynccontextmanager
+class SkillInstallRequest(BaseModel):
+    name: str = ""
+    content: str = ""
+    source_url: str = ""
+    origin_repo: str = ""
+    version: str = ""
+    commit_sha: str = ""
+    description: str = ""
+    taxonomy: Optional[List[str]] = None
+
+
+from contextlib import asynccontextmanager, suppress
 
 # ---------------------------------------------------------------------------
 # FastAPI Application & Middlewares
@@ -183,11 +311,177 @@ async def _warmup_caches() -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Analytics digest (optional local-LLM, e.g. Bielik via Ollama)
+# ---------------------------------------------------------------------------
+
+_DIGEST_FILENAME = "analytics_digest.json"
+_digest_lock = asyncio.Lock()
+
+
+def _digest_cache_path(workspace_dir: str) -> Path:
+    ws_root = Path(workspace_dir or ".").resolve()
+    botex_dir = ws_root / ".botex"
+    botex_dir.mkdir(parents=True, exist_ok=True)
+    return botex_dir / _DIGEST_FILENAME
+
+
+def _find_latest_digest(workspace_dir: str) -> Optional[Dict[str, Any]]:
+    try:
+        p = _digest_cache_path(workspace_dir)
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not data.get("content"):
+            return None
+        return {
+            "id": data.get("id") or "latest_digest",
+            "title": data.get("title") or "Analytics Digest",
+            "timestamp": data.get("timestamp") or "",
+            "content": data.get("content") or "",
+        }
+    except Exception:
+        return None
+
+
+async def _generate_analytics_digest(
+    workspace_dir: str,
+    provider: str = "",
+    model: str = "",
+    days: int = 1,
+) -> Dict[str, Any]:
+    """Summarize recent run telemetry with a small local model.
+
+    The prompt carries only a pre-aggregated compact JSON (<500 tokens) —
+    small ARM-class local models cannot process large payloads.
+    """
+    if _digest_lock.locked():
+        return {"ok": False, "error": "digest already running"}
+    async with _digest_lock:
+        return await _run_analytics_digest(workspace_dir, provider, model, days)
+
+
+async def _run_analytics_digest(
+    workspace_dir: str,
+    provider: str,
+    model: str,
+    days: int,
+) -> Dict[str, Any]:
+    from botex.providers import build_async_client, sanitize_provider_error
+
+    cfg = botex_server.load_config()
+    prov_name = (provider or analytics_setting("digest_provider") or "").strip()
+    model_id = (model or analytics_setting("digest_model") or "").strip()
+    if not prov_name or not model_id:
+        return {"ok": False, "error": "digest provider/model not configured"}
+    prov_cfg = (cfg.get("providers") or {}).get(prov_name) or {}
+
+    stats = await asyncio.to_thread(aggregate_stats, load_analytics(), days)
+    compact = {
+        "days": days,
+        "runs": stats["runs"],
+        "done_pct": stats["done_pct"],
+        "cost_usd": stats["cost_usd"],
+        "cache_hit_pct": stats["cache_hit_pct"],
+        "avg_duration_s": stats["avg_duration_s"],
+        "failures": {k: v for k, v in stats["status_counts"].items() if k != "DONE"},
+        "top_models": [
+            {
+                "model": m["model"],
+                "runs": m["runs"],
+                "cost": m["cost_usd"],
+                "fail": m["top_failure"],
+            }
+            for m in stats["by_model"][:5]
+        ],
+        "daily_last7": [
+            {"d": d["date"], "runs": d["runs"], "usd": d["cost_usd"]} for d in stats["daily"][-7:]
+        ],
+    }
+    stats_json = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))[:1500]
+
+    messages = [
+        {
+            "role": "system",
+            "content": "Jesteś asystentem telemetrycznym BoteX. Odpowiadasz po polsku, maksymalnie 6 zwięzłych punktów. Bez wstępów.",
+        },
+        {
+            "role": "user",
+            "content": f"Agregat uruchomień agenta ({days}d): {stats_json}\nStreść: koszt, awarie, najdroższy model, trend.",
+        },
+    ]
+    try:
+        client = build_async_client(prov_name, prov_cfg)
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=model_id,
+                messages=messages,
+                max_tokens=int(analytics_setting("digest_max_tokens") or 320),
+                temperature=0.3,
+                stream=False,
+            ),
+            timeout=float(analytics_setting("digest_timeout_s") or 180),
+        )
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        return {"ok": False, "error": sanitize_provider_error(exc)}
+    if not text:
+        return {"ok": False, "error": "empty digest"}
+
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    digest_payload = {
+        "id": "latest_digest",
+        "title": f"Analytics Digest {ts[:10]} {ts[11:16]} UTC",
+        "timestamp": ts,
+        "content": f"Model: {prov_name}/{model_id} | window: {days}d | generated: {ts}\n\n{text}",
+        "model": f"{prov_name}/{model_id}",
+        "days": days,
+    }
+    try:
+        cache_file = _digest_cache_path(workspace_dir)
+        await asyncio.to_thread(
+            cache_file.write_text,
+            json.dumps(digest_payload, ensure_ascii=False, indent=2),
+            "utf-8",
+        )
+        err = None
+    except Exception as exc:
+        err = str(exc)
+    return {
+        "ok": not err,
+        "text": text,
+        "memory_id": None,
+        "error": err,
+    }
+
+
+async def _analytics_digest_loop() -> None:
+    """Periodic digest writer — runs only when analytics.digest_enabled=true."""
+    interval = float(analytics_setting("digest_interval_s") or 3600)
+    await asyncio.sleep(60)
+    while True:
+        try:
+            ws = resolve_workspace("")
+            res = await _generate_analytics_digest(ws)
+            if not res.get("ok"):
+                logger.warning("analytics digest skipped: %s", res.get("error"))
+        except Exception:
+            logger.exception("analytics digest tick failed")
+        await asyncio.sleep(max(300.0, interval))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Non-blocking background warmup
     asyncio.create_task(_warmup_caches())
+    digest_task: Optional[asyncio.Task] = None
+    if analytics_setting("digest_enabled"):
+        digest_task = asyncio.create_task(_analytics_digest_loop())
     yield
+    if digest_task is not None:
+        digest_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await digest_task
 
 
 app = FastAPI(
@@ -382,6 +676,31 @@ async def get_key_status(
     )
 
 
+@app.get("/api/analytics")
+async def get_analytics(
+    period: str = Query(default="week"),
+    workspace_dir: str = Query(default=""),
+) -> Dict[str, Any]:
+    """Aggregated run telemetry: totals, per-model stats, daily series, recent runs."""
+    days = {"week": 7, "month": 30, "all": None}.get(period, 7)
+    ws = resolve_workspace(workspace_dir)
+    stats = await asyncio.to_thread(aggregate_stats, load_analytics(), days)
+    digest = await asyncio.to_thread(_find_latest_digest, ws)
+    return {"period": period, "days": days, **stats, "latest_digest": digest}
+
+
+@app.post("/api/analytics/digest")
+async def trigger_analytics_digest(
+    provider: str = Query(default=""),
+    model: str = Query(default=""),
+    days: int = Query(default=1, ge=1, le=30),
+    workspace_dir: str = Query(default=""),
+) -> Dict[str, Any]:
+    """Manually generate a local-LLM analytics digest and persist it to Memory."""
+    ws = resolve_workspace(workspace_dir)
+    return await _generate_analytics_digest(ws, provider=provider, model=model, days=days)
+
+
 @app.get("/api/models")
 async def get_models(
     provider: Optional[str] = Query(default=None),
@@ -391,7 +710,7 @@ async def get_models(
     if provider and provider.strip():
         providers_seq = (provider.strip().lower(),)
     else:
-        providers_seq = ("openrouter", "openrouter-free", "nvidia")
+        providers_seq = ("openrouter", "openrouter-free", "nvidia", "ollama")
     cfg = botex_server.load_config() if force_refresh else _cfg
     return get_consolidated_models(
         providers=providers_seq,
@@ -496,12 +815,30 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
         entry["result_data"] = {"ok": False, "status": "ERROR", "error": masked_err}
     finally:
         entry["finished_at"] = time.time()
+        _save_task_persistent(task_id, entry, req.workspace_dir)
 
 
 @app.post("/api/tasks", status_code=status.HTTP_202_ACCEPTED)
-async def create_task(req: TaskCreateRequest) -> Dict[str, Any]:
-    """Delegate autonomous code editing task in the background."""
+async def create_task(
+    req: TaskCreateRequest,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+) -> Dict[str, Any]:
+    """Delegate autonomous code editing task in the background with WAN idempotency protection."""
     botex_server._cleanup_tasks()
+    _cleanup_idempotency_cache()
+
+    if idempotency_key:
+        clean_key = sanitize_identifier(idempotency_key)
+        if clean_key and clean_key in _IDEMPOTENCY_CACHE:
+            cached = _IDEMPOTENCY_CACHE[clean_key]
+            existing_tid = cached.get("task_id")
+            if existing_tid and existing_tid in _TASKS:
+                existing_entry = _TASKS[existing_tid]
+                return {
+                    "task_id": existing_tid,
+                    "status": existing_entry.get("status", "QUEUED"),
+                    "idempotent_replay": True,
+                }
 
     # Task queue bounding
     max_queued = int(botex_server.load_config().get("engine", {}).get("max_queued_tasks", 32))
@@ -516,6 +853,8 @@ async def create_task(req: TaskCreateRequest) -> Dict[str, Any]:
     entry = {
         "task_id": task_id,
         "task": mask_secrets(req.task),  # ZDR: scrub sensitive tokens
+        # Original request params (masked) — enables retry/clone from the PWA.
+        "request": botex_server.mask_secrets_recursive(req.model_dump(exclude_none=True)),
         "status": "QUEUED",
         "created_at": time.time(),
         "finished_at": None,
@@ -524,14 +863,25 @@ async def create_task(req: TaskCreateRequest) -> Dict[str, Any]:
         "async_task": None,
     }
     _TASKS[task_id] = entry
+    _save_task_persistent(task_id, entry, req.workspace_dir)
     worker = asyncio.create_task(_run_task_worker(task_id, req))
     entry["async_task"] = worker
-    return {"task_id": task_id, "status": "QUEUED"}
+    res_dict = {"task_id": task_id, "status": "QUEUED"}
+    if idempotency_key:
+        clean_key = sanitize_identifier(idempotency_key)
+        if clean_key:
+            _IDEMPOTENCY_CACHE[clean_key] = {
+                "task_id": task_id,
+                "created_at": time.time(),
+                "response": res_dict,
+            }
+    return res_dict
 
 
 @app.get("/api/tasks")
 async def list_tasks() -> Dict[str, Any]:
     """List all registered background tasks."""
+    _load_tasks_persistent()
     tasks = []
     for tid, entry in _TASKS.items():
         tasks.append(
@@ -559,6 +909,8 @@ async def get_task(task_id: str) -> Dict[str, Any]:
         "finished_at": entry.get("finished_at"),
         "result": entry.get("result"),
         "result_data": entry.get("result_data"),
+        "task": entry.get("task"),
+        "request": entry.get("request"),
     }
 
 
@@ -586,6 +938,12 @@ async def cancel_task(task_id: str) -> Dict[str, Any]:
     worker = entry.get("async_task")
     if worker and not worker.done():
         worker.cancel()
+
+    req_data = entry.get("request", {})
+    prov = (req_data.get("provider") or "").lower()
+    mod = req_data.get("model") or ""
+    if prov == "ollama" or "bielik" in mod.lower() or "ollama" in mod.lower():
+        _unload_ollama_model_sync(mod)
 
     entry["status"] = "CANCELLED"
     entry["result"] = "Task cancelled by operator."
@@ -727,9 +1085,212 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
     return botex_server.mask_secrets_recursive(res)
 
 
+@app.delete("/api/memory/{memory_id}")
+async def delete_memory_endpoint(
+    memory_id: str,
+    scope: str = Query(default="local"),
+    workspace_dir: str = Query(default="."),
+) -> Dict[str, Any]:
+    """Delete a memory entry by ID from local or global Memory Vault."""
+    clean_mid = sanitize_identifier(memory_id)
+    if not clean_mid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid memory_id format.",
+        )
+    ws = resolve_workspace(workspace_dir)
+    res = delete_memory(workspace_dir=ws, memory_id=clean_mid, scope=scope)
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Memory entry '{clean_mid}' not found.",
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
+# ---------------------------------------------------------------------------
+# REST Endpoints: Server-Side Skills Catalog (Skill Vault)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/skills")
+async def get_skills_catalog() -> Dict[str, Any]:
+    """List all installed server-side skills in the BoteX Skill Vault."""
+    res = await asyncio.to_thread(list_skills)
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.get("/api/skills/{skill_name}")
+async def get_skill_detail(skill_name: str) -> Dict[str, Any]:
+    """Retrieve full metadata and SKILL.md content for an installed skill."""
+    clean_name = sanitize_identifier(skill_name)
+    if not clean_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid skill name format.",
+        )
+    res = await asyncio.to_thread(get_skill, clean_name)
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill '{clean_name}' not found.",
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.post("/api/skills")
+async def post_install_skill(body: SkillInstallRequest) -> Dict[str, Any]:
+    """Install or update a server-side skill from raw Markdown or a public URL/repo."""
+    res = await install_skill_async(
+        name=body.name,
+        content=body.content,
+        source_url=body.source_url,
+        origin_repo=body.origin_repo,
+        version=body.version,
+        commit_sha=body.commit_sha,
+        description=body.description,
+        taxonomy=body.taxonomy,
+    )
+    if not res.get("ok"):
+        err_msg = sever_taint_numeric(
+            mask_secrets(str(res.get("error") or "Failed to install skill."))
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=err_msg,
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.delete("/api/skills/{skill_name}")
+async def delete_skill_endpoint(skill_name: str) -> Dict[str, Any]:
+    """Delete an installed skill from the server-side Skill Vault."""
+    clean_name = sanitize_identifier(skill_name)
+    if not clean_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid skill name format.",
+        )
+    res = await asyncio.to_thread(delete_skill, clean_name)
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill '{clean_name}' not found.",
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.get("/api/memory/graph")
+async def get_memory_graph(
+    scope: str = Query(default="all"),
+    workspace_dir: str = Query(default="."),
+) -> Dict[str, Any]:
+    """Retrieve full knowledge graph nodes, wikilink edges, and health integrity report."""
+    ws = resolve_workspace(workspace_dir)
+    health = find_graph_health(workspace_dir=ws, scope=scope)
+
+    search_dirs = _resolve_scope_dirs(ws, scope)
+    nodes_map: Dict[str, Dict[str, Any]] = {}
+    edges_list: List[Dict[str, Any]] = []
+
+    for mem_dir, sc in search_dirs:
+        if not mem_dir.exists() or not mem_dir.is_dir():
+            continue
+        conn = _get_index_db(mem_dir)
+        try:
+            m_rows = conn.execute(
+                "SELECT id, title, kind, tags, status, compiled_truth, timestamp FROM memories_meta;"
+            ).fetchall()
+            for r in m_rows:
+                mid = r["id"]
+                if mid not in nodes_map:
+                    raw_tags = r["tags"].split() if r["tags"] else []
+                    nodes_map[mid] = {
+                        "id": mid,
+                        "title": r["title"] or mid,
+                        "kind": r["kind"] or "context",
+                        "tags": raw_tags,
+                        "status": r["status"] or "active",
+                        "compiled_truth": bool(r["compiled_truth"]),
+                        "timestamp": r["timestamp"] or "",
+                        "scope": sc,
+                        "in_degree": 0,
+                        "out_degree": 0,
+                    }
+
+            e_rows = conn.execute(
+                "SELECT source_id, target_id, kind FROM memories_edges;"
+            ).fetchall()
+            for er in e_rows:
+                edges_list.append(
+                    {
+                        "source": er["source_id"],
+                        "target": er["target_id"],
+                        "kind": er["kind"] or "wikilink",
+                    }
+                )
+        finally:
+            conn.close()
+
+    for e in edges_list:
+        s, t = e["source"], e["target"]
+        if s in nodes_map:
+            nodes_map[s]["out_degree"] += 1
+        if t in nodes_map:
+            nodes_map[t]["in_degree"] += 1
+
+    return botex_server.mask_secrets_recursive(
+        {
+            "ok": True,
+            "nodes": list(nodes_map.values()),
+            "edges": edges_list,
+            "health": health,
+        }
+    )
+
+
+@app.get("/api/memory/backlinks")
+async def get_memory_backlinks_endpoint(
+    memory_id: str = Query(...),
+    scope: str = Query(default="all"),
+    workspace_dir: str = Query(default="."),
+) -> Dict[str, Any]:
+    """Retrieve all memory notes referencing the specified memory_id via [[wikilinks]]."""
+    clean_mid = sanitize_identifier(memory_id)
+    if not clean_mid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid memory_id format.",
+        )
+    ws = resolve_workspace(workspace_dir)
+    res = get_backlinks(workspace_dir=ws, memory_id=clean_mid, scope=scope)
+    return botex_server.mask_secrets_recursive(res)
+
+
 # ---------------------------------------------------------------------------
 # Chat Session Management & Memory Export
 # ---------------------------------------------------------------------------
+
+
+@app.post("/api/chat/abort")
+async def abort_chat(
+    session_id: str = Query(default=""),
+    model: str = Query(default=""),
+    provider: str = Query(default=""),
+) -> Dict[str, Any]:
+    """Abort in-flight chat generation and release Ollama VRAM if active."""
+    # 1. Cancel in-flight asyncio task immediately to sever HTTP socket to Ollama
+    active_task = _active_chat_tasks.get(session_id)
+    if active_task and not active_task.done():
+        active_task.cancel()
+
+    # 2. If local provider, unload model from VRAM immediately
+    prov_norm = provider.lower()
+    if prov_norm == "ollama" or any(
+        k in model.lower() for k in ("bielik", "nemo", "hermes", "qwen", "llama")
+    ):
+        _unload_ollama_model_sync(model)
+    return {"ok": True, "session_id": session_id, "status": "ABORTED"}
 
 
 @app.get("/api/chat/sessions")
@@ -818,8 +1379,11 @@ async def save_chat_session_to_memory(
 
 
 @app.post("/api/chat")
-async def post_chat(body: ChatRequest) -> EventSourceResponse:
-    """Stream conversational chat turns using Server-Sent Events with periodic keepalives."""
+async def post_chat(
+    body: ChatRequest,
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+) -> EventSourceResponse:
+    """Stream conversational chat turns using Server-Sent Events with WAN replay and keepalives."""
     clean_sid = sanitize_identifier(body.session_id) if body.session_id else None
     if body.session_id and not clean_sid:
         raise HTTPException(
@@ -836,13 +1400,40 @@ async def post_chat(body: ChatRequest) -> EventSourceResponse:
     )
 
     async def event_generator():
-        async with session.lock:
-            async for chunk in stream_chat_turn(session, user_input=body.message):
-                masked_chunk = botex_server.mask_secrets_recursive(chunk)
-                yield ServerSentEvent(
-                    data=json.dumps(masked_chunk),
-                    event=masked_chunk.get("type", "message"),
-                )
+        curr_t = asyncio.current_task()
+        if curr_t and session.session_id:
+            _active_chat_tasks[session.session_id] = curr_t
+        try:
+            async with session.lock:
+                # 1. Replay missed events if client reconnected with Last-Event-ID
+                if last_event_id:
+                    missed = _get_sse_replay_events(session.session_id, last_event_id)
+                    for ev in missed:
+                        yield ServerSentEvent(
+                            data=json.dumps(ev["data"]),
+                            event=ev["event"],
+                            id=ev["id"],
+                        )
+
+                # 2. Stream new turn chunks
+                seq_num = 0
+                async for chunk in stream_chat_turn(session, user_input=body.message):
+                    seq_num += 1
+                    ev_id = f"{session.session_id}_{int(time.time() * 1000)}_{seq_num}"
+                    masked_chunk = botex_server.mask_secrets_recursive(chunk)
+                    ev_type = masked_chunk.get("type", "message")
+                    _record_sse_event(session.session_id, ev_id, ev_type, masked_chunk)
+                    yield ServerSentEvent(
+                        data=json.dumps(masked_chunk),
+                        event=ev_type,
+                        id=ev_id,
+                    )
+        except asyncio.CancelledError:
+            # Client aborted or explicitly requested abort
+            pass
+        finally:
+            if session.session_id:
+                _active_chat_tasks.pop(session.session_id, None)
 
     return EventSourceResponse(
         event_generator(),
@@ -913,6 +1504,15 @@ async def chat_websocket(websocket: WebSocket) -> None:
                 continue
             elif msg_type == "ping":
                 await _send_ws_json_safe(websocket, {"type": "pong", "timestamp": time.time()})
+                continue
+            elif msg_type == "abort" or msg_type == "cancel":
+                abort_mod = data.get("model", "")
+                abort_prov = (data.get("provider") or "").lower()
+                if abort_prov == "ollama" or "bielik" in abort_mod.lower():
+                    _unload_ollama_model_sync(abort_mod)
+                await _send_ws_json_safe(
+                    websocket, {"type": "done", "finish_reason": "aborted", "content": ""}
+                )
                 continue
             elif msg_type == "message" or "message" in data or "content" in data:
                 content = data.get("content") or data.get("message") or ""

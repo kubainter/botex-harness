@@ -20,8 +20,19 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parent
+
+if load_dotenv is not None:
+    _root_env = PROJECT_ROOT / ".env"
+    if _root_env.exists():
+        load_dotenv(dotenv_path=_root_env, override=False)
+    load_dotenv(override=False)
 
 CONFIG_FILE = PROJECT_ROOT / "botex.config.json"
 LOCAL_CONFIG_FILE = PROJECT_ROOT / "botex.config.local.json"
@@ -321,6 +332,15 @@ DEFAULTS: Dict[str, Any] = {
         # When True, the full (still secret-masked) summary text is stored.
         "store_full_text": False,
         "preview_chars": 160,
+        # Periodic local-LLM digest (e.g. Bielik via Ollama). Disabled by default;
+        # the prompt stays under ~500 tokens because small ARM-class local models
+        # cannot process large payloads. Manual trigger: POST /api/analytics/digest.
+        "digest_enabled": False,
+        "digest_interval_s": 3600,
+        "digest_provider": "",
+        "digest_model": "",
+        "digest_max_tokens": 320,
+        "digest_timeout_s": 180,
     },
     "ui": {
         # CLI language for human-facing output: "auto" (OS locale), "en", "pl".
@@ -734,6 +754,14 @@ def denylist_setting(key: str = "denylist") -> Any:
     if val is not None:
         return val
     return DEFAULTS.get("engine", {}).get(key, [] if key == "denylist" else {})
+
+
+def get_tasks_dir(workspace_dir: str = "") -> Path:
+    """Resolve directory for storing background tasks persistent history."""
+    ws = resolve_workspace(workspace_dir) if workspace_dir else resolve_workspace("")
+    target_dir = Path(ws) / ".botex" / "tasks"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
 
 
 def get_chat_sessions_dir(workspace_dir: str = "") -> Path:

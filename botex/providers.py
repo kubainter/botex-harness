@@ -27,7 +27,7 @@ import urllib.request
 from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Type
 
 from openai import AsyncOpenAI
 
@@ -350,14 +350,119 @@ def normalize_response(response: Any) -> NormalizedResponse:
     raw_model = _get(response, "model")
     resp_model = mask_secrets(raw_model) if isinstance(raw_model, str) and raw_model else ""
 
+    final_content = _content_to_text(_get(msg, "content"))
+    if not final_content:
+        reasoning_val = _content_to_text(_get(msg, "reasoning_content") or _get(msg, "reasoning"))
+        if reasoning_val:
+            final_content = reasoning_val
+
     return NormalizedResponse(
         finish_reason=finish_kind,
         raw_finish_reason=str(raw_fr),
-        content=_content_to_text(_get(msg, "content")),
+        content=final_content,
         tool_calls=tool_calls,
         usage=nusage,
         generation_id=gen_id,
         model=resp_model,
+    )
+
+
+def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> NormalizedResponse:
+    """Accumulate stream chunks into a complete NormalizedResponse."""
+    full_content = ""
+    full_reasoning = ""
+    accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+    raw_finish_reason = "unknown"
+    usage_obj = None
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        usage_chunk = getattr(chunk, "usage", None) or (
+            chunk.get("usage") if isinstance(chunk, dict) else None
+        )
+        if usage_chunk:
+            usage_obj = usage_chunk
+
+        choices = _get(chunk, "choices") or []
+        if not choices:
+            continue
+        choice = choices[0]
+        fr = _get(choice, "finish_reason")
+        if fr:
+            raw_finish_reason = str(fr)
+
+        delta = _get(choice, "delta")
+        if not delta:
+            continue
+
+        c = _get(delta, "content")
+        if c:
+            full_content += _content_to_text(c)
+
+        r = _get(delta, "reasoning_content") or _get(delta, "reasoning")
+        if r:
+            full_reasoning += str(r)
+
+        tc_deltas = _get(delta, "tool_calls")
+        if tc_deltas:
+            for tc in tc_deltas:
+                idx = _safe_int(_get(tc, "index", 0), 0)
+                if idx not in accumulated_tool_calls:
+                    accumulated_tool_calls[idx] = {
+                        "id": _get(tc, "id") or f"call_{idx}",
+                        "name": _get(_get(tc, "function"), "name") or "",
+                        "arguments": "",
+                    }
+                fn = _get(tc, "function")
+                if fn:
+                    fn_name = _get(fn, "name")
+                    if fn_name:
+                        accumulated_tool_calls[idx]["name"] = str(fn_name)
+                    fn_args = _get(fn, "arguments")
+                    if fn_args:
+                        accumulated_tool_calls[idx]["arguments"] += str(fn_args)
+
+    final_content = full_content if full_content else full_reasoning
+
+    tool_calls = tuple(
+        NormalizedToolCall(
+            id=v["id"],
+            name=v["name"],
+            arguments=v["arguments"],
+        )
+        for _, v in sorted(accumulated_tool_calls.items())
+    )
+
+    finish_kind = (
+        _VALID_FINISH_KIND_MAP.get("tool_calls", "tool_call")
+        if tool_calls
+        else _VALID_FINISH_KIND_MAP.get(str(raw_finish_reason), "unknown")
+    )
+
+    comp_details = _get(usage_obj, "completion_tokens_details") if usage_obj else None
+    real_reasoning = _safe_int(_get(comp_details, "reasoning_tokens", 0) if comp_details else 0, 0)
+    reasoning_toks = real_reasoning or _safe_int(len(full_reasoning) // 4, 0)
+    raw_cached = _get(usage_obj, "prompt_tokens_details") if usage_obj else None
+    cached_toks = _safe_int(_get(raw_cached, "cached_tokens", 0) if raw_cached else 0, 0)
+
+    nusage = NormalizedUsage(
+        prompt_tokens=_safe_int(_get(usage_obj, "prompt_tokens", 0) if usage_obj else 0, 0),
+        completion_tokens=_safe_int(_get(usage_obj, "completion_tokens", 0) if usage_obj else 0, 0),
+        reasoning_tokens=reasoning_toks,
+        cached_tokens=cached_toks,
+        cache_write_tokens=0,
+        cost_usd=0.0,
+    )
+
+    return NormalizedResponse(
+        finish_reason=finish_kind,
+        raw_finish_reason=str(raw_finish_reason),
+        content=final_content,
+        tool_calls=tool_calls,
+        usage=nusage,
+        generation_id="",
+        model=mask_secrets(raw_model),
     )
 
 
@@ -872,7 +977,37 @@ class NvidiaProvider(BaseProvider):
         return None
 
     def get_extra_body(self, allow_non_zdr: bool = False) -> Dict[str, Any]:
-        return copy.deepcopy(self.config.get("extra_body") or {})
+        extra = copy.deepcopy(self.config.get("extra_body") or {})
+        if "chat_template_kwargs" not in extra:
+            extra["chat_template_kwargs"] = {"enable_thinking": True}
+        return extra
+
+    def prepare_request_payload(
+        self,
+        model: str,
+        messages: list,
+        tools: Optional[list] = None,
+        max_tokens: int = 4000,
+        temperature: float = 1.0,
+        allow_non_zdr: bool = False,
+        timeout: Optional[float] = None,
+        **extra_kwargs: Any,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max(max_tokens, 4000),
+            "temperature": temperature,
+            "top_p": 0.95,
+            "extra_body": self.get_extra_body(allow_non_zdr=allow_non_zdr),
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        if timeout is not None:
+            payload["timeout"] = timeout
+        payload.update(extra_kwargs)
+        return payload
 
     def resolve_api_key(
         self,
