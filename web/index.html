@@ -2,10 +2,11 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>BoteX Control</title>
     <meta name="description" content="Progressive Web App Command Center for BoteX Cloud & Harness" />
     <meta name="theme-color" content="#0f172a" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="BoteX Control" />
@@ -23,6 +24,10 @@
             skin = legacy === 'light' ? 'studio-light' : 'cyber-slate';
           }
           document.documentElement.setAttribute('data-skin', skin);
+          var themeMeta = document.querySelector('meta[name="theme-color"]');
+          if (themeMeta) {
+            themeMeta.setAttribute('content', skin === 'studio-light' ? '#f8fafc' : '#0f172a');
+          }
           if (skin === 'studio-light') {
             document.documentElement.classList.remove('dark');
             document.documentElement.classList.add('light');
@@ -34,7 +39,7 @@
       })();
     </script>
   </head>
-  <body class="bg-botex-950 text-slate-100 font-sans antialiased selection:bg-brand-blue/30 selection:text-white min-h-screen">
+  <body class="bg-botex-950 text-slate-100 font-sans antialiased selection:bg-brand-blue/30 selection:text-white min-h-dvh">
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

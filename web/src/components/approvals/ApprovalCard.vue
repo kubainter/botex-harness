@@ -24,7 +24,7 @@
       <button
         v-if="!compact"
         type="button"
-        class="text-xs text-cyan-300 hover:text-cyan-200 underline underline-offset-2"
+        class="min-h-[36px] inline-flex items-center text-xs text-cyan-300 hover:text-cyan-200 underline underline-offset-2"
         @click="$emit('inspect', action)"
       >
         {{ locale === 'pl' ? 'Pełny podgląd' : 'Inspect' }}
@@ -62,17 +62,17 @@
           v-model="rejectionReason"
           type="text"
           :placeholder="locale === 'pl' ? 'np. Nie zmieniaj testów, popraw logikę w server.py' : 'e.g. Do not modify tests, fix server.py instead'"
-          class="w-full bg-botex-950 border border-rose-500/50 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500"
+          class="w-full bg-botex-950 border border-rose-500/50 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500"
         />
       </div>
 
       <div class="flex flex-wrap items-center justify-between gap-3">
         <!-- Remember session checkbox -->
-        <label class="inline-flex items-center space-x-2 text-xs text-slate-300 select-none cursor-pointer min-h-[36px]">
+        <label class="inline-flex items-center space-x-2 text-xs text-slate-300 select-none cursor-pointer min-h-[44px]">
           <input
             v-model="rememberSession"
             type="checkbox"
-            class="rounded bg-botex-950 border-botex-700 text-brand-blue focus:ring-0 focus:ring-offset-0"
+            class="w-5 h-5 shrink-0 rounded bg-botex-950 border-botex-700 text-brand-blue focus:ring-0 focus:ring-offset-0"
           />
           <span>{{ t('rememberSession') }}</span>
         </label>
@@ -84,7 +84,7 @@
             v-if="!showRejectInput"
             type="button"
             :disabled="isDeciding"
-            class="min-h-[40px] px-3.5 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 border border-rose-700/60 text-xs font-medium transition active:scale-95 flex items-center space-x-1"
+            class="min-h-[44px] lg:min-h-[36px] px-3.5 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 border border-rose-700/60 text-xs font-medium transition active:scale-95 flex items-center space-x-1"
             @click="showRejectInput = true"
           >
             <XCircleIcon class="w-3.5 h-3.5" />
@@ -94,7 +94,7 @@
             v-else
             type="button"
             :disabled="isDeciding"
-            class="min-h-[40px] px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition active:scale-95 flex items-center space-x-1"
+            class="min-h-[44px] lg:min-h-[36px] px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition active:scale-95 flex items-center space-x-1"
             @click="handleDecision(false)"
           >
             <XCircleIcon class="w-3.5 h-3.5" />
@@ -105,7 +105,7 @@
           <button
             type="button"
             :disabled="isDeciding"
-            class="min-h-[40px] px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition active:scale-95 flex items-center space-x-1.5"
+            class="min-h-[44px] lg:min-h-[36px] px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition active:scale-95 flex items-center space-x-1.5"
             @click="handleDecision(true)"
           >
             <CheckCircleIcon class="w-3.5 h-3.5" />

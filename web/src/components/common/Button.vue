@@ -53,11 +53,11 @@ defineEmits<{
 const sizeClasses = computed(() => {
   switch (props.size) {
     case 'sm':
-      return 'px-2.5 py-1.5 text-xs'
+      return 'min-h-[44px] lg:min-h-[36px] px-2.5 py-1.5 text-xs'
     case 'lg':
-      return 'px-5 py-2.5 text-base'
+      return 'min-h-[44px] px-5 py-2.5 text-base'
     default:
-      return 'px-3.5 py-2 text-sm'
+      return 'min-h-[44px] lg:min-h-[36px] px-3.5 py-2 text-sm'
   }
 })
 

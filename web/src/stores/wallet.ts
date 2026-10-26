@@ -10,12 +10,8 @@ export const useWalletStore = defineStore('wallet', () => {
   const errorMessage = ref<string | null>(null)
 
   const isBudgetLow = computed<boolean>(() => {
-    if (keyStatus.value?.low_budget_warning) return true
-    const rem = keyStatus.value?.limit_remaining ?? walletInfo.value?.limit_remaining_usd
-    if (rem !== null && rem !== undefined && rem < 1.0) return true
-    const bal = keyStatus.value?.balance_usd ?? walletInfo.value?.balance_usd
-    if (bal !== null && bal !== undefined && bal < 1.0) return true
-    return false
+    const bal = walletInfo.value?.balance_usd ?? keyStatus.value?.balance_usd
+    return bal !== null && bal !== undefined && bal < 1.0
   })
 
   // Curated model roster based on BoteX benchmark recommendations

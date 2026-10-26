@@ -93,6 +93,10 @@ export const useThemeStore = defineStore('theme', () => {
       root.classList.remove('dark')
       root.classList.add('light')
     }
+    const themeMeta = document.querySelector('meta[name="theme-color"]')
+    if (themeMeta) {
+      themeMeta.setAttribute('content', meta.isDark ? '#0f172a' : '#f8fafc')
+    }
   }
 
   function setSkin(skinId: SkinId) {

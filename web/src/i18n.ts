@@ -11,8 +11,12 @@ const initialLang = ((): UiLang => {
     const saved = localStorage.getItem(STORAGE_KEY_LANG)
     if (saved === 'pl' || saved === 'en') return saved
   }
-  return 'en'
+  return 'pl'
 })()
+
+if (typeof document !== 'undefined') {
+  document.documentElement.lang = initialLang
+}
 
 const initialTheme = ((): UiTheme => {
   if (typeof localStorage !== 'undefined') {
@@ -66,6 +70,9 @@ export function toggleTheme() {
 
 export function setUiLang(lang: UiLang) {
   currentLang.value = lang
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = lang
+  }
   if (typeof localStorage !== 'undefined') {
     localStorage.setItem(STORAGE_KEY_LANG, lang)
   }
@@ -95,17 +102,21 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     'app.unreachable.banner': 'Cannot reach BoteX gateway at ',
     'app.auth.bearer': 'Bearer Auth',
     'app.auth.local': 'Local Mode',
+    'app.auth.banner': 'Authorization failed (401/403) — check your Bearer Token.',
     'app.budget.low': 'Low credit balance (< $1.00)',
 
     // Chat & Model Selector
     'chat.mode.chat': 'Chat (Read-Only)',
     'chat.mode.agent': 'Agent (Task Runner)',
+    'chat.mode.chat.short': 'Chat',
+    'chat.mode.agent.short': 'Agent',
     'chat.history': 'Conversation History',
     'chat.new_session': 'New session',
     'chat.convert_task': 'Create Task from Chat',
     'chat.empty.title': 'Workspace Console',
     'chat.empty.subtitle': 'Inspect repository files, query project memory, or draft an execution plan before running a background task.',
     'chat.input.placeholder': 'Ask a question or describe a change... (Enter to send, Shift+Enter for newline)',
+    'chat.input.placeholder.short': 'Ask a question or describe a change...',
     'chat.send': 'Send question',
     'chat.streaming': 'Reading workspace and generating response...',
     'chat.inspector.title': 'Workspace Inspector',
@@ -213,7 +224,36 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     limitCap: 'Spend Cap',
     remainingQuota: 'Remaining Quota',
     ledgerTitle: 'Token & Spend Ledger',
+    ledgerSubtitle: 'Lifetime per-model telemetry from the analytics ledger',
+    noTelemetry: 'No run telemetry yet — the ledger fills in after the first background task.',
+    colCacheSave: 'Cache hit · saved',
     recommendedRoster: 'Recommended Models by Role',
+    tabBudget: 'Budget',
+    tabStats: 'Statistics',
+    statsTitle: 'Run Statistics',
+    statsSubtitle: 'Aggregated telemetry recorded by the harness analytics ledger.',
+    periodWeek: '7 days',
+    periodMonth: '30 days',
+    periodAll: 'All time',
+    totalRuns: 'Runs',
+    successRate: 'Success Rate',
+    totalCost: 'Total Cost',
+    tokensUsed: 'Tokens',
+    cacheHit: 'Cache Hit',
+    cacheSaved: 'saved',
+    byModelTitle: 'Per-model breakdown',
+    colRuns: 'Runs',
+    colDone: 'Done %',
+    colTopFailure: 'Top Failure',
+    colTokens: 'Tokens',
+    colCost: 'Cost',
+    dailyTitle: 'Daily activity',
+    recentTitle: 'Recent runs',
+    digestTitle: 'Local AI Digest',
+    digestEmpty: 'No digest yet — enable analytics.digest_* or trigger it manually.',
+    runDigest: 'Generate digest',
+    noStats: 'No run telemetry recorded yet',
+    retryTask: 'Retry (clone params)',
 
     // Settings View
     'settings.title': 'Gateway Configuration',
@@ -248,17 +288,21 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     'app.unreachable.banner': 'Brak połączenia z serwerem BoteX pod adresem ',
     'app.auth.bearer': 'Token Bearer',
     'app.auth.local': 'Tryb lokalny',
+    'app.auth.banner': 'Autoryzacja nie powiodła się (401/403) — sprawdź token Bearer.',
     'app.budget.low': 'Niski stan konta (< $1.00)',
 
     // Chat & Model Selector
     'chat.mode.chat': 'Czat (tylko odczyt)',
     'chat.mode.agent': 'Agent (edycja kodu)',
+    'chat.mode.chat.short': 'Czat',
+    'chat.mode.agent.short': 'Agent',
     'chat.history': 'Historia rozmów',
     'chat.new_session': 'Nowa rozmowa',
     'chat.convert_task': 'Przekształć w zadanie',
     'chat.empty.title': 'Konsola robocza BoteX',
     'chat.empty.subtitle': 'Przeglądaj pliki repozytorium, przeszukuj pamięć projektu lub przygotuj plan zmian przed uruchomieniem zadania.',
     'chat.input.placeholder': 'Wyślij pytanie lub opisz zmianę w kodzie... (Enter wysyła, Shift+Enter nowa linia)',
+    'chat.input.placeholder.short': 'Wyślij pytanie lub opisz zmianę w kodzie...',
     'chat.send': 'Wyślij pytanie',
     'chat.streaming': 'Odczyt kontekstu i generowanie odpowiedzi...',
     'chat.inspector.title': 'Podgląd sesji',
@@ -366,7 +410,36 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     limitCap: 'Limit wydatków',
     remainingQuota: 'Pozostały limit',
     ledgerTitle: 'Rejestr tokenów i kosztów',
+    ledgerSubtitle: 'Sumaryczna telemetria per model z rejestru analitycznego',
+    noTelemetry: 'Brak telemetrii — rejestr zapełni się po pierwszym zadaniu w tle.',
+    colCacheSave: 'Cache · zysk',
     recommendedRoster: 'Polecane modele według roli',
+    tabBudget: 'Budżet',
+    tabStats: 'Statystyki',
+    statsTitle: 'Statystyki uruchomień',
+    statsSubtitle: 'Zagregowana telemetria z rejestru analitycznego harnessa.',
+    periodWeek: '7 dni',
+    periodMonth: '30 dni',
+    periodAll: 'Cały okres',
+    totalRuns: 'Uruchomienia',
+    successRate: 'Skuteczność',
+    totalCost: 'Koszt całkowity',
+    tokensUsed: 'Tokeny',
+    cacheHit: 'Trafienia cache',
+    cacheSaved: 'zaoszczędzone',
+    byModelTitle: 'Zestawienie per model',
+    colRuns: 'Uruch.',
+    colDone: 'OK %',
+    colTopFailure: 'Główna awaria',
+    colTokens: 'Tokeny',
+    colCost: 'Koszt',
+    dailyTitle: 'Aktywność dzienna',
+    recentTitle: 'Ostatnie uruchomienia',
+    digestTitle: 'Podsumowanie AI (lokalne)',
+    digestEmpty: 'Brak podsumowania — włącz analytics.digest_* lub wygeneruj ręcznie.',
+    runDigest: 'Generuj podsumowanie',
+    noStats: 'Brak zarejestrowanej telemetrii uruchomień',
+    retryTask: 'Ponów (klonuj parametry)',
 
     // Settings View
     'settings.title': 'Konfiguracja połączenia',
@@ -384,7 +457,9 @@ export function useI18n() {
   const lang = computed(() => currentLang.value)
   const theme = computed(() => currentTheme.value)
   function t(key: string): string {
-    return MESSAGES[currentLang.value]?.[key] || MESSAGES.en[key] || key
+    const val = MESSAGES[currentLang.value]?.[key] ?? MESSAGES.en[key]
+    if (val === undefined && import.meta.env.DEV) console.warn('[i18n] missing key:', key)
+    return val ?? key
   }
   return {
     lang,

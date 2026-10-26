@@ -11,7 +11,7 @@
         :placeholder="placeholder"
         :disabled="disabled"
         :class="[
-          'block w-full rounded-lg bg-botex-900 border border-botex-700 text-slate-100 placeholder-slate-500 text-sm px-3 py-2 transition-colors focus:outline-none focus:ring-1 focus:ring-brand-blue focus:border-brand-blue disabled:opacity-50 disabled:bg-botex-950 font-mono',
+          'block w-full min-h-[44px] lg:min-h-[36px] rounded-lg bg-botex-900 border border-botex-700 text-slate-100 placeholder-slate-500 text-base sm:text-sm px-3 py-2 transition-colors focus:outline-none focus:ring-1 focus:ring-brand-blue focus:border-brand-blue disabled:opacity-50 disabled:bg-botex-950 font-mono',
           inputClass
         ]"
         @input="$emit('update:modelValue', ($event.target as HTMLInputElement).value)"

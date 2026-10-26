@@ -2,7 +2,7 @@
   <div :class="['flex w-full mb-3', isUser ? 'justify-end' : 'justify-start']">
     <div
       :class="[
-        'max-w-[92%] sm:max-w-[82%] rounded-xl px-4 py-3 border transition-colors select-text',
+        'max-w-[92%] sm:max-w-[82%] min-w-0 rounded-xl px-4 py-3 border transition-colors select-text',
         isUser
           ? 'bg-sky-950/35 border-sky-700/50 text-slate-100 rounded-tr-sm'
           : 'bg-botex-900 border-botex-700 text-slate-100 rounded-tl-sm'
@@ -16,20 +16,20 @@
           </span>
           <span
             v-if="!isUser && message.model"
-            class="text-[11px] px-1.5 py-0.5 rounded bg-botex-950 border border-botex-800 text-slate-300 font-mono"
+            class="text-xs px-1.5 py-0.5 rounded bg-botex-950 border border-botex-800 text-slate-300 font-mono"
           >
             {{ message.model }}
           </span>
         </div>
         <div class="flex items-center space-x-2">
-          <span class="text-[11px] text-slate-400 font-mono">
+          <span class="text-xs text-slate-400 font-mono">
             {{ formattedTime }}
           </span>
           <!-- One-click Copy Button for both user prompts and model responses -->
           <button
             v-if="message.content"
             type="button"
-            class="min-h-[26px] px-2 py-0.5 rounded text-[11px] font-mono transition flex items-center space-x-1"
+            class="min-h-[44px] lg:min-h-[36px] px-2 py-0.5 rounded text-xs font-mono transition flex items-center space-x-1"
             :class="
               copied
                 ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/50'
@@ -40,15 +40,31 @@
           >
             <CheckIcon v-if="copied" class="w-3 h-3 text-emerald-400" />
             <CopyIcon v-else class="w-3 h-3" />
-            <span class="text-[10px]">{{ copied ? t('chat.copied') : t('chat.copy') }}</span>
+            <span class="text-xs">{{ copied ? t('chat.copied') : t('chat.copy') }}</span>
           </button>
         </div>
+      </div>
+
+      <!-- Reasoning Box (Thinking Process) -->
+      <div v-if="message.reasoning || (message.streaming && message.is_thinking)" class="mb-2">
+        <details :open="Boolean(message.is_thinking || (!message.content && message.reasoning))" class="bg-botex-950/90 border border-botex-800 rounded-lg p-2 text-xs">
+          <summary class="cursor-pointer text-amber-400/90 hover:text-amber-300 font-mono flex items-center justify-between select-none">
+            <span class="flex items-center space-x-1.5">
+              <BrainIcon class="w-3.5 h-3.5" :class="{'animate-pulse text-amber-400': message.is_thinking}" />
+              <span class="font-medium">{{ message.is_thinking ? 'Generowanie toku myślenia (Reasoning)...' : 'Tok rozumowania (Reasoning)' }}</span>
+            </span>
+            <span v-if="message.is_thinking" class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+          </summary>
+          <div class="mt-2 text-slate-300 font-mono text-xs whitespace-pre-wrap max-h-48 overflow-y-auto bg-botex-950 p-2 rounded border border-botex-900 leading-normal select-text">
+            {{ message.reasoning }}
+          </div>
+        </details>
       </div>
 
       <!-- Message Content -->
       <div class="text-sm leading-relaxed select-text cursor-text">
         <MarkdownViewer v-if="message.content" :content="message.content" />
-        <div v-else-if="message.streaming" class="flex items-center space-x-2 text-slate-300 py-1">
+        <div v-else-if="message.streaming && !message.reasoning" class="flex items-center space-x-2 text-slate-300 py-1">
           <span class="inline-block w-2 h-2 rounded-full bg-sky-400 animate-pulse"></span>
           <span class="text-xs font-mono">{{ t('chat.streaming') }}</span>
         </div>
@@ -67,7 +83,7 @@ import { ref, computed } from 'vue'
 import type { ChatMessage } from '../../api/types'
 import { useI18n } from '../../i18n'
 import MarkdownViewer from '../common/MarkdownViewer.vue'
-import { Copy as CopyIcon, Check as CheckIcon } from 'lucide-vue-next'
+import { Copy as CopyIcon, Check as CheckIcon, Brain as BrainIcon } from 'lucide-vue-next'
 
 const props = defineProps<{
   message: ChatMessage
