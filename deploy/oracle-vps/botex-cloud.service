@@ -1,0 +1,45 @@
+# BoteX Cloud Gateway - FastAPI + Remote MCP SSE + REST/Chat API
+# Target: Oracle Cloud Always Free VM.Standard.A1.Flex (4 OCPU Ampere A1 ARM64)
+# Install: /etc/systemd/system/botex-cloud.service
+[Unit]
+Description=BoteX FastAPI Cloud Gateway (Remote MCP SSE + REST API)
+Documentation=https://github.com/kubainter/botex-harness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botex
+Group=botex
+WorkingDirectory=/opt/botex
+
+# Secrets (OPENROUTER_API_KEY, BOTEX_ACCESS_TOKEN, ...) live in /opt/botex/.env.
+# BoteX also loads that file itself via python-dotenv; this additionally exposes
+# the variables in the process environment. '-' prefix = ignore if missing.
+EnvironmentFile=-/opt/botex/.env
+
+# Single worker is a hard invariant: task registry, idempotency cache and the
+# SSE replay buffer are per-process (see botex/server_cloud.py).
+ExecStart=/opt/botex/.venv/bin/uvicorn botex.server_cloud:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info
+
+Restart=on-failure
+RestartSec=5
+
+# CPU partitioning: OCPU 0 reserved for BoteX; OCPUs 1-3 belong to Bielik.
+CPUAffinity=0
+
+# RAM budget on a 24 GiB box (Bielik ~7.2 GiB + keepalive ballast ~6 GiB).
+MemoryMax=6G
+
+# Hardening - BoteX writes .snapshots/, .botex/, .agent_analytics.json and
+# ~/.botex (global Memory Vault) under its working directory / user home.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/botex
+ProtectHome=true
+
+SyslogIdentifier=botex-cloud
+
+[Install]
+WantedBy=multi-user.target

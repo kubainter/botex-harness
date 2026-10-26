@@ -1,0 +1,28 @@
+# BoteX Nightly Knowledge Graph Curator & Memory Vault Compactor (Bielik LLM)
+# Install: /etc/systemd/system/botex-nightly-curator.service
+[Unit]
+Description=BoteX Nightly Knowledge Graph Curator (Bielik Memory Audit)
+Documentation=https://github.com/kubainter/botex-harness
+After=network.target bielik.service botex-cloud.service
+
+[Service]
+Type=oneshot
+User=botex
+Group=botex
+WorkingDirectory=/opt/botex
+
+EnvironmentFile=-/opt/botex/.env
+ExecStart=/usr/local/sbin/botex-curator.sh
+
+# Run at low priority so it never spikes VPS load
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/botex /var/log/botex
+ProtectHome=true
+
+SyslogIdentifier=botex-curator
