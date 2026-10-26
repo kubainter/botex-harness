@@ -5,10 +5,34 @@ import { wsManager } from '../api/ws'
 import type { ChatMessage, ChatChunk, CatalogModel, ChatSessionSummary } from '../api/types'
 
 function generateId(): string {
-  return Math.random().toString(36).substring(2, 10) + Date.now().toString(36)
+  const c = globalThis.crypto
+  if (typeof c?.randomUUID === 'function') return c.randomUUID()
+  const buf = new Uint8Array(16)
+  c.getRandomValues(buf)
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 const FALLBACK_CATALOG_MODELS: CatalogModel[] = [
+  {
+    id: 'bielik-direct:latest',
+    name: 'Bielik Direct (Lokalny 11B)',
+    provider: 'ollama',
+    is_free: true,
+    context_length: 32768,
+    pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
+    supports_tools: true,
+    is_zdr_compliant: true
+  },
+  {
+    id: 'SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M',
+    name: 'Bielik 11B v3.0 Instruct (Ollama)',
+    provider: 'ollama',
+    is_free: true,
+    context_length: 32768,
+    pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
+    supports_tools: true,
+    is_zdr_compliant: true
+  },
   {
     id: 'liquid/lfm-2.5-2.6b:free',
     name: 'Liquid LFM 2.5:free',
@@ -103,8 +127,14 @@ const FALLBACK_CATALOG_MODELS: CatalogModel[] = [
 
 function inferProviderFromSlug(slug: string): string {
   const s = slug.toLowerCase()
+  if (s.includes('bielik') || s.startsWith('ollama:') || s.includes('speakleash')) {
+    return 'ollama'
+  }
   if (s.includes(':free') || s.includes('openrouter/free')) {
     return 'openrouter-free'
+  }
+  if (s.startsWith('nvidia/') || s.startsWith('meta/llama-3.3-70b-instruct')) {
+    return 'nvidia'
   }
   return 'openrouter'
 }
@@ -113,6 +143,7 @@ export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string>(localStorage.getItem('botex_chat_session') || generateId())
   const messages = ref<ChatMessage[]>([])
   const isStreaming = ref<boolean>(false)
+  let activeAbortController: AbortController | null = null
   const activeTransport = ref<'ws' | 'sse' | null>(null)
   const activeMode = ref<'chat' | 'agent'>('chat')
   const selectedModel = ref<string>(
@@ -166,8 +197,14 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const list = await api.getModels(undefined, forceRefresh)
       if (Array.isArray(list) && list.length > 0) {
-        catalogModels.value = list
-        const match = list.find((m) => m.id === selectedModel.value)
+        const hasOllama = list.some((m) => m.provider === 'ollama')
+        if (!hasOllama) {
+          const fallbackOllama = FALLBACK_CATALOG_MODELS.filter((m) => m.provider === 'ollama')
+          catalogModels.value = [...fallbackOllama, ...list]
+        } else {
+          catalogModels.value = list
+        }
+        const match = catalogModels.value.find((m) => m.id === selectedModel.value)
         if (match && !localStorage.getItem('botex_selected_provider')) {
           selectedProvider.value = match.provider
         }
@@ -263,6 +300,7 @@ export const useChatStore = defineStore('chat', () => {
     const last = messages.value[messages.value.length - 1]
     if (last && last.role === 'assistant') {
       last.streaming = false
+      last.is_thinking = false
     }
     fetchSessions()
   }
@@ -273,7 +311,17 @@ export const useChatStore = defineStore('chat', () => {
 
     if (chunk.type === 'turn_start') {
       return
+    } else if (chunk.type === 'reasoning_chunk') {
+      const text = chunk.chunk ?? chunk.delta ?? chunk.content ?? ''
+      if (text && isAssistant) {
+        last.reasoning = (last.reasoning || '') + text
+        last.is_thinking = true
+      }
+      return
     } else if (chunk.type === 'content_chunk' || chunk.type === 'chunk') {
+      if (isAssistant) {
+        last.is_thinking = false
+      }
       const text = chunk.delta ?? chunk.content ?? chunk.message ?? ''
       if (text) {
         appendChunkToLastAssistant(text)
@@ -309,6 +357,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function runSseFallback(promptText: string) {
     activeTransport.value = 'sse'
+    activeAbortController = new AbortController()
     try {
       await api.streamChatSSE(
         {
@@ -318,7 +367,8 @@ export const useChatStore = defineStore('chat', () => {
           provider: selectedProvider.value,
           workspace_dir: workspaceDir.value
         },
-        handleChunk
+        handleChunk,
+        activeAbortController.signal
       )
     } catch (err: any) {
       errorMessage.value = err?.message || 'Failed to stream response'
@@ -354,6 +404,7 @@ export const useChatStore = defineStore('chat', () => {
     const wsStatus = wsManager.getStatus()
     if (wsStatus === 'CONNECTED') {
       activeTransport.value = 'ws'
+      activeAbortController = new AbortController()
       const sent = wsManager.sendChatMessage(
         promptText,
         sessionId.value,
@@ -365,6 +416,36 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     await runSseFallback(promptText)
+  }
+
+  async function abortGeneration() {
+    if (!isStreaming.value) return
+    // 1. Abort SSE fetch if active
+    if (activeAbortController) {
+      try {
+        activeAbortController.abort()
+      } catch {}
+      activeAbortController = null
+    }
+
+    // 2. Send WS abort message if using WebSocket
+    if (activeTransport.value === 'ws') {
+      wsManager.send({
+        type: 'abort',
+        session_id: sessionId.value,
+        model: selectedModel.value,
+        provider: selectedProvider.value
+      })
+    }
+
+    // 3. Notify backend /api/chat/abort to unload VRAM immediately (e.g. Ollama)
+    try {
+      await api.abortChat(sessionId.value, selectedModel.value, selectedProvider.value)
+    } catch {}
+
+    // 4. Update UI message
+    appendChunkToLastAssistant('\n\n*[Zatrzymano przez użytkownika]*')
+    finishStreaming()
   }
 
   async function saveCurrentToMemory(
@@ -406,10 +487,13 @@ export const useChatStore = defineStore('chat', () => {
 
   async function init() {
     fetchCatalogModels()
-    fetchSessions()
+    await fetchSessions()
 
-    // Restore existing session if stored in localStorage
-    if (sessionId.value && messages.value.length === 0) {
+    // Restore existing session if stored in localStorage — skip the fetch
+    // entirely when the backend no longer knows the id (avoids a 404 hit on
+    // every launch after the session store was reset).
+    const knownOnServer = sessions.value.some((s) => s.session_id === sessionId.value)
+    if (sessionId.value && messages.value.length === 0 && knownOnServer) {
       try {
         const detail = await api.getChatSession(sessionId.value, workspaceDir.value)
         if (detail && Array.isArray(detail.messages) && detail.messages.length > 0) {
@@ -462,6 +546,7 @@ export const useChatStore = defineStore('chat', () => {
     saveCurrentToMemory,
     newSession,
     sendMessage,
+    abortGeneration,
     convertChatToTask,
     finishStreaming,
     init

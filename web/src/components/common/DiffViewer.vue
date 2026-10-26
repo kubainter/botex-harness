@@ -6,12 +6,12 @@
         <span class="w-2.5 h-2.5 rounded-full bg-rose-500/80"></span>
         <span class="w-2.5 h-2.5 rounded-full bg-amber-500/80"></span>
         <span class="w-2.5 h-2.5 rounded-full bg-emerald-500/80"></span>
-        <span class="text-[11px] font-semibold text-slate-300 ml-1.5">{{ title || 'Unified Diff Preview' }}</span>
+        <span class="text-xs font-semibold text-slate-300 ml-1.5">{{ title || 'Unified Diff Preview' }}</span>
       </div>
       <div class="flex items-center space-x-2">
         <button
           type="button"
-          class="px-2 py-0.5 rounded text-[11px] bg-botex-800 hover:bg-botex-700 text-slate-300 transition flex items-center space-x-1"
+          class="min-h-[44px] lg:min-h-[36px] px-2 py-0.5 rounded text-xs bg-botex-800 hover:bg-botex-700 text-slate-300 transition flex items-center space-x-1"
           @click="copyContent"
         >
           <CopyIcon class="w-3 h-3" />
@@ -33,7 +33,7 @@
           'text-slate-300 hover:bg-botex-900/40'
         ]"
       >
-        <span class="w-6 shrink-0 text-right pr-3 select-none text-slate-600 text-[10px]">
+        <span class="w-6 shrink-0 text-right pr-3 select-none text-slate-600 text-xs">
           {{ idx + 1 }}
         </span>
         <span class="w-4 shrink-0 select-none font-bold text-center">

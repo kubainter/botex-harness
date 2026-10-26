@@ -4,7 +4,8 @@
 BoteX Chat Mode
 ===============
 Conversational execution loop with streaming chunk generation, multi-turn history
-management, and strictly read-only tool access (zero file mutation, zero command execution).
+management, read-only workspace inspection (zero workspace file mutation, zero command execution),
+and governed Memory Vault / Skill Vault administration.
 """
 
 from __future__ import annotations
@@ -17,10 +18,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 try:
     from .config import (
+        get_chat_sessions_dir,
         load_config,
         resolve_model,
         resolve_provider,
@@ -33,6 +36,8 @@ try:
         read_file_lines,
     )
     from .memory import (
+        delete_memory,
+        patch_memory_section,
         read_memory,
         save_memory,
         search_memory,
@@ -51,8 +56,10 @@ try:
         sanitize_identifier,
         sever_taint_numeric,
     )
+    from .skills import install_skill_async, list_skills
 except (ImportError, ValueError):
     from config import (
+        get_chat_sessions_dir,
         load_config,
         resolve_model,
         resolve_provider,
@@ -65,6 +72,8 @@ except (ImportError, ValueError):
         read_file_lines,
     )
     from memory import (
+        delete_memory,
+        patch_memory_section,
         read_memory,
         save_memory,
         search_memory,
@@ -83,6 +92,8 @@ except (ImportError, ValueError):
         sanitize_identifier,
         sever_taint_numeric,
     )
+
+    from skills import install_skill_async, list_skills
 
 __all__ = [
     "ChatMessage",
@@ -104,22 +115,30 @@ _VALID_ROLES_MAP: dict[str, str] = {
 }
 
 DEFAULT_CHAT_SYSTEM_PROMPT = (
-    "You are BoteX — an intelligent, versatile AI assistant in Chat Mode.\n"
-    "In Chat Mode, you can converse freely, answer general questions, explore topics, and assist with software engineering.\n"
-    "You have access to read-only tools to retrieve data:\n"
+    "You are BoteX — an intelligent, versatile AI assistant and Vault Administrator in Chat Mode.\n"
+    "In Chat Mode, you converse freely, answer general questions, explore topics, assist with software engineering, "
+    "and curate the BoteX Memory Vault and Server-Side Skill Vault.\n"
+    "You are strictly helpful, analytical, witty, and direct. You never judge, moralize, or deliver unsolicited ethics lectures.\n"
+    "LANGUAGE INVARIANT: Strictly detect and match the user's primary language. If the user communicates in Polish, you MUST always reply in fluent, natural, grammatically correct Polish.\n"
+    "You have access to workspace inspection and Vault administration tools:\n"
     "- fetch_url(url): Fetch live public web pages, documentation, or public REST APIs (e.g. currency rates, public data).\n"
     "- get_file_outline(path): Inspect file classes, methods, and functions with line numbers.\n"
     "- read_file_lines(path, start, end): Read specific line slices of files.\n"
     "- read_file(path): Read entire small files (<150 lines).\n"
     "- list_dir(path): List files and directories (respects .gitignore).\n"
     "- search_memory(query, tag, kind, scope): Search local workspace or global shared memory.\n"
-    "- read_memory(memory_id, scope): Retrieve stored decisions, handoffs, or architectural notes.\n\n"
-    "Rules in Chat Mode:\n"
-    "1. Answer naturally and helpfully on any topic (general knowledge, coding, analysis, live web data).\n"
-    "2. If external live information is needed (e.g. exchange rates, public API data), use fetch_url.\n"
-    "3. You CANNOT mutate files, apply patches, or execute terminal commands directly in Chat Mode.\n"
-    "4. If the user asks you to implement code changes, run tests, or execute terminal commands, explain the changes "
-    "and advise switching to Agent Mode."
+    "- read_memory(memory_id, scope): Retrieve stored decisions, handoffs, or architectural notes.\n"
+    "- save_memory(title, content, kind, tags, scope): Save a structured note, decision, or lesson into the Memory Vault when requested.\n"
+    "- patch_memory_section(memory_id, section, new_content, scope, append): Surgically update or append a Markdown section (e.g. 'Powiązania' or 'Compiled Truth') in an existing memory note.\n"
+    "- delete_memory(memory_id, scope): Delete an obsolete or duplicate note from the Memory Vault when explicitly requested.\n"
+    "- find_graph_health(scope): Audit Memory Vault graph topology (broken links, orphans).\n"
+    "- list_skills(): Inspect installed server-side engineering skills in the BoteX Skill Vault.\n"
+    "- install_skill(name, source_url, content, version, origin_repo, taxonomy): Install or update a skill in the BoteX Skill Vault when requested by the operator.\n\n"
+    "Rules & Local Model Guidelines (Bielik / Vault Admin Protocol):\n"
+    "1. ZERO TOOL SIMULATION (No Fast-Forwarding): Never simulate, narrate, or print raw JSON tool calls in your text response. Always invoke the actual tool via function calling and wait for its result.\n"
+    "2. SINGLE-TARGET CURATION: When curating the Memory Vault (fixing links, updating sections, or linking orphans), operate on ONE memory note at a time using `patch_memory_section` or `save_memory` — never attempt to batch-edit dozens of files in a single turn.\n"
+    "3. WIKILINK & GRAPH HYGIENE: Only create `[[memory_id]]` wikilinks to real, existing memory IDs (without `.md` extension). Never save ephemeral telemetry or raw logs into the Memory Vault.\n"
+    "4. WORKSPACE CODE SAFETY: You CANNOT mutate workspace source code files or execute terminal commands in Chat Mode. For multi-file code edits or test runs, advise using Agent Mode."
 )
 
 # Tool Declarations for OpenAI / OpenRouter Function Calling in Chat Mode
@@ -248,6 +267,199 @@ READ_ONLY_CHAT_TOOLS = [
                     },
                 },
                 "required": ["memory_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_scratchpad",
+            "description": "Reads the full offloaded terminal or execution log from .botex/scratchpad/ by memory_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The scratchpad log ID (e.g. 'mem_exec_a1b2c3d4').",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_backlinks",
+            "description": "Finds all memories that link TO the given memory_id via [[wikilinks]].",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "Memory ID to retrieve backlinks for.",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Scope ('local', 'global', or 'all').",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_graph_health",
+            "description": "Audits Memory Vault knowledge graph integrity: broken links, orphans, cycles.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "description": "Scope ('local', 'global', or 'all').",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": (
+                "Saves a structured note, architectural decision, lesson, or handoff into the Memory Vault "
+                "when the user asks to save or remember something."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short descriptive title."},
+                    "content": {
+                        "type": "string",
+                        "description": "Markdown content (include [[wikilinks]] when relevant).",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Category ('context', 'decision', 'lesson', 'handoff').",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tags.",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Scope ('local' or 'global'). Default is 'local'.",
+                    },
+                },
+                "required": ["title", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_memory_section",
+            "description": (
+                "Surgically replaces or appends content to a specific Markdown section (e.g. 'Powiązania' or 'Compiled Truth') "
+                "of an existing memory note without needing unified diffs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "Target memory ID (without .md).",
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "Markdown section heading name (e.g. 'Powiązania', 'Compiled Truth').",
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "Markdown text to write or append into the section (e.g. '- Powiązano z [[other_id]]').",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Scope ('local' or 'global'). Default is 'local'.",
+                    },
+                    "append": {
+                        "type": "boolean",
+                        "description": "If true, appends to the section instead of replacing it.",
+                    },
+                },
+                "required": ["memory_id", "section", "new_content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_memory",
+            "description": "Deletes a memory note by ID from the local or global Memory Vault when requested by the user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string", "description": "Memory ID to delete."},
+                    "scope": {
+                        "type": "string",
+                        "description": "Scope ('local', 'global', or 'all'). Default is 'local'.",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": "Lists all installed server-side skills in the BoteX Skill Vault with version and origin repo.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "install_skill",
+            "description": (
+                "Installs or updates a server-side skill in the BoteX Skill Vault from a repository/URL "
+                "or Markdown content when requested by the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill identifier (e.g. 'code-review-security').",
+                    },
+                    "source_url": {
+                        "type": "string",
+                        "description": "Public GitHub repo/blob URL or raw SKILL.md URL to install from.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Optional raw SKILL.md markdown content if not fetching from source_url.",
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": "Skill version string (e.g. '1.0.0').",
+                    },
+                    "origin_repo": {
+                        "type": "string",
+                        "description": "Source repository URL or identifier.",
+                    },
+                    "taxonomy": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task taxonomy tags ('bugfix', 'refactor', 'test', 'infra', 'analysis', 'feature', 'general').",
+                    },
+                },
             },
         },
     },
@@ -414,17 +626,15 @@ class ChatSession:
         }
 
     def save_to_disk(self) -> None:
-        """Persist session JSON to <workspace_dir>/.botex/chat_sessions/."""
+        """Persist session JSON to configured chat sessions directory."""
         if not self.workspace_dir or not self.messages:
             return
         try:
             safe_id = sanitize_identifier(self.session_id)
             if not safe_id:
                 return
-            ws = resolve_workspace(self.workspace_dir)
-            sessions_dir = os.path.join(ws, ".botex", "chat_sessions")
-            os.makedirs(sessions_dir, exist_ok=True)
-            file_path = os.path.join(sessions_dir, f"{safe_id}.json")
+            sessions_dir = get_chat_sessions_dir(self.workspace_dir)
+            file_path = sessions_dir / f"{safe_id}.json"
             data = self.to_dict()
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -448,9 +658,14 @@ class ChatManager:
         if not safe_id:
             return None
         ws = resolve_workspace(workspace_dir)
-        file_path = os.path.join(ws, ".botex", "chat_sessions", f"{safe_id}.json")
-        if not os.path.isfile(file_path):
-            return None
+        sessions_dir = get_chat_sessions_dir(ws)
+        file_path = sessions_dir / f"{safe_id}.json"
+        if not file_path.is_file():
+            legacy_path = Path(ws) / ".botex" / "chat_sessions" / f"{safe_id}.json"
+            if legacy_path.is_file():
+                file_path = legacy_path
+            else:
+                return None
         try:
             with open(file_path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -547,10 +762,18 @@ class ChatManager:
         safe_id = sanitize_identifier(session_id)
         if safe_id:
             ws = resolve_workspace(workspace_dir)
-            file_path = os.path.join(ws, ".botex", "chat_sessions", f"{safe_id}.json")
-            if os.path.isfile(file_path):
+            sessions_dir = get_chat_sessions_dir(ws)
+            file_path = sessions_dir / f"{safe_id}.json"
+            if file_path.is_file():
                 try:
-                    os.remove(file_path)
+                    file_path.unlink()
+                    removed = True
+                except Exception:
+                    pass
+            legacy_path = Path(ws) / ".botex" / "chat_sessions" / f"{safe_id}.json"
+            if legacy_path.is_file():
+                try:
+                    legacy_path.unlink()
                     removed = True
                 except Exception:
                     pass
@@ -559,18 +782,22 @@ class ChatManager:
     def list_sessions(self, workspace_dir: str = "") -> List[Dict[str, Any]]:
         ws = resolve_workspace(workspace_dir) if workspace_dir else ""
         if ws:
-            sessions_dir = os.path.join(ws, ".botex", "chat_sessions")
-            if os.path.isdir(sessions_dir):
-                try:
-                    for fname in os.listdir(sessions_dir):
-                        if fname.endswith(".json"):
-                            sid = fname[:-5]
+            sessions_dir = get_chat_sessions_dir(ws)
+            dirs_to_scan = [sessions_dir]
+            legacy_dir = Path(ws) / ".botex" / "chat_sessions"
+            if legacy_dir.is_dir() and legacy_dir.resolve() != sessions_dir.resolve():
+                dirs_to_scan.append(legacy_dir)
+            for sdir in dirs_to_scan:
+                if sdir.is_dir():
+                    try:
+                        for entry in sdir.glob("*.json"):
+                            sid = entry.stem
                             if sid not in self._sessions:
                                 loaded = self._load_session_from_disk(sid, ws)
                                 if loaded:
                                     self._sessions[loaded.session_id] = loaded
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
         results = []
         for s in self._sessions.values():
@@ -725,6 +952,85 @@ async def execute_chat_tool(name: str, arguments: dict[str, Any], workspace_dir:
                 scope=str(arguments.get("scope", "local")),
             )
             return mask_secrets(json.dumps(res, indent=2))
+        elif name == "read_scratchpad":
+            from botex.context_guard import read_scratchpad as _read_pad
+
+            res = _read_pad(
+                memory_id=str(arguments.get("memory_id", "")),
+                cwd=workspace_dir,
+            )
+            return mask_secrets(json.dumps(res, indent=2))
+        elif name == "get_backlinks":
+            from botex.memory import get_backlinks as _get_bl
+
+            res = _get_bl(
+                workspace_dir=workspace_dir,
+                memory_id=str(arguments.get("memory_id", "")),
+                scope=str(arguments.get("scope", "local")),
+            )
+            return mask_secrets(json.dumps(res, indent=2))
+        elif name == "find_graph_health":
+            from botex.memory import find_graph_health as _fgh
+
+            res = _fgh(
+                workspace_dir=workspace_dir,
+                scope=str(arguments.get("scope", "local")),
+            )
+            return mask_secrets(json.dumps(res, indent=2))
+        elif name == "save_memory":
+            raw_tags = arguments.get("tags")
+            tags_list = (
+                [str(t) for t in raw_tags if str(t).strip()] if isinstance(raw_tags, list) else None
+            )
+            res = save_memory(
+                workspace_dir=workspace_dir,
+                title=str(arguments.get("title", "Chat Note")),
+                content=str(arguments.get("content", "")),
+                kind=str(arguments.get("kind", "context")),
+                tags=tags_list,
+                scope=str(arguments.get("scope", "local")),
+                origin="chat_tool",
+            )
+            return mask_secrets(json.dumps(res, indent=2))
+        elif name == "patch_memory_section":
+            res = patch_memory_section(
+                workspace_dir=workspace_dir,
+                memory_id=str(arguments.get("memory_id", "")),
+                section=str(arguments.get("section", "Compiled Truth")),
+                new_content=str(arguments.get("new_content", "")),
+                scope=str(arguments.get("scope", "local")),
+                append=bool(arguments.get("append", False)),
+            )
+            return mask_secrets(json.dumps(res, indent=2))
+        elif name == "delete_memory":
+            res = delete_memory(
+                workspace_dir=workspace_dir,
+                memory_id=str(arguments.get("memory_id", "")),
+                scope=str(arguments.get("scope", "local")),
+            )
+            return mask_secrets(json.dumps(res, indent=2))
+        elif name == "list_skills":
+            res = list_skills()
+            return mask_secrets(json.dumps(res, indent=2))
+        elif name == "install_skill":
+            chat_cfg = load_config().get("chat", {})
+            if not chat_cfg.get("allow_skill_admin", True):
+                return "Error: Skill installation via Chat Mode is disabled by policy ('chat.allow_skill_admin' is false)."
+            raw_tax = arguments.get("taxonomy")
+            tax_list = (
+                [str(t) for t in raw_tax if str(t).strip()] if isinstance(raw_tax, list) else None
+            )
+            src_url = str(arguments.get("source_url", "")).strip()
+            orig_repo = str(arguments.get("origin_repo", "")).strip() or (src_url or "chat_admin")
+            res = await install_skill_async(
+                name=str(arguments.get("name", "")),
+                content=str(arguments.get("content", "")),
+                source_url=src_url,
+                origin_repo=orig_repo,
+                version=str(arguments.get("version", "")),
+                taxonomy=tax_list,
+            )
+            return mask_secrets(json.dumps(res, indent=2))
         elif name == "fetch_url":
             url = str(arguments.get("url", "")).strip()
             net_cfg = load_config().get("net", {})
@@ -861,6 +1167,7 @@ async def stream_chat_turn(
         request_messages.extend(session.get_history())
 
         accumulated_text = ""
+        accumulated_reasoning = ""
         tool_calls_map: dict[int, dict[str, Any]] = {}
 
         # Force final synthesis without further tool calls on the last iteration
@@ -932,6 +1239,24 @@ async def stream_chat_turn(
                     )
                     if not delta:
                         continue
+
+                    # Reasoning delta (NVIDIA NIM thinking, DeepSeek-R1, QwQ, etc.)
+                    reasoning_delta = (
+                        getattr(delta, "reasoning_content", None)
+                        or getattr(delta, "reasoning", None)
+                        or (
+                            delta.get("reasoning_content") or delta.get("reasoning")
+                            if isinstance(delta, dict)
+                            else None
+                        )
+                    )
+                    if reasoning_delta:
+                        accumulated_reasoning += str(reasoning_delta)
+                        yield {
+                            "type": "reasoning_chunk",
+                            "delta": str(reasoning_delta),
+                            "accumulated": accumulated_reasoning,
+                        }
 
                     # Text delta
                     text_delta = getattr(delta, "content", None) or (
@@ -1101,6 +1426,7 @@ async def stream_chat_turn(
                 "type": "done",
                 "session_id": session.session_id,
                 "content": final_content,
+                "reasoning": accumulated_reasoning or None,
                 "iterations": iteration,
             }
             return

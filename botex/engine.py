@@ -21,7 +21,13 @@ from dotenv import load_dotenv
 from openai import APITimeoutError, AsyncOpenAI
 
 try:
-    from .analytics import calculate_cost_usd, check_budget_limit, log_run, print_run_summary
+    from .analytics import (
+        calculate_cost_usd,
+        check_budget_limit,
+        is_free_model,
+        log_run,
+        print_run_summary,
+    )
     from .approval import ApprovalPolicy, TaskAbortedError, default_approval_manager
     from .capabilities import (
         CAP_EXEC,
@@ -63,15 +69,22 @@ try:
         read_file_lines,
     )
     from .memory import save_memory
+    from .meta_harness import (
+        classify_task_taxonomy,
+        extract_meta_lesson,
+        get_relevant_meta_lessons,
+    )
     from .net_tools import read_url, resolve_net_scope
     from .patch_engine import apply_patch, snapshot_manager, validate_syntax
     from .pricing import check_model_price, check_model_tools
     from .providers import (
         OPENROUTER_META_ROUTERS,
+        ProviderRegistry,
         build_async_client,
         fetch_openrouter_generations_async,
         is_reasoning_capable_slug,
         normalize_response,
+        normalize_streaming_chunks,
         resolve_api_key,
         sanitize_provider_error,
     )
@@ -83,8 +96,15 @@ try:
         sever_taint_numeric,
         zdr_enforced,
     )
+    from .skills import format_skills_prompt_block, triage_skills_for_task
 except (ImportError, ValueError):
-    from analytics import calculate_cost_usd, check_budget_limit, log_run, print_run_summary
+    from analytics import (
+        calculate_cost_usd,
+        check_budget_limit,
+        is_free_model,
+        log_run,
+        print_run_summary,
+    )
     from approval import ApprovalPolicy, TaskAbortedError, default_approval_manager
     from capabilities import (
         CAP_EXEC,
@@ -126,6 +146,11 @@ except (ImportError, ValueError):
         read_file_lines,
     )
     from memory import save_memory
+    from meta_harness import (
+        classify_task_taxonomy,
+        extract_meta_lesson,
+        get_relevant_meta_lessons,
+    )
     from net_tools import read_url, resolve_net_scope
     from patch_engine import apply_patch, snapshot_manager, validate_syntax
     from pricing import check_model_price, check_model_tools
@@ -135,6 +160,7 @@ except (ImportError, ValueError):
         fetch_openrouter_generations_async,
         is_reasoning_capable_slug,
         normalize_response,
+        normalize_streaming_chunks,
         resolve_api_key,
         sanitize_provider_error,
     )
@@ -146,6 +172,8 @@ except (ImportError, ValueError):
         sever_taint_numeric,
         zdr_enforced,
     )
+
+    from skills import format_skills_prompt_block, triage_skills_for_task
 
 # Dotenv chain: process CWD -> configured env_file -> project root .env
 load_dotenv()
@@ -272,6 +300,28 @@ BOTEX_TOOLS = [
                     }
                 },
                 "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_scratchpad",
+            "description": (
+                "Reads the full offloaded terminal or execution log from the "
+                "scratchpad (.botex/scratchpad/<memory_id>.log). Call this when a previous command "
+                "truncated its output and provided a scratchpad ID."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The scratchpad log ID (e.g. 'mem_exec_a1b2c3d4').",
+                    }
+                },
+                "required": ["memory_id"],
                 "additionalProperties": False,
             },
         },
@@ -442,12 +492,19 @@ _UNSUPPORTED_HINT_RE = re.compile(
 )
 
 # Delivery-gate rationalization heuristics: detecting unevidenced claims of completion/changes
+# (English + Polish completion claims + narrated tool-call JSON in prose)
 _RATIONALIZATION_RE = re.compile(
-    r"\b(have (modified|updated|created|written|fixed|implemented|added|changed|applied|edited)|"
-    r"(changes|modifications|updates|fixes) (have been|were|are) (applied|made|implemented|saved)|"
-    r"file (has been|was|is) (updated|modified|created|written|patched)|"
+    r"(\b(have (modified|updated|created|written|fixed|implemented|added|changed|applied|edited)|"
+    r"(changes|modifications|updates|fixes|patch) (have been|were|was|are|is) (applied|made|implemented|saved|successful)|"
+    r"(file|wikilink|note|code|content) (has been|was|is) (updated|modified|created|written|patched|fixed)|"
+    r"has been (updated|modified|patched|applied|fixed) from\b|"
+    r"simulate (the )?tool execution|"
     r"already (working|fixed|implemented|set up|configured|up to date)|"
-    r"(completed|finished|implemented) the (task|changes|feature|fix|request))\b",
+    r"(completed|finished|implemented) the (task|changes|feature|fix|request)|"
+    r"(zaktualizowano|zmodyfikowano|naprawiono|poprawiono|zapisano|utworzono|wdrożono)\s+(plik|pliki|notatkę|notatki|kod|zmiany|wikilink)|"
+    r"(wprowadzono|zastosowano)\s+(zmiany|poprawki|łatkę)|"
+    r"pliki?\s+został[ya]?\s+(zaktualizowan|zmodyfikowan|naprawion|poprawion))\b|"
+    r'"name"\s*:\s*"(apply_patch|create_file|write_file|delete_file|move_file)")',
     re.IGNORECASE,
 )
 
@@ -870,10 +927,30 @@ async def run_botex_task(
     last_result["attempts"] = attempts
     last_result.setdefault("duration_s", 0.0)
     last_result.setdefault("cost_usd", 0.0)
+    last_result.setdefault("applied_skills", [])
     if len(attempts) > 1:
         # Deprecated alias for the immediately-preceding failed candidate;
         # attempts[] carries the full chain.
         last_result["fallback_from"] = attempts[-2]["model"]
+        if last_result.get("ok"):
+            try:
+                tax = classify_task_taxonomy(task, files)
+                fail_m = str(attempts[-2].get("model") or "")
+                succ_m = str(attempts[-1].get("model") or "")
+                fail_reason = str(
+                    attempts[-2].get("status") or attempts[-2].get("failure_kind") or "model_failed"
+                )
+                extract_meta_lesson(
+                    task_id=str(attempts[-1].get("task_id") or ""),
+                    taxonomy=tax,
+                    error_summary=f"Model {fail_m} failed with {fail_reason}",
+                    recovery_strategy=f"Switched to fallback model {succ_m}",
+                    workspace_dir=workspace_dir,
+                    failed_model=fail_m,
+                    successful_model=succ_m,
+                )
+            except Exception:
+                pass
     return last_result
 
 
@@ -900,6 +977,15 @@ async def _run_botex_task_once(*args, task_id: Optional[str] = None, **kwargs):
         "failure_kind",
         STATUS_FAILURE_KIND.get(result.get("status"), "provider_error"),
     )
+    if "applied_skills" not in result:
+        try:
+            task_str = str(args[0] if args else kwargs.get("task", ""))
+            files_arg = args[1] if len(args) > 1 else kwargs.get("files")
+            tax = classify_task_taxonomy(task_str, files_arg)
+            matched = triage_skills_for_task(task_str, files_arg, taxonomy=tax, max_skills=2)
+            result["applied_skills"] = [str(s["name"]) for s in matched if s.get("name")]
+        except Exception:
+            result["applied_skills"] = []
     return result
 
 
@@ -926,7 +1012,10 @@ def _save_task_receipt(
     """Save a zero-token deterministic handoff receipt into the Memory Vault on task completion."""
     try:
         clean_prompt = prompt.strip().replace("\r\n", "\n")
-        first_line = clean_prompt.split("\n")[0].strip()[:80] or "Task Completion"
+        safe_quoted_prompt = clean_prompt[:2000].replace("[[", "[\\[")
+        first_line = (
+            clean_prompt.split("\n")[0].strip()[:80].replace("[[", "[\\[") or "Task Completion"
+        )
         title = f"Task {task_id[:8]} Receipt: {first_line}"
         files_md = (
             "\n".join(f"- `{f}`" for f in sorted(files_touched))
@@ -958,7 +1047,7 @@ def _save_task_receipt(
             f"### Modified Files\n"
             f"{files_md}\n\n"
             f"### Original Prompt\n"
-            f"```text\n{clean_prompt[:2000]}\n```\n"
+            f"```text\n{safe_quoted_prompt}\n```\n"
         )
 
         return save_memory(
@@ -1307,9 +1396,11 @@ async def _run_botex_task_once_impl(
     if tools_msg:
         sys.stderr.write(tools_msg + "\n")
 
-    # 1. Budget check
+    # 1. Budget check — free/local zero-cost models are exempt: a run that
+    # cannot accrue cost must never be blocked by past spend.
+    model_is_free = is_free_model(model, provider_cfg, provider_name)
     is_exceeded, current_spend = check_budget_limit(budget_limit_usd)
-    if is_exceeded:
+    if is_exceeded and not model_is_free:
         return {
             "ok": False,
             "task_id": task_id,
@@ -1366,6 +1457,12 @@ async def _run_botex_task_once_impl(
         api_key, provider_name, provider_cfg, load_config().get("secrets", {})
     )
     if not api_key:
+        fallback = provider_cfg.get("api_key_fallback") or (
+            "ollama" if provider_cfg.get("local") else ""
+        )
+        if fallback:
+            api_key = fallback
+    if not api_key:
         return {
             "ok": False,
             "task_id": task_id,
@@ -1391,7 +1488,8 @@ async def _run_botex_task_once_impl(
     # provider config is never mutated. Only an explicit "deny" is flipped —
     # providers that never declared a data policy (e.g. NVIDIA) must not
     # grow OpenRouter-specific fields on their requests.
-    provider_extra_body = provider_cfg.get("extra_body") or {}
+    prov_adapter = ProviderRegistry.get(provider_name, provider_cfg)
+    provider_extra_body = prov_adapter.get_extra_body(allow_non_zdr=bool(allow_non_zdr))
     zdr_on = zdr_enforced(provider_cfg, bool(allow_non_zdr))
     if not zdr_on:
         provider_extra_body = copy.deepcopy(provider_extra_body)
@@ -1511,6 +1609,14 @@ async def _run_botex_task_once_impl(
             "DELIVERABLE: a written analysis — report the actual findings "
             "in the final STATUS: DONE response.\n"
         )
+    tax = classify_task_taxonomy(task, files)
+    meta_lessons = get_relevant_meta_lessons(tax, workspace_dir=root_path, max_lessons=2)
+    if meta_lessons:
+        lesson_bullets = "\n".join(f"- {ml}" for ml in meta_lessons)
+        initial_user_prompt += f"HARNESS LESSONS ({tax.upper()}):\n{lesson_bullets}\n"
+    matched_skills = triage_skills_for_task(task, files, taxonomy=tax, max_skills=2)
+    applied_skills = [str(s["name"]) for s in matched_skills if s.get("name")]
+    skills_block = format_skills_prompt_block(matched_skills)
     if CAP_NET in caps:
         if effective_net_policy == "public" and not (net_hosts or net_urls):
             access_note = (
@@ -1535,6 +1641,8 @@ async def _run_botex_task_once_impl(
     )
     if recipe_content:
         system_text += f"\n\nACTIVE RECIPE / PERSONA ({recipe}):\n{recipe_content}\n"
+    if skills_block:
+        system_text += f"\n\n{skills_block}\n"
     messages = [
         {
             "role": "system",
@@ -1564,6 +1672,8 @@ async def _run_botex_task_once_impl(
     failed_mutations_streak = 0
     last_full_signature = ""
     no_tool_strikes = 0
+    syntax_rejections = 0
+    last_syntax_error = ""
     # Invocation-level failures (malformed JSON args, non-object args,
     # unknown tool, dispatch crash) are the model's fault — tracked so a
     # surrender after only-failed calls reports model_tool_misuse instead
@@ -1595,6 +1705,8 @@ async def _run_botex_task_once_impl(
             turn_extra_body["models"] = list(validated_in_payload_models)
         else:
             turn_extra_body.pop("models", None)
+        is_nvidia = "nvidia" in provider_name.lower()
+        use_stream = bool(is_nvidia or provider_cfg.get("stream", False))
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -1605,10 +1717,30 @@ async def _run_botex_task_once_impl(
             "extra_body": turn_extra_body,
             "timeout": request_timeout_s or None,
         }
+        if is_nvidia:
+            create_kwargs.setdefault("top_p", 0.95)
+        if use_stream:
+            create_kwargs["stream"] = True
+            create_kwargs["stream_options"] = {"include_usage": True}
+            turn_extra_body.setdefault("stream_options", {"include_usage": True})
         if response_format is not None:
             create_kwargs["response_format"] = response_format
         try:
-            response = await client.chat.completions.create(**create_kwargs)
+            if use_stream:
+                stream_resp = await client.chat.completions.create(**create_kwargs)
+                if hasattr(stream_resp, "__aiter__"):
+                    chunks = []
+                    async for chunk in stream_resp:
+                        chunks.append(chunk)
+                    nresp = normalize_streaming_chunks(chunks, raw_model=model)
+                elif hasattr(stream_resp, "__iter__") and not hasattr(stream_resp, "choices"):
+                    chunks = list(stream_resp)
+                    nresp = normalize_streaming_chunks(chunks, raw_model=model)
+                else:
+                    nresp = normalize_response(stream_resp)
+            else:
+                raw_api_resp = await client.chat.completions.create(**create_kwargs)
+                nresp = normalize_response(raw_api_resp)
         except APITimeoutError:
             rollback_verified = _rollback_attempt(task_id, files_touched)
             log_entry = log_run(
@@ -1681,7 +1813,6 @@ async def _run_botex_task_once_impl(
                 "rollback_verified": rollback_verified,
             }
 
-        nresp = normalize_response(response)
         usage = nresp.usage
         total_prompt_tokens += usage.prompt_tokens
         total_completion_tokens += usage.completion_tokens
@@ -1703,7 +1834,7 @@ async def _run_botex_task_once_impl(
         if last_reasoning_tokens:
             effective_max_tokens = max(effective_max_tokens, reasoning_cap)
 
-        if budget_limit_usd > 0:
+        if budget_limit_usd > 0 and not model_is_free:
             current_run_cost = (
                 inline_cost_usd
                 if has_inline_cost
@@ -1812,9 +1943,50 @@ async def _run_botex_task_once_impl(
             if structured is not None and structured.get("status") == "DONE":
                 is_done = True
                 summary_text = str(structured.get("summary") or "").strip()
+            elif structured is not None and structured.get("status") == "BLOCKED":
+                duration = time.time() - start_time
+                blocking_reason = (
+                    structured.get("blocking_reason")
+                    or structured.get("summary")
+                    or "Blocked by Fail-Stop Protocol"
+                )
+                log_entry = log_run(
+                    task_id=task_id,
+                    model=model,
+                    provider=provider_name,
+                    duration_s=duration,
+                    steps=turn,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    cached_tokens=total_cached_tokens,
+                    cache_write_tokens=total_cache_write_tokens,
+                    files_touched=list(files_touched),
+                    lines_added=lines_added_total,
+                    lines_removed=lines_removed_total,
+                    status="BLOCKED",
+                    summary=blocking_reason,
+                    failure_kind="fail_stop_blocked",
+                )
+                print_run_summary(log_entry)
+                return {
+                    "ok": False,
+                    "task_id": task_id,
+                    "status": "BLOCKED",
+                    "failure_kind": "fail_stop_blocked",
+                    "summary": blocking_reason,
+                    "blocking_reason": blocking_reason,
+                    "message": blocking_reason,
+                    "artifact_refs": structured.get("artifact_refs", []),
+                    "memory_keys": structured.get("memory_keys", []),
+                    "files_touched": list(files_touched),
+                    "exec_ran": exec_ran,
+                    "steps": turn,
+                    "duration_s": round(duration, 2),
+                    "cost_usd": log_entry["cost_usd"],
+                }
             elif structured is not None and structured.get("status") in (
                 "UNSUPPORTED",
-                "BLOCKED",
+                "FAILED",
                 "INCOMPLETE",
             ):
                 content = (
@@ -2111,6 +2283,12 @@ async def _run_botex_task_once_impl(
                         telemetry_err = f"OpenRouter generation telemetry skipped: {sanitize_provider_error(exc)}\n"
                         sys.stderr.write(sever_taint_numeric(telemetry_err))
 
+                # Zero-cost runs report exactly 0 — otherwise the ledger
+                # falls back to pseudo-pricing for providers without
+                # billing telemetry (e.g. local Ollama).
+                if model_is_free:
+                    live_cost_usd = 0.0
+
                 log_entry = log_run(
                     task_id=task_id,
                     model=model,
@@ -2162,6 +2340,19 @@ async def _run_botex_task_once_impl(
                     except Exception as exc:
                         sys.stderr.write(f"Snapshot pruning skipped: {exc}\n")
 
+                if syntax_rejections > 0:
+                    try:
+                        extract_meta_lesson(
+                            task_id=task_id,
+                            taxonomy=tax,
+                            error_summary=f"In-memory syntax rejection: {last_syntax_error}",
+                            recovery_strategy="Model corrected patch syntax in subsequent turn",
+                            workspace_dir=root_path,
+                            successful_model=model,
+                        )
+                    except Exception:
+                        pass
+
                 done_result: Dict[str, Any] = {
                     "ok": True,
                     "task_id": task_id,
@@ -2176,7 +2367,15 @@ async def _run_botex_task_once_impl(
                     "cache_write_tokens": total_cache_write_tokens,
                     "lines_added": lines_added_total,
                     "lines_removed": lines_removed_total,
+                    "applied_skills": applied_skills,
                 }
+                if structured:
+                    if structured.get("artifact_refs"):
+                        done_result["artifact_refs"] = structured["artifact_refs"]
+                    if structured.get("memory_keys"):
+                        done_result["memory_keys"] = structured["memory_keys"]
+                    if structured.get("blocking_reason") is not None:
+                        done_result["blocking_reason"] = structured["blocking_reason"]
                 if queue_time_ms is not None:
                     done_result["queue_time_ms"] = queue_time_ms
                 if generation_time_ms is not None:
@@ -2487,6 +2686,10 @@ async def _run_botex_task_once_impl(
                                 norm_p = _normalize_track_path(path_arg, root_path)
                                 if norm_p:
                                     files_read.add(norm_p)
+                        elif fn_name == "read_scratchpad":
+                            from botex.context_guard import read_scratchpad as _read_pad
+
+                            tool_result = _read_pad(args.get("memory_id", ""), cwd=root_path)
                         elif fn_name == "apply_patch":
                             target_p = args.get("path", "")
                             norm_p = _normalize_track_path(target_p, root_path)
@@ -2516,6 +2719,11 @@ async def _run_botex_task_once_impl(
                                     lines_removed_total += tool_result.get("lines_removed", 0)
                                     # Context Pruning: prune verbose reads for this file
                                     prune_tool_history(messages, target_p)
+                                else:
+                                    err_str = str(tool_result.get("error", ""))
+                                    if "syntax" in err_str.lower() or "rejected" in err_str.lower():
+                                        syntax_rejections += 1
+                                        last_syntax_error = err_str[:150]
                         elif fn_name == "create_file":
                             target_p = args.get("path", "")
                             norm_p = _normalize_track_path(target_p, root_path)

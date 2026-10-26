@@ -1,0 +1,14 @@
+# Fires botex-maintenance.service periodically
+# Install: /etc/systemd/system/botex-maintenance.timer
+# Enable:  systemctl enable --now botex-maintenance.timer
+[Unit]
+Description=Periodic BoteX Background Maintenance and Graph Sync Timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

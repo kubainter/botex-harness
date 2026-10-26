@@ -10,7 +10,7 @@
     >
       <div
         v-if="isOpen"
-        class="fixed inset-0 z-50 overflow-y-auto bg-botex-950/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-6"
+        class="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-botex-950/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-6"
         @click.self="onBackdropClick"
         @keydown.esc="onEsc"
       >
@@ -25,7 +25,7 @@
           <div
             v-if="isOpen"
             :class="[
-              'relative w-full rounded-t-2xl sm:rounded-xl bg-botex-900 border-t sm:border border-botex-700 shadow-2xl text-slate-100 flex flex-col max-h-[92vh] sm:max-h-[90vh] overflow-hidden',
+              'relative w-full rounded-t-2xl sm:rounded-xl bg-botex-900 border-t sm:border border-botex-700 shadow-2xl text-slate-100 flex flex-col max-h-[92dvh] sm:max-h-[90dvh] px-safe pb-safe overflow-hidden',
               maxWidthClass
             ]"
           >
@@ -40,7 +40,7 @@
               <button
                 type="button"
                 aria-label="Close modal"
-                class="min-w-[44px] min-h-[44px] sm:min-w-[34px] sm:min-h-[34px] rounded-lg p-1.5 text-slate-300 hover:text-white hover:bg-botex-800 transition flex items-center justify-center"
+                class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] rounded-lg p-1.5 text-slate-300 hover:text-white hover:bg-botex-800 transition flex items-center justify-center"
                 @click="$emit('close')"
               >
                 <XIcon class="w-5 h-5" />
@@ -48,7 +48,7 @@
             </div>
 
             <!-- Body -->
-            <div class="px-4 sm:px-5 py-4 overflow-y-auto flex-1">
+            <div class="px-4 sm:px-5 py-4 overflow-y-auto overscroll-contain flex-1">
               <slot />
             </div>
 

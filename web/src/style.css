@@ -2,8 +2,28 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ==========================================================================
+   Semantic Theme Tokens (Operate-Mode Skins)
+   ========================================================================== */
+
+/* 1. Cyber Slate (Default) */
 :root,
-html.dark {
+[data-skin="cyber-slate"],
+html:not([data-skin]) {
+  --surface-ground: #020617;
+  --surface-panel: #0f172a;
+  --surface-panel-hover: #1e293b;
+  --surface-card: #0b1120;
+  --fg-primary: #f8fafc;
+  --fg-secondary: #94a3b8;
+  --fg-muted: #8ba0bd;
+  --border-subtle: #1e293b;
+  --border-focus: #38bdf8;
+  --accent-primary: #10b981;
+  --accent-hover: #059669;
+  --status-danger: #f43f5e;
+  --status-warning: #f59e0b;
+  --status-success: #10b981;
   --botex-50: 248 250 252;
   --botex-100: 241 245 249;
   --botex-200: 226 232 240;
@@ -18,137 +38,178 @@ html.dark {
   color-scheme: dark;
 }
 
+/* 2. Monolith (Obsidian Black & Silver) */
+[data-skin="monolith"] {
+  --surface-ground: #000000;
+  --surface-panel: #09090b;
+  --surface-panel-hover: #18181b;
+  --surface-card: #0c0a09;
+  --fg-primary: #ffffff;
+  --fg-secondary: #a1a1aa;
+  --fg-muted: #71717a;
+  --border-subtle: #27272a;
+  --border-focus: #e4e4e7;
+  --accent-primary: #ffffff;
+  --accent-hover: #e4e4e7;
+  --status-danger: #ef4444;
+  --status-warning: #f59e0b;
+  --status-success: #22c55e;
+  --botex-50: 250 250 250;
+  --botex-100: 244 244 245;
+  --botex-200: 228 228 231;
+  --botex-300: 212 212 216;
+  --botex-400: 161 161 170;
+  --botex-500: 113 113 122;
+  --botex-600: 82 82 91;
+  --botex-700: 63 63 70;
+  --botex-800: 39 39 42;
+  --botex-900: 9 9 11;
+  --botex-950: 0 0 0;
+  color-scheme: dark;
+}
+
+/* 3. Arctic Dusk (Midnight Navy & Ice Cyan) */
+[data-skin="arctic-dusk"] {
+  --surface-ground: #030712;
+  --surface-panel: #0b1329;
+  --surface-panel-hover: #132247;
+  --surface-card: #080e1e;
+  --fg-primary: #f0f9ff;
+  --fg-secondary: #7dd3fc;
+  --fg-muted: #38bdf8;
+  --border-subtle: #1e3a5f;
+  --border-focus: #06b6d4;
+  --accent-primary: #06b6d4;
+  --accent-hover: #0891b2;
+  --status-danger: #f43f5e;
+  --status-warning: #f59e0b;
+  --status-success: #10b981;
+  --botex-50: 240 249 255;
+  --botex-100: 224 242 254;
+  --botex-200: 186 230 253;
+  --botex-300: 125 211 252;
+  --botex-400: 56 189 248;
+  --botex-500: 14 165 233;
+  --botex-600: 2 132 199;
+  --botex-700: 3 105 161;
+  --botex-800: 19 34 71;
+  --botex-900: 11 19 41;
+  --botex-950: 3 7 18;
+  color-scheme: dark;
+}
+
+/* 4. Amber Console (Warm Phosphor on Dark Obsidian) */
+[data-skin="amber-console"] {
+  --surface-ground: #0c0a09;
+  --surface-panel: #1c1917;
+  --surface-panel-hover: #292524;
+  --surface-card: #141210;
+  --fg-primary: #fef3c7;
+  --fg-secondary: #fcd34d;
+  --fg-muted: #d97706;
+  --border-subtle: #292524;
+  --border-focus: #f59e0b;
+  --accent-primary: #f59e0b;
+  --accent-hover: #d97706;
+  --status-danger: #ef4444;
+  --status-warning: #f59e0b;
+  --status-success: #10b981;
+  --botex-50: 254 243 199;
+  --botex-100: 253 230 138;
+  --botex-200: 252 211 77;
+  --botex-300: 245 158 11;
+  --botex-400: 217 119 6;
+  --botex-500: 180 83 9;
+  --botex-600: 120 53 15;
+  --botex-700: 68 64 60;
+  --botex-800: 41 37 36;
+  --botex-900: 28 25 23;
+  --botex-950: 12 10 9;
+  color-scheme: dark;
+}
+
+/* 5. Studio Light (Clean Daylight with Slate Indigo) */
+[data-skin="studio-light"],
 html.light {
-  --botex-50: 2 6 23;
-  --botex-100: 15 23 42;
-  --botex-200: 30 41 59;
-  --botex-300: 51 65 85;
-  --botex-400: 71 85 105;
-  --botex-500: 100 116 139;
-  --botex-600: 148 163 184;
-  --botex-700: 203 213 225;
-  --botex-800: 226 232 240;
+  --surface-ground: #f8fafc;
+  --surface-panel: #ffffff;
+  --surface-panel-hover: #f1f5f9;
+  --surface-card: #ffffff;
+  --fg-primary: #0f172a;
+  --fg-secondary: #475569;
+  --fg-muted: #64748b;
+  --border-subtle: #e2e8f0;
+  --border-focus: #4f46e5;
+  --accent-primary: #4f46e5;
+  --accent-hover: #4338ca;
+  --status-danger: #dc2626;
+  --status-warning: #d97706;
+  --status-success: #059669;
+  --botex-50: 15 23 42;
+  --botex-100: 30 41 59;
+  --botex-200: 51 65 85;
+  --botex-300: 71 85 105;
+  --botex-400: 100 116 139;
+  --botex-500: 148 163 184;
+  --botex-600: 203 213 225;
+  --botex-700: 226 232 240;
+  --botex-800: 241 245 249;
   --botex-900: 255 255 255;
-  --botex-950: 241 245 249;
+  --botex-950: 248 250 252;
   color-scheme: light;
 }
 
-/* Light mode high-contrast typography and surface overrides (WCAG AA/AAA) */
-html.light body {
-  background-color: #f1f5f9 !important;
-  color: #0f172a !important;
+body {
+  background-color: var(--surface-ground);
+  color: var(--fg-primary);
 }
 
-html.light .text-slate-100,
-html.light .text-slate-200 {
-  color: #0f172a !important;
-}
-
-html.light .text-slate-300 {
-  color: #334155 !important;
-}
-
-html.light .text-slate-400,
-html.light .text-slate-500 {
-  color: #475569 !important;
-}
-
-html.light .placeholder-slate-400::placeholder,
-html.light .placeholder-slate-500::placeholder {
-  color: #64748b !important;
-}
-
-html.light .hover\:text-white:hover {
-  color: #020617 !important;
-}
-
-/* Semantic accent text in Light Mode for high contrast */
-html.light .text-sky-200,
-html.light .text-sky-300,
-html.light .text-sky-400 {
-  color: #0369a1 !important;
-}
-
-html.light .text-cyan-200,
-html.light .text-cyan-300,
-html.light .text-cyan-400 {
-  color: #0e7490 !important;
-}
-
-html.light .text-emerald-200,
-html.light .text-emerald-300,
-html.light .text-emerald-400 {
-  color: #047857 !important;
-}
-
-html.light .text-amber-200,
-html.light .text-amber-300,
-html.light .text-amber-400 {
-  color: #b45309 !important;
-}
-
-html.light .text-rose-200,
-html.light .text-rose-300,
-html.light .text-rose-400 {
-  color: #be123c !important;
-}
-
-/* Light mode semantic badge & callout backgrounds */
-html.light .bg-emerald-950,
-html.light .bg-emerald-950\/60,
-html.light .bg-emerald-950\/40 {
-  background-color: #ecfdf5 !important;
-}
-
-html.light .bg-sky-950,
-html.light .bg-sky-950\/60,
-html.light .bg-sky-950\/35,
-html.light .bg-sky-950\/25 {
-  background-color: #e0f2fe !important;
-}
-
-html.light .bg-cyan-950,
-html.light .bg-cyan-950\/60,
-html.light .bg-cyan-950\/40,
-html.light .bg-cyan-950\/20 {
-  background-color: #ecfeff !important;
-}
-
-html.light .bg-amber-950,
-html.light .bg-amber-950\/90,
-html.light .bg-amber-950\/60,
-html.light .bg-amber-950\/50 {
-  background-color: #fffbeb !important;
-}
-
-html.light .bg-rose-950,
-html.light .bg-rose-950\/60,
-html.light .bg-rose-950\/40 {
-  background-color: #fff1f2 !important;
-}
-
-html.light .bg-slate-800,
-html.light .bg-slate-800\/80 {
-  background-color: #e2e8f0 !important;
-}
-
-/* Custom slim scrollbar for developer aesthetic */
+/* Custom slim scrollbar adapting to active skin */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgb(var(--botex-900));
+  background: var(--surface-panel);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgb(var(--botex-700));
+  background: var(--border-subtle);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgb(var(--botex-600));
+  background: var(--fg-muted);
+}
+
+/* View switching: fast fade + slight rise (Operate-mode: conveys location
+   change only, never decorative). Disabled under reduced motion. */
+.view-fade-enter-active,
+.view-fade-leave-active {
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.view-fade-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.view-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .view-fade-enter-active,
+  .view-fade-leave-active {
+    transition: none;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @keyframes fadeIn {
@@ -158,6 +219,14 @@ html.light .bg-slate-800\/80 {
 
 .animate-fadeIn {
   animation: fadeIn 0.2s ease-out forwards;
+}
+
+/* Keyboard focus ring: one global rule covers every interactive element.
+   Mouse/touch activation unaffected (:focus-visible only fires for keyboard nav). */
+:focus-visible {
+  outline: 2px solid rgb(var(--accent-500, 14 165 233));
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 /* Text selection and copying rules */
@@ -175,4 +244,174 @@ html.light .bg-slate-800\/80 {
 .markdown-body li {
   user-select: text !important;
   -webkit-user-select: text !important;
+}
+
+
+/* ==========================================================================
+   Typography & Skin Contrast Bridges (Ensures 100% WCAG AA/AAA across skins)
+   ========================================================================== */
+
+/* Universal semantic text binding */
+.text-slate-100,
+.text-slate-200 {
+  color: var(--fg-primary) !important;
+}
+
+.text-slate-300 {
+  color: var(--fg-secondary) !important;
+}
+
+.text-slate-400,
+.text-slate-500 {
+  color: var(--fg-muted) !important;
+}
+
+.hover\:text-white:hover {
+  color: var(--fg-primary) !important;
+}
+
+/* 1. Amber Console (Warm phosphor monochrome) */
+[data-skin="amber-console"] .text-cyan-400,
+[data-skin="amber-console"] .text-cyan-300,
+[data-skin="amber-console"] .text-sky-300,
+[data-skin="amber-console"] .text-sky-400 {
+  color: #f59e0b !important;
+}
+
+[data-skin="amber-console"] .border-cyan-500\/50,
+[data-skin="amber-console"] .border-cyan-400\/80 {
+  border-color: #f59e0b !important;
+}
+
+/* 2. Monolith (Platinum & crisp white contrast) */
+[data-skin="monolith"] .text-cyan-400,
+[data-skin="monolith"] .text-cyan-300,
+[data-skin="monolith"] .text-sky-300 {
+  color: #f8fafc !important;
+}
+
+[data-skin="monolith"] .border-cyan-500\/50,
+[data-skin="monolith"] .border-cyan-400\/80 {
+  border-color: #e4e4e7 !important;
+}
+
+/* 3. Arctic Dusk (Ice cyan & polar blue) */
+[data-skin="arctic-dusk"] .text-cyan-400,
+[data-skin="arctic-dusk"] .text-sky-300 {
+  color: #38bdf8 !important;
+}
+
+/* 4. Studio Light (Daylight high-contrast typography & panel backgrounds) */
+[data-skin="studio-light"] .text-slate-100,
+[data-skin="studio-light"] .text-slate-200 {
+  color: #0f172a !important;
+}
+
+[data-skin="studio-light"] .text-slate-300 {
+  color: #334155 !important;
+}
+
+[data-skin="studio-light"] .text-slate-400,
+[data-skin="studio-light"] .text-slate-500 {
+  color: #64748b !important;
+}
+
+[data-skin="studio-light"] .bg-botex-900 {
+  background-color: #ffffff !important;
+}
+
+[data-skin="studio-light"] .bg-botex-950 {
+  background-color: #f8fafc !important;
+}
+
+[data-skin="studio-light"] .bg-botex-800 {
+  background-color: #f1f5f9 !important;
+}
+
+[data-skin="studio-light"] .border-botex-800,
+[data-skin="studio-light"] .border-botex-700 {
+  border-color: #e2e8f0 !important;
+}
+
+[data-skin="studio-light"] .hover\:bg-botex-800:hover,
+[data-skin="studio-light"] .hover\:bg-botex-900:hover {
+  background-color: #e2e8f0 !important;
+}
+
+[data-skin="studio-light"] .text-cyan-400,
+[data-skin="studio-light"] .text-sky-300,
+[data-skin="studio-light"] .text-cyan-300 {
+  color: #0284c7 !important;
+}
+
+[data-skin="studio-light"] .text-emerald-300,
+[data-skin="studio-light"] .text-emerald-400 {
+  color: #059669 !important;
+}
+
+/* ==========================================================================
+   Mobile & PWA Ergonomics (safe-area, touch hygiene, scroll containment)
+   ========================================================================== */
+
+html,
+body {
+  overscroll-behavior-y: contain;
+}
+
+/* Prevent iOS tap flash, double-tap zoom delay, and accidental text
+   selection on interactive chrome. Text content stays selectable via
+   the .select-text / .markdown-body rules above. */
+button,
+[role='button'],
+[role='tab'],
+summary {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Hidden-scrollbar utility used by horizontally scrollable pill/tab bars */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@layer utilities {
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pl-safe {
+    padding-left: env(safe-area-inset-left);
+  }
+  .pr-safe {
+    padding-right: env(safe-area-inset-right);
+  }
+  .px-safe {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
+
+/* Long unbroken tokens (URLs, hashes, task IDs) must not force overflow-x */
+.markdown-body {
+  overflow-wrap: anywhere;
+}
+
+/* Touch devices (incl. tablets ≥768px where sm:text-xs compact styles apply):
+   form fields must stay ≥16px so iOS/Android never auto-zooms on focus.
+   No form input in this app intentionally uses >16px, so forcing 16px is safe. */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
 }

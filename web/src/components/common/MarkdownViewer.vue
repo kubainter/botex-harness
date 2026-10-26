@@ -30,11 +30,11 @@ const renderedHtml = computed(() => {
         return `
           <div class="relative group my-3 rounded-lg overflow-hidden border border-botex-700 bg-botex-950 font-mono text-xs">
             <div class="flex items-center justify-between px-3 py-1.5 bg-botex-900 border-b border-botex-800 text-slate-400">
-              <span class="text-[10px] text-slate-400 font-mono">code</span>
+              <span class="text-xs text-slate-400 font-mono">code</span>
               <button
                 type="button"
                 data-copy-code="true"
-                class="px-2 py-0.5 rounded text-[11px] bg-botex-800 hover:bg-botex-700 text-slate-300 hover:text-white transition flex items-center space-x-1"
+                class="min-h-[44px] lg:min-h-[36px] px-2 py-0.5 rounded text-xs bg-botex-800 hover:bg-botex-700 text-slate-300 hover:text-white transition flex items-center space-x-1"
               >
                 Copy
               </button>
@@ -89,7 +89,7 @@ function handleCopyClick(event: MouseEvent) {
 .markdown-body ol { list-style-type: decimal; }
 .markdown-body li { margin-bottom: 0.25rem; }
 .markdown-body blockquote {
-  border-left: 3px solid #06b6d4;
+  border-left: 2px solid rgb(var(--botex-700));
   padding-left: 0.75rem;
   color: rgb(var(--botex-300));
   font-style: italic;
@@ -121,5 +121,16 @@ html.dark .markdown-body a {
   background-color: rgb(var(--botex-800));
   color: rgb(var(--botex-100));
   font-weight: 600;
+}
+.markdown-body input[type='checkbox'] {
+  width: 1rem;
+  height: 1rem;
+  margin-right: 0.375rem;
+  vertical-align: -0.15em;
+  accent-color: #0ea5e9;
+}
+.markdown-body li:has(> input[type='checkbox']) {
+  list-style: none;
+  margin-left: -1.25rem;
 }
 </style>

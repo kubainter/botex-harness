@@ -9,7 +9,7 @@ metadata:
 
 BoteX is an agent-agnostic execution harness and MCP server. It runs a self-contained tool loop (read -> patch -> validate -> snapshot) over a workspace directory. You delegate a file task to it; it returns a verified contract result with status, files touched, line balance, and USD cost.
 
-MCP tools: `run_subagent`, `start_task`, `get_task_status`, `save_memory`, `search_memory`, `read_memory`, `fetch_url`, `get_outline`, `get_stats`, `check_health`, `clean_snapshots`, `recommend_models`.
+MCP tools: `run_subagent`, `start_task`, `get_task_status`, `save_memory`, `search_memory`, `read_memory`, `patch_memory_section`, `get_backlinks`, `find_graph_health`, `init_obsidian_vault`, `read_scratchpad`, `fetch_url`, `get_outline`, `get_stats`, `check_health`, `clean_snapshots`, `recommend_models`.
 
 Transports:
 - **Local stdio**: Standard input/output pipe for local agents (Devin, Antigravity, Cursor, Claude Desktop). Zero network overhead, zero configuration.
@@ -171,6 +171,11 @@ MCP tools:
 - `save_memory(title, content, workspace_dir="", kind="context", tags=[], memory_id="", scope="local")`: Save context, decisions, handoffs, or lessons with secret redaction.
 - `search_memory(workspace_dir="", query="", tag="", kind="", scope="all")`: Fast keyword and tag search across memories.
 - `read_memory(memory_id, workspace_dir="", scope="local")`: Retrieve full entry content and metadata.
+- `patch_memory_section(memory_id, section="Compiled Truth", new_content="", workspace_dir="", scope="local", append=false)`: Replace or append a single Markdown section without touching frontmatter or other sections — the right tool for updating a note's current state while preserving its history.
+- `get_backlinks(memory_id, workspace_dir="", scope="local")`: List notes that link to a memory via `[[wikilinks]]`, for impact analysis before changing a decision.
+- `find_graph_health(workspace_dir="", scope="local")`: Audit the wikilink graph — broken links, orphan notes, cycles. Run after large memory refactors.
+- `init_obsidian_vault(workspace_dir="", scope="local", override_existing=false, export_index=true)`: Write `.obsidian/` config with per-kind graph colors and refresh `_GRAPH_INDEX.md` so the vault opens as a visual graph.
+- `read_scratchpad(memory_id, workspace_dir="")`: Read a task execution log offloaded to `.botex/scratchpad/<memory_id>.log` — where verbose terminal output goes instead of the note body.
 
 Entry kinds:
 - `context`: General project architecture notes, environment specifics, or setup details.
@@ -190,6 +195,9 @@ Specialized personas can be activated via the `recipe` argument in `run_subagent
 | `security-reviewer` | Defensive security audit (OWASP, injection, path traversal, secrets) | `readonly` |
 | `build-resolver` | Surgical error resolver for compiler, linter, and test failures | `edit` / `full` |
 | `tdd` | Strict Test-Driven Development workflow (Red -> Green -> Refactor) | `edit` / `full` |
+| `architecture-adr` | Architecture Decision Record drafting and trade-off analysis | `readonly` / `edit` |
+| `security-taint-hardener` | CodeQL-oriented taint-flow hardening and sanitizer placement | `edit` |
+| `ui-craftsman` | Frontend/UI implementation with design-system awareness | `edit` |
 
 ## Read-Before-Write Gate
 

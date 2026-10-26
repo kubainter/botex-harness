@@ -4,12 +4,12 @@ import { registerSW } from 'virtual:pwa-register'
 import App from './App.vue'
 import './style.css'
 
-// Register PWA Service Worker with auto-update capability
+// Register PWA Service Worker with immediate auto-reload
 const updateSW = registerSW({
+  immediate: true,
   onNeedRefresh() {
-    if (confirm('A new version of BoteX Control is available. Reload to update?')) {
-      updateSW(true)
-    }
+    console.info('[PWA] New version detected, auto-activating...')
+    updateSW(true)
   },
   onOfflineReady() {
     console.info('[PWA] Application ready to work offline.')

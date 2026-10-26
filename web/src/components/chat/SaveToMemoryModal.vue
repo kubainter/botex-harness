@@ -24,43 +24,41 @@
 
       <!-- Note Title -->
       <div>
-        <label class="block text-slate-200 font-medium mb-1 font-mono text-[11px] uppercase tracking-wide">
+        <label class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
           {{ t('chat.save_memory.note_title') }} *
         </label>
         <input
           v-model="formTitle"
           type="text"
           placeholder="e.g. WebSocket Streaming and Error Recovery Flow"
-          class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
+          class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
         />
       </div>
 
       <!-- Category (Kind) & Scope -->
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <label class="block text-slate-200 font-medium mb-1 font-mono text-[11px] uppercase tracking-wide">
+          <label class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
             {{ t('chat.save_memory.kind') }}
           </label>
           <select
             v-model="formKind"
-            class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
+            class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
           >
             <option value="context">context (General Context)</option>
-            <option value="architecture">architecture (Architecture Decision)</option>
-            <option value="decision">decision (Technical Decision)</option>
-            <option value="convention">convention (Coding Standard)</option>
-            <option value="snippet">snippet (Code Snippet)</option>
-            <option value="lesson">lesson (Post-mortem / Fix)</option>
+            <option value="decision">decision (Architectural / Technical Decision)</option>
+            <option value="lesson">lesson (Post-mortem / Meta-Lesson)</option>
+            <option value="handoff">handoff (Task Handoff & Next Steps)</option>
           </select>
         </div>
 
         <div>
-          <label class="block text-slate-200 font-medium mb-1 font-mono text-[11px] uppercase tracking-wide">
+          <label class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
             {{ t('chat.save_memory.scope') }}
           </label>
           <select
             v-model="formScope"
-            class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
+            class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
           >
             <option value="local">local (.botex/memory/ in project)</option>
             <option value="global">global (~/.botex/memory/ user home)</option>
@@ -70,24 +68,24 @@
 
       <!-- Tags -->
       <div>
-        <label class="block text-slate-200 font-medium mb-1 font-mono text-[11px] uppercase tracking-wide">
+        <label class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
           {{ t('chat.save_memory.tags') }}
         </label>
         <input
           v-model="formTags"
           type="text"
           placeholder="chat, architecture, fastapi"
-          class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono"
+          class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono"
         />
       </div>
 
       <!-- Content Markdown Preview / Editor -->
       <div>
         <div class="flex items-center justify-between mb-1">
-          <label class="block text-slate-200 font-medium font-mono text-[11px] uppercase tracking-wide">
+          <label class="block text-slate-200 font-medium font-mono text-xs uppercase tracking-wide">
             {{ t('chat.save_memory.content') }}
           </label>
-          <span class="text-[10px] font-mono text-slate-400">
+          <span class="text-xs font-mono text-slate-400">
             {{ formContent ? formContent.length : 0 }} chars
           </span>
         </div>
@@ -95,7 +93,7 @@
           v-model="formContent"
           rows="6"
           placeholder="Conversation transcript or summary notes in Markdown format..."
-          class="w-full bg-botex-950 border border-botex-700 rounded-lg p-3 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono leading-relaxed"
+          class="w-full bg-botex-950 border border-botex-700 rounded-lg p-3 text-base sm:text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono leading-relaxed"
         ></textarea>
       </div>
     </div>
@@ -104,7 +102,7 @@
       <div class="flex items-center justify-end space-x-2">
         <button
           type="button"
-          class="min-h-[40px] px-3.5 py-2 rounded-lg bg-botex-800 hover:bg-botex-700 text-slate-200 text-xs font-medium transition"
+          class="min-h-[44px] lg:min-h-[36px] px-3.5 py-2 rounded-lg bg-botex-800 hover:bg-botex-700 text-slate-200 text-xs font-medium transition"
           :disabled="isSubmitting"
           @click="handleClose"
         >
@@ -112,7 +110,7 @@
         </button>
         <button
           type="button"
-          class="min-h-[40px] px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-medium transition flex items-center space-x-1.5"
+          class="min-h-[44px] lg:min-h-[36px] px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-medium transition flex items-center space-x-1.5"
           :disabled="!formTitle.trim() || isSubmitting"
           @click="handleSubmit"
         >

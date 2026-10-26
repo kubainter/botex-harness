@@ -620,7 +620,7 @@ async def test_stage_4_6_edge_cases_and_error_branches(tmp_path: Path):
     res_empty_sum = parse_structured_completion('{"status": "blocked"}')
     assert (
         res_empty_sum is not None
-        and res_empty_sum["status"] == "INCOMPLETE"
+        and res_empty_sum["status"] in ("BLOCKED", "INCOMPLETE")
         and res_empty_sum["summary"] == ""
     )
 

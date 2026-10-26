@@ -30,7 +30,10 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 │   ├── wallet.py          credit balance, usage, and limit checker
 │   ├── benchmarks.py      live model benchmarks & recommend_models
 │   ├── net_tools.py       SSRF-safe network fetching (read_url, fetch_url)
-│   ├── memory.py          two-tier Memory Vault (local & global scopes)
+│   ├── memory.py          two-tier Memory Vault with wikilink graph (local & global)
+│   ├── embeddings.py      local embedding helpers for memory/graph features
+│   ├── obsidian.py        Obsidian PKM vault export & graph index generation
+│   ├── meta_harness.py    task taxonomy, patch probing & meta-lesson recommendations
 │   ├── recipes.py         recipe loader & system prompt injection
 │   ├── i18n.py            CLI localization (EN/PL); MCP responses are always EN
 │   ├── ui.py              ANSI helpers with plain-text fallback
@@ -39,6 +42,7 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 ├── tests/
 │   ├── test_botex.py          core unit and integration suite
 │   ├── test_stage_4_6.py      OpenRouter live telemetry, routing & JSON schema tests
+│   ├── test_stage_4_7.py      recipes metadata, benchmarks cache, cloud recipe endpoints
 │   ├── test_approval.py       HITL approval and policy tests
 │   ├── test_chat.py           streaming chat and sandbox tests
 │   ├── test_memory_twotier.py two-tier memory vault scoping tests
@@ -140,7 +144,9 @@ Persistent Memory Vault (`botex/memory.py`) supports two distinct scopes:
 2. **Global Scope (`scope="global"`)**: Stored centrally at `~/.botex/memory/` (or `paths.global_memory_dir`). Shared across projects and VPS sessions.
 3. **Consolidated Search (`scope="all"`)**: Searches across both local and global memory entries concurrently using outline-first FTS5 retrieval.
 
-MCP tools: `save_memory`, `read_memory`, `search_memory`.
+Notes link to each other through `[[wikilinks]]`, forming a navigable knowledge graph; verbose execution logs are offloaded to `.botex/scratchpad/<memory_id>.log` instead of the note body.
+
+MCP tools: `save_memory`, `read_memory`, `search_memory`, `patch_memory_section` (surgical section update), `get_backlinks`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` (Obsidian config + `_GRAPH_INDEX.md`), `read_scratchpad`.
 
 ## 7. FastAPI Cloud Gateway & Remote MCP
 
@@ -154,10 +160,14 @@ BoteX can operate as a central HTTP/SSE daemon (`botex/server_cloud.py`):
 - **Remote MCP via SSE**: Exposes `GET /mcp/sse` and `POST /mcp/messages/` with keepalive comments, allowing remote IDEs (Cursor, Windsurf, Claude Desktop, Antigravity) to connect over WAN.
 - **REST & WebSocket API**:
   - `/api/wallet` & `/api/key/status`: Live credit balance, API key budget limits (`limit_usd`, `spend_usd`, `remaining_usd`, `resets_at`, `free_model_daily_requests`), and `low_budget_warning` (`remaining_usd < $1.00`).
-  - `/api/tasks`: Background task delegation, status polling, and cancellation.
-  - `/api/approvals`: Real-time decision queue for Human-in-the-Loop operators.
-  - `/api/memory`: REST interface for two-tier memory vault.
-  - `/api/chat` (SSE streaming) & `/api/chat/ws` (WebSocket with 15s ping heartbeat).
+  - `/api/analytics` & `POST /api/analytics/digest`: Aggregated cost/token/cache statistics (`period=week|month|all`) and an optional local-LLM digest loop saved into the Memory Vault.
+  - `/api/tasks` (+`/{id}`, `/{id}/cancel`): Background task delegation, status polling, and cancellation. Task entries persist the original request for retry/clone.
+  - `/api/approvals` (+`/{id}/decide`): Real-time decision queue for Human-in-the-Loop operators.
+  - `/api/memory` (+`/graph`, `/backlinks`): REST interface for the two-tier memory vault and its wikilink graph.
+  - `/api/models` & `/api/models/recommended`: Dynamic model catalog plus benchmark-driven recommendations.
+  - `/api/recipes`: Bundled persona prompts available to task runs.
+  - `/api/chat` (+`/abort`, `/sessions`, `/sessions/{id}` incl. `DELETE`, `/sessions/{id}/save_to_memory`): SSE streaming, session persistence, and abort.
+  - `/api/chat/ws`: WebSocket with 15s `{"type":"ping"}` heartbeat.
 
 ## 8. Cost, routing, and capability guardrails
 
@@ -224,6 +234,10 @@ botex config zdr off
 # default project directory
 botex config workspace ./my-project
 botex config workspace none
+
+# memory vault
+botex memory save "note title" "content..." --kind decision --tags arch
+botex memory search "query" --scope all
 
 # maintenance
 botex --stats
