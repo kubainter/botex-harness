@@ -15,7 +15,7 @@
       <div class="flex items-center space-x-2">
         <button
           type="button"
-          class="min-h-[40px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
+          class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
           @click="tasksStore.fetchTasks"
         >
           <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': tasksStore.isLoading }" />
@@ -23,13 +23,22 @@
         </button>
         <button
           type="button"
-          class="min-h-[40px] px-4 py-1.5 rounded-lg bg-brand-blue hover:bg-blue-600 text-xs font-semibold text-white transition flex items-center space-x-1.5"
+          class="min-h-[44px] lg:min-h-[36px] px-4 py-1.5 rounded-lg bg-brand-blue hover:bg-blue-600 text-xs font-semibold text-white transition flex items-center space-x-1.5"
           @click="showCreateModal = true"
         >
           <PlusIcon class="w-4 h-4" />
           <span>{{ t('newTask') }}</span>
         </button>
       </div>
+    </div>
+
+    <!-- Error notice -->
+    <div
+      v-if="tasksStore.errorMessage"
+      class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
+    >
+      <span class="font-mono truncate">{{ tasksStore.errorMessage }}</span>
+      <button type="button" class="shrink-0 underline hover:text-white min-h-[44px] px-2" @click="tasksStore.fetchTasks()">{{ t('refresh') }}</button>
     </div>
 
     <!-- Active Task Banner / Quick Card if any is running -->
@@ -51,14 +60,14 @@
         <div class="flex items-center space-x-2">
           <button
             type="button"
-            class="min-h-[38px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-cyan-300 transition"
+            class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-cyan-300 transition"
             @click="inspectTask(activeRunningTask.task_id)"
           >
             {{ locale === 'pl' ? 'Podgląd' : 'Inspect' }}
           </button>
           <button
             type="button"
-            class="min-h-[38px] px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 border border-rose-700/60 text-xs font-medium transition"
+            class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 border border-rose-700/60 text-xs font-medium transition"
             @click="cancelTask(activeRunningTask.task_id)"
           >
             {{ t('abortTask') }}
@@ -98,7 +107,7 @@
           <p class="text-slate-300 text-sm">{{ t('noTasksYet') }}</p>
           <button
             type="button"
-            class="inline-flex items-center space-x-1.5 px-3.5 py-2 rounded-lg bg-botex-800 hover:bg-botex-700 border border-botex-700 text-xs font-medium text-slate-100 transition"
+            class="inline-flex items-center space-x-1.5 min-h-[44px] px-3.5 py-2 rounded-lg bg-botex-800 hover:bg-botex-700 border border-botex-700 text-xs font-medium text-slate-100 transition"
             @click="showCreateModal = true"
           >
             <PlusIcon class="w-3.5 h-3.5 text-cyan-400" />
@@ -135,7 +144,7 @@
             <button
               v-if="taskItem.status === 'RUNNING' || taskItem.status === 'QUEUED'"
               type="button"
-              class="min-h-[36px] px-2.5 py-1 rounded bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 text-xs border border-rose-700/60 transition"
+              class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 text-xs border border-rose-700/60 transition"
               @click.stop="cancelTask(taskItem.task_id)"
             >
               {{ t('cancel') }}
@@ -145,55 +154,22 @@
         </div>
       </div>
 
-      <!-- Detail Panel (1 col) -->
-      <div class="lg:col-span-1">
+      <!-- Detail Panel (1 col, desktop side column only) -->
+      <div class="lg:col-span-1 hidden lg:block">
         <div v-if="currentTask" class="rounded-xl border border-botex-800 bg-botex-900 p-5 space-y-4 sticky top-4">
           <div class="flex items-center justify-between border-b border-botex-800 pb-3">
-            <div>
-              <h3 class="text-sm font-bold text-slate-100 font-mono">{{ currentTask.task_id }}</h3>
+            <div class="min-w-0">
+              <h3 class="text-sm font-bold text-slate-100 font-mono truncate">{{ currentTask.task_id }}</h3>
               <p class="text-xs text-slate-300 font-mono">{{ formatDate(currentTask.created_at) }}</p>
             </div>
             <Badge :variant="statusBadgeVariant(currentTask.status)">{{ currentTask.status }}</Badge>
           </div>
 
-          <div v-if="currentTask.status === 'RUNNING' || currentTask.status === 'QUEUED'" class="p-3 rounded-lg bg-cyan-950/40 border border-cyan-800/50 flex items-center space-x-3">
-            <Loader2Icon class="w-4 h-4 text-cyan-400 animate-spin" />
-            <span class="text-xs text-cyan-200">
-              {{ locale === 'pl' ? 'Zadanie działa w tle...' : 'Task running in background harness...' }}
-            </span>
-          </div>
-
-          <!-- Structured Result -->
-          <div v-if="currentTask.result" class="space-y-1.5">
-            <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
-              {{ locale === 'pl' ? 'Wynik zadania' : 'Summary Result' }}
-            </label>
-            <div class="p-3 rounded-lg bg-botex-950 border border-botex-800 text-xs text-slate-200 max-h-48 overflow-y-auto">
-              {{ currentTask.result }}
-            </div>
-          </div>
-
-          <!-- Result Data JSON -->
-          <div v-if="currentTask.result_data" class="space-y-1.5">
-            <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
-              {{ locale === 'pl' ? 'Weryfikacja kontraktu' : 'Contract Verification Data' }}
-            </label>
-            <div class="p-3 rounded-lg bg-botex-950 border border-botex-800 font-mono text-[11px] text-slate-300 max-h-56 overflow-y-auto">
-              <pre class="m-0">{{ JSON.stringify(currentTask.result_data, null, 2) }}</pre>
-            </div>
-          </div>
-
-          <!-- Cancel Action -->
-          <div v-if="currentTask.status === 'RUNNING' || currentTask.status === 'QUEUED'" class="pt-2">
-            <Button
-              variant="danger"
-              size="sm"
-              class="w-full"
-              @click="cancelTask(currentTask.task_id)"
-            >
-              {{ t('abortTask') }}
-            </Button>
-          </div>
+          <TaskDetailPanel
+            :task="currentTask"
+            @cancel="cancelTask"
+            @retry="retryTask"
+          />
         </div>
 
         <div v-else class="rounded-xl border border-botex-800 bg-botex-900/50 p-6 text-center text-slate-300 text-xs">
@@ -201,6 +177,26 @@
         </div>
       </div>
     </div>
+
+    <!-- Task Detail as bottom-sheet modal on mobile (<lg): tapping a card
+         opens the sheet immediately instead of pinning the panel under the
+         whole list at the bottom of the page. -->
+    <Modal
+      :is-open="showDetailModal && Boolean(currentTask)"
+      :title="currentTask?.task_id || ''"
+      :subtitle="currentTask ? formatDate(currentTask.created_at) : ''"
+      max-width="lg"
+      @close="showDetailModal = false"
+    >
+      <div v-if="currentTask" class="space-y-4">
+        <Badge :variant="statusBadgeVariant(currentTask.status)">{{ currentTask.status }}</Badge>
+        <TaskDetailPanel
+          :task="currentTask"
+          @cancel="(id) => { cancelTask(id); showDetailModal = false }"
+          @retry="(task) => { retryTask(task); showDetailModal = false }"
+        />
+      </div>
+    </Modal>
 
     <!-- Create Task Modal -->
     <Modal
@@ -219,7 +215,7 @@
             rows="4"
             required
             :placeholder="t('taskSpecPlaceholder')"
-            class="w-full rounded-lg bg-botex-950 border border-botex-700 text-slate-100 placeholder-slate-400 p-2.5 font-sans focus:outline-none focus:border-cyan-500"
+            class="w-full rounded-lg bg-botex-950 border border-botex-700 text-slate-100 placeholder-slate-400 p-2.5 text-base sm:text-xs font-sans focus:outline-none focus:border-cyan-500"
           ></textarea>
         </div>
 
@@ -229,14 +225,14 @@
             <label class="block font-medium text-slate-200 mb-1">{{ t('execModelLabel') }}</label>
             <button
               type="button"
-              class="w-full min-h-[40px] flex items-center justify-between px-3 py-2 rounded-lg bg-botex-950 hover:bg-botex-900 border border-botex-700 text-left transition"
+              class="w-full min-h-[44px] lg:min-h-[36px] flex items-center justify-between px-3 py-2 rounded-lg bg-botex-950 hover:bg-botex-900 border border-botex-700 text-left transition"
               @click="showModelSelector = true"
             >
               <div class="min-w-0 pr-2">
                 <div class="text-xs font-mono text-slate-100 truncate">{{ newTask.model }}</div>
-                <div class="text-[10px] font-mono text-slate-400 uppercase">{{ newTask.provider || 'openrouter' }}</div>
+                <div class="text-xs font-mono text-slate-400 uppercase">{{ newTask.provider || 'openrouter' }}</div>
               </div>
-              <span class="px-2 py-0.5 rounded bg-botex-800 border border-botex-700 text-[10px] font-mono text-cyan-300 shrink-0">
+              <span class="px-2 py-0.5 rounded bg-botex-800 border border-botex-700 text-xs font-mono text-cyan-300 shrink-0">
                 {{ locale === 'pl' ? 'Zmień' : 'Browse' }}
               </span>
             </button>
@@ -246,7 +242,7 @@
             <label class="block font-medium text-slate-200 mb-1">{{ t('permModeLabel') }}</label>
             <select
               v-model="newTask.mode"
-              class="w-full min-h-[40px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-slate-100"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
             >
               <option value="edit">Edit (Modify workspace files)</option>
               <option value="readonly">Read-Only (No disk mutations)</option>
@@ -258,20 +254,20 @@
 
         <!-- Capability Toggles -->
         <div class="p-3 bg-botex-950 rounded-lg border border-botex-800 space-y-2">
-          <span class="block font-mono text-[11px] font-semibold text-slate-300 uppercase">
+          <span class="block font-mono text-xs font-semibold text-slate-300 uppercase">
             {{ locale === 'pl' ? 'Uprawnienia wykonawcze' : 'Capabilities & Guards' }}
           </span>
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[32px]">
-              <input v-model="newTask.allow_exec" type="checkbox" class="rounded bg-botex-900 border-botex-700 text-cyan-500" />
+            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[44px] lg:min-h-[36px]">
+              <input v-model="newTask.allow_exec" type="checkbox" class="w-5 h-5 shrink-0 rounded bg-botex-900 border-botex-700 text-cyan-500" />
               <span>Allow Exec</span>
             </label>
-            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[32px]">
-              <input v-model="newTask.allow_net" type="checkbox" class="rounded bg-botex-900 border-botex-700 text-cyan-500" />
+            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[44px] lg:min-h-[36px]">
+              <input v-model="newTask.allow_net" type="checkbox" class="w-5 h-5 shrink-0 rounded bg-botex-900 border-botex-700 text-cyan-500" />
               <span>Allow Net (SSRF safe)</span>
             </label>
-            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[32px]">
-              <input v-model="newTask.allow_destructive" type="checkbox" class="rounded bg-botex-900 border-botex-700 text-rose-500" />
+            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[44px] lg:min-h-[36px]">
+              <input v-model="newTask.allow_destructive" type="checkbox" class="w-5 h-5 shrink-0 rounded bg-botex-900 border-botex-700 text-rose-500" />
               <span class="text-rose-300">Allow Destructive</span>
             </label>
           </div>
@@ -329,12 +325,14 @@ import { storeToRefs } from 'pinia'
 import { useTasksStore } from '../stores/tasks'
 import { useChatStore } from '../stores/chat'
 import { useI18n } from '../i18n'
-import type { CatalogModel, TaskCreateRequest, TaskSummary } from '../api/types'
+import type { CatalogModel, TaskCreateRequest, TaskDetail, TaskSummary } from '../api/types'
 import Modal from '../components/common/Modal.vue'
 import Button from '../components/common/Button.vue'
 import Badge from '../components/common/Badge.vue'
 import Input from '../components/common/Input.vue'
 import ModelSelectorModal from '../components/chat/ModelSelectorModal.vue'
+import TaskDetailPanel from '../components/tasks/TaskDetailPanel.vue'
+import { statusDotColor, statusBadgeVariant } from '../components/tasks/statusMaps'
 import {
   Cpu as CpuIcon,
   Plus as PlusIcon,
@@ -350,7 +348,16 @@ const { locale, t } = useI18n()
 
 const showCreateModal = ref(false)
 const showModelSelector = ref(false)
+const showDetailModal = ref(false)
 const selectedTaskId = ref<string>('')
+
+// <lg the detail lives in a bottom-sheet modal; >=lg it pins in the side column.
+const lgQuery = typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)') : null
+const isDesktop = ref<boolean>(lgQuery?.matches ?? true)
+const onLgChange = (e: MediaQueryListEvent) => {
+  isDesktop.value = e.matches
+  if (e.matches) showDetailModal.value = false
+}
 
 const newTask = ref<TaskCreateRequest>({
   task: chatStore.pendingTaskDraft || '',
@@ -367,6 +374,7 @@ const newTask = ref<TaskCreateRequest>({
 })
 
 onMounted(() => {
+  lgQuery?.addEventListener('change', onLgChange)
   tasksStore.fetchTasks()
   tasksStore.startPolling()
   if (chatStore.catalogModels.length === 0) {
@@ -383,6 +391,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  lgQuery?.removeEventListener('change', onLgChange)
   tasksStore.stopPolling()
 })
 
@@ -400,12 +409,23 @@ function onSelectTaskModel(model: CatalogModel) {
 function inspectTask(id: string) {
   selectedTaskId.value = id
   tasksStore.fetchTask(id)
+  if (!isDesktop.value) showDetailModal.value = true
 }
 
 async function cancelTask(id: string) {
   if (confirm(`Abort task ${id}?`)) {
     await tasksStore.cancelTask(id)
   }
+}
+
+function retryTask(task: TaskDetail) {
+  if (!task.request) return
+  newTask.value = {
+    ...newTask.value,
+    ...task.request,
+    task: task.request.task || task.task || newTask.value.task
+  }
+  showCreateModal.value = true
 }
 
 async function handleCreateTask() {
@@ -418,38 +438,6 @@ async function handleCreateTask() {
   if (createdId) {
     showCreateModal.value = false
     selectedTaskId.value = createdId
-  }
-}
-
-function statusDotColor(status: string) {
-  switch (status) {
-    case 'DONE':
-      return 'bg-emerald-400'
-    case 'RUNNING':
-      return 'bg-cyan-400 animate-pulse'
-    case 'QUEUED':
-      return 'bg-amber-400 animate-pulse'
-    case 'FAILED':
-      return 'bg-rose-500'
-    case 'CANCELLED':
-      return 'bg-slate-400'
-    default:
-      return 'bg-slate-400'
-  }
-}
-
-function statusBadgeVariant(status: string) {
-  switch (status) {
-    case 'DONE':
-      return 'success'
-    case 'RUNNING':
-      return 'info'
-    case 'QUEUED':
-      return 'warning'
-    case 'FAILED':
-      return 'danger'
-    default:
-      return 'default'
   }
 }
 

@@ -1,5 +1,5 @@
 <template>
-  <div class="h-full flex flex-col overflow-y-auto bg-botex-950 p-4 sm:p-6 space-y-6">
+  <div class="h-full overflow-y-auto bg-botex-950 p-4 sm:p-6 space-y-6">
     <!-- View Header -->
     <div class="flex flex-wrap items-center justify-between gap-4 border-b border-botex-800 pb-4">
       <div>
@@ -19,12 +19,21 @@
 
       <button
         type="button"
-        class="min-h-[40px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
+        class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
         @click="approvalsStore.fetchApprovals()"
       >
         <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': approvalsStore.isLoading }" />
         <span>{{ t('refresh') }}</span>
       </button>
+    </div>
+
+    <!-- Error notice -->
+    <div
+      v-if="approvalsStore.errorMessage"
+      class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
+    >
+      <span class="font-mono truncate">{{ approvalsStore.errorMessage }}</span>
+      <button type="button" class="shrink-0 underline hover:text-white min-h-[44px] px-2" @click="approvalsStore.fetchApprovals()">{{ t('refresh') }}</button>
     </div>
 
     <!-- Empty state -->

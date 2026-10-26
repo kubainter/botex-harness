@@ -9,14 +9,14 @@
 /* 1. Cyber Slate (Default) */
 :root,
 [data-skin="cyber-slate"],
-html.dark {
+html:not([data-skin]) {
   --surface-ground: #020617;
   --surface-panel: #0f172a;
   --surface-panel-hover: #1e293b;
   --surface-card: #0b1120;
   --fg-primary: #f8fafc;
   --fg-secondary: #94a3b8;
-  --fg-muted: #64748b;
+  --fg-muted: #8ba0bd;
   --border-subtle: #1e293b;
   --border-focus: #38bdf8;
   --accent-primary: #10b981;
@@ -106,7 +106,7 @@ html.dark {
   --surface-card: #141210;
   --fg-primary: #fef3c7;
   --fg-secondary: #fcd34d;
-  --fg-muted: #b45309;
+  --fg-muted: #d97706;
   --border-subtle: #292524;
   --border-focus: #f59e0b;
   --accent-primary: #f59e0b;
@@ -183,6 +183,35 @@ body {
   background: var(--fg-muted);
 }
 
+/* View switching: fast fade + slight rise (Operate-mode: conveys location
+   change only, never decorative). Disabled under reduced motion. */
+.view-fade-enter-active,
+.view-fade-leave-active {
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.view-fade-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.view-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .view-fade-enter-active,
+  .view-fade-leave-active {
+    transition: none;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
@@ -190,6 +219,14 @@ body {
 
 .animate-fadeIn {
   animation: fadeIn 0.2s ease-out forwards;
+}
+
+/* Keyboard focus ring: one global rule covers every interactive element.
+   Mouse/touch activation unaffected (:focus-visible only fires for keyboard nav). */
+:focus-visible {
+  outline: 2px solid rgb(var(--accent-500, 14 165 233));
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 /* Text selection and copying rules */
@@ -207,4 +244,174 @@ body {
 .markdown-body li {
   user-select: text !important;
   -webkit-user-select: text !important;
+}
+
+
+/* ==========================================================================
+   Typography & Skin Contrast Bridges (Ensures 100% WCAG AA/AAA across skins)
+   ========================================================================== */
+
+/* Universal semantic text binding */
+.text-slate-100,
+.text-slate-200 {
+  color: var(--fg-primary) !important;
+}
+
+.text-slate-300 {
+  color: var(--fg-secondary) !important;
+}
+
+.text-slate-400,
+.text-slate-500 {
+  color: var(--fg-muted) !important;
+}
+
+.hover\:text-white:hover {
+  color: var(--fg-primary) !important;
+}
+
+/* 1. Amber Console (Warm phosphor monochrome) */
+[data-skin="amber-console"] .text-cyan-400,
+[data-skin="amber-console"] .text-cyan-300,
+[data-skin="amber-console"] .text-sky-300,
+[data-skin="amber-console"] .text-sky-400 {
+  color: #f59e0b !important;
+}
+
+[data-skin="amber-console"] .border-cyan-500\/50,
+[data-skin="amber-console"] .border-cyan-400\/80 {
+  border-color: #f59e0b !important;
+}
+
+/* 2. Monolith (Platinum & crisp white contrast) */
+[data-skin="monolith"] .text-cyan-400,
+[data-skin="monolith"] .text-cyan-300,
+[data-skin="monolith"] .text-sky-300 {
+  color: #f8fafc !important;
+}
+
+[data-skin="monolith"] .border-cyan-500\/50,
+[data-skin="monolith"] .border-cyan-400\/80 {
+  border-color: #e4e4e7 !important;
+}
+
+/* 3. Arctic Dusk (Ice cyan & polar blue) */
+[data-skin="arctic-dusk"] .text-cyan-400,
+[data-skin="arctic-dusk"] .text-sky-300 {
+  color: #38bdf8 !important;
+}
+
+/* 4. Studio Light (Daylight high-contrast typography & panel backgrounds) */
+[data-skin="studio-light"] .text-slate-100,
+[data-skin="studio-light"] .text-slate-200 {
+  color: #0f172a !important;
+}
+
+[data-skin="studio-light"] .text-slate-300 {
+  color: #334155 !important;
+}
+
+[data-skin="studio-light"] .text-slate-400,
+[data-skin="studio-light"] .text-slate-500 {
+  color: #64748b !important;
+}
+
+[data-skin="studio-light"] .bg-botex-900 {
+  background-color: #ffffff !important;
+}
+
+[data-skin="studio-light"] .bg-botex-950 {
+  background-color: #f8fafc !important;
+}
+
+[data-skin="studio-light"] .bg-botex-800 {
+  background-color: #f1f5f9 !important;
+}
+
+[data-skin="studio-light"] .border-botex-800,
+[data-skin="studio-light"] .border-botex-700 {
+  border-color: #e2e8f0 !important;
+}
+
+[data-skin="studio-light"] .hover\:bg-botex-800:hover,
+[data-skin="studio-light"] .hover\:bg-botex-900:hover {
+  background-color: #e2e8f0 !important;
+}
+
+[data-skin="studio-light"] .text-cyan-400,
+[data-skin="studio-light"] .text-sky-300,
+[data-skin="studio-light"] .text-cyan-300 {
+  color: #0284c7 !important;
+}
+
+[data-skin="studio-light"] .text-emerald-300,
+[data-skin="studio-light"] .text-emerald-400 {
+  color: #059669 !important;
+}
+
+/* ==========================================================================
+   Mobile & PWA Ergonomics (safe-area, touch hygiene, scroll containment)
+   ========================================================================== */
+
+html,
+body {
+  overscroll-behavior-y: contain;
+}
+
+/* Prevent iOS tap flash, double-tap zoom delay, and accidental text
+   selection on interactive chrome. Text content stays selectable via
+   the .select-text / .markdown-body rules above. */
+button,
+[role='button'],
+[role='tab'],
+summary {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Hidden-scrollbar utility used by horizontally scrollable pill/tab bars */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@layer utilities {
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pl-safe {
+    padding-left: env(safe-area-inset-left);
+  }
+  .pr-safe {
+    padding-right: env(safe-area-inset-right);
+  }
+  .px-safe {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
+
+/* Long unbroken tokens (URLs, hashes, task IDs) must not force overflow-x */
+.markdown-body {
+  overflow-wrap: anywhere;
+}
+
+/* Touch devices (incl. tablets ≥768px where sm:text-xs compact styles apply):
+   form fields must stay ≥16px so iOS/Android never auto-zooms on focus.
+   No form input in this app intentionally uses >16px, so forcing 16px is safe. */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
 }

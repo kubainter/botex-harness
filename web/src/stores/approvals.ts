@@ -76,7 +76,7 @@ export const useApprovalsStore = defineStore('approvals', () => {
       }
       return true
     } catch (err: any) {
-      alert(`Decision error: ${err?.message || 'Failed to submit decision'}`)
+      errorMessage.value = err?.message || 'Failed to submit decision'
       return false
     } finally {
       isSubmitting.value = false
