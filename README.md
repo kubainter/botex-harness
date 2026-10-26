@@ -121,6 +121,11 @@ BoteX exposes a focused set of MCP tools:
 ### Two-Tier Memory Vault
 * **`save_memory(title, content, workspace_dir, kind, tags, memory_id, scope)`**: Saves persistent notes, decisions, handoffs, or lessons. Scope can be `"local"` (`<workspace_dir>/.botex/memory/`) or `"global"` (`~/.botex/memory/`).
 * **`read_memory(memory_id, workspace_dir, scope)`** / **`search_memory(workspace_dir, query, tag, kind, scope)`**: Retrieves saved memory across local or global storage (`scope="all"` searches both).
+* **`patch_memory_section(memory_id, section, new_content, workspace_dir, scope, append)`**: Replaces or appends one Markdown section in a memory note without touching frontmatter, other sections, or the Timeline trail.
+* **`get_backlinks(memory_id, workspace_dir, scope)`**: Lists memories that link to the given note through `[[wikilinks]]`.
+* **`find_graph_health(workspace_dir, scope)`**: Audits the vault's wikilink graph — reports broken links, orphan notes, and cycles.
+* **`init_obsidian_vault(workspace_dir, scope, override_existing, export_index)`**: Writes `.obsidian/` config (per-kind graph colors) and optionally regenerates `_GRAPH_INDEX.md`.
+* **`read_scratchpad(memory_id, workspace_dir)`**: Reads an execution or terminal log offloaded to `.botex/scratchpad/<memory_id>.log`.
 
 ### Diagnostics & Utility
 * **`get_outline(path, workspace_dir)`**: Returns a high-level symbol outline of a file without reading all lines.
@@ -157,7 +162,7 @@ Example payload for `run_subagent`:
 | `profile` | `""` | Model profile from `botex.config.json` (`default`, `coding`, `auto-beta`, `fast`). Empty = picked per mode via `engine.mode_profiles`. |
 | `api_key` | `""` | Provider API key per-request; highest priority (overrides env/.env/config). |
 | `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full` (empty = `engine.default_mode`). |
-| `recipe` | `""` | Specialized workflow persona (`planner`, `code-explorer`, `reviewer`, `security-reviewer`, `build-resolver`, `tdd`). |
+| `recipe` | `""` | Specialized workflow persona (`planner`, `code-explorer`, `reviewer`, `security-reviewer`, `security-taint-hardener`, `build-resolver`, `tdd`, `architecture-adr`, `ui-craftsman`). |
 | `max_turns` | `0` | Max tool-loop iterations (`0` uses `engine.max_turns`, usually 15, overridable per mode via `engine.mode_max_turns`). |
 | `max_tokens` | `0` | Per-turn completion cap (`0` = config value; reasoning models need ~8000+). |
 | `max_duration_s` | `0` | Total wall-clock limit in seconds (`0` = config value). |
@@ -371,6 +376,8 @@ botex cloud --host 0.0.0.0 --port 8000
 ```
 *Zero-Friction Local mode runs unauthenticated when `BOTEX_ACCESS_TOKEN` is unset. Set `BOTEX_ACCESS_TOKEN` in `.env` to enforce Bearer token verification on all protected endpoints.*
 
+REST surface (all under `/api/`): `health`, `wallet`, `key/status`, `analytics` (+`POST analytics/digest`), `models`, `models/recommended`, `recipes`, `tasks` (+`/{id}`, `/{id}/cancel`), `approvals` (+`/{id}/decide`), `memory` (+`/graph`, `/backlinks`), `chat` (+`/abort`, `/sessions`, `/sessions/{id}`, `/sessions/{id}/save_to_memory`), and WebSocket `/api/chat/ws`. `/api/health` and the PWA shell stay public.
+
 ### Maintenance & Observability
 
 ```bash
@@ -383,6 +390,7 @@ botex --history <task_id>  # Inspect exact prompts, tool calls, and diffs for a 
 botex --snapshots          # Check disk usage of backup snapshots
 botex --clean-snapshots    # Prune old snapshot backups
 botex models [--refresh]   # List configured provider models (refresh catalog)
+botex memory <sub>         # Memory vault CLI (save, search, list, ...)
 botex serve                # Force MCP stdio server mode explicitly
 ```
 
@@ -411,8 +419,12 @@ botex/
   exec_tools.py        Policy-controlled command execution & argument filtering
   capabilities.py      Permission presets (readonly, edit, destructive, full)
   config.py            Layered config loader (defaults < local < env)
+  context_guard.py     Context compaction & verification output pruning
   net_tools.py         Net policy enforcement (read_url / fetch_url)
-  memory.py            Two-tier memory vault (local .botex/memory/ and global ~/.botex/memory/)
+  memory.py            Two-tier memory vault with wikilink graph & scratchpad offload
+  embeddings.py        Local embedding helpers for memory/graph features
+  obsidian.py          Obsidian PKM vault export & graph index generation
+  meta_harness.py      Task taxonomy, patch probing & meta-lesson recommendations
   analytics.py         Cost/token ledger, budgeting & summary reporting
   pricing.py           Live model price guardrail & catalog checks
   providers.py         Provider adapters (OpenRouter, NVIDIA, etc.) & request normalizer
@@ -420,7 +432,9 @@ botex/
   contracts.py         Task completion verification & status taxonomy
   recipes.py           Recipe loading & system-prompt injection
   i18n.py / ui.py      CLI language & status rendering
-  recipes/             Specialized agent personas (planner, reviewer, tdd, etc.)
+  recipes/             Specialized agent personas (planner, reviewer, tdd,
+                       code-explorer, build-resolver, security-reviewer,
+                       security-taint-hardener, architecture-adr, ui-craftsman)
 skills/botex/          Caller-side SKILL.md (delegation patterns)
 tests/                 Comprehensive test suite (unit, cloud gateway, chat, approvals)
 docs/
