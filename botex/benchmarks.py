@@ -6,13 +6,15 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 try:
+    from .catalog import _infer_context_length
     from .config import app_headers, benchmarks_cache_file, load_config, resolve_provider
-    from .providers import resolve_api_key
+    from .providers import is_reasoning_capable_slug, resolve_api_key
     from .recipes import load_recipe_metadata
     from .security import mask_secrets
 except (ImportError, ValueError):
+    from catalog import _infer_context_length
     from config import app_headers, benchmarks_cache_file, load_config, resolve_provider
-    from providers import resolve_api_key
+    from providers import is_reasoning_capable_slug, resolve_api_key
     from recipes import load_recipe_metadata
     from security import mask_secrets
 
@@ -48,6 +50,8 @@ _FLAGSHIP_HINTS = (
     "gemini-1.5-pro",
     "pareto-code",
     "coder",
+    "nemotron",
+    "llama-3.3",
 )
 
 _LIGHTWEIGHT_HINTS = (
@@ -281,7 +285,12 @@ def get_recommended_models(
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        return [{"error": f"Failed to fetch models from OpenRouter: {mask_secrets(str(e))}"}]
+        prov_label = (
+            "OpenRouter"
+            if "openrouter" in str(pname or provider).lower()
+            else str(pname or provider)
+        )
+        return [{"error": f"Failed to fetch models from {prov_label}: {mask_secrets(str(e))}"}]
 
     benchmarks_data = fetch_openrouter_benchmarks(
         api_key=resolved_key, provider_name=pname or provider
@@ -296,6 +305,7 @@ def get_recommended_models(
         slug = str(m.get("id") or "").strip()
         if not slug:
             continue
+        is_nv = (pname == "nvidia") or ("nvidia" in str(provider or "").lower())
 
         if denylist_filter is not None and not denylist_filter.is_allowed(
             slug, provider=pname or provider, profile=profile
@@ -306,12 +316,18 @@ def get_recommended_models(
         param_set = (
             {str(p).lower() for p in params} if isinstance(params, (list, tuple, set)) else set()
         )
-        if require_tools and params is not None and isinstance(params, (list, tuple, set)):
-            if "tools" not in param_set:
-                continue
+        if require_tools:
+            if params is not None and isinstance(params, (list, tuple, set)):
+                if "tools" not in param_set:
+                    continue
+            elif is_nv:
+                # Active NVIDIA chat/coding models support tools
+                pass
 
         pricing = m.get("pricing") or {}
         context_length = int(m.get("context_length") or 0)
+        if context_length <= 0:
+            context_length = _infer_context_length(slug, 0)
 
         try:
             pin = float(pricing.get("prompt", 0)) * 1_000_000
@@ -381,6 +397,10 @@ def get_recommended_models(
         for cap in ("tools", "reasoning", "structured_outputs", "response_format"):
             if cap in param_set:
                 capabilities.append(cap)
+        if is_nv and "tools" not in capabilities:
+            capabilities.append("tools")
+        if "reasoning" not in capabilities and is_reasoning_capable_slug(slug):
+            capabilities.append("reasoning")
 
         entry_dict = {
             "id": slug,
