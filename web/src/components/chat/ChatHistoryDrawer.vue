@@ -49,6 +49,7 @@
               type="button"
               class="p-2 rounded-lg text-slate-300 hover:text-white hover:bg-botex-800 transition"
               title="New Chat Session"
+              aria-label="New Chat Session"
               @click="handleNewSession"
             >
               <PlusIcon class="w-4 h-4" />
@@ -57,6 +58,7 @@
               type="button"
               class="p-2 rounded-lg text-slate-300 hover:text-white hover:bg-botex-800 transition"
               title="Refresh Sessions"
+              aria-label="Refresh Sessions"
               :disabled="isLoading"
               @click="$emit('refresh')"
             >
@@ -66,6 +68,7 @@
               type="button"
               class="p-2 rounded-lg text-slate-300 hover:text-white hover:bg-botex-800 transition"
               title="Close panel"
+              aria-label="Close panel"
               @click="$emit('close')"
             >
               <XIcon class="w-4 h-4" />
@@ -81,6 +84,7 @@
               v-model="searchQuery"
               type="text"
               :placeholder="t('chat.history.search')"
+              :aria-label="t('chat.history.search')"
               class="w-full bg-botex-950 border border-botex-700 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
             />
           </div>
@@ -118,6 +122,7 @@
                 <button
                   type="button"
                   title="Save conversation to Memory Vault"
+                  aria-label="Save conversation to Memory Vault"
                   class="p-1 rounded text-slate-300 hover:text-sky-300 hover:bg-botex-800 transition"
                   @click.stop="$emit('save-memory', s)"
                 >
@@ -126,6 +131,7 @@
                 <button
                   type="button"
                   title="Delete conversation"
+                  aria-label="Delete conversation"
                   class="p-1 rounded text-slate-300 hover:text-rose-400 hover:bg-botex-800 transition"
                   @click.stop="handleDelete(s.session_id)"
                 >
