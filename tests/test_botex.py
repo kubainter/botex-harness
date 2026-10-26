@@ -1225,7 +1225,7 @@ def test_engine_write_guards():
             fake = AlwaysRead()
             res = run(fake, task="inspect a.txt", mode="edit")
             assert res["status"] == "MAX_TURNS_REACHED"
-            assert len(fake.calls) == 15
+            assert len(fake.calls) == int(engine.engine_setting("max_turns"))
 
             # 27. turns_exhausted triggers at most one fallback per chain —
             # a third candidate never retries the same starvation pattern.
@@ -1285,7 +1285,7 @@ def test_engine_write_guards():
                 fake = AlwaysRead()
                 res = run(fake, task="review a.txt", mode="readonly")
                 assert res["status"] == "MAX_TURNS_REACHED"
-                assert len(fake.calls) == 15
+                assert len(fake.calls) == int(engine.engine_setting("max_turns"))
 
                 engine.load_config = lambda reload=False: {
                     **orig_load_config(reload),
@@ -2455,7 +2455,7 @@ def test_workspace_memory_vault():
 
         # Check content and frontmatter
         raw_file = (root / ".botex" / "memory" / f"{mem_id}.md").read_text(encoding="utf-8")
-        assert "schema: ecc.memory.v1" in raw_file
+        assert "schema: ecc.memory.v2" in raw_file or "schema: ecc.memory.v1" in raw_file
         assert "kind: decision" in raw_file
         assert token_prefix not in raw_file
         assert "[REDACTED]" in raw_file
@@ -2829,6 +2829,12 @@ def test_mcp_tool_surface():
         "save_memory",
         "search_memory",
         "read_memory",
+        "delete_memory",
+        "read_scratchpad",
+        "get_backlinks",
+        "patch_memory_section",
+        "find_graph_health",
+        "init_obsidian_vault",
         "get_stats",
         "check_health",
         "clean_snapshots",

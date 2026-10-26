@@ -69,6 +69,7 @@ def isolate_botex_test_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BOTEX_BENCHMARKS_CACHE_FILE", str(benchmarks_file))
     monkeypatch.setenv("BOTEX_CHAT_SESSIONS_DIR", str(chat_sessions_dir))
     monkeypatch.setenv("BOTEX_GLOBAL_MEMORY_DIR", str(global_memory_dir))
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN", raising=False)
 
     try:
         from botex.config import load_config

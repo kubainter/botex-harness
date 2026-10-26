@@ -222,6 +222,24 @@ def test_task_cancellation(client):
     assert "terminal state" in repeat_cancel.json()["message"]
 
 
+def test_task_idempotency_key(client):
+    """Submitting duplicate task with same Idempotency-Key returns existing task without re-execution."""
+    headers = {"Idempotency-Key": "test-idem-key-42"}
+    payload = {"task": "Idempotent task execution", "mode": "readonly"}
+
+    resp1 = client.post("/api/tasks", json=payload, headers=headers)
+    assert resp1.status_code == 202
+    data1 = resp1.json()
+    task_id1 = data1["task_id"]
+
+    # Repeat request with identical idempotency key
+    resp2 = client.post("/api/tasks", json=payload, headers=headers)
+    assert resp2.status_code == 202
+    data2 = resp2.json()
+    assert data2["task_id"] == task_id1
+    assert data2.get("idempotent_replay") is True
+
+
 # ---------------------------------------------------------------------------
 # 5. Operator Approvals Endpoint
 # ---------------------------------------------------------------------------
@@ -554,3 +572,54 @@ def test_models_catalog_provider_filter(client):
     models = resp.json()
     assert len(models) >= 1
     assert all(m["provider"] == "openrouter-free" and m["is_free"] is True for m in models)
+
+
+def test_memory_graph_and_backlinks_endpoints(client, tmp_path):
+    """Verify GET /api/memory/graph and /api/memory/backlinks endpoints."""
+    # 1. Create two connected memory notes
+    m1 = client.post(
+        "/api/memory",
+        json={
+            "workspace_dir": str(tmp_path),
+            "title": "Node A",
+            "content": "Links to [[node_b_target]].",
+            "kind": "decision",
+            "tags": ["alpha"],
+            "scope": "local",
+        },
+    ).json()
+    assert m1.get("ok") is True
+
+    m2 = client.post(
+        "/api/memory",
+        json={
+            "workspace_dir": str(tmp_path),
+            "memory_id": "node_b_target",
+            "title": "Node B",
+            "content": f"Links back to [[{m1.get('id')}]].",
+            "kind": "lesson",
+            "tags": ["beta"],
+            "scope": "local",
+        },
+    ).json()
+    assert m2.get("ok") is True
+
+    # 2. Query graph endpoint
+    g_resp = client.get(f"/api/memory/graph?workspace_dir={tmp_path}&scope=local")
+    assert g_resp.status_code == 200
+    g_data = g_resp.json()
+    assert g_data["ok"] is True
+    assert len(g_data["nodes"]) >= 2
+    assert len(g_data["edges"]) >= 2
+    assert "health" in g_data
+
+    # 3. Query backlinks endpoint
+    bl_resp = client.get(
+        f"/api/memory/backlinks?workspace_dir={tmp_path}&memory_id=node_b_target&scope=local"
+    )
+    assert bl_resp.status_code == 200
+    bl_data = bl_resp.json()
+    assert bl_data["ok"] is True
+    assert bl_data["count"] >= 1
+    source_ids = [b["id"] for b in bl_data["backlinks"]]
+    assert m1.get("id") in source_ids
