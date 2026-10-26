@@ -109,7 +109,7 @@ def _unwrap_untrusted_web_content(raw_text: str) -> str:
 
 def _infer_skill_name_from_url(url: str) -> str:
     """Extract a sensible skill slug from a GitHub/raw URL, skipping branch/structural tokens."""
-    clean_url = re.sub(r"[?#].*$", "", str(url or "").strip()).rstrip("/")
+    clean_url = str(url or "").strip().partition("?")[0].partition("#")[0].rstrip("/")
     parts = [p for p in clean_url.split("/") if p and not p.lower().startswith("http")]
     # Remove domain part if present
     if parts and (
