@@ -49,6 +49,7 @@
               type="button"
               class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] rounded-lg text-slate-300 hover:text-white hover:bg-botex-800 transition flex items-center justify-center"
               title="New Chat Session"
+              aria-label="New Chat Session"
               @click="handleNewSession"
             >
               <PlusIcon class="w-4 h-4" />
@@ -57,6 +58,7 @@
               type="button"
               class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] rounded-lg text-slate-300 hover:text-white hover:bg-botex-800 transition flex items-center justify-center"
               title="Refresh Sessions"
+              aria-label="Refresh Sessions"
               :disabled="isLoading"
               @click="$emit('refresh')"
             >
@@ -66,6 +68,7 @@
               type="button"
               class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] rounded-lg text-slate-300 hover:text-white hover:bg-botex-800 transition flex items-center justify-center"
               title="Close panel"
+              aria-label="Close panel"
               @click="$emit('close')"
             >
               <XIcon class="w-4 h-4" />
