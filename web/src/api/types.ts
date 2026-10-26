@@ -69,6 +69,8 @@ export interface TaskSummary {
 export interface TaskDetail extends TaskSummary {
   result: string | null
   result_data: Record<string, any> | null
+  task?: string | null
+  request?: TaskCreateRequest | null
 }
 
 export interface PendingAction {
@@ -104,6 +106,10 @@ export interface MemoryEntry {
   updated_at?: string | number
   scope?: string
   path?: string
+  status?: string
+  compiled_truth?: boolean
+  links?: string[]
+  timestamp?: string
 }
 
 export interface MemorySaveRequest {
@@ -121,6 +127,8 @@ export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  reasoning?: string
+  is_thinking?: boolean
   timestamp: number
   streaming?: boolean
   model?: string
@@ -129,8 +137,9 @@ export interface ChatMessage {
 }
 
 export interface ChatChunk {
-  type: 'chunk' | 'content_chunk' | 'message' | 'tool_call' | 'tool_call_start' | 'tool_result' | 'approval_required' | 'error' | 'done' | 'ping' | 'pong' | 'auth_ok' | string
+  type: 'chunk' | 'content_chunk' | 'reasoning_chunk' | 'message' | 'tool_call' | 'tool_call_start' | 'tool_result' | 'approval_required' | 'error' | 'done' | 'ping' | 'pong' | 'auth_ok' | string
   delta?: string
+  chunk?: string
   accumulated?: string
   content?: string
   message?: string
@@ -186,4 +195,161 @@ export interface ChatSessionDetail extends ChatSessionSummary {
   messages: ChatMessage[]
 }
 
+export interface GraphNode {
+  id: string
+  title: string
+  kind: string
+  tags: string[]
+  status: string
+  compiled_truth: boolean
+  timestamp: string
+  scope: string
+  in_degree: number
+  out_degree: number
+}
+
+export interface GraphEdge {
+  source: string
+  target: string
+  kind: string
+}
+
+export interface GraphHealth {
+  total_nodes: number
+  total_edges: number
+  broken_count: number
+  orphan_count: number
+  cycle_count: number
+  is_healthy: boolean
+  broken_links?: Array<{ source: string; target: string }>
+  orphans?: any[]
+  cycles?: string[][]
+}
+
+export interface MemoryGraphResponse {
+  ok: boolean
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  health: GraphHealth
+}
+
+export interface BacklinkItem {
+  id: string
+  title: string
+  kind: string
+  tags: string[]
+  status: string
+  compiled_truth: boolean
+  timestamp: string
+  scope: string
+}
+
+export interface BacklinksResponse {
+  ok: boolean
+  target_id: string
+  count: number
+  backlinks: BacklinkItem[]
+}
+
+// ---------------------------------------------------------------------------
+// Analytics (run telemetry aggregated by backend from .agent_analytics.json)
+// ---------------------------------------------------------------------------
+
+export interface AnalyticsModelStat {
+  model: string
+  runs: number
+  done_runs: number
+  done_pct: number
+  cost_usd: number
+  tokens: number
+  prompt_tokens?: number
+  cached_tokens: number
+  cache_hit_pct?: number
+  cache_savings_usd: number
+  failures: Record<string, number>
+  top_failure: string | null
+}
+
+export interface AnalyticsDailyPoint {
+  date: string
+  runs: number
+  cost_usd: number
+  tokens: number
+}
+
+export interface AnalyticsRecentRun {
+  task_id: string | null
+  timestamp: string | null
+  model: string | null
+  provider: string | null
+  status: string | null
+  failure_kind: string | null
+  cost_usd: number
+  duration_s: number | null
+  tokens: number
+}
+
+export interface AnalyticsDigest {
+  id: string
+  title: string
+  timestamp: string
+  content: string
+}
+
+export interface AnalyticsResponse {
+  period: 'week' | 'month' | 'all' | string
+  days: number | null
+  runs: number
+  done_runs: number
+  failed_runs: number
+  done_pct: number
+  cost_usd: number
+  prompt_tokens: number
+  completion_tokens: number
+  cached_tokens: number
+  cache_hit_pct: number
+  cache_savings_usd: number
+  lines_added: number
+  lines_removed: number
+  avg_duration_s: number | null
+  avg_generation_ms: number | null
+  status_counts: Record<string, number>
+  by_model: AnalyticsModelStat[]
+  daily: AnalyticsDailyPoint[]
+  recent: AnalyticsRecentRun[]
+  latest_digest: AnalyticsDigest | null
+}
+
+// ---------------------------------------------------------------------------
+// Server-Side Skills Catalog (Skill Vault)
+// ---------------------------------------------------------------------------
+
+export interface SkillCatalogItem {
+  name: string
+  display_name?: string
+  description: string
+  version: string
+  origin_repo: string
+  commit_sha?: string
+  installed_at?: string
+  taxonomy: string[]
+  size_bytes: number
+  path: string
+  preview?: string
+}
+
+export interface SkillDetail extends SkillCatalogItem {
+  content: string
+}
+
+export interface SkillInstallRequest {
+  name?: string
+  content?: string
+  source_url?: string
+  origin_repo?: string
+  version?: string
+  commit_sha?: string
+  description?: string
+  taxonomy?: string[]
+}
 

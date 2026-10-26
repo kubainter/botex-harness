@@ -48,11 +48,24 @@ from botex.config import (
     resolve_workspace_source,
     set_local_config,
 )
+from botex.context_guard import read_scratchpad as _read_scratchpad
 from botex.engine import run_botex_task
 from botex.file_tools import get_file_outline as _get_file_outline
 from botex.i18n import SUPPORTED, init_language, set_language, t
 from botex.memory import (
+    delete_memory as _delete_memory,
+)
+from botex.memory import (
+    find_graph_health as _find_graph_health,
+)
+from botex.memory import (
+    get_backlinks as _get_backlinks,
+)
+from botex.memory import (
     list_memories as _list_memories,
+)
+from botex.memory import (
+    patch_memory_section as _patch_memory_section,
 )
 from botex.memory import (
     read_memory as _read_memory,
@@ -64,8 +77,15 @@ from botex.memory import (
     search_memory as _search_memory,
 )
 from botex.net_tools import fetch_url as _fetch_url
+from botex.obsidian import (
+    export_graph_index_markdown as _export_graph_index_markdown,
+)
+from botex.obsidian import (
+    init_obsidian_vault as _init_obsidian_vault,
+)
 from botex.patch_engine import snapshot_manager
 from botex.pricing import load_catalog, model_price
+from botex.providers import ProviderRegistry
 from botex.security import mask_secrets, sever_taint_numeric, wrap_untrusted_content, zdr_enforced
 from botex.ui import accent, dim, err, mark_status, ok, title, warn
 
@@ -117,6 +137,10 @@ class SubagentTaskResult(TypedDict, total=False):
     fallback_from: str
     zdr_enforced: bool
     vault_memory_id: Optional[str]
+    applied_skills: list[str]
+    artifact_refs: list[str]
+    memory_keys: list[str]
+    blocking_reason: Optional[str]
 
 
 def mask_secrets_recursive(val: Any) -> Any:
@@ -209,6 +233,8 @@ def _format_result_text(res: dict) -> str:
         f"- Modified files: {files_str}",
         f"- Line balance: +{res.get('lines_added', 0)} / -{res.get('lines_removed', 0)}",
     ]
+    if res.get("applied_skills"):
+        lines.append(f"- Applied skills: {', '.join(res['applied_skills'])}")
     if offloaded:
         lines.append(
             "- Full audit report saved to Memory Vault. "
@@ -423,6 +449,7 @@ async def recommend_models(
     provider: str = "",
     profile: str = "",
     tier: str = "auto",
+    recipe: str = "",
 ) -> str:
     """
     [EN] Fetches the most cost-effective and capable models from OpenRouter based on live benchmarks.
@@ -444,6 +471,7 @@ async def recommend_models(
         provider=provider or "openrouter",
         profile=profile or None,
         tier=tier or "auto",
+        recipe=recipe or None,
     )
     return json.dumps(results, indent=2)
 
@@ -695,6 +723,142 @@ async def read_memory(
 
 
 @mcp.tool()
+async def delete_memory(
+    memory_id: str,
+    workspace_dir: str = "",
+    scope: str = "local",
+) -> dict[str, Any]:
+    """
+    Deletes a specific memory entry by ID from the workspace or global Memory Vault
+    and removes its index/graph links.
+
+    Args:
+        memory_id: The ID of the memory entry to delete (e.g. 'mem_a1b2c3d4').
+        workspace_dir: Workspace root directory. Empty = engine.default_workspace
+               from the config, else the server's current directory.
+        scope: Lookup scope ('local', 'global', or 'all'). Default is 'local'.
+    """
+    return _delete_memory(
+        workspace_dir=resolve_workspace(workspace_dir),
+        memory_id=memory_id,
+        scope=scope,
+    )
+
+
+@mcp.tool()
+async def read_scratchpad(
+    memory_id: str,
+    workspace_dir: str = "",
+) -> dict[str, Any]:
+    """
+    Reads the full execution or terminal log offloaded to the scratchpad (.botex/scratchpad/<memory_id>.log).
+
+    Args:
+        memory_id: The ID of the scratchpad entry (e.g. 'mem_exec_a1b2c3d4').
+        workspace_dir: Workspace root directory. Empty = engine.default_workspace
+               from the config, else the server's current directory.
+    """
+    return _read_scratchpad(
+        memory_id=memory_id,
+        cwd=resolve_workspace(workspace_dir),
+    )
+
+
+@mcp.tool()
+async def get_backlinks(
+    memory_id: str,
+    workspace_dir: str = "",
+    scope: str = "local",
+) -> dict[str, Any]:
+    """
+    Finds all memories that link TO the given memory_id via [[wikilinks]].
+
+    Args:
+        memory_id: Target memory ID (e.g. 'mem_a1b2c3d4').
+        workspace_dir: Workspace root directory.
+        scope: Lookup scope ('local', 'global', or 'all').
+    """
+    return _get_backlinks(
+        workspace_dir=resolve_workspace(workspace_dir),
+        memory_id=memory_id,
+        scope=scope,
+    )
+
+
+@mcp.tool()
+async def patch_memory_section(
+    memory_id: str,
+    section: str = "Compiled Truth",
+    new_content: str = "",
+    workspace_dir: str = "",
+    scope: str = "local",
+    append: bool = False,
+) -> dict[str, Any]:
+    """
+    Surgically updates a Markdown section (e.g. '## Compiled Truth') in a memory note
+    without modifying frontmatter, other sections, or the Timeline audit trail.
+
+    Args:
+        memory_id: Target memory ID to patch.
+        section: Section heading to replace or create (default 'Compiled Truth').
+        new_content: New Markdown text for the section.
+        workspace_dir: Workspace root directory.
+        scope: Lookup scope ('local' or 'global').
+        append: Whether to append to existing section content instead of replacing.
+    """
+    return _patch_memory_section(
+        workspace_dir=resolve_workspace(workspace_dir),
+        memory_id=memory_id,
+        section=section,
+        new_content=new_content,
+        scope=scope,
+        append=append,
+    )
+
+
+@mcp.tool()
+async def find_graph_health(
+    workspace_dir: str = "",
+    scope: str = "local",
+) -> dict[str, Any]:
+    """
+    Audits Memory Vault knowledge graph integrity: reports broken links, orphan notes, and cycles.
+
+    Args:
+        workspace_dir: Workspace root directory.
+        scope: Lookup scope ('local', 'global', or 'all').
+    """
+    return _find_graph_health(
+        workspace_dir=resolve_workspace(workspace_dir),
+        scope=scope,
+    )
+
+
+@mcp.tool()
+async def init_obsidian_vault(
+    workspace_dir: str = "",
+    scope: str = "local",
+    override_existing: bool = False,
+    export_index: bool = True,
+) -> dict[str, Any]:
+    """
+    Initializes or syncs Obsidian PKM vault configuration (.obsidian/graph.json, app.json)
+    with preset color profiles for #decision, #lesson, #handoff, #context.
+
+    Args:
+        workspace_dir: Workspace root directory.
+        scope: Target scope ('local' or 'global').
+        override_existing: Whether to overwrite existing .obsidian config files.
+        export_index: Also generate dynamic _GRAPH_INDEX.md note.
+    """
+    ws = resolve_workspace(workspace_dir)
+    res = _init_obsidian_vault(workspace_dir=ws, scope=scope, override_existing=override_existing)
+    if export_index and res.get("ok"):
+        _export_graph_index_markdown(workspace_dir=ws, scope=scope)
+    return res
+
+
+@mcp.tool()
 async def get_stats(period: str = "week") -> str:
     """
     Returns an analytics summary of executed BoteX tasks (USD costs, token
@@ -763,8 +927,18 @@ async def check_health() -> str:
     key_lines = []
     for pname, pcfg in cfg.get("providers", {}).items():
         env_name = pcfg.get("api_key_env") or f"{pname.upper()}_API_KEY"
-        has_key = bool(os.environ.get(env_name) or secrets.get(f"{pname}_api_key"))
         marker = " [default]" if pcfg.get("default") else ""
+        # Local endpoints (e.g. Ollama / Bielik) need no external API key —
+        # a static api_key_fallback or `local: true` flag is sufficient.
+        if pcfg.get("local") or pcfg.get("api_key_fallback"):
+            key_lines.append(f"[OK] {pname}{marker}: local endpoint active")
+            continue
+        try:
+            prov_adapter = ProviderRegistry.get(pname, pcfg)
+            resolved = prov_adapter.resolve_api_key(secrets_cfg=secrets, provider_cfg=pcfg)
+            has_key = bool(resolved)
+        except Exception:
+            has_key = bool(os.environ.get(env_name) or secrets.get(f"{pname}_api_key"))
         key_lines.append(
             f"[{'OK' if has_key else 'MISSING'}] {pname}{marker}: {env_name} "
             f"{'configured' if has_key else '(check .env)'}"

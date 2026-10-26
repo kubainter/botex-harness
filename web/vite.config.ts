@@ -11,12 +11,15 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'icon-192.png', 'icon-512.png', 'icon-512-maskable.png', 'botex-logo.svg'],
       manifest: {
+        id: '/',
         name: 'BoteX Control',
         short_name: 'BoteX',
         description: 'Progressive Web App Command Center for BoteX Cloud & Harness',
         theme_color: '#0f172a',
         background_color: '#0f172a',
         display: 'standalone',
+        display_override: ['window-controls-overlay', 'standalone'],
+        categories: ['developer', 'utilities', 'productivity'],
         orientation: 'any',
         start_url: '/',
         icons: [

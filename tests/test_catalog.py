@@ -938,3 +938,38 @@ def test_catalog_single_pass_loaded_flag_prevents_repeated_reloads(isolated_cach
     catalog.get_model("another-model")
     catalog.list_models()
     assert mock_provider.fetch_catalog.call_count == 1
+
+
+def test_consolidated_models_includes_ollama_local_free(isolated_cache_path: Path):
+    """TEST-CAT-30: Consolidated catalog surfaces local Ollama models as free entries."""
+    from botex.catalog import get_consolidated_models
+
+    config = {
+        "providers": {
+            "ollama": {
+                "local": True,
+                "api_key_fallback": "ollama",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "models": {
+                    "default": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
+                    "coding": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
+                },
+            }
+        }
+    }
+
+    models = get_consolidated_models(
+        providers=("ollama",),
+        config=config,
+        cache_file=isolated_cache_path,
+        force_refresh=True,
+    )
+
+    ollama_entries = [m for m in models if m["provider"] == "ollama"]
+    assert ollama_entries, "ollama provider missing from consolidated catalog"
+    assert any(m["id"] == "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M" for m in ollama_entries)
+    for entry in ollama_entries:
+        assert entry["is_free"] is True
+        assert entry["pricing"]["prompt_per_m"] == 0.0
+        assert entry["pricing"]["completion_per_m"] == 0.0
+        assert entry["context_length"] > 0

@@ -15,7 +15,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from .config import PROJECT_ROOT
@@ -27,6 +27,22 @@ except (ImportError, ValueError):
     from providers import BaseProvider, ProviderRegistry
     from security import mask_secrets, sever_taint_numeric
     from wallet import _sanitize_raw_payload
+
+# Allowlist of verified active models hosted on NVIDIA Cloud Functions
+_ACTIVE_NVIDIA_MODELS: set[str] = {
+    "google/diffusiongemma-26b-a4b-it",
+    "meta/llama-3.2-11b-vision-instruct",
+    "meta/muse-glimmer-30b",
+    "nvidia/ising-calibration-1.5-31b",
+    "nvidia/llama-3.1-nemotron-safety-guard-8b-v3",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3.5-content-safety",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    "nvidia/nemotron-parse-2.0",
+    "nvidia/riva-translate-4b-instruct-v2",
+    "stepfun-ai/step-5-preview",
+}
 
 CACHE_FILE_DEFAULT: Path = PROJECT_ROOT / ".model_pricing.json"
 DEFAULT_TTL_HOURS: float = 24.0
@@ -507,15 +523,19 @@ _VALID_PROVIDERS_MAP: Dict[str, str] = {
     "openrouter": "openrouter",
     "openrouter-free": "openrouter-free",
     "nvidia": "nvidia",
+    "ollama": "ollama",
 }
 
 _KNOWN_DISPLAY_NAMES: Dict[str, str] = {
+    "bielik-direct:latest": "Bielik Direct (Lokalny 11B)",
+    "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M": "Bielik 11B v3.0 Instruct (Ollama)",
     "liquid/lfm-2.5-2.6b:free": "Liquid LFM 2.5:free",
     "deepseek/deepseek-r1": "DeepSeek R1",
     "deepseek/deepseek-v3.2": "DeepSeek V3.2",
     "deepseek/deepseek-v4-flash-0731": "DeepSeek V4 Flash",
     "meta-llama/llama-3.1-8b-instruct": "Llama 3.1 8B Instruct",
     "meta/llama-3.3-70b-instruct": "Llama 3.3 70B Instruct",
+    "meta/llama-3.2-11b-vision-instruct": "Llama 3.2 11B Vision Instruct (NIM)",
     "google/gemini-2.5-flash": "Gemini 2.5 Flash",
     "google/gemini-2.5-flash-lite": "Gemini 2.5 Flash Lite",
     "google/gemma-4-31b-it:free": "Gemma 4 31B IT:free",
@@ -648,7 +668,7 @@ _CONSOLIDATED_MEM_CACHE: Dict[str, Any] = {
 
 
 def get_consolidated_models(
-    providers: Sequence[str] = ("openrouter", "openrouter-free", "nvidia"),
+    providers: Sequence[str] = ("openrouter", "openrouter-free", "nvidia", "ollama"),
     config: Optional[Dict[str, Any]] = None,
     cache_file: Optional[Path | str] = None,
     ttl_seconds: float = 300.0,
@@ -673,7 +693,7 @@ def get_consolidated_models(
         if isinstance(p, str) and p.strip().lower() in _VALID_PROVIDERS_MAP
     )
     if not norm_providers:
-        norm_providers = ("openrouter", "openrouter-free", "nvidia")
+        norm_providers = ("openrouter", "openrouter-free", "nvidia", "ollama")
 
     if (
         not force_refresh
@@ -703,7 +723,14 @@ def get_consolidated_models(
 
     def _add_meta(meta: ModelMetadata, target_provider: str) -> None:
         prov_literal = _VALID_PROVIDERS_MAP.get(target_provider, "openrouter")
-        free_flag = bool(meta.is_free)
+        prov_cfg = providers_cfg.get(prov_literal) if isinstance(providers_cfg, dict) else None
+        # Local endpoints (e.g. Ollama / Bielik) cannot bill per request —
+        # they are always free, and prompts never leave the operator's host.
+        local_free = bool(
+            isinstance(prov_cfg, dict)
+            and (prov_cfg.get("local") or prov_cfg.get("api_key_fallback"))
+        )
+        free_flag = bool(meta.is_free) or local_free
         # Route OpenRouter free models to openrouter-free provider when enabled
         if prov_literal == "openrouter" and free_flag and "openrouter-free" in norm_providers:
             prov_literal = "openrouter-free"
@@ -713,7 +740,9 @@ def get_consolidated_models(
         prompt_p = 0.0 if free_flag else round(float(meta.prompt_price_per_m or 0.0), 4)
         comp_p = 0.0 if free_flag else round(float(meta.completion_price_per_m or 0.0), 4)
         zdr_flag = (
-            False
+            bool(meta.is_zdr_compliant)
+            if local_free
+            else False
             if (free_flag or prov_literal == "openrouter-free")
             else bool(meta.is_zdr_compliant)
         )
@@ -753,6 +782,8 @@ def get_consolidated_models(
             loaded_by_base_url[b_key] = models_list
 
         for m in models_list:
+            if prov_name == "nvidia" and m.id not in _ACTIVE_NVIDIA_MODELS:
+                continue
             _add_meta(m, prov_name)
 
     # Ensure canonical fallback models exist even if cache file is empty in offline/test environments
@@ -837,8 +868,8 @@ def get_consolidated_models(
 
     if "nvidia" in norm_providers:
         nv_seed = ModelMetadata(
-            id="meta/llama-3.3-70b-instruct",
-            name="Llama 3.3 70B Instruct (NIM)",
+            id="meta/llama-3.2-11b-vision-instruct",
+            name="Llama 3.2 11B Vision Instruct (NIM)",
             context_length=131072,
             prompt_price_per_m=0.0,
             completion_price_per_m=0.0,
@@ -857,6 +888,29 @@ def get_consolidated_models(
                 "is_zdr_compliant": True,
             }
 
+    # Seed configured Ollama models so a local endpoint stays visible in the
+    # catalog even when it is offline and its /models fetch returns nothing.
+    if "ollama" in norm_providers:
+        ollama_cfg = providers_cfg.get("ollama") if isinstance(providers_cfg, dict) else None
+        ollama_models = (ollama_cfg.get("models") if isinstance(ollama_cfg, dict) else None) or {}
+        seed_ids = [s for s in ollama_models.values() if isinstance(s, str) and s.strip()]
+        if not seed_ids:
+            seed_ids = ["SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M"]
+        for slug in dict.fromkeys(seed_ids):
+            if f"ollama:{slug}" not in entries_by_key:
+                _add_meta(
+                    ModelMetadata(
+                        id=slug,
+                        name="",
+                        context_length=0,
+                        prompt_price_per_m=0.0,
+                        completion_price_per_m=0.0,
+                        supports_tools=True,
+                        is_zdr_compliant=True,
+                    ),
+                    "ollama",
+                )
+
     # Sort: curated/known models & free models first, then alphabetical by name
     def _sort_key(entry: Dict[str, Any]) -> Any:
         slug = entry["id"]
@@ -872,3 +926,40 @@ def get_consolidated_models(
     _CONSOLIDATED_MEM_CACHE["providers"] = norm_providers
     _CONSOLIDATED_MEM_CACHE["models"] = sorted_models
     return list(sorted_models)
+
+
+# Tier-0 ($0 budget) multi-provider cascade chain
+# Ordered by capability & speed:
+# 1. NVIDIA NIM (Reasoning / Nemotron / Llama-3.1 on fast inference)
+# 2. OpenRouter free-tier reasoning / coding
+# 3. Google AI Studio / Gemini free-tier
+FREE_TIER_FAILOVER_CHAIN: Tuple[Dict[str, str], ...] = (
+    {"provider": "nvidia", "model": "nvidia/nemotron-3.5-super-vl-120b-a12b"},
+    {"provider": "nvidia", "model": "meta/llama-3.1-70b-instruct"},
+    {"provider": "openrouter-free", "model": "deepseek/deepseek-r1:free"},
+    {"provider": "openrouter-free", "model": "qwen/qwen-2.5-coder-32b-instruct:free"},
+    {"provider": "openrouter-free", "model": "meta-llama/llama-3.3-70b-instruct:free"},
+    {"provider": "openrouter-free", "model": "google/gemini-2.0-flash-thinking-exp:free"},
+    {"provider": "openrouter-free", "model": "google/gemini-2.0-flash-exp:free"},
+)
+
+
+def get_free_tier_failover_candidates(
+    current_model: str = "",
+    attempted_models: Optional[Sequence[str]] = None,
+) -> List[Dict[str, str]]:
+    """Return an ordered list of remaining free-tier failover provider/model pairs.
+
+    Filters out already attempted models to prevent looping upon HTTP 429 rate limits.
+    """
+    attempted_set = {str(m).strip().lower() for m in (attempted_models or []) if m}
+    if current_model:
+        attempted_set.add(str(current_model).strip().lower())
+
+    candidates: List[Dict[str, str]] = []
+    for entry in FREE_TIER_FAILOVER_CHAIN:
+        cand_model = entry["model"].strip().lower()
+        if cand_model not in attempted_set:
+            candidates.append(dict(entry))
+            attempted_set.add(cand_model)
+    return candidates

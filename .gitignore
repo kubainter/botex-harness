@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -98,3 +98,12 @@ inspect_sessions.py
 BOTEX_IMPLEMENTATION_STATUS.md
 .agents/
 
+
+# Local audit tooling and probe artifacts
+web/.pw-*
+web/*-shots/
+web/*-out.json
+web/.*.cjs
+
+# Stale internal planning doc (kept locally only)
+docs/CONTEXT_OPTIMIZATION_PLAN.md

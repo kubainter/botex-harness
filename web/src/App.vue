@@ -1,5 +1,5 @@
 <template>
-  <div class="h-screen w-screen flex flex-col md:flex-row bg-botex-950 text-slate-100 font-sans overflow-hidden">
+  <div class="h-screen supports-[height:100dvh]:h-dvh w-full flex flex-col md:flex-row bg-botex-950 text-slate-100 font-sans overflow-hidden pt-safe pl-safe pr-safe">
     <!-- Tablet / Desktop Sidebar -->
     <aside
       :class="[
@@ -8,36 +8,37 @@
       ]"
     >
       <!-- App Brand -->
-      <div class="px-3.5 py-3.5 border-b border-botex-800 flex items-center justify-between gap-2">
+      <div class="px-3.5 py-3.5 border-b border-botex-800 flex flex-wrap items-center justify-between gap-2">
         <div class="flex items-center space-x-2.5 min-w-0">
           <button
             type="button"
-            class="w-8 h-8 rounded-lg bg-botex-950 border border-botex-700 hover:border-sky-500/50 flex items-center justify-center shrink-0 transition"
+            class="w-11 h-11 lg:w-9 lg:h-9 rounded-lg bg-botex-950 border border-botex-700 hover:border-sky-500/50 flex items-center justify-center shrink-0 transition"
             title="Toggle sidebar width"
             @click="sidebarCollapsed = !sidebarCollapsed"
           >
             <span class="font-mono font-bold text-sky-400 text-sm">BX</span>
           </button>
-          <div v-if="!sidebarCollapsed" class="truncate">
-            <h1 class="text-sm font-bold text-slate-100 tracking-tight truncate">BoteX Control</h1>
-            <p class="text-[11px] text-slate-300 font-mono truncate">{{ t('app.subtitle') }}</p>
+          <div v-if="!sidebarCollapsed" class="truncate cursor-pointer select-none" @click="currentView = 'chat'" title="Go to Chat">
+            <h1 class="text-base font-bold text-slate-100 tracking-tight truncate hover:text-sky-300 transition">BoteX Control</h1>
+            <p class="text-xs text-slate-300 font-mono truncate">{{ t('app.subtitle') }}</p>
           </div>
         </div>
 
         <!-- Connection Status, Theme & Language Switcher -->
-        <div v-if="!sidebarCollapsed" class="flex items-center space-x-1.5 shrink-0">
+        <div v-if="!sidebarCollapsed" class="flex items-center space-x-1.5 shrink-0 ml-auto">
           <button
             type="button"
-            class="p-1.5 rounded bg-botex-950 border border-botex-700 text-slate-200 hover:border-sky-500/50 transition"
-            :title="theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
+            class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] p-1.5 rounded bg-botex-950 border border-botex-700 text-slate-200 hover:border-sky-500/50 transition flex items-center justify-center"
+            :title="themeStore.isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
+            :aria-pressed="themeStore.isDark"
             @click="toggleTheme"
           >
-            <SunIcon v-if="theme === 'dark'" class="w-3.5 h-3.5 text-amber-400" />
+            <SunIcon v-if="themeStore.isDark" class="w-3.5 h-3.5 text-amber-400" />
             <MoonIcon v-else class="w-3.5 h-3.5 text-sky-400" />
           </button>
           <button
             type="button"
-            class="px-1.5 py-0.5 rounded bg-botex-950 border border-botex-700 text-[10px] font-mono font-semibold text-slate-200 hover:border-sky-500/50 transition uppercase"
+            class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] px-2 py-1 rounded bg-botex-950 border border-botex-700 text-xs font-mono font-semibold text-slate-200 hover:border-sky-500/50 transition uppercase"
             title="Switch interface language (EN / PL)"
             @click="toggleLang"
           >
@@ -59,7 +60,7 @@
           type="button"
           :title="t(item.labelKey)"
           :class="[
-            'w-full min-h-[40px] flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors',
+            'w-full min-h-[44px] flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors',
             currentView === item.id
               ? 'bg-botex-800 text-slate-100 border border-botex-700'
               : 'text-slate-300 hover:text-white hover:bg-botex-800/60 border border-transparent'
@@ -78,14 +79,14 @@
           <!-- Pending count badge -->
           <span
             v-if="!sidebarCollapsed && item.id === 'approvals' && approvalsCount > 0"
-            class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-950 text-amber-300 border border-amber-500/40"
+            class="px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-950 text-amber-300 border border-amber-500/40"
           >
             {{ approvalsCount }}
           </span>
           <!-- Low budget warning badge -->
           <span
             v-if="!sidebarCollapsed && item.id === 'wallet' && isBudgetLow"
-            class="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-950 text-rose-300 border border-rose-500/40"
+            class="px-1.5 py-0.5 rounded text-xs font-mono font-bold bg-rose-950 text-rose-300 border border-rose-500/40"
             :title="t('app.budget.low')"
           >
             !$
@@ -97,16 +98,16 @@
       <div v-if="!sidebarCollapsed" class="p-3 border-t border-botex-800 bg-botex-950/70 text-xs">
         <div
           v-if="isBudgetLow"
-          class="mb-2 px-2 py-1 rounded bg-rose-950/90 border border-rose-500/40 text-rose-200 text-[11px] font-mono flex items-center justify-between cursor-pointer"
+          class="mb-2 px-2 py-1 rounded bg-rose-950/90 border border-rose-500/40 text-rose-200 text-xs font-mono flex items-center justify-between cursor-pointer"
           @click="currentView = 'wallet'"
         >
           <span class="truncate">{{ t('app.budget.low') }}</span>
         </div>
-        <div class="flex items-center justify-between text-[11px] text-slate-300 font-mono mb-1">
+        <div class="flex items-center justify-between text-xs text-slate-300 font-mono mb-1">
           <span class="truncate max-w-[140px]">{{ backendHost }}</span>
           <span :class="wsColorClass">{{ wsStatus }}</span>
         </div>
-        <div class="flex items-center justify-between text-[11px] text-slate-300 font-mono">
+        <div class="flex items-center justify-between text-xs text-slate-300 font-mono">
           <span>v1.0.0</span>
           <span v-if="authStore.accessToken" class="text-sky-300">{{ t('app.auth.bearer') }}</span>
           <span v-else class="text-slate-300">{{ t('app.auth.local') }}</span>
@@ -116,20 +117,20 @@
 
     <!-- Main Content Area -->
     <main class="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden">
-      <!-- Mobile Top Bar -->
-      <header class="md:hidden px-3.5 py-2.5 bg-botex-900 border-b border-botex-800 flex items-center justify-between shrink-0">
-        <div class="flex items-center space-x-2.5">
-          <div class="w-7 h-7 rounded-lg bg-botex-950 border border-botex-700 flex items-center justify-center text-sky-400 font-bold font-mono text-xs">
+      <!-- Mobile Top Bar (Strict RWD & Safe Bounds) -->
+      <header class="md:hidden px-2.5 sm:px-3.5 py-2 bg-botex-900 border-b border-botex-800 flex items-center justify-between gap-1.5 shrink-0 w-full max-w-full overflow-hidden">
+        <div class="flex items-center space-x-2 cursor-pointer select-none min-w-0 shrink" @click="currentView = 'chat'" title="Go to Chat">
+          <div class="w-7 h-7 shrink-0 rounded-lg bg-botex-950 border border-botex-700 hover:border-sky-500/50 flex items-center justify-center text-sky-400 font-bold font-mono text-xs transition">
             BX
           </div>
-          <span class="text-sm font-bold text-slate-100">BoteX Control</span>
+          <span class="text-base font-bold text-slate-100 hover:text-sky-300 transition truncate">BoteX Control</span>
         </div>
 
-        <div class="flex items-center space-x-2">
+        <div class="flex items-center space-x-1 shrink-0">
           <button
             v-if="isBudgetLow"
             type="button"
-            class="min-h-[36px] px-2 py-1 rounded text-xs font-mono font-bold bg-rose-950 text-rose-300 border border-rose-500/40"
+            class="min-h-[44px] px-1.5 py-0.5 rounded text-xs font-mono font-bold bg-rose-950 text-rose-300 border border-rose-500/40"
             :title="t('app.budget.low')"
             @click="currentView = 'wallet'"
           >
@@ -137,16 +138,18 @@
           </button>
           <button
             type="button"
-            class="min-h-[36px] min-w-[36px] p-1.5 rounded bg-botex-950 border border-botex-700 text-slate-200 flex items-center justify-center"
-            :title="theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
+            class="min-h-[44px] min-w-[44px] p-1.5 rounded bg-botex-950 border border-botex-700 text-slate-200 flex items-center justify-center transition hover:border-slate-500"
+            :title="themeStore.isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
+            :aria-pressed="themeStore.isDark"
             @click="toggleTheme"
           >
-            <SunIcon v-if="theme === 'dark'" class="w-4 h-4 text-amber-400" />
+            <SunIcon v-if="themeStore.isDark" class="w-4 h-4 text-amber-400" />
             <MoonIcon v-else class="w-4 h-4 text-sky-400" />
           </button>
           <button
             type="button"
-            class="min-h-[36px] px-2.5 py-1 rounded bg-botex-950 border border-botex-700 text-xs font-mono font-semibold text-slate-200 uppercase"
+            class="min-h-[44px] min-w-[44px] px-2 py-1 rounded bg-botex-950 border border-botex-700 text-xs font-mono font-semibold text-slate-200 uppercase transition hover:border-slate-500 flex items-center justify-center"
+            title="Switch Language"
             @click="toggleLang"
           >
             {{ lang }}
@@ -154,14 +157,17 @@
           <button
             v-if="approvalsCount > 0"
             type="button"
-            class="min-h-[36px] px-2.5 py-1 rounded text-xs font-mono font-bold bg-amber-950 text-amber-300 border border-amber-500/40"
+            class="min-h-[44px] px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-950 text-amber-300 border border-amber-500/40 flex items-center space-x-1"
+            title="Pending Approvals"
             @click="currentView = 'approvals'"
           >
-            {{ approvalsCount }} Gate
+            <ShieldAlertIcon class="w-3.5 h-3.5 text-amber-400" />
+            <span>{{ approvalsCount }}</span>
           </button>
           <div
-            class="w-2.5 h-2.5 rounded-full"
-            :class="authStore.isServerHealthy ? 'bg-emerald-400' : 'bg-rose-500'"
+            class="w-2.5 h-2.5 rounded-full shrink-0 ml-0.5"
+            :class="authStore.isServerHealthy ? 'bg-emerald-400' : 'bg-rose-500 animate-pulse'"
+            :title="authStore.isServerHealthy ? t('app.online') : t('app.offline')"
           ></div>
         </div>
       </header>
@@ -169,6 +175,7 @@
       <!-- Connection Warning Banner if offline -->
       <div
         v-if="!authStore.isOnline || !authStore.isServerHealthy"
+        role="alert"
         class="bg-amber-950/90 border-b border-amber-500/40 text-amber-200 text-xs px-4 py-1.5 text-center flex items-center justify-center space-x-2 shrink-0"
       >
         <AlertTriangleIcon class="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -177,51 +184,97 @@
         </span>
       </div>
 
-      <!-- Dynamic Views -->
-      <div class="flex-1 overflow-hidden relative">
-        <ChatView
-          v-if="currentView === 'chat'"
-          @navigate="onNavigate"
-        />
-        <TasksView
-          v-else-if="currentView === 'tasks'"
-        />
-        <ApprovalsView
-          v-else-if="currentView === 'approvals'"
-        />
-        <MemoryView
-          v-else-if="currentView === 'memory'"
-        />
-        <WalletView
-          v-else-if="currentView === 'wallet'"
-        />
-        <SettingsView
-          v-else-if="currentView === 'settings'"
-        />
+      <!-- Auth Failure Banner -->
+      <div
+        v-if="authError"
+        role="alert"
+        class="bg-rose-950/90 border-b border-rose-500/40 text-rose-200 text-xs px-4 py-1.5 flex items-center justify-between shrink-0"
+      >
+        <div class="flex items-center space-x-2 truncate">
+          <AlertTriangleIcon class="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          <span class="truncate">{{ t('app.auth.banner') }}</span>
+        </div>
+        <button
+          type="button"
+          class="underline text-xs text-rose-300 hover:text-white shrink-0 ml-2 font-mono min-h-[44px] px-2"
+          @click="currentView = 'settings'"
+        >
+          {{ lang === 'pl' ? 'Ustawienia' : 'Settings' }} &rarr;
+        </button>
       </div>
 
-      <!-- Mobile Bottom Navigation Bar (44x44px minimum touch target) -->
-      <nav class="md:hidden bg-botex-900 border-t border-botex-800 grid grid-cols-6 py-1 px-1 shrink-0 z-30">
+      <!-- Low Balance Warning Banner -->
+      <div
+        v-if="isBudgetLow"
+        role="alert"
+        class="bg-rose-950/90 border-b border-rose-500/40 text-rose-200 text-xs px-4 py-1.5 flex items-center justify-between shrink-0"
+      >
+        <div class="flex items-center space-x-2 truncate">
+          <AlertTriangleIcon class="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          <span class="truncate">
+            {{ lang === 'pl' ? 'Niski stan portfela OpenRouter' : 'Low OpenRouter Balance' }}:
+            <strong class="font-mono text-white">${{ (walletStore.walletInfo?.balance_usd ?? walletStore.keyStatus?.balance_usd ?? 0).toFixed(2) }}</strong>
+            ({{ lang === 'pl' ? 'wymagane zasilenie lub przełączenie na darmowy model :free' : 'top-up required or switch to free model' }})
+          </span>
+        </div>
+        <button
+          type="button"
+          class="underline text-xs text-rose-300 hover:text-white shrink-0 ml-2 font-mono"
+          @click="currentView = 'wallet'"
+        >
+          {{ lang === 'pl' ? 'Szczegóły' : 'Details' }} &rarr;
+        </button>
+      </div>
+
+      <!-- Dynamic Views -->
+      <div class="flex-1 overflow-hidden relative">
+        <Transition name="view-fade" mode="out-in">
+          <div :key="currentView" class="h-full min-h-0">
+            <ChatView
+              v-if="currentView === 'chat'"
+              @navigate="onNavigate"
+            />
+            <TasksView
+              v-else-if="currentView === 'tasks'"
+            />
+            <ApprovalsView
+              v-else-if="currentView === 'approvals'"
+            />
+            <MemoryView
+              v-else-if="currentView === 'memory'"
+            />
+            <WalletView
+              v-else-if="currentView === 'wallet'"
+            />
+            <SettingsView
+              v-else-if="currentView === 'settings'"
+            />
+          </div>
+        </Transition>
+      </div>
+
+      <!-- Mobile Bottom Navigation Bar (Safe Bounds & Equal Columns) -->
+      <nav class="md:hidden bg-botex-900 border-t border-botex-800 grid grid-cols-6 w-full max-w-full overflow-hidden py-1 px-0.5 pb-safe shrink-0 z-30 select-none">
         <button
           v-for="item in navItems"
           :key="item.id"
           type="button"
           :class="[
-            'min-h-[48px] min-w-[44px] flex flex-col items-center justify-center py-1 rounded-lg text-[10px] font-medium transition relative',
-            currentView === item.id ? 'text-sky-300 bg-botex-800/70' : 'text-slate-300 hover:text-white'
+            'min-h-[48px] w-full min-w-0 overflow-hidden flex flex-col items-center justify-center py-1 px-0 rounded-lg text-xs font-medium transition relative',
+            currentView === item.id ? 'text-sky-300 bg-botex-800/80 shadow-sm' : 'text-slate-300 hover:text-white'
           ]"
           @click="currentView = item.id"
         >
-          <div class="relative">
-            <component :is="item.icon" class="w-4 h-4" />
+          <div class="relative shrink-0 flex items-center justify-center">
+            <component :is="item.icon" class="w-4 h-4 shrink-0" />
             <span
               v-if="item.id === 'approvals' && approvalsCount > 0"
-              class="absolute -top-1 -right-2.5 w-4 h-4 bg-amber-500 text-botex-950 text-[9px] font-mono font-bold rounded-full flex items-center justify-center"
+              class="absolute -top-1 -right-1.5 w-3.5 h-3.5 bg-amber-500 text-botex-950 text-[8px] font-mono font-bold rounded-full flex items-center justify-center"
             >
               {{ approvalsCount }}
             </span>
           </div>
-          <span class="mt-1 truncate max-w-[54px]">{{ t(item.shortKey) }}</span>
+          <span class="mt-0.5 truncate w-full text-center text-xs tracking-[-0.07em] leading-none">{{ t(item.shortKey) }}</span>
         </button>
       </nav>
     </main>
@@ -239,10 +292,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
+import { authError } from './api/client'
 import { useAuthStore } from './stores/auth'
 import { useApprovalsStore } from './stores/approvals'
 import { useChatStore } from './stores/chat'
 import { useWalletStore } from './stores/wallet'
+import { useThemeStore } from './stores/theme'
 import { useI18n } from './i18n'
 import ChatView from './views/ChatView.vue'
 import TasksView from './views/TasksView.vue'
@@ -267,7 +322,8 @@ const authStore = useAuthStore()
 const approvalsStore = useApprovalsStore()
 const chatStore = useChatStore()
 const walletStore = useWalletStore()
-const { lang, theme, setUiLang, toggleTheme, t } = useI18n()
+const themeStore = useThemeStore()
+const { lang, setUiLang, t } = useI18n()
 
 const { count: approvalsCount, activeModalAction } = storeToRefs(approvalsStore)
 const { wsStatus } = storeToRefs(authStore)
@@ -305,11 +361,15 @@ function toggleLang() {
   setUiLang(lang.value === 'en' ? 'pl' : 'en')
 }
 
+function toggleTheme() {
+  themeStore.toggleMode()
+}
+
 onMounted(() => {
   authStore.init()
   approvalsStore.init()
   chatStore.init()
-  walletStore.fetchKeyStatus()
+  walletStore.fetchWallet()
 })
 
 function onNavigate(viewName: string) {

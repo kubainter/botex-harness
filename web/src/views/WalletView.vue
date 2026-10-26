@@ -1,5 +1,5 @@
 <template>
-  <div class="h-full flex flex-col overflow-y-auto bg-botex-950 p-4 sm:p-6 space-y-6">
+  <div class="h-full overflow-y-auto bg-botex-950 p-4 sm:p-6 space-y-6">
     <!-- View Header -->
     <div class="flex flex-wrap items-center justify-between gap-4 border-b border-botex-800 pb-4">
       <div>
@@ -12,16 +12,39 @@
         </p>
       </div>
 
-      <button
-        type="button"
-        class="min-h-[40px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
-        @click="walletStore.fetchWallet(true)"
-      >
-        <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': walletStore.isLoading }" />
-        <span>{{ t('forceRefresh') }}</span>
-      </button>
+      <div class="flex items-center gap-2 flex-wrap">
+        <div class="flex items-center bg-botex-950 p-0.5 rounded-lg border border-botex-800 space-x-1">
+          <button
+            v-for="tab in tabs"
+            :key="tab.value"
+            type="button"
+            :aria-pressed="activeTab === tab.value"
+            :class="[
+              'min-h-[44px] lg:min-h-[36px] min-w-[44px] px-3 py-1 rounded text-xs font-medium transition',
+              activeTab === tab.value
+                ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30'
+                : 'text-slate-300 hover:text-white'
+            ]"
+            @click="activeTab = tab.value"
+          >
+            {{ t(tab.label) }}
+          </button>
+        </div>
+        <button
+          v-if="activeTab === 'budget'"
+          type="button"
+          class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
+          @click="walletStore.fetchWallet(true)"
+        >
+          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': walletStore.isLoading }" />
+          <span>{{ t('forceRefresh') }}</span>
+        </button>
+      </div>
     </div>
 
+    <StatsPanel v-if="activeTab === 'stats'" />
+
+    <template v-else>
     <!-- Wallet Balance Cards -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       <!-- Balance USD -->
@@ -40,7 +63,7 @@
           <Badge :variant="walletInfo?.is_free_tier ? 'warning' : 'success'">
             {{ walletInfo?.is_free_tier ? 'Free Tier' : 'Paid Quota' }}
           </Badge>
-          <span class="text-[11px] text-slate-300 font-mono">{{ walletInfo?.label || 'OpenRouter' }}</span>
+          <span class="text-xs text-slate-300 font-mono">{{ walletInfo?.label || 'OpenRouter' }}</span>
         </div>
       </div>
 
@@ -56,7 +79,7 @@
           </span>
           <span v-else class="text-slate-400 text-lg">N/A</span>
         </div>
-        <p class="text-[11px] text-slate-300 mt-2">
+        <p class="text-xs text-slate-300 mt-2">
           {{ locale === 'pl' ? 'Łączne zużycie na koncie' : 'Cumulative account spend' }}
         </p>
       </div>
@@ -73,7 +96,7 @@
           </span>
           <span v-else class="text-slate-400 text-lg">{{ locale === 'pl' ? 'Brak limitu' : 'No limit' }}</span>
         </div>
-        <p class="text-[11px] text-slate-300 mt-2">
+        <p class="text-xs text-slate-300 mt-2">
           {{ locale === 'pl' ? 'Skonfigurowany próg wydatków' : 'Configured spend cap' }}
         </p>
       </div>
@@ -90,10 +113,19 @@
           </span>
           <span v-else class="text-slate-400 text-lg">N/A</span>
         </div>
-        <p class="text-[11px] text-slate-300 mt-2">
+        <p class="text-xs text-slate-300 mt-2">
           {{ locale === 'pl' ? 'Dostępne środki przed blokadą' : 'Available before hard cap' }}
         </p>
       </div>
+    </div>
+
+    <!-- API error notice -->
+    <div
+      v-if="walletStore.errorMessage"
+      class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
+    >
+      <span class="font-mono truncate">{{ walletStore.errorMessage }}</span>
+      <button type="button" class="shrink-0 underline hover:text-white min-h-[44px] px-2" @click="walletStore.fetchWallet()">{{ t('refresh') }}</button>
     </div>
 
     <!-- Error Notice if any -->
@@ -105,42 +137,73 @@
     <div class="space-y-3">
       <div class="flex items-center justify-between text-xs text-slate-300 px-1 border-b border-botex-800 pb-2">
         <span class="font-semibold uppercase tracking-wider font-mono">{{ t('ledgerTitle') }}</span>
-        <span class="text-slate-400">{{ locale === 'pl' ? 'Rozliczenie dzienne i miesięczne' : 'Daily & monthly breakdown' }}</span>
+        <span class="text-slate-400">{{ t('ledgerSubtitle') }}</span>
       </div>
 
       <div class="rounded-xl border border-botex-800 bg-botex-900 overflow-hidden shadow-sm">
-        <div class="overflow-x-auto">
-          <table class="w-full text-left border-collapse text-xs">
+        <div v-if="ledgerRows.length === 0" class="p-6 text-center text-xs text-slate-400">
+          {{ t('noTelemetry') }}
+        </div>
+        <!-- Mobile: stacked cards instead of a squeezed scrollable table -->
+        <div v-else class="lg:hidden divide-y divide-botex-800">
+          <div v-for="item in ledgerRows" :key="item.id" class="px-4 py-3 space-y-1.5">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="font-medium text-xs text-slate-100 break-all">{{ item.name }}</div>
+                <div v-if="item.name !== item.id" class="text-xs text-slate-400 font-mono break-all">{{ item.id }}</div>
+              </div>
+              <Badge v-if="item.role" :variant="roleBadgeVariant(item.role)" class="shrink-0">{{ item.role }}</Badge>
+            </div>
+            <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs font-mono text-slate-300">
+              <span>{{ t('colRuns') }}: <span class="text-slate-100">{{ item.runs }}</span></span>
+              <span>{{ t('colTokens') }}: <span class="text-slate-100">{{ item.tokens.toLocaleString() }}</span></span>
+              <span v-if="item.cachedTokens > 0" class="text-emerald-400/90">
+                {{ item.cachePct }}% · ~${{ item.savings.toFixed(2) }}
+              </span>
+              <span>{{ t('colCost') }}: <span class="text-emerald-300 font-semibold">${{ item.cost.toFixed(4) }}</span></span>
+            </div>
+            <div v-if="item.inputCost !== null" class="text-xs font-mono text-slate-400">
+              ${{ item.inputCost.toFixed(2) }} / ${{ item.outputCost!.toFixed(2) }} per 1M
+            </div>
+          </div>
+        </div>
+        <div v-if="ledgerRows.length > 0" class="hidden lg:block overflow-x-auto">
+          <table class="w-full text-left border-collapse text-xs min-w-[640px]">
             <thead>
-              <tr class="border-b border-botex-800 bg-botex-950/60 text-slate-300 font-mono text-[11px]">
+              <tr class="border-b border-botex-800 bg-botex-950/60 text-slate-300 font-mono text-xs">
                 <th class="py-2.5 px-4 font-semibold">Model</th>
                 <th class="py-2.5 px-4 font-semibold">Role</th>
-                <th class="py-2.5 px-4 font-semibold">Daily Tokens</th>
-                <th class="py-2.5 px-4 font-semibold">Daily Spend</th>
-                <th class="py-2.5 px-4 font-semibold">Monthly Tokens</th>
-                <th class="py-2.5 px-4 font-semibold">Monthly Spend</th>
+                <th class="py-2.5 px-4 font-semibold">{{ t('colRuns') }}</th>
+                <th class="py-2.5 px-4 font-semibold">{{ t('colTokens') }}</th>
+                <th class="py-2.5 px-4 font-semibold">{{ t('colCacheSave') }}</th>
+                <th class="py-2.5 px-4 font-semibold">{{ t('colCost') }}</th>
                 <th class="py-2.5 px-4 font-semibold text-right">Rates (In/Out 1M)</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-botex-800 font-mono text-slate-200">
               <tr
-                v-for="item in analyticsLedger"
+                v-for="item in ledgerRows"
                 :key="item.id"
                 class="hover:bg-botex-800/40 transition"
               >
-                <td class="py-2.5 px-4">
-                  <div class="font-medium text-slate-100">{{ item.name }}</div>
-                  <div class="text-[11px] text-slate-300">{{ item.id }}</div>
+                <td class="py-2.5 px-4 min-w-[170px]">
+                  <div class="font-medium text-slate-100 break-all">{{ item.name }}</div>
+                  <div v-if="item.name !== item.id" class="text-xs text-slate-300 break-all">{{ item.id }}</div>
                 </td>
                 <td class="py-2.5 px-4">
-                  <Badge :variant="roleBadgeVariant(item.role)">{{ item.role }}</Badge>
+                  <Badge v-if="item.role" :variant="roleBadgeVariant(item.role)">{{ item.role }}</Badge>
+                  <span v-else class="text-slate-400">—</span>
                 </td>
-                <td class="py-2.5 px-4 text-slate-100">{{ item.dailyTokens.toLocaleString() }}</td>
-                <td class="py-2.5 px-4 text-emerald-300 font-semibold">${{ item.dailyCost.toFixed(4) }}</td>
-                <td class="py-2.5 px-4 text-slate-100">{{ item.monthlyTokens.toLocaleString() }}</td>
-                <td class="py-2.5 px-4 text-cyan-300 font-semibold">${{ item.monthlyCost.toFixed(4) }}</td>
-                <td class="py-2.5 px-4 text-right text-slate-300 text-[11px]">
-                  ${{ item.inputCost.toFixed(2) }} / ${{ item.outputCost.toFixed(2) }}
+                <td class="py-2.5 px-4 text-slate-100">{{ item.runs }}</td>
+                <td class="py-2.5 px-4 text-slate-100">{{ item.tokens.toLocaleString() }}</td>
+                <td class="py-2.5 px-4 text-slate-300">
+                  <template v-if="item.cachedTokens > 0">{{ item.cachePct }}% · ~${{ item.savings.toFixed(2) }}</template>
+                  <template v-else>—</template>
+                </td>
+                <td class="py-2.5 px-4 text-emerald-300 font-semibold">${{ item.cost.toFixed(4) }}</td>
+                <td class="py-2.5 px-4 text-right text-slate-300 text-xs">
+                  <template v-if="item.inputCost !== null">${{ item.inputCost.toFixed(2) }} / ${{ item.outputCost!.toFixed(2) }}</template>
+                  <template v-else>—</template>
                 </td>
               </tr>
             </tbody>
@@ -161,7 +224,7 @@
             :key="roleName"
             type="button"
             :class="[
-              'min-h-[32px] px-2.5 py-1 rounded text-[11px] font-medium capitalize transition',
+              'min-h-[44px] lg:min-h-[36px] min-w-[44px] justify-center px-2.5 py-1 rounded text-xs font-medium capitalize transition',
               selectedRole === roleName
                 ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30'
                 : 'text-slate-300 hover:text-white'
@@ -187,28 +250,29 @@
               </div>
               <p class="text-xs font-mono text-cyan-300 mt-0.5">{{ model.id }}</p>
             </div>
-            <span class="text-[10px] text-slate-300 font-mono">{{ model.provider }}</span>
+            <span class="text-xs text-slate-300 font-mono">{{ model.provider }}</span>
           </div>
 
           <p class="text-xs text-slate-200">{{ model.description }}</p>
 
           <div class="pt-2 border-t border-botex-800 grid grid-cols-3 gap-2 text-center text-xs font-mono">
-            <div class="bg-botex-950 p-2 rounded-lg border border-botex-800">
-              <span class="block text-[10px] text-slate-300 uppercase">Context</span>
+            <div class="bg-botex-950 p-2 rounded-lg border border-botex-800 min-w-0">
+              <span class="block text-[10px] sm:text-xs text-slate-300 uppercase truncate">Context</span>
               <span class="text-slate-100 font-semibold">{{ formatContext(model.context_length) }}</span>
             </div>
-            <div class="bg-botex-950 p-2 rounded-lg border border-botex-800">
-              <span class="block text-[10px] text-slate-300 uppercase">Input / 1M</span>
+            <div class="bg-botex-950 p-2 rounded-lg border border-botex-800 min-w-0">
+              <span class="block text-[10px] sm:text-xs text-slate-300 uppercase truncate">Input / 1M</span>
               <span class="text-slate-100 font-semibold">${{ model.input_cost_per_m.toFixed(2) }}</span>
             </div>
-            <div class="bg-botex-950 p-2 rounded-lg border border-botex-800">
-              <span class="block text-[10px] text-slate-300 uppercase">Output / 1M</span>
+            <div class="bg-botex-950 p-2 rounded-lg border border-botex-800 min-w-0">
+              <span class="block text-[10px] sm:text-xs text-slate-300 uppercase truncate">Output / 1M</span>
               <span class="text-slate-100 font-semibold">${{ model.output_cost_per_m.toFixed(2) }}</span>
             </div>
           </div>
         </div>
       </div>
     </div>
+    </template>
   </div>
 </template>
 
@@ -216,8 +280,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useWalletStore } from '../stores/wallet'
+import { useAnalyticsStore } from '../stores/analytics'
 import { useI18n } from '../i18n'
+import type { AnalyticsResponse } from '../api/types'
 import Badge from '../components/common/Badge.vue'
+import StatsPanel from '../components/stats/StatsPanel.vue'
 import {
   Wallet as WalletIcon,
   RefreshCw as RefreshCwIcon,
@@ -228,59 +295,53 @@ import {
 } from 'lucide-vue-next'
 
 const walletStore = useWalletStore()
+const analyticsStore = useAnalyticsStore()
 const { walletInfo, recommendedModels } = storeToRefs(walletStore)
 const { locale, t } = useI18n()
 
 const selectedRole = ref<'all' | 'planner' | 'coder' | 'chat' | 'reviewer'>('all')
+
+const activeTab = ref<'budget' | 'stats'>('budget')
+const tabs: { value: 'budget' | 'stats'; label: string }[] = [
+  { value: 'budget', label: 'tabBudget' },
+  { value: 'stats', label: 'tabStats' }
+]
 
 const filteredModels = computed(() => {
   if (selectedRole.value === 'all') return recommendedModels.value
   return recommendedModels.value.filter((m) => m.role === selectedRole.value)
 })
 
-const analyticsLedger = computed(() => {
-  return recommendedModels.value.map((m) => {
-    let dailyTokens = 0
-    let monthlyTokens = 0
-    let dailyCost = 0
-    let monthlyCost = 0
+// Real per-model telemetry from the analytics ledger (lifetime), joined with
+// the catalog for role badges and list pricing. Models never used never appear.
+const ledgerStats = ref<AnalyticsResponse | null>(null)
 
-    if (m.id.includes(':free')) {
-      dailyTokens = 64000
-      monthlyTokens = 1420000
-    } else if (m.id.includes('flash')) {
-      dailyTokens = 42800
-      monthlyTokens = 1184000
-    } else if (m.id.includes('qwen')) {
-      dailyTokens = 28500
-      monthlyTokens = 840000
-    } else if (m.id.includes('deepseek')) {
-      dailyTokens = 12400
-      monthlyTokens = 310000
-    } else {
-      dailyTokens = 4500
-      monthlyTokens = 92000
-    }
-
-    dailyCost = (dailyTokens / 1000000) * ((m.input_cost_per_m + m.output_cost_per_m) / 2)
-    monthlyCost = (monthlyTokens / 1000000) * ((m.input_cost_per_m + m.output_cost_per_m) / 2)
-
+const ledgerRows = computed(() => {
+  const rows = (ledgerStats.value?.by_model || []).map((s) => {
+    const catalog = recommendedModels.value.find((m) => m.id === s.model)
     return {
-      id: m.id,
-      name: m.name,
-      role: m.role,
-      dailyTokens,
-      dailyCost,
-      monthlyTokens,
-      monthlyCost,
-      inputCost: m.input_cost_per_m,
-      outputCost: m.output_cost_per_m
+      id: s.model,
+      name: catalog?.name || s.model,
+      role: catalog?.role || null,
+      runs: s.runs,
+      tokens: s.tokens,
+      cachedTokens: s.cached_tokens,
+      cachePct: Math.round(
+        s.cache_hit_pct ??
+          ((s.prompt_tokens || 0) > 0 ? (s.cached_tokens / (s.prompt_tokens || 1)) * 100 : 0)
+      ),
+      savings: s.cache_savings_usd,
+      cost: s.cost_usd,
+      inputCost: catalog ? catalog.input_cost_per_m : null,
+      outputCost: catalog ? catalog.output_cost_per_m : null
     }
   })
+  return rows.sort((a, b) => b.cost - a.cost)
 })
 
-onMounted(() => {
+onMounted(async () => {
   walletStore.fetchWallet()
+  ledgerStats.value = await analyticsStore.fetchPeriodStats('all')
 })
 
 function roleBadgeVariant(role: string) {

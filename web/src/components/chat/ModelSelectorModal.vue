@@ -17,7 +17,7 @@
         @click.self="close"
       >
         <div
-          class="w-full sm:max-w-2xl bg-botex-900 border-t sm:border border-botex-700 rounded-t-2xl sm:rounded-xl shadow-2xl text-slate-100 flex flex-col max-h-[88vh] sm:max-h-[82vh] overflow-hidden"
+          class="w-full sm:max-w-2xl bg-botex-900 border-t sm:border border-botex-700 rounded-t-2xl sm:rounded-xl shadow-2xl text-slate-100 flex flex-col max-h-[88dvh] sm:max-h-[82dvh] px-safe pb-safe overflow-hidden"
           @keydown="handleKeydown"
         >
           <!-- Top Header & Search Input -->
@@ -28,14 +28,14 @@
                   {{ t('models.title') }}
                 </h3>
                 <p class="text-xs text-slate-300 mt-0.5">
-                  {{ t('models.subtitle') }} ({{ filteredModels.length }} / {{ models.length }})
+                  {{ t('models.subtitle') }} ({{ filteredModels.length }} / {{ availableModels.length }})
                 </p>
               </div>
               <div class="flex items-center space-x-1.5">
                 <button
                   type="button"
                   title="Refresh catalog"
-                  class="min-w-[44px] min-h-[44px] sm:min-w-[34px] sm:min-h-[34px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
+                  class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
                   @click="onRefresh"
                 >
                   <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': isLoading }" />
@@ -43,7 +43,7 @@
                 <button
                   type="button"
                   aria-label="Close model selector"
-                  class="min-w-[44px] min-h-[44px] sm:min-w-[34px] sm:min-h-[34px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
+                  class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
                   @click="close"
                 >
                   <XIcon class="w-4 h-4" />
@@ -59,26 +59,60 @@
                 v-model="searchQuery"
                 type="text"
                 :placeholder="t('models.search.placeholder')"
-                class="w-full min-h-[44px] sm:min-h-[40px] bg-botex-950 border border-botex-700 rounded-lg pl-10 pr-20 py-2 text-xs sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-sans"
+                class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg pl-10 pr-20 py-2 text-base sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-sans"
               />
               <button
                 v-if="searchQuery"
                 type="button"
-                class="absolute right-2.5 top-1/2 -translate-y-1/2 px-2 py-1 text-[11px] font-mono text-slate-300 hover:text-white bg-botex-800 rounded"
+                class="absolute right-2.5 top-1/2 -translate-y-1/2 min-h-[32px] px-2.5 py-1 text-xs font-mono text-slate-300 hover:text-white bg-botex-800 rounded flex items-center"
                 @click="searchQuery = ''"
               >
                 Clear
               </button>
               <span
                 v-else
-                class="hidden sm:inline-block absolute right-3 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-[10px] font-mono text-slate-400 bg-botex-900 border border-botex-700 rounded"
+                class="hidden sm:inline-block absolute right-3 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-xs font-mono text-slate-400 bg-botex-900 border border-botex-700 rounded"
               >
                 ESC
               </span>
             </div>
 
+            <!-- Provider Filter Pills / Tabs -->
+            <div
+              class="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar"
+              role="tablist"
+              @wheel="onWheelScrollX"
+            >
+              <button
+                v-for="pTab in providerTabs"
+                :key="pTab.id"
+                type="button"
+                role="tab"
+                :aria-selected="activeProvider === pTab.id"
+                :class="[
+                  'min-h-[40px] lg:min-h-[36px] px-2.5 py-1 rounded-md text-xs font-mono font-medium whitespace-nowrap transition border flex items-center space-x-1.5 shrink-0',
+                  activeProvider === pTab.id
+                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/50 font-semibold'
+                    : 'bg-botex-950 text-slate-400 border-botex-800 hover:border-botex-700 hover:text-white'
+                ]"
+                @click="activeProvider = pTab.id"
+              >
+                <span>{{ pTab.label }}</span>
+                <span
+                  class="text-xs font-mono px-1 py-px rounded"
+                  :class="activeProvider === pTab.id ? 'bg-emerald-500/20 text-emerald-200' : 'bg-botex-900 text-slate-500'"
+                >
+                  {{ pTab.count }}
+                </span>
+              </button>
+            </div>
+
             <!-- Category Filter Pills / Tabs -->
-            <div class="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar" role="tablist">
+            <div
+              class="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar"
+              role="tablist"
+              @wheel="onWheelScrollX"
+            >
               <button
                 v-for="tab in categoryTabs"
                 :key="tab.id"
@@ -86,7 +120,7 @@
                 role="tab"
                 :aria-selected="activeCategory === tab.id"
                 :class="[
-                  'min-h-[38px] sm:min-h-[32px] px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition border flex items-center space-x-1.5 shrink-0',
+                  'min-h-[40px] lg:min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition border flex items-center space-x-1.5 shrink-0',
                   activeCategory === tab.id
                     ? 'bg-sky-500/15 text-sky-300 border-sky-500/50 font-semibold'
                     : 'bg-botex-950 text-slate-300 border-botex-800 hover:border-botex-700 hover:text-white'
@@ -95,7 +129,7 @@
               >
                 <span>{{ tab.label }}</span>
                 <span
-                  class="text-[10px] font-mono px-1.5 py-0.2 rounded"
+                  class="text-xs font-mono px-1.5 py-px rounded"
                   :class="activeCategory === tab.id ? 'bg-sky-500/20 text-sky-200' : 'bg-botex-900 text-slate-400'"
                 >
                   {{ tab.count }}
@@ -123,7 +157,7 @@
           <div
             v-else
             ref="listContainerRef"
-            class="flex-1 overflow-y-auto divide-y divide-botex-800/70 bg-botex-950/60"
+            class="flex-1 overflow-y-auto overscroll-contain divide-y divide-botex-800/70 bg-botex-950/60"
             role="listbox"
           >
             <div
@@ -133,7 +167,7 @@
               <p class="text-sm font-medium text-slate-200">{{ t('models.empty') }}</p>
               <button
                 type="button"
-                class="min-h-[40px] px-3.5 py-1.5 rounded-lg bg-botex-800 hover:bg-botex-700 text-xs text-slate-200 border border-botex-700 transition"
+                class="min-h-[44px] lg:min-h-[36px] px-3.5 py-1.5 rounded-lg bg-botex-800 hover:bg-botex-700 text-xs text-slate-200 border border-botex-700 transition"
                 @click="resetFilters"
               >
                 Reset filters
@@ -179,7 +213,7 @@
                 <!-- Provider Badge -->
                 <span
                   :class="[
-                    'px-2 py-0.5 rounded text-[11px] font-mono font-medium border',
+                    'px-2 py-0.5 rounded text-xs font-mono font-medium border',
                     providerBadgeClass(item.provider)
                   ]"
                 >
@@ -189,20 +223,20 @@
                 <!-- Cost Badge -->
                 <span
                   v-if="item.is_free"
-                  class="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40"
+                  class="px-2 py-0.5 rounded text-xs font-mono font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40"
                 >
                   FREE (0.00$)
                 </span>
                 <span
                   v-else
-                  class="px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-botex-900 text-slate-200 border border-botex-700"
+                  class="px-2 py-0.5 rounded text-xs font-mono font-medium bg-botex-900 text-slate-200 border border-botex-700"
                 >
                   {{ formatPriceLabel(item) }}
                 </span>
 
                 <!-- Context Window Pill -->
                 <span
-                  class="px-2 py-0.5 rounded text-[11px] font-mono text-slate-300 bg-botex-900 border border-botex-800"
+                  class="px-2 py-0.5 rounded text-xs font-mono text-slate-300 bg-botex-900 border border-botex-800"
                   title="Maximum context window"
                 >
                   {{ formatContextWindow(item.context_length) }}
@@ -212,10 +246,10 @@
           </div>
 
           <!-- Footer Keyboard Hint -->
-          <div class="px-4 py-2.5 bg-botex-900 border-t border-botex-800 flex items-center justify-between text-[11px] text-slate-300 font-mono">
+          <div class="px-4 py-2.5 bg-botex-900 border-t border-botex-800 flex items-center justify-between text-xs text-slate-300 font-mono">
             <span class="hidden sm:inline">{{ t('models.select_hint') }}</span>
             <span class="sm:hidden">Tap a model to select</span>
-            <span>{{ models.length }} catalog models</span>
+            <span>{{ availableModels.length }} catalog models</span>
           </div>
         </div>
       </div>
@@ -243,12 +277,28 @@ const props = withDefaults(
     selectedModel: string
     selectedProvider?: string
     isLoading?: boolean
+    allowedProviders?: string[]
+    excludeProviders?: string[]
   }>(),
   {
     selectedProvider: '',
-    isLoading: false
+    isLoading: false,
+    allowedProviders: () => [],
+    excludeProviders: () => []
   }
 )
+
+const availableModels = computed<CatalogModel[]>(() => {
+  return props.models.filter((m) => {
+    if (props.excludeProviders && props.excludeProviders.length > 0 && props.excludeProviders.includes(m.provider)) {
+      return false
+    }
+    if (props.allowedProviders && props.allowedProviders.length > 0 && !props.allowedProviders.includes(m.provider)) {
+      return false
+    }
+    return true
+  })
+})
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -260,10 +310,16 @@ const { t } = useI18n()
 
 const searchQuery = ref('')
 const activeCategory = ref<ModelCategory>('all')
+const activeProvider = ref<string>('all')
 const highlightedIndex = ref(0)
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const listContainerRef = ref<HTMLElement | null>(null)
 const itemRefs = ref<Record<number, HTMLElement | null>>({})
+
+function onWheelScrollX(e: WheelEvent) {
+  const el = e.currentTarget as HTMLElement | null
+  if (el) el.scrollLeft += e.deltaY || e.deltaX
+}
 
 function setItemRef(el: any, idx: number) {
   if (el) {
@@ -312,7 +368,7 @@ function isUltraCheapModel(m: CatalogModel): boolean {
 function matchesCategory(m: CatalogModel, cat: ModelCategory): boolean {
   switch (cat) {
     case 'free':
-      return m.is_free || m.provider === 'openrouter-free'
+      return m.is_free || m.provider === 'openrouter-free' || m.provider === 'ollama'
     case 'cheap':
       return isUltraCheapModel(m)
     case 'reasoning':
@@ -328,8 +384,24 @@ function normalizeSearchText(str: string): string {
   return str.toLowerCase().replace(/[-_/:()]/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
+const providerTabs = computed(() => {
+  const all = availableModels.value
+  const providers = Array.from(new Set(all.map((m) => m.provider))).filter(Boolean)
+  const tabs = [
+    { id: 'all', label: 'Wszyscy Dostawcy', count: all.length }
+  ]
+  for (const p of providers) {
+    tabs.push({
+      id: p,
+      label: formatProviderLabel(p),
+      count: all.filter((m) => m.provider === p).length
+    })
+  }
+  return tabs
+})
+
 const categoryTabs = computed(() => {
-  const all = props.models
+  const all = availableModels.value
   return [
     { id: 'all' as ModelCategory, label: 'Wszystkie (All)', count: all.length },
     {
@@ -360,7 +432,8 @@ const filteredModels = computed<CatalogModel[]>(() => {
   const qNorm = normalizeSearchText(qRaw)
   const qTokens = qNorm ? qNorm.split(' ') : []
 
-  return props.models.filter((m) => {
+  return availableModels.value.filter((m) => {
+    if (activeProvider.value !== 'all' && m.provider !== activeProvider.value) return false
     if (!matchesCategory(m, activeCategory.value)) return false
     if (!qRaw) return true
 
@@ -388,7 +461,7 @@ watch(
   }
 )
 
-watch([searchQuery, activeCategory], () => {
+watch([searchQuery, activeCategory, activeProvider], () => {
   highlightedIndex.value = 0
 })
 
@@ -400,6 +473,7 @@ function setCategory(cat: ModelCategory) {
 function resetFilters() {
   searchQuery.value = ''
   activeCategory.value = 'all'
+  activeProvider.value = 'all'
   searchInputRef.value?.focus()
 }
 
@@ -464,6 +538,8 @@ function formatProviderLabel(provider: string): string {
       return 'OpenRouter'
     case 'nvidia':
       return 'NVIDIA NIM'
+    case 'ollama':
+      return 'Ollama (Lokalny Bielik)'
     default:
       return provider
   }
@@ -475,6 +551,8 @@ function providerBadgeClass(provider: string): string {
       return 'bg-emerald-950/60 text-emerald-300 border-emerald-600/40'
     case 'nvidia':
       return 'bg-lime-950/60 text-lime-300 border-lime-600/40'
+    case 'ollama':
+      return 'bg-purple-950/60 text-purple-300 border-purple-600/40'
     default:
       return 'bg-sky-950/60 text-sky-300 border-sky-600/40'
   }

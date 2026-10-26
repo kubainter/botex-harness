@@ -1,0 +1,30 @@
+# Periodic background maintenance for BoteX Memory Vault and Knowledge Graph
+# Install: /etc/systemd/system/botex-maintenance.service
+[Unit]
+Description=BoteX Background Maintenance and Knowledge Graph Re-indexing
+After=network.target
+
+[Service]
+Type=oneshot
+User=botex
+Group=botex
+
+EnvironmentFile=-/etc/default/botex-cloud
+ExecStart=/usr/local/sbin/botex-maintenance.sh
+
+TimeoutStartSec=10m
+TimeoutStopSec=30s
+
+# Low scheduling priority so it yields to live agent tasks
+Nice=19
+CPUSchedulingPolicy=idle
+CPUWeight=20
+IOSchedulingClass=idle
+IOWeight=20
+
+MemoryMax=4G
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+SyslogIdentifier=botex-maintenance

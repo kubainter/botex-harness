@@ -20,6 +20,8 @@ from openai import APIConnectionError, APITimeoutError
 # to this map.
 STATUS_FAILURE_KIND: Dict[str, Optional[str]] = {
     "DONE": None,
+    "BLOCKED": "fail_stop_blocked",
+    "FAILED": "contract_failed",
     "INCOMPLETE": "no_progress",
     "UNSUPPORTED": "capability_missing",
     "API_ERROR": "provider_error",
@@ -67,6 +69,7 @@ FALLBACKABLE_KINDS = frozenset(
 # with PRICE_EXCEEDED; VERIFICATION_FAILED shares contract_failed).
 NEVER_FALLBACK_STATUSES = frozenset(
     {
+        "BLOCKED",
         "BUDGET_EXCEEDED",
         "VERIFICATION_FAILED",
         "CONFIG_ERROR",
@@ -163,7 +166,8 @@ _VALID_STRUCTURED_STATUS_MAP: Dict[str, str] = {
     "done": "DONE",
     "incomplete": "INCOMPLETE",
     "unsupported": "UNSUPPORTED",
-    "blocked": "INCOMPLETE",
+    "blocked": "BLOCKED",
+    "failed": "FAILED",
 }
 
 TASK_COMPLETION_JSON_SCHEMA: Dict[str, Any] = {
@@ -176,10 +180,21 @@ TASK_COMPLETION_JSON_SCHEMA: Dict[str, Any] = {
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["DONE", "INCOMPLETE", "UNSUPPORTED"],
+                    "enum": ["DONE", "INCOMPLETE", "UNSUPPORTED", "BLOCKED", "FAILED"],
                 },
                 "summary": {
                     "type": "string",
+                },
+                "artifact_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "memory_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "blocking_reason": {
+                    "type": ["string", "null"],
                 },
                 "files_modified": {
                     "type": "array",
@@ -253,8 +268,26 @@ def parse_structured_completion(text: str) -> Optional[Dict[str, Any]]:
     else:
         summary_str = ""
 
+    artifact_refs_val = parsed.get("artifact_refs")
+    if isinstance(artifact_refs_val, list):
+        artifact_refs = [str(r) for r in artifact_refs_val if r is not None]
+    else:
+        artifact_refs = []
+
+    memory_keys_val = parsed.get("memory_keys")
+    if isinstance(memory_keys_val, list):
+        memory_keys = [str(k) for k in memory_keys_val if k is not None]
+    else:
+        memory_keys = []
+
+    blocking_reason_val = parsed.get("blocking_reason")
+    blocking_reason = str(blocking_reason_val).strip() if blocking_reason_val is not None else None
+
     return {
         "status": mapped_status,
         "summary": summary_str,
+        "artifact_refs": artifact_refs,
+        "memory_keys": memory_keys,
+        "blocking_reason": blocking_reason,
         "data": parsed,
     }

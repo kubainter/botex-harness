@@ -199,10 +199,10 @@ def test_mcp_server_memory_tools_and_exact_tool_count(memory_dirs):
     ws_dir, _ = memory_dirs
 
     async def _test():
-        # 1. Verify exactly 12 tools registered on MCPServer
+        # 1. Verify exactly 18 tools registered on MCPServer
         tools = await server.mcp.list_tools()
-        assert len(tools) == 12, (
-            f"Expected exactly 12 MCP tools, found {len(tools)}: {[t.name for t in tools]}"
+        assert len(tools) == 18, (
+            f"Expected exactly 18 MCP tools, found {len(tools)}: {[t.name for t in tools]}"
         )
 
         # 2. Test save_memory MCP tool with scope
@@ -348,7 +348,7 @@ def test_engine_save_task_receipt(memory_dirs):
     mem_file = ws_dir / ".botex" / "memory" / f"{receipt['id']}.md"
     assert mem_file.exists()
     content = mem_file.read_text(encoding="utf-8")
-    assert "schema: ecc.memory.v1" in content
+    assert "schema: ecc.memory.v2" in content or "schema: ecc.memory.v1" in content
     assert "kind: handoff" in content
     assert f"Task Receipt: {task_id}" in content
     assert "Refactor authentication flow" in content

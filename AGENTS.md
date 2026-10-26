@@ -22,7 +22,7 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`) and agency middleware.
     *   `approval.py` - Human-in-the-Loop approval manager, async pending actions, and risk policies.
     *   `chat.py` - Conversational chat sessions, SSE/WebSocket token streaming, and read-only sandbox.
-    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE server, and REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/chat`).
+    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE server, and REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/analytics`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/recipes`, `/api/chat`).
     *   `pricing.py` - Model pricing guardrail, live catalog checks, and cost caps.
     *   `analytics.py` - Cost/token ledger, generation latency/cache telemetry, budget tracking, and CLI reports.
     *   `providers.py` - Provider registry, adapters (`OpenRouterProvider`, `NvidiaProvider`, `GenericOpenAIProvider`), `/api/v1/generation` telemetry reconciliation, and request normalizer.
@@ -32,14 +32,17 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `benchmarks.py` - Authenticated live model recommendations (`recommend_models`) and tier-aware (`high` / `standard` / `budget`) rankings.
     *   `context_guard.py` - Context compaction and verification output pruning.
     *   `net_tools.py` - SSRF-safe network fetching tools (`read_url`, `fetch_url`).
-    *   `memory.py` - Persistent two-tier Memory Vault (local `.botex/memory/` and global `~/.botex/memory/`).
+    *   `memory.py` - Persistent two-tier Memory Vault (local `.botex/memory/` and global `~/.botex/memory/`) with wikilink graph and scratchpad offload.
+    *   `embeddings.py` - Local embedding helpers supporting memory/graph features.
+    *   `obsidian.py` - Obsidian PKM vault export, per-kind graph colors, and `_GRAPH_INDEX.md` generation.
+    *   `meta_harness.py` - Task taxonomy classification, patch probing, and meta-lesson extraction/recommendation (self-improvement layer).
     *   `recipes.py` - Recipe loader and system-prompt injection.
     *   `config.py` - Layered configuration loader (defaults < local < env) with `mtime` hot-reload.
     *   `i18n.py` - CLI localization (EN/PL).
     *   `ui.py` - ANSI styling helpers with plain-text fallback.
-    *   `recipes/` - Bundled persona prompts (`planner`, `reviewer`, `tdd`, `build-resolver`, `security-reviewer`, `code-explorer`).
+    *   `recipes/` - Bundled persona prompts (`planner`, `reviewer`, `tdd`, `build-resolver`, `security-reviewer`, `security-taint-hardener`, `code-explorer`, `architecture-adr`, `ui-craftsman`).
 *   **`web/`** - Vue 3 + Vite + Pinia + Tailwind CSS PWA frontend for the Cloud Gateway.
-*   **`tests/`** - Test suite (`test_botex.py`, `test_stage_4_6.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_context_guard.py`, and live integration tests in `test_live_e2e.py`).
+*   **`tests/`** - Test suite (~25 files, ~446 collected tests: `test_botex.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_context_guard.py`, `test_analytics.py`, `test_embeddings.py`, `test_meta_harness.py`, `test_obsidian_graph.py`, `test_obsidian_edge_cases.py`, `test_nvidia_streaming.py`, `test_integration.py`, and live integration tests in `test_live_e2e.py`).
 *   **`docs/`** - Documentation (`TUTORIAL.md`).
 *   **`skills/`** - Caller-side skill definitions (`skills/botex/SKILL.md`).
 

@@ -1,3 +1,4 @@
+import { ref } from 'vue'
 import type {
   HealthStatus,
   WalletInfo,
@@ -12,7 +13,13 @@ import type {
   ChatChunk,
   CatalogModel,
   ChatSessionSummary,
-  ChatSessionDetail
+  ChatSessionDetail,
+  MemoryGraphResponse,
+  BacklinksResponse,
+  AnalyticsResponse,
+  SkillCatalogItem,
+  SkillDetail,
+  SkillInstallRequest
 } from './types'
 
 const STORAGE_KEY_URL = 'botex_backend_url'
@@ -42,6 +49,11 @@ export function getStoredAccessToken(): string {
 export function setStoredAccessToken(token: string): void {
   localStorage.setItem(STORAGE_KEY_TOKEN, token.trim())
 }
+
+// Reactive auth-failure signal: set when any API call returns 401/403 so the
+// shell can warn instead of silently rendering empty states. Cleared on the
+// next successful request.
+export const authError = ref<string | null>(null)
 
 export class ApiError extends Error {
   status: number
@@ -85,9 +97,13 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
         // use statusText
       }
     }
+    if (response.status === 401 || response.status === 403) {
+      authError.value = `HTTP ${response.status}`
+    }
     throw new ApiError(response.status, errorDetail)
   }
 
+  authError.value = null
   if (response.status === 204) {
     return {} as T
   }
@@ -178,7 +194,7 @@ export const api = {
     scope?: string
     workspace_dir?: string
     memory_id?: string
-  }): Promise<{ ok: boolean; results?: MemoryEntry[]; entry?: MemoryEntry; total?: number; error?: string }> {
+  }): Promise<{ ok: boolean; results?: MemoryEntry[]; memories?: MemoryEntry[]; entry?: MemoryEntry; total?: number; count?: number; error?: string }> {
     const q = new URLSearchParams()
     if (params.query) q.set('query', params.query)
     if (params.tag) q.set('tag', params.tag)
@@ -197,6 +213,36 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body)
     })
+  },
+
+  async deleteMemory(memoryId: string, scope: string = 'local', workspaceDir?: string): Promise<{ ok: boolean; memory_id?: string; deleted?: boolean; error?: string }> {
+    const q = new URLSearchParams({ scope })
+    if (workspaceDir) q.set('workspace_dir', workspaceDir)
+    return request<{ ok: boolean; memory_id?: string; deleted?: boolean; error?: string }>(
+      `/api/memory/${encodeURIComponent(memoryId)}?${q.toString()}`,
+      { method: 'DELETE' }
+    )
+  },
+
+  async getMemoryGraph(params?: { scope?: string; workspace_dir?: string }): Promise<MemoryGraphResponse> {
+    const q = new URLSearchParams()
+    if (params?.scope) q.set('scope', params.scope)
+    if (params?.workspace_dir) q.set('workspace_dir', params.workspace_dir)
+    return request<MemoryGraphResponse>(`/api/memory/graph?${q.toString()}`)
+  },
+
+  async getMemoryBacklinks(memoryId: string, params?: { scope?: string; workspace_dir?: string }): Promise<BacklinksResponse> {
+    const q = new URLSearchParams({ memory_id: memoryId })
+    if (params?.scope) q.set('scope', params.scope)
+    if (params?.workspace_dir) q.set('workspace_dir', params.workspace_dir)
+    return request<BacklinksResponse>(`/api/memory/backlinks?${q.toString()}`)
+  },
+
+  async abortChat(sessionId: string, model?: string, provider?: string): Promise<{ ok: boolean }> {
+    const q = new URLSearchParams({ session_id: sessionId })
+    if (model) q.set('model', model)
+    if (provider) q.set('provider', provider)
+    return request<{ ok: boolean }>(`/api/chat/abort?${q.toString()}`, { method: 'POST' })
   },
 
   // 6. SSE Fallback for Chat
@@ -305,6 +351,25 @@ export const api = {
     )
   },
 
+  // 8. Run Analytics & Local-LLM Digest
+  async getAnalytics(period: 'week' | 'month' | 'all' = 'week', workspaceDir?: string): Promise<AnalyticsResponse> {
+    const q = new URLSearchParams({ period })
+    if (workspaceDir) q.set('workspace_dir', workspaceDir)
+    return request<AnalyticsResponse>(`/api/analytics?${q.toString()}`)
+  },
+
+  async triggerAnalyticsDigest(params?: { provider?: string; model?: string; days?: number }): Promise<{ ok: boolean; text?: string; memory_id?: string; error?: string }> {
+    const q = new URLSearchParams()
+    if (params?.provider) q.set('provider', params.provider)
+    if (params?.model) q.set('model', params.model)
+    if (params?.days) q.set('days', String(params.days))
+    const qs = q.toString()
+    return request<{ ok: boolean; text?: string; memory_id?: string; error?: string }>(
+      `/api/analytics/digest${qs ? '?' + qs : ''}`,
+      { method: 'POST' }
+    )
+  },
+
   async saveChatToMemory(
     sessionId: string,
     body: {
@@ -322,6 +387,29 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(body)
       }
+    )
+  },
+
+  // 9. Server-Side Skills Catalog (Skill Vault)
+  async getSkills(): Promise<{ ok: boolean; count: number; skills: SkillCatalogItem[]; skills_dir?: string }> {
+    return request<{ ok: boolean; count: number; skills: SkillCatalogItem[]; skills_dir?: string }>('/api/skills')
+  },
+
+  async getSkill(skillName: string): Promise<{ ok: boolean; skill: SkillDetail }> {
+    return request<{ ok: boolean; skill: SkillDetail }>(`/api/skills/${encodeURIComponent(skillName)}`)
+  },
+
+  async installSkill(body: SkillInstallRequest): Promise<{ ok: boolean; name: string; version: string; origin_repo: string; skill?: SkillCatalogItem }> {
+    return request<{ ok: boolean; name: string; version: string; origin_repo: string; skill?: SkillCatalogItem }>('/api/skills', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    })
+  },
+
+  async deleteSkill(skillName: string): Promise<{ ok: boolean; name: string; deleted: boolean }> {
+    return request<{ ok: boolean; name: string; deleted: boolean }>(
+      `/api/skills/${encodeURIComponent(skillName)}`,
+      { method: 'DELETE' }
     )
   }
 }
