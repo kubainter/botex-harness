@@ -14,6 +14,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
+from dataclasses import replace as _dc_replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -784,6 +785,12 @@ def get_consolidated_models(
         entries_by_key[dedup_key] = item
 
     loaded_by_base_url: Dict[str, List[ModelMetadata]] = {}
+    try:
+        from .denylist import DenylistFilter
+    except ImportError:
+        from denylist import DenylistFilter
+
+    deny_filter = DenylistFilter(config)
     for prov_name in norm_providers:
         pcfg = providers_cfg.get(prov_name) if isinstance(providers_cfg, dict) else None
         cat = ModelCatalog(
@@ -802,6 +809,12 @@ def get_consolidated_models(
 
         for m in models_list:
             if prov_name == "nvidia" and m.id not in _ACTIVE_NVIDIA_MODELS:
+                continue
+            # Google's /models catalog prefixes ids ("models/gemini-…") — the
+            # OpenAI-compatible chat endpoint expects the bare slug.
+            if prov_name == "google" and m.id.startswith("models/"):
+                m = _dc_replace(m, id=m.id.removeprefix("models/"))
+            if not deny_filter.is_allowed(m.id, provider=prov_name):
                 continue
             _add_meta(m, prov_name)
 

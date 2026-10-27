@@ -352,6 +352,8 @@ const isCurrentModelFree = computed(() => {
 const selectedProviderLabel = computed(() => {
   if (selectedProvider.value === 'openrouter-free') return 'OR Free'
   if (selectedProvider.value === 'nvidia') return 'NIM'
+  if (selectedProvider.value === 'google') return 'AI Studio'
+  if (selectedProvider.value === 'ollama') return 'Ollama'
   return 'OpenRouter'
 })
 
