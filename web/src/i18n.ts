@@ -146,7 +146,7 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
 
     // Model Selector Modal
     'models.title': 'Select Execution Model',
-    'models.subtitle': 'Search live catalog across OpenRouter, Free Tier, and NVIDIA NIM',
+    'models.subtitle': 'Search live catalog across OpenRouter, Free Tier, NVIDIA NIM, Ollama, and Google AI Studio',
     'models.search.placeholder': 'Filter by model name, slug, or provider (e.g. liquid, r1, qwen, free)...',
     'models.filter.all': 'Wszystkie (All)',
     'models.filter.free': '100% Free Tier',
@@ -332,7 +332,7 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
 
     // Model Selector Modal
     'models.title': 'Wybierz model wykonawczy',
-    'models.subtitle': 'Przeszukaj katalog modeli OpenRouter, darmowego pakietu Free oraz NVIDIA NIM',
+    'models.subtitle': 'Przeszukaj katalog modeli OpenRouter, darmowego pakietu Free, NVIDIA NIM, Ollama i Google AI Studio',
     'models.search.placeholder': 'Szukaj po nazwie, slugu lub dostawcy (np. liquid, r1, qwen, free)...',
     'models.filter.all': 'Wszystkie',
     'models.filter.free': '100% Free Tier',

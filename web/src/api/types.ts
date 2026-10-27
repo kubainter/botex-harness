@@ -172,7 +172,7 @@ export interface CatalogModelPricing {
 export interface CatalogModel {
   id: string
   name: string
-  provider: 'openrouter-free' | 'openrouter' | 'nvidia' | string
+  provider: 'openrouter-free' | 'openrouter' | 'nvidia' | 'google' | 'ollama' | string
   is_free: boolean
   context_length: number
   pricing: CatalogModelPricing
