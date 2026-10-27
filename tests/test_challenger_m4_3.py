@@ -271,6 +271,9 @@ async def test_challenger_03_multi_model_fallback_chain_on_http_429(tmp_path: An
     cfg = copy.deepcopy(load_config())
     cfg["providers"]["openrouter"]["models"]["default"] = "primary/rate-limited"
     cfg["providers"]["openrouter"]["model_fallbacks"]["default"] = ["failover/healthy-worker"]
+    # This scenario exercises the fallback chain itself — disable the
+    # in-place retry layer so the 429 reaches the attempt boundary.
+    cfg["providers"]["openrouter"]["retry"] = {"enabled": False}
 
     err_429 = MockHTTPStatusError("Rate limit exceeded (Too Many Requests)", status_code=429)
     resp_success = FakeCompletionResponse(content="STATUS: DONE\nFixed successfully")
@@ -301,7 +304,7 @@ async def test_challenger_03_multi_model_fallback_chain_on_http_429(tmp_path: An
     att0 = result["attempts"][0]
     assert att0["model"] == "primary/rate-limited"
     assert att0["status"] == "API_ERROR"
-    assert att0["failure_kind"] == "provider_unavailable"
+    assert att0["failure_kind"] == "provider_rate_limited"
 
     # Attempt 1: Failover succeeded
     att1 = result["attempts"][1]
@@ -312,6 +315,96 @@ async def test_challenger_03_multi_model_fallback_chain_on_http_429(tmp_path: An
     assert len(fake_client.calls) == 2
     assert fake_client.calls[0]["model"] == "primary/rate-limited"
     assert fake_client.calls[1]["model"] == "failover/healthy-worker"
+
+
+@pytest.mark.anyio
+async def test_challenger_03b_retry_in_place_then_fallback_after_exhaustion(tmp_path: Any):
+    """Scenario 3b: the shared retry layer first retries the 429 in place;
+    only after max_waits is exhausted does the attempt fail with
+    provider_rate_limited and the chain falls back to the next model.
+    """
+    cfg = copy.deepcopy(load_config())
+    cfg["providers"]["openrouter"]["models"]["default"] = "primary/rate-limited"
+    cfg["providers"]["openrouter"]["model_fallbacks"]["default"] = ["failover/healthy-worker"]
+    # Zero-delay waits keep the test instant; max_waits=1 => 2 calls on primary.
+    cfg["providers"]["openrouter"]["retry"] = {
+        "enabled": True,
+        "max_waits": 1,
+        "base_delay_s": 0,
+        "jitter_s": 0,
+    }
+
+    err_429 = MockHTTPStatusError("Rate limit exceeded (Too Many Requests)", status_code=429)
+    resp_success = FakeCompletionResponse(content="STATUS: DONE\nFixed successfully")
+
+    fake_client = FakeClient([err_429, err_429, resp_success])
+
+    with (
+        patch("botex.config.load_config", return_value=cfg),
+        patch("botex.engine.load_config", return_value=cfg),
+        patch("botex.engine.build_async_client", return_value=fake_client),
+        patch("botex.engine.check_model_price", return_value=(True, "")),
+        patch("botex.engine.check_model_tools", return_value=(True, "")),
+    ):
+        result = await run_botex_task(
+            task="fix rate limit issue",
+            workspace_dir=str(tmp_path),
+            profile="default",
+            provider="openrouter",
+            mode="readonly",
+            api_key="sk-test",
+        )
+
+    assert result["ok"] is True
+    assert result["status"] == "DONE"
+    assert len(result["attempts"]) == 2
+    assert result["attempts"][0]["failure_kind"] == "provider_rate_limited"
+    # 2 calls on the retried primary + 1 on the failover
+    assert len(fake_client.calls) == 3
+    assert fake_client.calls[0]["model"] == "primary/rate-limited"
+    assert fake_client.calls[1]["model"] == "primary/rate-limited"
+    assert fake_client.calls[2]["model"] == "failover/healthy-worker"
+
+
+@pytest.mark.anyio
+async def test_challenger_03c_429_recovers_in_place_without_fallback(tmp_path: Any):
+    """Scenario 3c: a single transient 429 is absorbed by the retry layer —
+    the same model completes and no fallback attempt is recorded."""
+    cfg = copy.deepcopy(load_config())
+    cfg["providers"]["openrouter"]["models"]["default"] = "primary/flaky"
+    cfg["providers"]["openrouter"]["retry"] = {
+        "enabled": True,
+        "max_waits": 2,
+        "base_delay_s": 0,
+        "jitter_s": 0,
+    }
+
+    err_429 = MockHTTPStatusError("Rate limit exceeded (Too Many Requests)", status_code=429)
+    resp_success = FakeCompletionResponse(content="STATUS: DONE\nFixed successfully")
+
+    fake_client = FakeClient([err_429, resp_success])
+
+    with (
+        patch("botex.config.load_config", return_value=cfg),
+        patch("botex.engine.load_config", return_value=cfg),
+        patch("botex.engine.build_async_client", return_value=fake_client),
+        patch("botex.engine.check_model_price", return_value=(True, "")),
+        patch("botex.engine.check_model_tools", return_value=(True, "")),
+    ):
+        result = await run_botex_task(
+            task="fix rate limit issue",
+            workspace_dir=str(tmp_path),
+            profile="default",
+            provider="openrouter",
+            mode="readonly",
+            api_key="sk-test",
+        )
+
+    assert result["ok"] is True
+    assert result["status"] == "DONE"
+    assert len(result["attempts"]) == 1
+    assert "fallback_from" not in result
+    assert len(fake_client.calls) == 2
 
 
 # ==============================================================================

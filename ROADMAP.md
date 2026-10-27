@@ -109,7 +109,7 @@ the same budget and typically starves the same way, so repeat retries
 just re-burned the read budget (the observed double-burn).
 
 ### 10. Skill Vault, Remote AI Skill Installer & Workspace Root Normalization (Stage 4.7) — partially implemented
-Already shipped: recipes split & metadata, `/api/recipes` + `/api/models/recommended` endpoints, meta-lessons engine (`meta_harness.py`), and the Obsidian/wikilink memory graph (`obsidian.py`, `embeddings.py`, graph MCP tools). Still open: the Skill Vault itself (`~/.botex/skills/<slug>/`), the two-phase remote installer, the Skills PWA tab, `list_skills`/`read_skill` MCP tools, and workspace root normalization.
+Already shipped: recipes split & metadata, `/api/recipes` + `/api/models/recommended` endpoints, meta-lessons engine (`meta_harness.py`), and the Obsidian/wikilink memory graph (`obsidian.py`, `embeddings.py`, graph MCP tools). Shipped since (Stage 4.8): the Skill Vault itself (`botex/skills.py` — repo `skills/<slug>/` or `BOTEX_SKILLS_DIR`, not `~/.botex/`), the deterministic fetch/sanitize half of the remote installer, `GET/POST/DELETE /api/skills`, chat-mode `list_skills`/`install_skill` tools, and engine L0 triage auto-injection (`applied_skills`). Still open: the model-delegated ingestion phase of the installer, the Skills PWA tab, `list_skills`/`read_skill` MCP tools (chat-mode only today), an explicit `skills=` task parameter, and workspace root normalization.
 
 When BoteX runs as a remote gateway over VPN/VPS, worker models execute in an isolated system prompt and cannot see caller-side skills unless the caller pastes the full skill instructions into `task`. At the same time, built-in `recipes` (`botex/recipes/`) define engine execution personas (`planner`, `reviewer`, `tdd`) and should stay separate from domain/style skills (`humanizer`, `miodkuj`, `impeccable`, or third-party GitHub skills).
 
@@ -340,6 +340,18 @@ rest.
 
 ## Done recently (for reference)
 
+- Google AI Studio provider (`GoogleAIStudioProvider` in `botex/providers.py`;
+  `google`/`aistudio`/`gemini` registry aliases, `GEMINI_API_KEY` >
+  `GOOGLE_API_KEY` > `secrets.google_api_key` key resolution, configured
+  `pricing_overrides`/`capabilities` standing in for a catalog that publishes
+  neither, no credits API, Gemini `thought_signature` echoed via
+  `extra_content` so thinking turns stay valid)
+- Shared retry layer (`botex/retry.py`): unbilled-failure backoff for
+  provider calls — HTTP 429, connection errors, provider-blessed overloads
+  (Google 503) — with server delay hints (`Retry-After`, `retryDelay`,
+  `quotaResetDelay`, "retry in Xs"), immediate re-raise on daily-quota
+  errors, and `max_retries=0` on the SDK client while enabled; 429 now
+  classifies `provider_rate_limited` so fallbacks trigger after waits
 - Memory knowledge graph (Stage 4.7 partial): `[[wikilinks]]` between notes, `get_backlinks`, `patch_memory_section`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` with per-kind graph colors + `_GRAPH_INDEX.md`, `read_scratchpad` for offloaded execution logs
 - Meta-lessons layer: `botex/meta_harness.py` (task taxonomy classification, patch probing, meta-lesson extraction & recommendations)
 - Analytics & stats: `aggregate_stats()` shared by CLI and `GET /api/analytics?period=`, per-model/daily aggregates with cache-hit metrics, `POST /api/analytics/digest` + optional local-LLM (Bielik) digest loop writing to the Memory Vault, SVG stats panel inside WalletView

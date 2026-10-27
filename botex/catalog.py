@@ -20,12 +20,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 try:
     from .config import PROJECT_ROOT
     from .providers import BaseProvider, ProviderRegistry
-    from .security import mask_secrets, sever_taint_numeric
+    from .security import coerce_text, mask_secrets
     from .wallet import _sanitize_raw_payload
 except (ImportError, ValueError):
     from config import PROJECT_ROOT
     from providers import BaseProvider, ProviderRegistry
-    from security import mask_secrets, sever_taint_numeric
+    from security import coerce_text, mask_secrets
     from wallet import _sanitize_raw_payload
 
 # Allowlist of verified active models hosted on NVIDIA Cloud Functions
@@ -357,7 +357,7 @@ class ModelCatalog:
         except Exception as exc:
             masked_err = mask_secrets(str(exc))
             err_msg = f"[BoteX] Catalog fetch failed ({masked_err}); using stale cache if any.\n"
-            sys.stderr.write(sever_taint_numeric(err_msg))
+            sys.stderr.write(coerce_text(err_msg))
 
         # Stale cache fallback on network/HTTP exception
         if isinstance(cached_entry, dict):
@@ -433,6 +433,20 @@ class ModelCatalog:
                     comp_val = raw_comp * 1_000_000.0
             except (ValueError, TypeError, OverflowError):
                 comp_val = None
+
+        # Operator-declared prices win over (absent) catalog pricing —
+        # providers without a price list (e.g. Google AI Studio) are only
+        # verifiable through providers.<name>.pricing_overrides.
+        over = ((self.provider_cfg or {}).get("pricing_overrides") or {}).get(slug)
+        if isinstance(over, dict):
+            try:
+                prompt_val = float(over.get("input"))
+            except (TypeError, ValueError, OverflowError):
+                pass
+            try:
+                comp_val = float(over.get("output"))
+            except (TypeError, ValueError, OverflowError):
+                pass
 
         # Tool calling capability
         if "supports_tools" in caps:
@@ -516,7 +530,7 @@ class ModelCatalog:
             self.cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:
             err_msg = f"[BoteX] Failed to write catalog cache: {mask_secrets(str(exc))}\n"
-            sys.stderr.write(sever_taint_numeric(err_msg))
+            sys.stderr.write(coerce_text(err_msg))
 
 
 _VALID_PROVIDERS_MAP: Dict[str, str] = {
@@ -524,6 +538,11 @@ _VALID_PROVIDERS_MAP: Dict[str, str] = {
     "openrouter-free": "openrouter-free",
     "nvidia": "nvidia",
     "ollama": "ollama",
+    # Aliases collapse onto the canonical "google" provider entry so the
+    # consolidated catalog never duplicates the same endpoint.
+    "google": "google",
+    "aistudio": "google",
+    "gemini": "google",
 }
 
 _KNOWN_DISPLAY_NAMES: Dict[str, str] = {
@@ -668,7 +687,7 @@ _CONSOLIDATED_MEM_CACHE: Dict[str, Any] = {
 
 
 def get_consolidated_models(
-    providers: Sequence[str] = ("openrouter", "openrouter-free", "nvidia", "ollama"),
+    providers: Sequence[str] = ("openrouter", "openrouter-free", "nvidia", "ollama", "google"),
     config: Optional[Dict[str, Any]] = None,
     cache_file: Optional[Path | str] = None,
     ttl_seconds: float = 300.0,
@@ -693,7 +712,7 @@ def get_consolidated_models(
         if isinstance(p, str) and p.strip().lower() in _VALID_PROVIDERS_MAP
     )
     if not norm_providers:
-        norm_providers = ("openrouter", "openrouter-free", "nvidia", "ollama")
+        norm_providers = ("openrouter", "openrouter-free", "nvidia", "ollama", "google")
 
     if (
         not force_refresh
@@ -909,6 +928,33 @@ def get_consolidated_models(
                         is_zdr_compliant=True,
                     ),
                     "ollama",
+                )
+
+    # Seed configured Google AI Studio profile models — same reasoning as
+    # the Ollama seed: the provider stays visible in offline/test
+    # environments where its /models fetch returns nothing. Prices come
+    # from pricing_overrides so the models are never shown as free.
+    if "google" in norm_providers:
+        g_cfg = providers_cfg.get("google") if isinstance(providers_cfg, dict) else None
+        g_models = (g_cfg.get("models") if isinstance(g_cfg, dict) else None) or {}
+        g_prices = (g_cfg.get("pricing_overrides") if isinstance(g_cfg, dict) else None) or {}
+        g_caps = (g_cfg.get("capabilities") if isinstance(g_cfg, dict) else None) or {}
+        seed_ids = [s for s in g_models.values() if isinstance(s, str) and s.strip()]
+        for slug in dict.fromkeys(seed_ids):
+            if f"google:{slug}" not in entries_by_key:
+                ov = g_prices.get(slug) or {}
+                caps = g_caps.get(slug) or {}
+                _add_meta(
+                    ModelMetadata(
+                        id=slug,
+                        name="",
+                        context_length=int(caps.get("context_length") or 0),
+                        prompt_price_per_m=ov.get("input"),
+                        completion_price_per_m=ov.get("output"),
+                        supports_tools=caps.get("supports_tools"),
+                        is_zdr_compliant=True,
+                    ),
+                    "google",
                 )
 
     # Sort: curated/known models & free models first, then alphabetical by name

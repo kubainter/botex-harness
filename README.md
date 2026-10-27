@@ -48,9 +48,10 @@ BoteX handles provider keys internally, so calling MCP clients don't need to pas
 
 ```env
 OPENROUTER_API_KEY=sk-or-v1-...
+# GEMINI_API_KEY=AIza...        # only for provider "google" (GOOGLE_API_KEY works as fallback)
 ```
 
-*Key lookup order: `OPENROUTER_API_KEY` env var → local `.env` → custom `paths.env_file` → `botex.config.local.json` (gitignored).*
+*Key lookup order: `OPENROUTER_API_KEY` env var → local `.env` → custom `paths.env_file` → `botex.config.local.json` (gitignored). For provider `google`, the key resolves via `GEMINI_API_KEY` → `GOOGLE_API_KEY` → `secrets.google_api_key` in config.*
 
 ### 3. Connect to your MCP client
 
@@ -157,9 +158,9 @@ Example payload for `run_subagent`:
 | `task` | *(required)* | Clear description of what needs to be implemented or fixed. |
 | `files` | `[]` | List of primary target files to nudge the agent toward. |
 | `workspace_dir` | `""` | Root directory the agent is restricted to. Empty = `engine.default_workspace` from config, else the server's current directory. An explicit value (including `.`) always wins. |
-| `provider` | `""` | API provider from `botex.config.json` (`openrouter`, `nvidia`, `openrouter-free`; empty = configured default or `BOTEX_PROVIDER`). |
+| `provider` | `""` | API provider from `botex.config.json` (`openrouter`, `nvidia`, `google`, `openrouter-free`, `ollama`; empty = configured default or `BOTEX_PROVIDER`). |
 | `model` | `""` | Explicit provider model ID; overrides `profile`. |
-| `profile` | `""` | Model profile from `botex.config.json` (`default`, `coding`, `auto-beta`, `fast`). Empty = picked per mode via `engine.mode_profiles`. |
+| `profile` | `""` | Model profile from `botex.config.json` (`default`, `coding`, `auto-beta`, `review`, `fast`). Empty = picked per mode via `engine.mode_profiles`. |
 | `api_key` | `""` | Provider API key per-request; highest priority (overrides env/.env/config). |
 | `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full` (empty = `engine.default_mode`). |
 | `recipe` | `""` | Specialized workflow persona (`planner`, `code-explorer`, `reviewer`, `security-reviewer`, `security-taint-hardener`, `build-resolver`, `tdd`, `architecture-adr`, `ui-craftsman`). |
@@ -259,6 +260,8 @@ BoteX uses two complementary failover layers:
 
 1. **In-Payload OpenRouter Failovers (`extra_body.models`)**: Before sending the first turn to OpenRouter, BoteX runs each fallback candidate through all five safety gates (`Denylist`, `Decisions`, `ZDR`, `Price`, `Tools`) and passes up to three validated slugs in `extra_body["models"]`. If the primary endpoint is overloaded on the initial request, OpenRouter switches to the next validated model on the wire without an extra client round-trip. Meta-routers (`openrouter/auto`, `openrouter/pareto-code`, `openrouter/free`) are excluded from `models: [...]`, and once a run modifies any file (`files_touched`) or executes a command (`exec_ran`), BoteX strips `models` from subsequent turns so a different model never takes over a mutated workspace mid-task.
 2. **Engine-Level Rollback & Retry**: If an attempt fails mid-run, **BoteX verifies that all partial file changes from the failed attempt were rolled back** before starting the next candidate model. A fallback model never inherits a dirty workspace.
+
+Before a candidate can fail at all, a shared retry layer (`botex/retry.py`, configured per provider via `providers.<name>.retry`) waits out *unbilled* transient rejections: HTTP 429 and connection errors (Google additionally retries 503 "overloaded"), honoring server wait hints (`Retry-After` header, `retryDelay`/`quotaResetDelay` body fields). Timeouts and other 5xx are never retried — the request may already have executed, so a retry could double-bill it — and daily-quota errors skip the wait entirely so the run falls back immediately. While the layer is enabled, SDK-internal retries are disabled (`max_retries=0`) so exactly one layer owns the backoff policy; setting `"retry": false` on a provider hands control back to the SDK. Config keys: `enabled` (default `true`), `max_waits` (2), `max_wait_s` (60.0), `base_delay_s` (1.0), `jitter_s` (1.5). A persistent 429 surfaces as `failure_kind: "provider_rate_limited"`, which is eligible for the `model_fallbacks` chain.
 
 For OpenRouter runs, BoteX also sets `extra_body.provider` (`data_collection: "deny"` when ZDR is active, `require_parameters: true` when tools or `response_format` are present, `allow_fallbacks: true`, and `sort: "throughput"`), automatically stripping `reasoning` parameters for non-reasoning model slugs so `require_parameters: true` never triggers HTTP 404 rejections. On `DONE`, BoteX queries `GET /api/v1/generation?id=...` in parallel (with a short 404 retry) to record official billing (`total_cost`), queue latency (`queue_time_ms`), inference time (`generation_time_ms`), and prompt cache read/write tokens in `.agent_analytics.json` and `.botex/memory/` task receipts.
 
@@ -427,7 +430,8 @@ botex/
   meta_harness.py      Task taxonomy, patch probing & meta-lesson recommendations
   analytics.py         Cost/token ledger, budgeting & summary reporting
   pricing.py           Live model price guardrail & catalog checks
-  providers.py         Provider adapters (OpenRouter, NVIDIA, etc.) & request normalizer
+  providers.py         Provider adapters (OpenRouter, NVIDIA, Google AI Studio, etc.) & request normalizer
+  retry.py             Shared transient-failure backoff (429 / connection errors / Google 503 overload)
   benchmarks.py        Live model recommendations (recommend_models)
   contracts.py         Task completion verification & status taxonomy
   recipes.py           Recipe loading & system-prompt injection

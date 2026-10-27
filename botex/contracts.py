@@ -56,6 +56,7 @@ FALLBACKABLE_KINDS = frozenset(
         "time_exhausted",
         "turns_exhausted",
         "provider_policy_denied",
+        "provider_rate_limited",
         "provider_unavailable",
         "provider_error",
         "budget_or_price_block",
@@ -99,7 +100,9 @@ def classify_api_error(exc: BaseException) -> str:
         return "provider_auth_error"
     if status in (403, 404):
         return "provider_policy_denied"
-    if status == 429 or (isinstance(status, int) and status >= 500):
+    if status == 429:
+        return "provider_rate_limited"
+    if isinstance(status, int) and status >= 500:
         return "provider_unavailable"
     if isinstance(exc, APIConnectionError):
         return "provider_unavailable"

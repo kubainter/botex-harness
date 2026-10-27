@@ -89,6 +89,12 @@
       "zdr": {
         "enabled": false
       },
+      "retry": {
+        "enabled": true,
+        "max_waits": 3,
+        "max_wait_s": 90.0,
+        "jitter_s": 1.5
+      },
       "denylist": [],
       "profile_denylists": {},
       "models": {
@@ -108,6 +114,64 @@
         "fast": [
           "nvidia/nemotron-3.5-lightning:free",
           "liquid/lfm-2.5-2.6b:free"
+        ]
+      }
+    },
+    "google": {
+      "default": false,
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key_env": "GEMINI_API_KEY",
+      "stream": true,
+      "extra_body": {
+        "reasoning_effort": "low"
+      },
+      "zdr": {
+        "enabled": false
+      },
+      "retry": {
+        "enabled": true,
+        "max_waits": 2,
+        "max_wait_s": 60.0,
+        "jitter_s": 1.5
+      },
+      "denylist": [
+        "*image*", "*imagen*", "*veo*",
+        "*embedding*", "*gecko*",
+        "*tts*", "*speech*", "*audio*", "*transcribe*", "*lyria*", "*music*", "*chirp*",
+        "*realtime*", "*-live*", "*antigravity*",
+        "*gemma*", "*paligemma*", "*codegemma*",
+        "*robotics*", "*rt-*", "*computer-use*", "*deep-research*",
+        "*nano*", "*banana*",
+        "*learnlm*", "*aqa*", "*medlm*", "*med-gemini*",
+        "*bison*", "*gemini-1.0*", "*gemini-pro*", "*gemini-ultra*",
+        "tunedmodels/*", "*tuned*",
+        "*-exp*", "*-experimental*"
+      ],
+      "profile_denylists": {},
+      "capabilities": {
+        "gemini-2.5-flash": {"supports_tools": true, "context_length": 1048576},
+        "gemini-2.5-pro": {"supports_tools": true, "context_length": 1048576},
+        "gemini-2.5-flash-lite": {"supports_tools": true, "context_length": 1048576}
+      },
+      "pricing_overrides": {
+        "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
+        "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+        "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40}
+      },
+      "models": {
+        "default": "gemini-2.5-flash",
+        "coding": "gemini-2.5-pro",
+        "fast": "gemini-2.5-flash-lite"
+      },
+      "model_fallbacks": {
+        "default": [
+          "gemini-2.5-flash-lite"
+        ],
+        "coding": [
+          "gemini-2.5-flash"
+        ],
+        "fast": [
+          "gemini-2.5-flash"
         ]
       }
     },

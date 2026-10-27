@@ -6,6 +6,7 @@
   - Specialized adapters:
     - `OpenRouterProvider`: Handles OpenRouter attribution headers, ZDR wire flags, reasoning tokens, credits endpoints (`/api/v1/auth/key` and `/api/v1/credits`).
     - `NvidiaProvider`: Handles NVIDIA NIM OpenAI-compatible endpoint with explicit capabilities.
+    - `GoogleAIStudioProvider`: Handles Google AI Studio (Gemini) via its OpenAI-compatible endpoint (`google`/`aistudio`/`gemini` aliases, `GEMINI_API_KEY`/`GOOGLE_API_KEY` key chain, no credits API).
     - `GenericOpenAIProvider`: Handles custom OpenAI-compatible endpoints.
   - `ProviderRegistry`: Singleton / factory registry mapping provider names to provider classes and instances.
   - Backward Compatibility Layer: Retains top-level module functions `build_async_client(provider_name, provider_cfg, api_key, client_factory=AsyncOpenAI)`, `normalize_response(response)`, `resolve_api_key(explicit, provider_name, provider_cfg, secrets_cfg)`, `sanitize_provider_error(exc, max_chars=1024)`.

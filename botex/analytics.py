@@ -27,7 +27,7 @@ try:
         snapshot_dir as _cfg_snapshot_dir,
     )
     from .contracts import STATUS_FAILURE_KIND
-    from .security import mask_secrets, sever_taint_numeric
+    from .security import coerce_text, mask_secrets
 except (ImportError, ValueError):
     from config import (
         analytics_file as _cfg_analytics_file,
@@ -42,7 +42,7 @@ except (ImportError, ValueError):
         snapshot_dir as _cfg_snapshot_dir,
     )
     from contracts import STATUS_FAILURE_KIND
-    from security import mask_secrets, sever_taint_numeric
+    from security import coerce_text, mask_secrets
 
 ANALYTICS_FILE = _cfg_analytics_file()
 SNAPSHOT_DIR = _cfg_snapshot_dir()
@@ -56,6 +56,12 @@ MODEL_PRICING_ESTIMATES = {
     "anthropic/claude-3.7-sonnet": {"prompt": 3.00, "completion": 15.00},
     "google/gemini-2.5-pro": {"prompt": 1.25, "completion": 5.00},
     "google/gemini-2.5-flash": {"prompt": 0.075, "completion": 0.30},
+    # Bare slugs served by the Google AI Studio OpenAI-compat endpoint
+    # (provider "google"); OpenRouter carries the same models under
+    # "google/" prefixes above.
+    "gemini-2.5-pro": {"prompt": 1.25, "completion": 10.00},
+    "gemini-2.5-flash": {"prompt": 0.30, "completion": 2.50},
+    "gemini-2.5-flash-lite": {"prompt": 0.10, "completion": 0.40},
 }
 
 
@@ -422,7 +428,7 @@ def print_run_summary(entry: Dict[str, Any]):
             "=" * 40,
         ]
         output_str = "\n".join(lines) + "\n"
-        sys.stderr.write(sever_taint_numeric(output_str))
+        sys.stderr.write(coerce_text(output_str))
 
 
 def cli_stats(period: str = "week"):

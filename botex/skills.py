@@ -32,10 +32,10 @@ try:
     from .net_tools import fetch_url
     from .security import (
         SecurityError,
+        coerce_text,
         mask_secrets,
         resolve_safe_path,
         sanitize_for_storage,
-        sever_taint_numeric,
     )
 except (ImportError, ValueError):
     from config import PROJECT_ROOT, load_config
@@ -43,10 +43,10 @@ except (ImportError, ValueError):
     from net_tools import fetch_url
     from security import (
         SecurityError,
+        coerce_text,
         mask_secrets,
         resolve_safe_path,
         sanitize_for_storage,
-        sever_taint_numeric,
     )
 
 __all__ = [
@@ -150,7 +150,7 @@ def _sanitize_skill_name(name: str) -> str:
         raise SecurityError(
             f"Invalid skill name '{name}'. Only alphanumeric characters, '-' and '_' (max 64 chars) are allowed."
         )
-    return sever_taint_numeric(clean)
+    return coerce_text(clean)
 
 
 def get_skills_dir() -> Path:
@@ -343,7 +343,7 @@ def list_skills(skills_dir: Optional[Path] = None) -> Dict[str, Any]:
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Failed to list skills: {sever_taint_numeric(mask_secrets(str(exc)))}",
+            "error": f"Failed to list skills: {coerce_text(mask_secrets(str(exc)))}",
             "skills": [],
             "count": 0,
         }
@@ -364,12 +364,12 @@ def get_skill(name: str, skills_dir: Optional[Path] = None) -> Dict[str, Any]:
     except SecurityError as se:
         return {
             "ok": False,
-            "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
         }
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Failed to read skill: {sever_taint_numeric(mask_secrets(str(exc)))}",
+            "error": f"Failed to read skill: {coerce_text(mask_secrets(str(exc)))}",
         }
 
 
@@ -522,7 +522,7 @@ async def install_skill_async(
                 )
                 return {
                     "ok": False,
-                    "error": f"Failed to fetch skill from URL: {sever_taint_numeric(mask_secrets(str(err_detail)))}",
+                    "error": f"Failed to fetch skill from URL: {coerce_text(mask_secrets(str(err_detail)))}",
                 }
             if fetched.get("truncated"):
                 return {
@@ -568,12 +568,12 @@ async def install_skill_async(
     except SecurityError as se:
         return {
             "ok": False,
-            "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
         }
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Failed to install skill: {sever_taint_numeric(mask_secrets(str(exc)))}",
+            "error": f"Failed to install skill: {coerce_text(mask_secrets(str(exc)))}",
         }
 
 
@@ -609,12 +609,12 @@ def install_skill(
         except SecurityError as se:
             return {
                 "ok": False,
-                "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+                "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
             }
         except Exception as exc:
             return {
                 "ok": False,
-                "error": f"Failed to install skill: {sever_taint_numeric(mask_secrets(str(exc)))}",
+                "error": f"Failed to install skill: {coerce_text(mask_secrets(str(exc)))}",
             }
 
     import asyncio
@@ -647,7 +647,7 @@ def install_skill(
         except Exception as exc:
             return {
                 "ok": False,
-                "error": f"Failed to install skill: {sever_taint_numeric(mask_secrets(str(exc)))}",
+                "error": f"Failed to install skill: {coerce_text(mask_secrets(str(exc)))}",
             }
     return asyncio.run(
         install_skill_async(
@@ -679,12 +679,12 @@ def delete_skill(name: str, skills_dir: Optional[Path] = None) -> Dict[str, Any]
     except SecurityError as se:
         return {
             "ok": False,
-            "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
         }
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Failed to delete skill: {sever_taint_numeric(mask_secrets(str(exc)))}",
+            "error": f"Failed to delete skill: {coerce_text(mask_secrets(str(exc)))}",
         }
 
 

@@ -19,10 +19,10 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple, Type, Union
 
 try:
     from .providers import BaseProvider, CreditsInfo, ProviderRegistry, _extract_openrouter_key_meta
-    from .security import mask_secrets, sever_taint_numeric
+    from .security import coerce_text, mask_secrets
 except (ImportError, ValueError):
     from providers import BaseProvider, CreditsInfo, ProviderRegistry, _extract_openrouter_key_meta
-    from security import mask_secrets, sever_taint_numeric
+    from security import coerce_text, mask_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -305,9 +305,9 @@ class WalletService:
 
     def _build_cache_key(self, provider_name: str, scope_tag: Optional[str] = None) -> str:
         """Derive a taint-safe cache tag using PBKDF2-HMAC-SHA256 (CodeQL CWE-327/CWE-312)."""
-        prov = sever_taint_numeric(mask_secrets((provider_name or "").strip()).lower())
+        prov = coerce_text(mask_secrets((provider_name or "").strip()).lower())
         if scope_tag:
-            clean_tag = sever_taint_numeric(scope_tag)
+            clean_tag = coerce_text(scope_tag)
             dk = hashlib.pbkdf2_hmac(
                 "sha256",
                 clean_tag.encode("utf-8"),

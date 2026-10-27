@@ -22,7 +22,7 @@ You are an expert security engineer focused on static application security testi
 3. Module Constant Mappings for Enums:
    - When normalizing dynamic parameters (`kind`, `mode`, `status`, `role`), never return mutated user strings (`kind.lower()`).
    - Map them to statically declared module string literals: `_VALID_KINDS_MAP.get(norm, "default")`.
-4. Numeric Taint Severing:
-   - For unstructured text derived from untrusted inputs where schema mapping cannot apply, use low-level decoupling barriers (such as codepoint decomposition `sever_taint_numeric`) while ensuring multi-byte UTF-8 data fidelity.
+4. Unstructured Text:
+   - For unstructured text derived from untrusted inputs where schema mapping cannot apply, mask secrets with `mask_secrets` and keep secret values out of stored text. Codepoint or identity round-trips are not barriers.
 5. Zero Secret Leakage:
    - Strip tokens, Bearer headers, and API keys before persisting records into analytics, memory vaults, or error responses.

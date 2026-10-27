@@ -135,6 +135,98 @@ DEFAULTS: Dict[str, Any] = {
                     "liquid/lfm-2.5-2.6b:free",
                 ],
             },
+            # Free tier gets more patience: longer waits across more retries.
+            "retry": {
+                "enabled": True,
+                "max_waits": 3,
+                "max_wait_s": 90.0,
+                "jitter_s": 1.5,
+            },
+        },
+        # Google AI Studio (Gemini) via its OpenAI-compatible endpoint
+        # (https://ai.google.dev/gemini-api/docs/openai). The /models
+        # catalog publishes no pricing or supported_parameters — the
+        # pre-flight gates stay verifiable through pricing_overrides and
+        # capabilities below. There is no OpenRouter-style data_collection
+        # flag and no credits API; ZDR is operator-declared and OFF by
+        # default — selecting this provider is the opt-in. The denylist
+        # keeps non-chat families (image/audio/video/embedding/robotics,
+        # experimental, tuned, legacy) out of agent profiles.
+        # reasoning_effort caps hidden thinking so it cannot burn the
+        # whole max_tokens budget before emitting output.
+        "google": {
+            "default": False,
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "api_key_env": "GEMINI_API_KEY",
+            "stream": True,
+            "extra_body": {"reasoning_effort": "low"},
+            "zdr": {"enabled": False},
+            # Shared retry layer (botex/retry.py): 429 + 503-overload
+            # waits, then provider_rate_limited -> model_fallbacks. Daily
+            # quota errors skip the wait and fall back immediately.
+            "retry": {"enabled": True, "max_waits": 2, "max_wait_s": 60.0, "jitter_s": 1.5},
+            "denylist": [
+                "*image*",
+                "*imagen*",
+                "*veo*",
+                "*embedding*",
+                "*gecko*",
+                "*tts*",
+                "*speech*",
+                "*audio*",
+                "*transcribe*",
+                "*lyria*",
+                "*music*",
+                "*chirp*",
+                "*realtime*",
+                "*-live*",
+                "*antigravity*",
+                "*gemma*",
+                "*paligemma*",
+                "*codegemma*",
+                "*robotics*",
+                "*rt-*",
+                "*computer-use*",
+                "*deep-research*",
+                "*nano*",
+                "*banana*",
+                "*learnlm*",
+                "*aqa*",
+                "*medlm*",
+                "*med-gemini*",
+                "*bison*",
+                "*gemini-1.0*",
+                "*gemini-pro*",
+                "*gemini-ultra*",
+                "tunedmodels/*",
+                "*tuned*",
+                "*-exp*",
+                "*-experimental*",
+            ],
+            "profile_denylists": {},
+            "capabilities": {
+                "gemini-2.5-flash": {"supports_tools": True, "context_length": 1048576},
+                "gemini-2.5-pro": {"supports_tools": True, "context_length": 1048576},
+                "gemini-2.5-flash-lite": {"supports_tools": True, "context_length": 1048576},
+            },
+            # USD per 1M tokens, paid tier (<=200k context bracket) — the
+            # catalog does not publish prices, so the price gate reads
+            # these instead. Keep in sync with ai.google.dev/gemini-api/pricing.
+            "pricing_overrides": {
+                "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
+                "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+                "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+            },
+            "models": {
+                "default": "gemini-2.5-flash",
+                "coding": "gemini-2.5-pro",
+                "fast": "gemini-2.5-flash-lite",
+            },
+            "model_fallbacks": {
+                "default": ["gemini-2.5-flash-lite"],
+                "coding": ["gemini-2.5-flash"],
+                "fast": ["gemini-2.5-flash"],
+            },
         },
         "ollama": {
             "default": False,
@@ -386,6 +478,7 @@ DEFAULTS: Dict[str, Any] = {
     # the committed botex.config.json. Environment variables take precedence.
     "secrets": {
         "openrouter_api_key": "",
+        "google_api_key": "",
     },
 }
 
