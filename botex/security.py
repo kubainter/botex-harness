@@ -117,18 +117,9 @@ def mask_secrets(text: str) -> str:
     return text
 
 
-def sever_taint_numeric(text: str) -> str:
-    """
-    Sever static analysis taint flow (CodeQL py/clear-text-storage-sensitive-data)
-    via numeric integer code point reconstruction. Preserves exact UTF-8 Markdown
-    content while breaking continuous string data-flow graphs in static analyzers.
-    """
-    if text is None:
-        return ""
-    text_str = str(text)
-    if not text_str:
-        return ""
-    return "".join(chr(cp) for cp in [ord(c) for c in text_str])
+def coerce_text(text: Any) -> str:
+    """Coerce a value to str for logs, errors and stored text. None becomes an empty string."""
+    return "" if text is None else str(text)
 
 
 _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
@@ -138,14 +129,14 @@ def sanitize_identifier(ident: str, default: str = "") -> str:
     """
     Validate and sanitize an identifier (session_id, task_id, memory_id) against path injection.
     Only allows alphanumeric characters, underscores, and hyphens.
-    Returns numeric reconstructed string to sever taint.
+    Returns the stripped identifier.
     """
     if not ident or not isinstance(ident, str):
         return default
     cleaned = ident.strip()
     if not _SAFE_ID_RE.fullmatch(cleaned):
         return default
-    return sever_taint_numeric(cleaned)
+    return cleaned
 
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -153,13 +144,10 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 def sanitize_for_storage(text: str) -> str:
     """
-    Sanitization barrier for text persisted to disk: redacts secrets via
-    ``mask_secrets``, strips non-printable control characters, and severs
-    static analysis taint flow via ``sever_taint_numeric``. Registered as a
-    CodeQL barrier in ``.github/codeql/extensions/sanitizers.yml``.
+    Sanitization for text persisted to disk: redacts secrets via ``mask_secrets``
+    and strips non-printable control characters.
     """
-    cleaned = mask_secrets(_CONTROL_CHARS.sub("", str(text)))
-    return sever_taint_numeric(cleaned)
+    return mask_secrets(_CONTROL_CHARS.sub("", str(text)))
 
 
 def wrap_untrusted_content(content: str, tag: str = "untrusted_content", **attrs: str) -> str:

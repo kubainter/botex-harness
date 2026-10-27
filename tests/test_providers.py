@@ -26,6 +26,7 @@ from botex.providers import (
     _VALID_FINISH_KIND_MAP,
     BaseProvider,
     GenericOpenAIProvider,
+    GoogleAIStudioProvider,
     NvidiaProvider,
     OpenRouterProvider,
     ProviderRegistry,
@@ -670,3 +671,230 @@ def test_provider_local_api_key_fallback():
 
         p_remote = ProviderRegistry.get("generic", {"base_url": "https://api.example.com/v1"})
         assert p_remote.resolve_api_key() == ""
+
+
+# ---------------------------------------------------------------------------
+# Group 9: GoogleAIStudioProvider Adapter Specifications
+# ---------------------------------------------------------------------------
+def test_google_provider_registration_and_aliases():
+    """TEST-GAI-01: google/aistudio/gemini names and substring heuristic resolve to the adapter."""
+    assert isinstance(ProviderRegistry.get("google"), GoogleAIStudioProvider)
+    assert isinstance(ProviderRegistry.get("GOOGLE"), GoogleAIStudioProvider)
+    assert isinstance(ProviderRegistry.get("aistudio"), GoogleAIStudioProvider)
+    assert isinstance(ProviderRegistry.get("gemini"), GoogleAIStudioProvider)
+    assert "google" in ProviderRegistry.list_providers()
+    # Substring heuristic mirrors the openrouter/nvidia convention
+    assert isinstance(ProviderRegistry.get("google-ai-studio", {}), GoogleAIStudioProvider)
+    # OpenRouter keeps precedence for mixed names
+    assert isinstance(ProviderRegistry.get("openrouter", {}), OpenRouterProvider)
+
+
+def test_google_provider_client_construction():
+    """TEST-GAI-02: Default OpenAI-compat base URL, attribution headers off by default."""
+    provider = ProviderRegistry.get("google")
+    client = provider.get_client(
+        api_key="gemini-test",
+        client_factory=fake_client_factory,
+        provider_cfg={},
+    )
+    assert client.kwargs["base_url"] == "https://generativelanguage.googleapis.com/v1beta/openai"
+    assert client.kwargs["api_key"] == "gemini-test"
+    assert client.kwargs["default_headers"] is None
+
+
+def test_google_provider_key_resolution():
+    """TEST-GAI-03: Precedence explicit > api_key_env > GEMINI_API_KEY > GOOGLE_API_KEY > secrets."""
+    provider = ProviderRegistry.get("google")
+
+    assert provider.resolve_api_key(explicit_key="exp", secrets_cfg={}) == "exp"
+
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "gemini-env"}, clear=True):
+        assert provider.resolve_api_key(None, provider_cfg={}, secrets_cfg={}) == "gemini-env"
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "google-env"}, clear=True):
+        assert provider.resolve_api_key(None, provider_cfg={}, secrets_cfg={}) == "google-env"
+
+    # Configured api_key_env wins over the built-in fallbacks
+    with patch.dict(
+        os.environ,
+        {"CUSTOM_GEMINI": "cfg-env", "GEMINI_API_KEY": "gemini-env"},
+        clear=True,
+    ):
+        p = ProviderRegistry.get("google", {"api_key_env": "CUSTOM_GEMINI"})
+        assert p.resolve_api_key(None, provider_cfg={"api_key_env": "CUSTOM_GEMINI"}) == "cfg-env"
+
+    # Secrets fallbacks: canonical name and cross-alias
+    with patch.dict(os.environ, {}, clear=True):
+        assert (
+            provider.resolve_api_key(None, secrets_cfg={"google_api_key": "sec-google"})
+            == "sec-google"
+        )
+        p_alias = ProviderRegistry.get("aistudio")
+        assert (
+            p_alias.resolve_api_key(None, secrets_cfg={"gemini_api_key": "sec-gemini"})
+            == "sec-gemini"
+        )
+        assert provider.resolve_api_key(None, secrets_cfg={}) == ""
+
+
+def test_google_extra_body_sanitization():
+    """TEST-GAI-04: OpenRouter-only keys are stripped; google.* and reasoning_effort pass."""
+    cfg = {
+        "extra_body": {
+            "reasoning_effort": "low",
+            "provider": {"data_collection": "deny", "sort": "throughput"},
+            "models": ["a", "b"],
+            "transforms": [],
+            "usage": {"include": True},
+            "reasoning": {"max_tokens": 4000},
+            "google": {"safety_settings": [{"category": "HARM", "threshold": "OFF"}]},
+        }
+    }
+    cfg_copy = copy.deepcopy(cfg)
+    provider = GoogleAIStudioProvider("google", config=cfg)
+    extra = provider.get_extra_body()
+
+    assert extra["reasoning_effort"] == "low"
+    assert extra["google"]["safety_settings"]
+    for leaked in ("provider", "models", "transforms", "usage", "reasoning"):
+        assert leaked not in extra
+    # Caller's config dict is never mutated
+    assert cfg == cfg_copy
+
+
+def test_google_credits_unsupported():
+    """TEST-GAI-05: Google AI Studio exposes no credits endpoint."""
+    provider = GoogleAIStudioProvider("google")
+    info = provider.get_credits()
+    assert info.supported is False
+    assert info.provider == "google"
+
+
+def test_extra_content_passthrough_normalize():
+    """TEST-GAI-06: Message- and tool-call-level extra_content survive normalization."""
+    raw_resp = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "extra_content": {"google": {"thought_signature": "sig-msg"}},
+                    "tool_calls": [
+                        {
+                            "id": "tc1",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                            "extra_content": {"google": {"thought_signature": "sig-tc"}},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    nresp = providers.normalize_response(raw_resp)
+    assert nresp.finish_reason == "tool_call"
+    assert nresp.extra_content == {"google": {"thought_signature": "sig-msg"}}
+    assert nresp.tool_calls[0].extra_content == {"google": {"thought_signature": "sig-tc"}}
+
+    # Responses without extras keep the field unset
+    plain = providers.normalize_response(
+        {"choices": [{"message": {"content": "c"}, "finish_reason": "stop"}]}
+    )
+    assert plain.extra_content is None
+
+
+def test_extra_content_passthrough_streaming():
+    """TEST-GAI-07: Streaming deltas accumulate extra_content on message and tool calls."""
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "extra_content": {"google": {"thought_signature": "sig-stream"}},
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_0",
+                                "function": {"name": "read_file", "arguments": ""},
+                                "extra_content": {"google": {"thought_signature": "sig-tc"}},
+                            }
+                        ],
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [{"index": 0, "function": {"arguments": '{"path":"a.txt"}'}}]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        },
+    ]
+    nresp = providers.normalize_streaming_chunks(chunks, raw_model="gemini-2.5-pro")
+    assert nresp.finish_reason == "tool_call"
+    assert nresp.extra_content == {"google": {"thought_signature": "sig-stream"}}
+    assert nresp.tool_calls[0].extra_content == {"google": {"thought_signature": "sig-tc"}}
+    assert nresp.tool_calls[0].arguments == '{"path":"a.txt"}'
+
+
+def test_google_fetch_catalog_mocked():
+    """TEST-GAI-08: fetch_catalog hits {base_url}/models and parses the data array."""
+    provider = GoogleAIStudioProvider("google")
+    catalog_data = {
+        "data": [
+            {"id": "gemini-2.5-flash"},
+            {"id": "gemini-2.5-pro"},
+        ]
+    }
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps(catalog_data).encode("utf-8")
+    mock_resp.__enter__.return_value = mock_resp
+
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mocked:
+        models = provider.fetch_catalog(api_key="gai-test")
+        assert [m["id"] for m in models] == ["gemini-2.5-flash", "gemini-2.5-pro"]
+        req = mocked.call_args[0][0]
+        assert req.full_url.endswith("/v1beta/openai/models")
+        assert req.get_header("Authorization") == "Bearer gai-test"
+
+
+def test_normalize_tool_call_arguments_dict_coerced_to_string():
+    """TEST-GAI-09: a provider returning pre-parsed arguments as an object
+    must still produce a JSON string on the wire echo (review fix)."""
+    resp = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_x",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": {"path": "a.txt"}},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+    nresp = providers.normalize_response(resp)
+    assert nresp.tool_calls[0].arguments == '{"path": "a.txt"}'
+    assert isinstance(nresp.tool_calls[0].arguments, str)
+
+
+def test_google_resolve_key_dual_env_precedence(monkeypatch):
+    """TEST-GAI-10: both GEMINI_API_KEY and GOOGLE_API_KEY set with different
+    values -> GEMINI_API_KEY wins (one-time stderr warning emitted)."""
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-a")
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-b")
+    provider = GoogleAIStudioProvider("google", {})
+    assert provider.resolve_api_key() == "gemini-a"
+    assert provider._key_precedence_warned is True
+    assert provider.resolve_api_key() == "gemini-a"

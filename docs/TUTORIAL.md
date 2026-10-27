@@ -24,17 +24,20 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 │   ├── pricing.py         pre-flight price and capability guardrails
 │   ├── security.py        path traversal guard, blocked files, secret masking
 │   ├── analytics.py       cost ledger, budget checks, CLI reports
-│   ├── providers.py       provider registry & adapters (OpenRouter, NVIDIA, etc.)
+│   ├── providers.py       provider registry & adapters (OpenRouter, NVIDIA, Google AI Studio, etc.)
+│   ├── retry.py           shared transient-failure backoff for provider calls (429/conn/overload)
 │   ├── catalog.py         dynamic model catalog with TTL caching & ZDR checks
 │   ├── denylist.py        hierarchical model denylist (glob & regex)
 │   ├── wallet.py          credit balance, usage, and limit checker
 │   ├── benchmarks.py      live model benchmarks & recommend_models
+│   ├── context_guard.py   context compaction & verification output pruning
 │   ├── net_tools.py       SSRF-safe network fetching (read_url, fetch_url)
 │   ├── memory.py          two-tier Memory Vault with wikilink graph (local & global)
 │   ├── embeddings.py      local embedding helpers for memory/graph features
 │   ├── obsidian.py        Obsidian PKM vault export & graph index generation
 │   ├── meta_harness.py    task taxonomy, patch probing & meta-lesson recommendations
 │   ├── recipes.py         recipe loader & system prompt injection
+│   ├── skills.py          server-side Skill Vault, safe installer & L0 triage
 │   ├── i18n.py            CLI localization (EN/PL); MCP responses are always EN
 │   ├── ui.py              ANSI helpers with plain-text fallback
 │   └── recipes/           bundled markdown persona prompts
@@ -43,11 +46,13 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 │   ├── test_botex.py          core unit and integration suite
 │   ├── test_stage_4_6.py      OpenRouter live telemetry, routing & JSON schema tests
 │   ├── test_stage_4_7.py      recipes metadata, benchmarks cache, cloud recipe endpoints
+│   ├── test_stage_4_8.py      skill vault, L0 triage & memory deletion tests
 │   ├── test_approval.py       HITL approval and policy tests
 │   ├── test_chat.py           streaming chat and sandbox tests
 │   ├── test_memory_twotier.py two-tier memory vault scoping tests
 │   ├── test_server_cloud.py   FastAPI, SSE, and WebSocket tests
 │   ├── test_providers.py      provider registry and adapter tests
+│   ├── test_retry.py          shared retry/backoff layer tests
 │   ├── test_catalog.py        dynamic catalog and ZDR tests
 │   ├── test_denylist.py       hierarchical denylist tests
 │   ├── test_wallet.py         wallet and credit query tests
@@ -257,5 +262,5 @@ botex serve
 python -m pytest tests/
 ```
 
-Runs the complete hermetic test suite (377 tests across 14 test modules). All socket access is hermetically mocked.
+Runs the complete hermetic test suite (501 tests across 26 test modules). All socket access is hermetically mocked.
 A secondary, opt-in suite `tests/test_live_e2e.py` runs against live provider APIs when `OPENROUTER_API_TESTS_KEY` is provided.

@@ -89,11 +89,12 @@ try:
         sanitize_provider_error,
     )
     from .recipes import list_recipes, load_recipe
+    from .retry import call_with_backoff, describe_retry_error
     from .security import (
         SecurityError,
         check_model_zdr,
+        coerce_text,
         resolve_safe_path,
-        sever_taint_numeric,
         zdr_enforced,
     )
     from .skills import format_skills_prompt_block, triage_skills_for_task
@@ -165,11 +166,12 @@ except (ImportError, ValueError):
         sanitize_provider_error,
     )
     from recipes import list_recipes, load_recipe
+    from retry import call_with_backoff, describe_retry_error
     from security import (
         SecurityError,
         check_model_zdr,
+        coerce_text,
         resolve_safe_path,
-        sever_taint_numeric,
         zdr_enforced,
     )
 
@@ -1725,22 +1727,36 @@ async def _run_botex_task_once_impl(
             turn_extra_body.setdefault("stream_options", {"include_usage": True})
         if response_format is not None:
             create_kwargs["response_format"] = response_format
-        try:
+
+        # The retry unit wraps create() AND the full stream collection —
+        # a mid-stream failure escapes a wrapper that only covers create().
+        # Retried errors are unbilled rejections (429/conn, Google 503
+        # overload); billed or ambiguous failures pass straight through.
+        async def _run_model_request() -> Any:
             if use_stream:
                 stream_resp = await client.chat.completions.create(**create_kwargs)
                 if hasattr(stream_resp, "__aiter__"):
                     chunks = []
                     async for chunk in stream_resp:
                         chunks.append(chunk)
-                    nresp = normalize_streaming_chunks(chunks, raw_model=model)
-                elif hasattr(stream_resp, "__iter__") and not hasattr(stream_resp, "choices"):
-                    chunks = list(stream_resp)
-                    nresp = normalize_streaming_chunks(chunks, raw_model=model)
-                else:
-                    nresp = normalize_response(stream_resp)
-            else:
-                raw_api_resp = await client.chat.completions.create(**create_kwargs)
-                nresp = normalize_response(raw_api_resp)
+                    return normalize_streaming_chunks(chunks, raw_model=model)
+                if hasattr(stream_resp, "__iter__") and not hasattr(stream_resp, "choices"):
+                    return normalize_streaming_chunks(list(stream_resp), raw_model=model)
+                return normalize_response(stream_resp)
+            raw_api_resp = await client.chat.completions.create(**create_kwargs)
+            return normalize_response(raw_api_resp)
+
+        try:
+            nresp = await call_with_backoff(
+                prov_adapter,
+                _run_model_request,
+                provider_cfg,
+                deadline_ts=(start_time + max_duration_s) if max_duration_s > 0 else None,
+                on_wait=lambda delay, exc: sys.stderr.write(
+                    f"[BoteX] {provider_name}/{model}: transient error, "
+                    f"retrying in {delay:.1f}s — {describe_retry_error(exc)}\n"
+                ),
+            )
         except APITimeoutError:
             rollback_verified = _rollback_attempt(task_id, files_touched)
             log_entry = log_run(
@@ -1924,14 +1940,22 @@ async def _run_botex_task_once_impl(
         if nresp.content:
             assistant_dict["content"] = nresp.content
         if nresp.tool_calls:
-            assistant_dict["tool_calls"] = [
-                {
+            tc_list: List[Dict[str, Any]] = []
+            for tc in nresp.tool_calls:
+                tc_dict: Dict[str, Any] = {
                     "id": tc.id,
                     "type": "function",
                     "function": {"name": tc.name, "arguments": tc.arguments},
                 }
-                for tc in nresp.tool_calls
-            ]
+                if isinstance(tc.extra_content, dict):
+                    tc_dict["extra_content"] = tc.extra_content
+                tc_list.append(tc_dict)
+            assistant_dict["tool_calls"] = tc_list
+        # Echo provider message extras verbatim (e.g. Gemini
+        # extra_content.google.thought_signature) — thinking models reject
+        # the next request when the signature is dropped from history.
+        if isinstance(nresp.extra_content, dict):
+            assistant_dict["extra_content"] = nresp.extra_content
         messages.append(assistant_dict)
 
         # Check if model completed without tool calls
@@ -2281,7 +2305,7 @@ async def _run_botex_task_once_impl(
                                 actual_model = str(models_used[-1])
                     except Exception as exc:
                         telemetry_err = f"OpenRouter generation telemetry skipped: {sanitize_provider_error(exc)}\n"
-                        sys.stderr.write(sever_taint_numeric(telemetry_err))
+                        sys.stderr.write(coerce_text(telemetry_err))
 
                 # Zero-cost runs report exactly 0 — otherwise the ledger
                 # falls back to pseudo-pricing for providers without

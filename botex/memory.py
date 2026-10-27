@@ -23,19 +23,19 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from .security import (
         SecurityError,
+        coerce_text,
         mask_secrets,
         resolve_safe_path,
         sanitize_for_storage,
-        sever_taint_numeric,
         wrap_untrusted_content,
     )
 except (ImportError, ValueError):
     from security import (
         SecurityError,
+        coerce_text,
         mask_secrets,
         resolve_safe_path,
         sanitize_for_storage,
-        sever_taint_numeric,
         wrap_untrusted_content,
     )
 
@@ -153,7 +153,7 @@ def _sanitize_id(memory_id: str) -> str:
         raise SecurityError(
             f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed."
         )
-    return sever_taint_numeric(clean)
+    return coerce_text(clean)
 
 
 def _serialize_val(val: Any) -> str:
@@ -606,12 +606,12 @@ def save_memory(
     except SecurityError as se:
         return {
             "ok": False,
-            "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
         }
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Failed to save memory: {sever_taint_numeric(mask_secrets(str(exc)))}",
+            "error": f"Failed to save memory: {coerce_text(mask_secrets(str(exc)))}",
         }
 
 
@@ -754,7 +754,7 @@ def search_memory(
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Failed to search memory: {sever_taint_numeric(mask_secrets(str(exc)))}",
+            "error": f"Failed to search memory: {coerce_text(mask_secrets(str(exc)))}",
         }
 
 
@@ -812,12 +812,12 @@ def read_memory(
     except SecurityError as se:
         return {
             "ok": False,
-            "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
         }
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Failed to read memory: {sever_taint_numeric(mask_secrets(str(exc)))}",
+            "error": f"Failed to read memory: {coerce_text(mask_secrets(str(exc)))}",
         }
 
 
@@ -894,12 +894,12 @@ def delete_memory(
     except SecurityError as se:
         return {
             "ok": False,
-            "error": f"Security violation: {sever_taint_numeric(mask_secrets(str(se)))}",
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
         }
     except Exception as exc:
         return {
             "ok": False,
-            "error": f"Failed to delete memory: {sever_taint_numeric(mask_secrets(str(exc)))}",
+            "error": f"Failed to delete memory: {coerce_text(mask_secrets(str(exc)))}",
         }
 
 

@@ -61,7 +61,7 @@ from botex.memory import (
     save_memory,
     search_memory,
 )
-from botex.security import mask_secrets, sanitize_identifier, sever_taint_numeric
+from botex.security import coerce_text, mask_secrets, sanitize_identifier
 from botex.skills import delete_skill, get_skill, install_skill_async, list_skills
 from botex.wallet import default_wallet_service
 
@@ -487,7 +487,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="BoteX Cloud Gateway & Remote MCP",
     description="FastAPI service for autonomous code harness, Remote MCP SSE, and interactive chat.",
-    version="1.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -631,7 +631,7 @@ async def get_health() -> Dict[str, Any]:
     now = time.time()
     return {
         "status": "healthy",
-        "version": "1.0.0",
+        "version": "2.1.0",
         "uptime_s": round(now - START_TIME, 2),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -706,11 +706,11 @@ async def get_models(
     provider: Optional[str] = Query(default=None),
     force_refresh: bool = Query(default=False),
 ) -> List[Dict[str, Any]]:
-    """Return consolidated model catalog across configured providers (openrouter, openrouter-free, nvidia)."""
+    """Return consolidated model catalog across configured providers (openrouter, openrouter-free, nvidia, ollama, google)."""
     if provider and provider.strip():
         providers_seq = (provider.strip().lower(),)
     else:
-        providers_seq = ("openrouter", "openrouter-free", "nvidia", "ollama")
+        providers_seq = ("openrouter", "openrouter-free", "nvidia", "ollama", "google")
     cfg = botex_server.load_config() if force_refresh else _cfg
     return get_consolidated_models(
         providers=providers_seq,
@@ -1026,7 +1026,7 @@ async def get_memory(
             logger.warning(
                 "Memory read failed for ID '%s': %s",
                 clean_mid,
-                sever_taint_numeric(mask_secrets(str(res.get("error") or ""))),
+                coerce_text(mask_secrets(str(res.get("error") or ""))),
             )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1044,7 +1044,7 @@ async def get_memory(
     if not res.get("ok"):
         logger.warning(
             "Memory search failed: %s",
-            sever_taint_numeric(mask_secrets(str(res.get("error") or ""))),
+            coerce_text(mask_secrets(str(res.get("error") or ""))),
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1076,7 +1076,7 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
     if not res.get("ok"):
         logger.warning(
             "Memory save failed: %s",
-            sever_taint_numeric(mask_secrets(str(res.get("error") or ""))),
+            coerce_text(mask_secrets(str(res.get("error") or ""))),
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1152,9 +1152,7 @@ async def post_install_skill(body: SkillInstallRequest) -> Dict[str, Any]:
         taxonomy=body.taxonomy,
     )
     if not res.get("ok"):
-        err_msg = sever_taint_numeric(
-            mask_secrets(str(res.get("error") or "Failed to install skill."))
-        )
+        err_msg = coerce_text(mask_secrets(str(res.get("error") or "Failed to install skill.")))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=err_msg,
@@ -1364,7 +1362,7 @@ async def save_chat_session_to_memory(
         logger.warning(
             "Save chat to memory failed for '%s': %s",
             clean_sid,
-            sever_taint_numeric(mask_secrets(str(res.get("error") or ""))),
+            coerce_text(mask_secrets(str(res.get("error") or ""))),
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1531,7 +1529,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        clean_err = sever_taint_numeric(mask_secrets(str(exc)))
+        clean_err = coerce_text(mask_secrets(str(exc)))
         logger.warning("WebSocket session terminated: %s", clean_err)
     finally:
         heartbeat_task.cancel()

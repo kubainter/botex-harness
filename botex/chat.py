@@ -49,12 +49,13 @@ try:
         build_async_client,
         sanitize_provider_error,
     )
+    from .retry import call_with_backoff
     from .security import (
         SecurityError,
         check_model_zdr,
+        coerce_text,
         mask_secrets,
         sanitize_identifier,
-        sever_taint_numeric,
     )
     from .skills import install_skill_async, list_skills
 except (ImportError, ValueError):
@@ -85,12 +86,13 @@ except (ImportError, ValueError):
         build_async_client,
         sanitize_provider_error,
     )
+    from retry import call_with_backoff
     from security import (
         SecurityError,
         check_model_zdr,
+        coerce_text,
         mask_secrets,
         sanitize_identifier,
-        sever_taint_numeric,
     )
 
     from skills import install_skill_async, list_skills
@@ -475,13 +477,17 @@ class ChatMessage:
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
+    # Provider extras echoed verbatim on the next request (e.g. Gemini
+    # extra_content.google.thought_signature). Never masked — the blob is
+    # opaque and must survive byte-exact for thinking models.
+    extra_content: Optional[Dict[str, Any]] = None
     timestamp: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
         norm = str(self.role).strip().lower()
         self.role = _VALID_ROLES_MAP.get(norm, "user")
         if self.content is not None:
-            self.content = sever_taint_numeric(mask_secrets(str(self.content)))
+            self.content = coerce_text(mask_secrets(str(self.content)))
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict representation matching OpenAI message format."""
@@ -490,6 +496,8 @@ class ChatMessage:
             d["content"] = mask_secrets(self.content)
         if self.tool_calls is not None:
             d["tool_calls"] = self.tool_calls
+        if self.extra_content is not None:
+            d["extra_content"] = self.extra_content
         if self.tool_call_id is not None:
             d["tool_call_id"] = self.tool_call_id
         elif self.role == "tool":
@@ -539,8 +547,11 @@ class ChatSession:
         self,
         content: Optional[str],
         tool_calls: Optional[List[Dict[str, Any]]] = None,
+        extra_content: Optional[Dict[str, Any]] = None,
     ) -> ChatMessage:
-        msg = ChatMessage(role="assistant", content=content, tool_calls=tool_calls)
+        msg = ChatMessage(
+            role="assistant", content=content, tool_calls=tool_calls, extra_content=extra_content
+        )
         self.messages.append(msg)
         self.updated_at = time.time()
         self.save_to_disk()
@@ -684,11 +695,17 @@ class ChatManager:
                 tc = m.get("tool_calls")
                 tcid = m.get("tool_call_id")
                 name = m.get("name")
+                extra = m.get("extra_content")
                 if role == "user":
                     sess.messages.append(ChatMessage(role="user", content=content))
                 elif role == "assistant":
                     sess.messages.append(
-                        ChatMessage(role="assistant", content=content, tool_calls=tc)
+                        ChatMessage(
+                            role="assistant",
+                            content=content,
+                            tool_calls=tc,
+                            extra_content=extra if isinstance(extra, dict) else None,
+                        )
                     )
                 elif role == "tool":
                     # Self-heal missing tool_call_id from preceding assistant tool_calls if available
@@ -1169,6 +1186,9 @@ async def stream_chat_turn(
         accumulated_text = ""
         accumulated_reasoning = ""
         tool_calls_map: dict[int, dict[str, Any]] = {}
+        # Message-level provider extras (e.g. Gemini thought_signature) —
+        # echoed verbatim on the next request.
+        assistant_extra: Optional[Dict[str, Any]] = None
 
         # Force final synthesis without further tool calls on the last iteration
         use_tools_this_turn = (
@@ -1189,19 +1209,29 @@ async def stream_chat_turn(
             if use_tools_this_turn:
                 create_kwargs["tools"] = active_tools
                 create_kwargs["tool_choice"] = "auto"
-            response = await client.chat.completions.create(**create_kwargs)
+            # Retry covers only request creation — once the first chunk
+            # has streamed the turn is committed and must not retry.
+            response = await call_with_backoff(
+                provider_adapter,
+                lambda: client.chat.completions.create(**create_kwargs),
+                active_provider_cfg,
+            )
         except Exception as exc:
             err_lower = str(exc).lower()
             if use_tools_this_turn and ("tool" in err_lower or "function" in err_lower):
                 tools_supported = False
                 try:
-                    response = await client.chat.completions.create(
-                        model=effective_model,
-                        messages=request_messages,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        extra_body=extra_body,
-                        stream=True,
+                    response = await call_with_backoff(
+                        provider_adapter,
+                        lambda: client.chat.completions.create(
+                            model=effective_model,
+                            messages=request_messages,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            extra_body=extra_body,
+                            stream=True,
+                        ),
+                        active_provider_cfg,
                     )
                 except Exception as retry_exc:
                     if iteration == 1:
@@ -1274,6 +1304,12 @@ async def stream_chat_turn(
                     tc_deltas = getattr(delta, "tool_calls", None) or (
                         delta.get("tool_calls") if isinstance(delta, dict) else None
                     )
+                    delta_extra = getattr(delta, "extra_content", None) or (
+                        delta.get("extra_content") if isinstance(delta, dict) else None
+                    )
+                    if isinstance(delta_extra, dict):
+                        assistant_extra = delta_extra
+
                     if tc_deltas:
                         for tc in tc_deltas:
                             raw_idx = (
@@ -1283,7 +1319,17 @@ async def stream_chat_turn(
                             )
                             idx = 0 if raw_idx is None else int(raw_idx)
                             if idx not in tool_calls_map:
-                                tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
+                                tool_calls_map[idx] = {
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": "",
+                                    "extra_content": None,
+                                }
+                            tc_extra = getattr(tc, "extra_content", None) or (
+                                tc.get("extra_content") if isinstance(tc, dict) else None
+                            )
+                            if isinstance(tc_extra, dict):
+                                tool_calls_map[idx]["extra_content"] = tc_extra
                             tc_id = getattr(tc, "id", None) or (
                                 tc.get("id") if isinstance(tc, dict) else None
                             )
@@ -1314,6 +1360,11 @@ async def stream_chat_turn(
                         c.get("message") if isinstance(c, dict) else None
                     )
                     if msg:
+                        msg_extra = getattr(msg, "extra_content", None) or (
+                            msg.get("extra_content") if isinstance(msg, dict) else None
+                        )
+                        if isinstance(msg_extra, dict):
+                            assistant_extra = msg_extra
                         text_val = getattr(msg, "content", None) or (
                             msg.get("content") if isinstance(msg, dict) else None
                         )
@@ -1347,10 +1398,21 @@ async def stream_chat_turn(
                                     if hasattr(fn, "arguments")
                                     else (fn.get("arguments", "") if isinstance(fn, dict) else "")
                                 )
+                                if fn_args and not isinstance(fn_args, str):
+                                    try:
+                                        fn_args = json.dumps(fn_args, ensure_ascii=False)
+                                    except (TypeError, ValueError):
+                                        fn_args = str(fn_args)
+                                tc_extra = getattr(tc, "extra_content", None) or (
+                                    tc.get("extra_content") if isinstance(tc, dict) else None
+                                )
                                 tool_calls_map[idx] = {
                                     "id": tc_id,
                                     "name": fn_name,
                                     "arguments": fn_args,
+                                    "extra_content": tc_extra
+                                    if isinstance(tc_extra, dict)
+                                    else None,
                                 }
         except Exception as exc:
             if iteration == 1:
@@ -1369,19 +1431,22 @@ async def stream_chat_turn(
             for idx in sorted(tool_calls_map.keys()):
                 entry = tool_calls_map[idx]
                 call_id = entry["id"] or f"call_{uuid.uuid4().hex[:8]}"
-                formatted_tool_calls.append(
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": entry["name"],
-                            "arguments": entry["arguments"],
-                        },
-                    }
-                )
+                tc_dict: dict[str, Any] = {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": entry["name"],
+                        "arguments": entry["arguments"],
+                    },
+                }
+                if isinstance(entry.get("extra_content"), dict):
+                    tc_dict["extra_content"] = entry["extra_content"]
+                formatted_tool_calls.append(tc_dict)
 
             session.add_assistant_message(
-                content=accumulated_text or None, tool_calls=formatted_tool_calls
+                content=accumulated_text or None,
+                tool_calls=formatted_tool_calls,
+                extra_content=assistant_extra,
             )
 
             for tc in formatted_tool_calls:

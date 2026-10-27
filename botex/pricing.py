@@ -196,12 +196,23 @@ def check_model_price(
     if not base_url:
         return True, ""
 
-    catalog = load_catalog(
-        base_url,
-        api_key=api_key,
-        ttl_hours=float(pricing_cfg.get("cache_ttl_hours", DEFAULT_TTL_H)),
-    )
-    price = model_price(catalog, model)
+    # Operator-declared prices win over the catalog — providers that
+    # publish no price list (e.g. Google AI Studio) are only verifiable
+    # through providers.<name>.pricing_overrides.
+    price: Optional[Tuple[float, float]] = None
+    over = (provider_cfg.get("pricing_overrides") or {}).get(model)
+    if isinstance(over, dict):
+        try:
+            price = (float(over.get("input")), float(over.get("output")))
+        except (TypeError, ValueError, OverflowError):
+            price = None
+    if price is None:
+        catalog = load_catalog(
+            base_url,
+            api_key=api_key,
+            ttl_hours=float(pricing_cfg.get("cache_ttl_hours", DEFAULT_TTL_H)),
+        )
+        price = model_price(catalog, model)
 
     if price is None:
         on_unknown = pricing_cfg.get("on_unknown", "allow")

@@ -86,7 +86,7 @@ from botex.obsidian import (
 from botex.patch_engine import snapshot_manager
 from botex.pricing import load_catalog, model_price
 from botex.providers import ProviderRegistry
-from botex.security import mask_secrets, sever_taint_numeric, wrap_untrusted_content, zdr_enforced
+from botex.security import coerce_text, mask_secrets, wrap_untrusted_content, zdr_enforced
 from botex.ui import accent, dim, err, mark_status, ok, title, warn
 
 mcp = MCPServer("BoteX-Harness")
@@ -528,8 +528,8 @@ async def run_subagent(
                (readonly -> 'fast', destructive/full -> 'coding'). Ignored when
                'model' is given explicitly.
         provider: API provider from the 'providers' section of botex.config.json
-               ('openrouter', 'nvidia'). Empty = provider marked
-               'default: true' in the configuration.
+               ('openrouter', 'nvidia', 'google', 'openrouter-free', 'ollama').
+               Empty = provider marked 'default: true' in the configuration.
         mode: Capability preset: 'readonly' (read only — the contract is an
                analysis report, DONE requires non-empty findings), 'edit'
                (read + edit — default), 'destructive' (+delete/move),
@@ -1452,17 +1452,11 @@ def _cli_wallet(argv):
     if json_mode:
         payload = dataclasses.asdict(info) if info is not None else {}
         clean_payload = _sanitize_raw_payload(payload)
-        sys.stdout.write(
-            sever_taint_numeric(json.dumps(clean_payload, indent=2, default=str)) + "\n"
-        )
+        sys.stdout.write(coerce_text(json.dumps(clean_payload, indent=2, default=str)) + "\n")
     else:
-        prov_title = sever_taint_numeric(
-            title(f"=== BoteX Wallet ({mask_secrets(str(target_prov))}) ===")
-        )
+        prov_title = coerce_text(title(f"=== BoteX Wallet ({mask_secrets(str(target_prov))}) ==="))
         sys.stdout.write(prov_title + "\n")
-        sys.stdout.write(
-            sever_taint_numeric(format_credits_summary(info, compact=compact_mode)) + "\n"
-        )
+        sys.stdout.write(coerce_text(format_credits_summary(info, compact=compact_mode)) + "\n")
 
 
 def _cli_chat(argv: list[str]) -> None:
@@ -1490,7 +1484,9 @@ def _cli_chat(argv: list[str]) -> None:
     )
     parser.add_argument("--model", default="", help="Explicit provider model (overrides profile)")
     parser.add_argument(
-        "--provider", default="", help="API provider (openrouter/nvidia; empty = config default)"
+        "--provider",
+        default="",
+        help="API provider (openrouter/openrouter-free/nvidia/google/ollama; empty = config default)",
     )
     parser.add_argument("--session-id", default="", help="Resume or label specific chat session")
     parser.add_argument(
@@ -1524,11 +1520,11 @@ def _cli_chat(argv: list[str]) -> None:
                 t_name = event.get("name", "")
                 t_args = event.get("arguments", {})
                 tool_line = dim(f"\n[Tool: {t_name}({json.dumps(t_args)})]")
-                sys.stdout.write(sever_taint_numeric(mask_secrets(tool_line)) + "\n")
+                sys.stdout.write(coerce_text(mask_secrets(tool_line)) + "\n")
                 sys.stdout.flush()
             elif ev_type == "error":
                 err_text = err(f"\nError: {mask_secrets(str(event.get('error', '')))}")
-                sys.stdout.write(sever_taint_numeric(err_text) + "\n")
+                sys.stdout.write(coerce_text(err_text) + "\n")
                 sys.stdout.flush()
         print()
 
@@ -1575,7 +1571,7 @@ def _cli_chat(argv: list[str]) -> None:
             print(warn("\n" + t("repl.interrupted")))
         except Exception as exc:
             err_line = err(f"\nChat failure: {mask_secrets(str(exc))}")
-            sys.stdout.write(sever_taint_numeric(err_line) + "\n")
+            sys.stdout.write(coerce_text(err_line) + "\n")
             sys.stdout.flush()
 
 
@@ -1628,16 +1624,14 @@ def _cli_memory(argv: list[str]) -> None:
         )
         if args.json:
             clean_res = _sanitize_raw_payload(res)
-            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
+            sys.stdout.write(coerce_text(json.dumps(clean_res, indent=2)) + "\n")
         elif res.get("ok"):
             msg = ok(
                 f"[OK] Saved memory '{res.get('id')}' in {res.get('scope', 'local')} scope: {res.get('path')}"
             )
-            sys.stdout.write(sever_taint_numeric(msg) + "\n")
+            sys.stdout.write(coerce_text(msg) + "\n")
         else:
-            sys.stdout.write(
-                sever_taint_numeric(err(f"Failed to save memory: {res.get('error')}")) + "\n"
-            )
+            sys.stdout.write(coerce_text(err(f"Failed to save memory: {res.get('error')}")) + "\n")
 
     elif sub in ("search", "find"):
         parser.add_argument("query", nargs="?", default="", help="Search query string")
@@ -1654,24 +1648,22 @@ def _cli_memory(argv: list[str]) -> None:
         )
         if args.json:
             clean_res = _sanitize_raw_payload(res)
-            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
+            sys.stdout.write(coerce_text(json.dumps(clean_res, indent=2)) + "\n")
         elif res.get("ok"):
             mems = res.get("memories", [])
             header = title(f"=== Memory Search ({len(mems)} entries, scope: {args.scope}) ===")
-            sys.stdout.write(sever_taint_numeric(header) + "\n")
+            sys.stdout.write(coerce_text(header) + "\n")
             for m in mems:
                 sc = m.get("scope", "local")
                 tags = f" [{', '.join(m.get('tags', []))}]" if m.get("tags") else ""
                 line = (
                     f"  {accent('*')} {m.get('id')} ({sc}, {m.get('kind')}){tags}: {m.get('title')}"
                 )
-                sys.stdout.write(sever_taint_numeric(line) + "\n")
+                sys.stdout.write(coerce_text(line) + "\n")
                 if m.get("preview"):
-                    sys.stdout.write(
-                        sever_taint_numeric(f"    {dim(m.get('preview')[:120])}") + "\n"
-                    )
+                    sys.stdout.write(coerce_text(f"    {dim(m.get('preview')[:120])}") + "\n")
         else:
-            sys.stdout.write(sever_taint_numeric(err(f"Search failed: {res.get('error')}")) + "\n")
+            sys.stdout.write(coerce_text(err(f"Search failed: {res.get('error')}")) + "\n")
 
     elif sub in ("read", "get", "show"):
         parser.add_argument("memory_id", help="Memory entry ID")
@@ -1684,19 +1676,19 @@ def _cli_memory(argv: list[str]) -> None:
         )
         if args.json:
             clean_res = _sanitize_raw_payload(res)
-            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
+            sys.stdout.write(coerce_text(json.dumps(clean_res, indent=2)) + "\n")
         elif res.get("ok"):
             meta = res.get("metadata", {})
             header = title(f"=== Memory Entry: {res.get('id')} (scope: {res.get('scope')}) ===")
-            sys.stdout.write(sever_taint_numeric(header) + "\n")
-            sys.stdout.write(sever_taint_numeric(f"Title: {meta.get('title')}") + "\n")
+            sys.stdout.write(coerce_text(header) + "\n")
+            sys.stdout.write(coerce_text(f"Title: {meta.get('title')}") + "\n")
             sys.stdout.write(
-                sever_taint_numeric(f"Kind: {meta.get('kind')} | Tags: {meta.get('tags')}") + "\n"
+                coerce_text(f"Kind: {meta.get('kind')} | Tags: {meta.get('tags')}") + "\n"
             )
-            sys.stdout.write(sever_taint_numeric(f"Timestamp: {meta.get('timestamp')}") + "\n")
-            sys.stdout.write(sever_taint_numeric("\n" + res.get("content", "")) + "\n")
+            sys.stdout.write(coerce_text(f"Timestamp: {meta.get('timestamp')}") + "\n")
+            sys.stdout.write(coerce_text("\n" + res.get("content", "")) + "\n")
         else:
-            sys.stdout.write(sever_taint_numeric(err(f"Read failed: {res.get('error')}")) + "\n")
+            sys.stdout.write(coerce_text(err(f"Read failed: {res.get('error')}")) + "\n")
 
     elif sub == "list":
         parser.add_argument("--tag", default="", help="Filter by tag")
@@ -1711,23 +1703,23 @@ def _cli_memory(argv: list[str]) -> None:
         )
         if args.json:
             clean_res = _sanitize_raw_payload(res)
-            sys.stdout.write(sever_taint_numeric(json.dumps(clean_res, indent=2)) + "\n")
+            sys.stdout.write(coerce_text(json.dumps(clean_res, indent=2)) + "\n")
         elif res.get("ok"):
             mems = res.get("memories", [])
             header = title(f"=== Memory Vault ({len(mems)} entries, scope: {args.scope}) ===")
-            sys.stdout.write(sever_taint_numeric(header) + "\n")
+            sys.stdout.write(coerce_text(header) + "\n")
             for m in mems:
                 sc = m.get("scope", "local")
                 tags = f" [{', '.join(m.get('tags', []))}]" if m.get("tags") else ""
                 line = (
                     f"  {accent('*')} {m.get('id')} ({sc}, {m.get('kind')}){tags}: {m.get('title')}"
                 )
-                sys.stdout.write(sever_taint_numeric(line) + "\n")
+                sys.stdout.write(coerce_text(line) + "\n")
         else:
-            sys.stdout.write(sever_taint_numeric(err(f"List failed: {res.get('error')}")) + "\n")
+            sys.stdout.write(coerce_text(err(f"List failed: {res.get('error')}")) + "\n")
     else:
         sys.stdout.write(
-            sever_taint_numeric(
+            coerce_text(
                 err(f"Unknown memory subcommand: '{sub}'. Use save, search, read, or list.")
             )
             + "\n"
@@ -1769,7 +1761,9 @@ def _repl(argv):
         "--profile", default="default", help="Model profile (default/coding/auto-beta)"
     )
     parser.add_argument(
-        "--provider", default="", help="API provider (openrouter/nvidia; empty = config default)"
+        "--provider",
+        default="",
+        help="API provider (openrouter/openrouter-free/nvidia/google/ollama; empty = config default)",
     )
     parser.add_argument(
         "--mode",
@@ -1897,7 +1891,7 @@ def main():
         parser.add_argument(
             "--provider",
             default="",
-            help="API provider (openrouter/nvidia; empty = config default)",
+            help="API provider (openrouter/openrouter-free/nvidia/google/ollama; empty = config default)",
         )
         parser.add_argument(
             "--mode",

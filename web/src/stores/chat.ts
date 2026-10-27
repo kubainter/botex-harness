@@ -122,6 +122,26 @@ const FALLBACK_CATALOG_MODELS: CatalogModel[] = [
     pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
     supports_tools: true,
     is_zdr_compliant: true
+  },
+  {
+    id: 'gemini-2.5-flash',
+    name: 'Gemini 2.5 Flash (AI Studio)',
+    provider: 'google',
+    is_free: false,
+    context_length: 1048576,
+    pricing: { prompt_per_m: 0.30, completion_per_m: 2.50 },
+    supports_tools: true,
+    is_zdr_compliant: true
+  },
+  {
+    id: 'gemini-2.5-pro',
+    name: 'Gemini 2.5 Pro (AI Studio)',
+    provider: 'google',
+    is_free: false,
+    context_length: 1048576,
+    pricing: { prompt_per_m: 1.25, completion_per_m: 10.0 },
+    supports_tools: true,
+    is_zdr_compliant: true
   }
 ]
 
@@ -135,6 +155,11 @@ function inferProviderFromSlug(slug: string): string {
   }
   if (s.startsWith('nvidia/') || s.startsWith('meta/llama-3.3-70b-instruct')) {
     return 'nvidia'
+  }
+  // Bare "gemini-*" slugs (no vendor prefix) are served by the Google AI
+  // Studio endpoint; "google/..." prefixed ones stay on OpenRouter.
+  if (s.startsWith('gemini-') || s.startsWith('models/gemini-')) {
+    return 'google'
   }
   return 'openrouter'
 }

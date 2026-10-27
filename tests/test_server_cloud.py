@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
+from botex import __version__
 from botex.approval import ActionStatus, PendingAction, default_approval_manager
 from botex.providers import CreditsInfo
 from botex.server_cloud import app
@@ -48,7 +49,7 @@ def test_health_endpoint_public(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "healthy"
-    assert data["version"] == "1.0.0"
+    assert data["version"] == __version__
     assert "uptime_s" in data
     assert "timestamp" in data
 

@@ -59,6 +59,7 @@ Create `/opt/botex/.env` (mode 600, owner botex) with at least:
 ```ini
 OPENROUTER_API_KEY=sk-or-...
 NVIDIA_API_KEY=nvapi-...
+GEMINI_API_KEY=AIza-...                  # provider "google" (GOOGLE_API_KEY works as fallback)
 BOTEX_ACCESS_TOKEN=<long-random-token>   # enables Strict Cloud bearer auth
 ```
 
@@ -103,7 +104,7 @@ sudo systemctl enable --now botex-maintenance.timer
 
 1. **Struktura katalogu skilli na serwerze:**
    - Katalog: `/opt/botex/skills/` (lub ścieżka zdefiniowana w `botex.config.json` pod `paths.skills_dir`).
-   - Wrzucamy tam standardowe skille inżynieryjne w formacie `SKILL.md` (np. `code-review`, `security-audit`, `refactoring`, `api-design`, `test-generation`, `knowledge-synthesis`).
+   - Wrzucamy tam standardowe skille inżynieryjne w formacie `SKILL.md` (np. `code-review`, `security-audit`, `refactoring`, `api-design`, `test-generation`).
 2. **Autonomiczny Triage i Administracja przez Bielika (`bielik.service` / loopback:8080):**
    - Po odebraniu zadania przez MCP (`run_subagent` / `start_task`) moduł `botex/skills.py` (`triage_skills_for_task`) dopasowuje intencję zadania do zainstalowanych skilli w `/opt/botex/skills/`.
    - Wybrany skill (`SKILL.md`) jest dynamicznie wstrzykiwany jako instrukcja proceduralna do kontekstu modelu wykonawczego, a wynik zwraca listę `applied_skills`.

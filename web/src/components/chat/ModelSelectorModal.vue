@@ -540,6 +540,8 @@ function formatProviderLabel(provider: string): string {
       return 'NVIDIA NIM'
     case 'ollama':
       return 'Ollama (Lokalny Bielik)'
+    case 'google':
+      return 'Google AI Studio'
     default:
       return provider
   }
@@ -553,6 +555,8 @@ function providerBadgeClass(provider: string): string {
       return 'bg-lime-950/60 text-lime-300 border-lime-600/40'
     case 'ollama':
       return 'bg-purple-950/60 text-purple-300 border-purple-600/40'
+    case 'google':
+      return 'bg-blue-950/60 text-blue-300 border-blue-600/40'
     default:
       return 'bg-sky-950/60 text-sky-300 border-sky-600/40'
   }

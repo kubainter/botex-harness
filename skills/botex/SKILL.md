@@ -112,8 +112,8 @@ Headless tasks cannot pause for confirmation unless an async ApprovalManager is 
 
 ### Provider, model, cost
 
-- `provider`: `openrouter` (default), `nvidia`, or `openrouter-free` (free `:free` models, ZDR off, no subscription needed).
-- `profile`: `default` (`openrouter/auto`), `coding` (`qwen/qwen3-coder`), `auto-beta` (`openrouter/pareto-code`), `fast` (`openai/gpt-5.4-nano`): resolved per provider.
+- `provider`: `openrouter` (default), `nvidia`, `google` (Google AI Studio / Gemini via its OpenAI-compatible endpoint — key `GEMINI_API_KEY`, fallback `GOOGLE_API_KEY`; no credits/balance API), `ollama` (local), or `openrouter-free` (free `:free` models, ZDR off, no subscription needed).
+- `profile`: `default` (`openrouter/auto`), `coding` (`openrouter/pareto-code`), `auto-beta` (`openrouter/auto-beta`), `fast` (`google/gemini-2.5-flash`): resolved per provider (e.g. on `google`: default=`gemini-2.5-flash`, coding=`gemini-2.5-pro`, fast=`gemini-2.5-flash-lite`).
 - `model`: explicit slug, overrides profile.
 - **Model recommendations (`recommend_models`)**: When unsure which model to pick, call `recommend_models(task_type="coding", limit=5, include_free=False, provider="", profile="", tier="auto")`. It queries `/api/v1/models` with the provider's `Authorization: Bearer <API_KEY>` header (respecting account-level key filters), filters for tool-calling support (`require_tools=True`) and synchronous interactive endpoints (excluding `:batch`), classifies models into `high` / `standard` / `budget` tiers, and ranks them by task aptitude and token cost (`include_free=True` admits `:free` variants).
 - **Wallet and key budget monitoring (`botex wallet`, `/api/key/status`)**: Inspect credit balance, key spend (`spend_usd`), remaining budget (`remaining_usd`), reset window (`resets_at`), daily free-model request allowance (`free_model_daily_requests`), and `low_budget_warning` (`remaining_usd < $1.00`) before launching heavy tasks.
@@ -150,14 +150,16 @@ Headless tasks cannot pause for confirmation unless an async ApprovalManager is 
 | `DONE_WITHOUT_WRITE` | Required output was not written or salvaged |
 | `VERIFICATION_FAILED` | `verify_command` failed after 3 attempts: changes were rolled back |
 | `CONFIG_ERROR` | Bad provider, mode, net policy, or verify command: fix request parameters |
-| `API_ERROR` | Provider call failed; files were rolled back: check `failure_kind` (`provider_auth_error`, `provider_policy_denied`, `provider_unavailable`) |
+| `API_ERROR` | Provider call failed; files were rolled back: check `failure_kind` (`provider_auth_error`, `provider_policy_denied`, `provider_rate_limited`, `provider_unavailable`, `provider_error`) |
 | `ERROR` | Invalid or missing `workspace_dir` or other pre-run failure |
 
 `ok` is `true` **only** when `status == "DONE"`: it certifies the task contract was fulfilled, not merely that files changed. `ok: false` statuses are signals to change the request or inform the user.
 
 The configured fallback chain (`providers.<name>.model_fallbacks`) operates at two layers:
 1. **In-payload wire failover (`extra_body.models`)**: For OpenRouter non-meta-router models, up to 3 candidates validated through all 5 gates (`Denylist`, `Decisions`, `ZDR`, `Price`, `Tools`) are sent in `extra_body["models"]` on initial turns; as soon as a file is modified (`files_touched`) or a command runs (`exec_ran`), `models` is stripped from subsequent turns so a different model never inherits a mutated workspace mid-task.
-2. **Engine-level rollback retry**: Across turns, BoteX tries the next candidate model for transient failures (refusals, no-progress, provider policy or unavailability, resource limits), but never for auth errors, config errors, budget exhaustion, or failed verification. A workspace touched by file writes is handed to the next candidate only after a verified rollback; a run that executed commands (`exec_ran: true`) never falls back. Inspect `attempts[]` to see what was tried.
+2. **Engine-level rollback retry**: Across turns, BoteX tries the next candidate model for transient failures (refusals, no-progress, rate limits, provider policy or unavailability, resource limits), but never for auth errors, config errors, budget exhaustion, or failed verification. A workspace touched by file writes is handed to the next candidate only after a verified rollback; a run that executed commands (`exec_ran: true`) never falls back. Inspect `attempts[]` to see what was tried.
+
+Before any candidate fails, the shared retry layer (`providers.<name>.retry`; keys `enabled`, `max_waits`, `max_wait_s`, `base_delay_s`, `jitter_s`) waits out transient *unbilled* rejections — HTTP 429 and connection errors, plus Google 503 "overloaded" — honoring server wait hints (`Retry-After`, `retryDelay`). Timeouts and other 5xx are never retried (a retry could double-bill an executed request), and daily-quota errors skip the wait and fall back immediately. A persistent 429 surfaces as `failure_kind="provider_rate_limited"` (fallbackable). While enabled the SDK's own retries are disabled (`max_retries=0`); setting `"retry": false` on a provider returns control to the SDK.
 
 ## Two-Tier Memory Vault & Deterministic Task Receipts
 

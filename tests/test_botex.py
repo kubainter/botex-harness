@@ -1464,7 +1464,7 @@ def test_provider_adapter():
     assert classify_api_error(_status_err(401)) == "provider_auth_error"
     assert classify_api_error(_status_err(403)) == "provider_policy_denied"
     assert classify_api_error(_status_err(404)) == "provider_policy_denied"
-    assert classify_api_error(_status_err(429)) == "provider_unavailable"
+    assert classify_api_error(_status_err(429)) == "provider_rate_limited"
     assert classify_api_error(_status_err(500)) == "provider_unavailable"
     assert classify_api_error(Exception("weird")) == "provider_error"
     import httpx
@@ -2581,15 +2581,15 @@ def test_memory_sanitize_and_legacy_source():
         assert meta["tags"] == ["token: abc"]
         assert meta["source"] == "botex"
 
-        # 4. _VALID_KINDS_MAP and sever_taint_numeric verification
-        from botex.security import sever_taint_numeric
+        # 4. _VALID_KINDS_MAP and coerce_text verification
+        from botex.security import coerce_text
 
-        assert sever_taint_numeric("") == ""
-        assert sever_taint_numeric(None) == ""
-        assert sever_taint_numeric(0) == "0"
-        assert sever_taint_numeric(False) == "False"
+        assert coerce_text("") == ""
+        assert coerce_text(None) == ""
+        assert coerce_text(0) == "0"
+        assert coerce_text(False) == "False"
         test_text = "Zażółć gęślą jaźń 🚀\n---\ntitle: Safe\n"
-        assert sever_taint_numeric(test_text) == test_text
+        assert coerce_text(test_text) == test_text
 
         assert memory.VALID_KINDS == frozenset(memory._VALID_KINDS_MAP.keys())
         assert memory._VALID_KINDS_MAP["context"] == "context"

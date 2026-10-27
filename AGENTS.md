@@ -22,10 +22,11 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`) and agency middleware.
     *   `approval.py` - Human-in-the-Loop approval manager, async pending actions, and risk policies.
     *   `chat.py` - Conversational chat sessions, SSE/WebSocket token streaming, and read-only sandbox.
-    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE server, and REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/analytics`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/recipes`, `/api/chat`).
+    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE server, and REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/analytics`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/recipes`, `/api/skills`, `/api/chat`).
     *   `pricing.py` - Model pricing guardrail, live catalog checks, and cost caps.
     *   `analytics.py` - Cost/token ledger, generation latency/cache telemetry, budget tracking, and CLI reports.
-    *   `providers.py` - Provider registry, adapters (`OpenRouterProvider`, `NvidiaProvider`, `GenericOpenAIProvider`), `/api/v1/generation` telemetry reconciliation, and request normalizer.
+    *   `providers.py` - Provider registry, adapters (`OpenRouterProvider`, `NvidiaProvider`, `GoogleAIStudioProvider`, `GenericOpenAIProvider`), `/api/v1/generation` telemetry reconciliation, and request normalizer.
+    *   `retry.py` - Shared transient-failure backoff layer for provider calls (429, connection errors, provider-blessed overloads); when active the SDK client is built with `max_retries=0`.
     *   `catalog.py` - Dynamic model catalog service with TTL caching and ZDR checks.
     *   `denylist.py` - Hierarchical model denylist filter (exact, glob, regex).
     *   `wallet.py` - Credit balance, key budget status (`get_key_status`), and low-budget warnings.
@@ -37,14 +38,15 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `obsidian.py` - Obsidian PKM vault export, per-kind graph colors, and `_GRAPH_INDEX.md` generation.
     *   `meta_harness.py` - Task taxonomy classification, patch probing, and meta-lesson extraction/recommendation (self-improvement layer).
     *   `recipes.py` - Recipe loader and system-prompt injection.
+    *   `skills.py` - Server-side Skill Vault (`skills/<name>/SKILL.md` catalog, safe install/update with injection guards) and L0 task triage with `applied_skills` telemetry.
     *   `config.py` - Layered configuration loader (defaults < local < env) with `mtime` hot-reload.
     *   `i18n.py` - CLI localization (EN/PL).
     *   `ui.py` - ANSI styling helpers with plain-text fallback.
     *   `recipes/` - Bundled persona prompts (`planner`, `reviewer`, `tdd`, `build-resolver`, `security-reviewer`, `security-taint-hardener`, `code-explorer`, `architecture-adr`, `ui-craftsman`).
 *   **`web/`** - Vue 3 + Vite + Pinia + Tailwind CSS PWA frontend for the Cloud Gateway.
-*   **`tests/`** - Test suite (~25 files, ~446 collected tests: `test_botex.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_context_guard.py`, `test_analytics.py`, `test_embeddings.py`, `test_meta_harness.py`, `test_obsidian_graph.py`, `test_obsidian_edge_cases.py`, `test_nvidia_streaming.py`, `test_integration.py`, and live integration tests in `test_live_e2e.py`).
+*   **`tests/`** - Test suite (27 files, 501 collected tests: `test_botex.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_stage_4_8.py`, `test_retry.py`, `test_skills_parity.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_context_guard.py`, `test_analytics.py`, `test_embeddings.py`, `test_meta_harness.py`, `test_obsidian_graph.py`, `test_obsidian_edge_cases.py`, `test_nvidia_streaming.py`, `test_credits_stress.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_integration.py`, and live integration tests in `test_live_e2e.py`).
 *   **`docs/`** - Documentation (`TUTORIAL.md`).
-*   **`skills/`** - Caller-side skill definitions (`skills/botex/SKILL.md`).
+*   **`skills/`** - Skill definitions: caller-side contract (`skills/botex/SKILL.md`) plus server-side packs (`architecture-planner`, `build-resolver`, `code-review`, `security-audit`, `tdd-verification`) managed by `botex/skills.py`.
 
 ## 2. Tools and Commands
 
@@ -92,7 +94,7 @@ Under no circumstances should you modify the following locations:
 *   **Prioritize flow hardening over inline suppressions:** Do not rely on inline comment suppressions (`# lgtm[...]` is obsolete and ignored; `# codeql[...]` behavior depends on specific SARIF emission flags in CI). Always fix the taint flow and harden sanitization at the root rather than muting alerts.
 *   **`re.sub` and string operations are TaintSteps, NOT sanitizers:** The CodeQL semantic model treats `re.sub`, `str.replace`, and f-strings as taint-propagating summary steps. Calling masking functions iteratively multiplies graph edges instead of severing them.
 *   **Use Module Constant Mappings for Enums:** When normalizing dynamic parameters (e.g., `kind`, `mode`, `status`), never return the mutated user string (`kind.lower()`). Look up and return a statically declared module string literal (`_VALID_KINDS_MAP.get(norm, "default")`).
-*   **Taint Decoupling & Sanitization Architecture:** When persisting text derived from untrusted inputs/keys, prefer strict schema validation and allowlist mappings. Where unstructured text must be stored verbatim without external encryption/binary formats, document low-level decoupling barriers (such as codepoint decomposition) as context-specific workarounds and verify they preserve data fidelity across multi-byte UTF-8 encodings.
+*   **Taint Decoupling & Sanitization Architecture:** When persisting text derived from untrusted inputs/keys, prefer strict schema validation and allowlist mappings. Where unstructured text must be stored verbatim, do not treat codepoint or identity round-trips as taint barriers: they leave the taint flow intact. Rely on `mask_secrets` and keep secret values out of the stored text.
 
 ### 5.2. CI/CD & Runtime Invariants
 *   **Repository-wide Linting & Formatting:** Always run `ruff check .` and `ruff format --check .` across the entire repository root (`.`), not on scoped subsets of files, matching Section 2 conventions.
@@ -123,3 +125,18 @@ External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge)
 - When running full pytest suites, CodeQL traces, or coverage matrices that produce extensive logs, execute or filter them through `context-mode` via Toolport to prevent raw byte flooding into the context window.
 
 
+
+
+---
+
+## 7. Multi-Agent Interoperability & Portable Path Invariant (VPS / Cloud Alignment)
+
+### 7.1. Portable Repo-Relative Paths in Handoffs
+*   **Zero Absolute Paths:** All agent-to-agent and agent-to-human communications containing `artifact_refs` or file pointers MUST use repository-relative paths with POSIX forward slashes (`/`), e.g., `botex/engine.py`, `src/services/auth.ts`, `docs/ADR-001.md`.
+*   **Cross-Environment Interoperability:** Never emit absolute Windows drive paths (`C:\Users\...`) or Linux home paths (`/home/ubuntu/...`) in JSON handoff contracts. This ensures seamless interoperability between local developer workstations and remote Linux VPS instances (e.g. Oracle Linux ARM).
+
+### 7.2. Skills <-> Recipes Parity Invariant
+*   **Dual-Mode Parity:** BoteX engineering rules live symmetrically in two layers:
+    1.  Public contract layer: `skills/<skill_name>/SKILL.md` (read by external orchestrators like Antigravity, Devin, Codex).
+    2.  Kernel execution layer: `botex/recipes/<recipe_name>.md` (injected directly into BoteX model prompts).
+*   **Mandatory Synchronization:** Whenever engineering checklists, linting requirements, or runtime targets are updated, both layers must be updated in tandem. Parity is enforced by automated tests in `tests/test_skills_parity.py`.

@@ -29,14 +29,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Type
 
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
 
 try:
     from .config import app_headers
-    from .security import mask_secrets, sever_taint_numeric
+    from .retry import parse_retry_delay, resolve_retry_config, status_code_of
+    from .security import coerce_text, mask_secrets
 except (ImportError, ValueError):
     from config import app_headers
-    from security import mask_secrets, sever_taint_numeric
+    from retry import parse_retry_delay, resolve_retry_config, status_code_of
+    from security import coerce_text, mask_secrets
 
 
 # Canonical finish kind constants for CodeQL CWE-312 compliance
@@ -74,6 +76,10 @@ class NormalizedToolCall:
     id: str
     name: str
     arguments: str
+    # Provider extras that must be echoed back verbatim on the next request
+    # (e.g. Gemini thought_signature under extra_content.google) — dropping
+    # them breaks multi-turn tool calling on thinking models.
+    extra_content: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,9 @@ class NormalizedResponse:
     usage: NormalizedUsage = field(default_factory=NormalizedUsage)
     generation_id: str = ""
     model: str = ""
+    # Message-level provider extras (same echo requirement as the per-tool-
+    # call extras above).
+    extra_content: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -271,6 +280,20 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def _extract_extra_content(obj: Any) -> Optional[Dict[str, Any]]:
+    """Detach provider message extras (e.g. Gemini thought_signature) into a
+    plain detached dict so they can be echoed back verbatim. Non-mapping
+    values are dropped — they could not be serialized into the next request
+    body anyway."""
+    raw = _get(obj, "extra_content")
+    if isinstance(raw, Mapping):
+        try:
+            return copy.deepcopy(dict(raw))
+        except Exception:
+            return dict(raw)
+    return None
+
+
 def _content_to_text(content: Any) -> str:
     """Flatten provider content into plain text.
 
@@ -289,6 +312,20 @@ def _content_to_text(content: Any) -> str:
     return ""
 
 
+def _coerce_arguments(raw: Any) -> str:
+    """Tool-call arguments must be a JSON string on the wire. Some
+    providers return them pre-parsed as an object — reserialize so the
+    echo in message history never sends a dict where a string is due."""
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    try:
+        return json.dumps(raw, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(raw)
+
+
 def normalize_response(response: Any) -> NormalizedResponse:
     """Flatten an OpenAI-compatible response into the common model."""
     choices = _get(response, "choices") or []
@@ -300,7 +337,8 @@ def normalize_response(response: Any) -> NormalizedResponse:
         NormalizedToolCall(
             id=_get(tc, "id") or f"call_{i}",
             name=_get(_get(tc, "function"), "name") or "",
-            arguments=_get(_get(tc, "function"), "arguments") or "",
+            arguments=_coerce_arguments(_get(_get(tc, "function"), "arguments")),
+            extra_content=_extract_extra_content(tc),
         )
         for i, tc in enumerate(_get(msg, "tool_calls") or [])
     )
@@ -364,6 +402,7 @@ def normalize_response(response: Any) -> NormalizedResponse:
         usage=nusage,
         generation_id=gen_id,
         model=resp_model,
+        extra_content=_extract_extra_content(msg),
     )
 
 
@@ -372,6 +411,7 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
     full_content = ""
     full_reasoning = ""
     accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+    message_extra: Optional[Dict[str, Any]] = None
     raw_finish_reason = "unknown"
     usage_obj = None
 
@@ -404,6 +444,10 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         if r:
             full_reasoning += str(r)
 
+        delta_extra = _extract_extra_content(delta)
+        if delta_extra is not None:
+            message_extra = delta_extra
+
         tc_deltas = _get(delta, "tool_calls")
         if tc_deltas:
             for tc in tc_deltas:
@@ -413,7 +457,11 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
                         "id": _get(tc, "id") or f"call_{idx}",
                         "name": _get(_get(tc, "function"), "name") or "",
                         "arguments": "",
+                        "extra_content": None,
                     }
+                tc_extra = _extract_extra_content(tc)
+                if tc_extra is not None:
+                    accumulated_tool_calls[idx]["extra_content"] = tc_extra
                 fn = _get(tc, "function")
                 if fn:
                     fn_name = _get(fn, "name")
@@ -421,7 +469,7 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
                         accumulated_tool_calls[idx]["name"] = str(fn_name)
                     fn_args = _get(fn, "arguments")
                     if fn_args:
-                        accumulated_tool_calls[idx]["arguments"] += str(fn_args)
+                        accumulated_tool_calls[idx]["arguments"] += _coerce_arguments(fn_args)
 
     final_content = full_content if full_content else full_reasoning
 
@@ -430,6 +478,7 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
             id=v["id"],
             name=v["name"],
             arguments=v["arguments"],
+            extra_content=v.get("extra_content"),
         )
         for _, v in sorted(accumulated_tool_calls.items())
     )
@@ -463,6 +512,7 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         usage=nusage,
         generation_id="",
         model=mask_secrets(raw_model),
+        extra_content=message_extra,
     )
 
 
@@ -580,10 +630,17 @@ class BaseProvider(ABC):
         resolved_key = (
             api_key if api_key is not None else self.resolve_api_key(provider_cfg=merged_cfg)
         )
+        factory_kwargs: Dict[str, Any] = {}
+        # One retry owner at a time: when the shared layer is enabled the
+        # SDK stays silent (max_retries=0); when explicitly disabled the
+        # SDK defaults apply — the two are never active together.
+        if resolve_retry_config(merged_cfg.get("retry"))["enabled"]:
+            factory_kwargs["max_retries"] = 0
         return client_factory(
             base_url=base_url,
             api_key=resolved_key or "",
             default_headers=default_headers,
+            **factory_kwargs,
         )
 
     def build_client(self, *args: Any, **kwargs: Any) -> Any:
@@ -652,6 +709,33 @@ class BaseProvider(ABC):
     def get_credits(self, api_key: Optional[str] = None) -> CreditsInfo:
         """Query provider credits. Default implementation returns unsupported."""
         return CreditsInfo(supported=False, provider=self.name)
+
+    # Exceptions treated as unbilled rate-limit pressure by the shared
+    # retry layer (botex/retry.py). Every provider here talks through the
+    # OpenAI SDK, so the tuple holds RateLimitError; a provider on a
+    # different SDK widens it with its own exception class.
+    rate_limit_exceptions: Tuple[type, ...] = (RateLimitError,)
+
+    def is_retryable(self, exc: BaseException) -> bool:
+        """Whether ``exc`` is a transient, unbilled failure safe to retry.
+
+        429s and connection errors are retried; timeouts are explicitly
+        excluded (APITimeoutError subclasses APIConnectionError, so it
+        must be checked first — the request may still be executing
+        server-side and a retry could double-bill it). Arbitrary 5xx are
+        never retried for the same reason.
+        """
+        if isinstance(exc, APITimeoutError):
+            return False
+        if isinstance(exc, self.rate_limit_exceptions):
+            return True
+        if isinstance(exc, APIConnectionError):
+            return True
+        return status_code_of(exc) == 429
+
+    def retry_after_s(self, exc: BaseException) -> Optional[float]:
+        """Server-provided wait hint in seconds; ``None`` = caller backoffs."""
+        return parse_retry_delay(exc)
 
     def get_generation_stats(
         self,
@@ -1047,6 +1131,116 @@ class NvidiaProvider(BaseProvider):
         )
 
 
+class GoogleAIStudioProvider(BaseProvider):
+    """Adapter for Google AI Studio (Gemini) via its OpenAI-compatible API.
+
+    Endpoint: ``https://generativelanguage.googleapis.com/v1beta/openai``.
+    Key resolution: configured ``api_key_env`` (default GEMINI_API_KEY),
+    then GOOGLE_API_KEY, then secrets (``<name>_api_key`` plus the
+    google/gemini/aistudio aliases).
+
+    Wire notes: the catalog publishes no pricing or supported_parameters —
+    cost and tool gates rely on ``providers.google.pricing_overrides`` /
+    ``capabilities`` declared in config. There is no credits/billing
+    endpoint, so ``get_credits`` reports unsupported. Gemini thinking
+    models may attach ``extra_content.google.thought_signature`` to
+    assistant messages; the normalized response carries it through and the
+    engine echoes it back verbatim — dropping it breaks multi-turn tool
+    calling on thinking models.
+    """
+
+    default_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    default_api_key_env: str = "GEMINI_API_KEY"
+
+    # OpenRouter-only request fields that must never reach the Google wire.
+    # ``reasoning`` is the OpenRouter object form; Google takes the
+    # top-level ``reasoning_effort`` string and ``google.*`` options.
+    _OPENROUTER_ONLY_EXTRA_KEYS = frozenset(
+        {"provider", "models", "transforms", "usage", "reasoning"}
+    )
+
+    def get_default_headers(self) -> Optional[Dict[str, str]]:
+        if self.config.get("attribution_headers", False):
+            return app_headers()
+        return None
+
+    def get_extra_body(self, allow_non_zdr: bool = False) -> Dict[str, Any]:
+        """Return extra_body with OpenRouter-only routing keys stripped.
+
+        ``reasoning_effort`` and ``google.*`` options pass through; the
+        OpenRouter ``provider``/``models``/``transforms``/``usage``/
+        ``reasoning`` fields are dropped so a copied config cannot leak
+        unknown fields onto the Google wire.
+        """
+        extra = copy.deepcopy(self.config.get("extra_body") or {})
+        for key in self._OPENROUTER_ONLY_EXTRA_KEYS:
+            extra.pop(key, None)
+        return extra
+
+    def resolve_api_key(
+        self,
+        explicit_key: Optional[str] = None,
+        *args: Any,
+        secrets_cfg: Optional[Dict[str, Any]] = None,
+        explicit: Optional[str] = None,
+        provider_cfg: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> str:
+        key = explicit_key if explicit_key is not None else explicit
+        if key:
+            return str(key)
+        key_env = (provider_cfg.get("api_key_env") if provider_cfg else None) or self.config.get(
+            "api_key_env"
+        )
+        if key_env and os.environ.get(key_env):
+            return str(os.environ[key_env])
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        google_key = os.environ.get("GOOGLE_API_KEY")
+        if gemini_key and google_key and gemini_key != google_key:
+            if not getattr(self, "_key_precedence_warned", False):
+                self._key_precedence_warned = True
+                sys.stderr.write(
+                    "[BoteX] Both GEMINI_API_KEY and GOOGLE_API_KEY are set with "
+                    "different values — using GEMINI_API_KEY (higher precedence).\n"
+                )
+        if gemini_key:
+            return str(gemini_key)
+        if google_key:
+            return str(google_key)
+        resolved = super().resolve_api_key(
+            explicit_key=explicit_key,
+            *args,
+            secrets_cfg=secrets_cfg,
+            explicit=explicit,
+            provider_cfg=provider_cfg,
+            **kwargs,
+        )
+        if resolved:
+            return resolved
+        # Cross-name secrets aliases — a provider registered under the
+        # "aistudio"/"gemini" alias still finds the canonical key.
+        sec = secrets_cfg or {}
+        for sec_key in ("google_api_key", "gemini_api_key", "aistudio_api_key"):
+            found = sec.get(sec_key)
+            if found:
+                return str(found)
+        return ""
+
+    def get_credits(self, api_key: Optional[str] = None) -> CreditsInfo:
+        return CreditsInfo(
+            supported=False,
+            provider=self.name,
+            label="Google AI Studio (no credits API)",
+        )
+
+    def is_retryable(self, exc: BaseException) -> bool:
+        if super().is_retryable(exc):
+            return True
+        # Gemini signals transient cluster pressure as 503 "overloaded" —
+        # unbilled and safe to retry, unlike other 5xx.
+        return status_code_of(exc) == 503 and "overload" in str(exc).lower()
+
+
 class GenericOpenAIProvider(BaseProvider):
     """Adapter for generic OpenAI-compatible API endpoints."""
 
@@ -1101,6 +1295,10 @@ class ProviderRegistry:
             return cls._registry["openrouter"]
         if "nvidia" in key and "nvidia" in cls._registry:
             return cls._registry["nvidia"]
+        if ("google" in key or "aistudio" in key or "gemini" in key) and (
+            "google" in cls._registry
+        ):
+            return cls._registry["google"]
         if "openai" in key:
             target = (
                 cls._registry.get("openai")
@@ -1127,6 +1325,10 @@ class ProviderRegistry:
             return cls._registry["openrouter"](name=name, config=provider_cfg)
         if "nvidia" in key and "nvidia" in cls._registry:
             return cls._registry["nvidia"](name=name, config=provider_cfg)
+        if ("google" in key or "aistudio" in key or "gemini" in key) and (
+            "google" in cls._registry
+        ):
+            return cls._registry["google"](name=name, config=provider_cfg)
         if "openai" in key:
             target = (
                 cls._registry.get("openai")
@@ -1162,6 +1364,9 @@ class ProviderRegistry:
         cls.register("openrouter", OpenRouterProvider)
         cls.register("openrouter-free", OpenRouterProvider)
         cls.register("nvidia", NvidiaProvider)
+        cls.register("google", GoogleAIStudioProvider)
+        cls.register("aistudio", GoogleAIStudioProvider)
+        cls.register("gemini", GoogleAIStudioProvider)
         cls.register("generic_openai", GenericOpenAIProvider)
         cls.register("generic", GenericOpenAIProvider)
         cls.register("openai", GenericOpenAIProvider)
@@ -1220,7 +1425,7 @@ async def fetch_openrouter_generations_async(
         provider = ProviderRegistry.get(provider_name or "openrouter", provider_cfg or {})
     except Exception as exc:
         msg = f"OpenRouter provider lookup failed: {sanitize_provider_error(exc)}\n"
-        sys.stderr.write(sever_taint_numeric(msg))
+        sys.stderr.write(coerce_text(msg))
         return {}
 
     if not isinstance(provider, OpenRouterProvider):
@@ -1243,7 +1448,7 @@ async def fetch_openrouter_generations_async(
             return gid, None, True
         except Exception as exc:
             err_msg = f"OpenRouter generation query error ({mask_secrets(str(gid))}): {sanitize_provider_error(exc)}\n"
-            sys.stderr.write(sever_taint_numeric(err_msg))
+            sys.stderr.write(coerce_text(err_msg))
             return gid, None, False
 
     first_pass = await asyncio.gather(*(_query_one(gid) for gid in unique_ids))
