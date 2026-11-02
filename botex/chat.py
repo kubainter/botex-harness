@@ -1141,7 +1141,11 @@ async def stream_chat_turn(
         # Price guardrail
         _pricing_cfg = load_config().get("pricing", {})
         price_ok, price_reason = check_model_price(
-            effective_model, active_provider_cfg, _pricing_cfg, api_key=api_key or ""
+            effective_model,
+            active_provider_cfg,
+            _pricing_cfg,
+            api_key=api_key or "",
+            provider_name=active_provider_name,
         )
         if not price_ok:
             _rollback_user_message()
@@ -1313,11 +1317,27 @@ async def stream_chat_turn(
                     if tc_deltas:
                         for tc in tc_deltas:
                             raw_idx = (
-                                getattr(tc, "index", 0)
+                                getattr(tc, "index", None)
                                 if not isinstance(tc, dict)
-                                else tc.get("index", 0)
+                                else tc.get("index")
                             )
-                            idx = 0 if raw_idx is None else int(raw_idx)
+                            tc_id = getattr(tc, "id", None) or (
+                                tc.get("id") if isinstance(tc, dict) else None
+                            )
+                            if raw_idx is not None:
+                                idx = int(raw_idx)
+                            elif tc_id:
+                                existing_idx = next(
+                                    (k for k, v in tool_calls_map.items() if v.get("id") == tc_id),
+                                    None,
+                                )
+                                idx = (
+                                    existing_idx
+                                    if existing_idx is not None
+                                    else (max(tool_calls_map.keys(), default=-1) + 1)
+                                )
+                            else:
+                                idx = max(tool_calls_map.keys(), default=-1) + 1
                             if idx not in tool_calls_map:
                                 tool_calls_map[idx] = {
                                     "id": "",
@@ -1330,11 +1350,8 @@ async def stream_chat_turn(
                             )
                             if isinstance(tc_extra, dict):
                                 tool_calls_map[idx]["extra_content"] = tc_extra
-                            tc_id = getattr(tc, "id", None) or (
-                                tc.get("id") if isinstance(tc, dict) else None
-                            )
-                            if tc_id:
-                                tool_calls_map[idx]["id"] += tc_id
+                            if tc_id and not tool_calls_map[idx]["id"]:
+                                tool_calls_map[idx]["id"] = str(tc_id)
                             fn = getattr(tc, "function", None) or (
                                 tc.get("function") if isinstance(tc, dict) else None
                             )

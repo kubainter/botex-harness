@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from botex.analytics import (
+    aggregate_stats,
     calculate_cost_usd,
     check_budget_limit,
     is_free_model,
@@ -44,18 +45,24 @@ def test_is_free_model_slug_markers():
 
 
 def test_is_free_model_provider_flags():
-    """Local endpoints and static api_key_fallback providers cannot bill per request."""
+    """Local endpoints, package/quota providers (google, nvidia), and static api_key_fallback providers cannot bill per request."""
     assert is_free_model("any/model", {"local": True}) is True
+    assert is_free_model("any/model", {"free_tier": True}) is True
     assert is_free_model("any/model", {"api_key_fallback": "ollama"}) is True
     assert is_free_model("any/model", provider_name="ollama") is True
     assert is_free_model("any/model", provider_name="OLLAMA") is True
+    assert is_free_model("gemini-2.5-pro", provider_name="google") is True
+    assert is_free_model("gemini-2.5-flash", provider_name="gemini") is True
+    assert is_free_model("meta/llama-3.1-70b-instruct", provider_name="nvidia") is True
+    assert is_free_model("any/model", provider_name="openrouter-free") is True
     assert is_free_model("any/model", {"local": False}, "openrouter") is False
+    assert is_free_model("google/gemini-2.5-pro", {"local": False}, "openrouter") is False
     assert is_free_model("any/model", None, "") is False
     assert is_free_model("any/model", "not-a-dict", "") is False
 
 
 def test_calculate_cost_usd_free_models_zero():
-    """Pseudo-pricing never applies to free/zero-cost models."""
+    """Pseudo-pricing never applies to free/zero-cost models or free-tier providers."""
     free_slugs = [
         "vendor/some-model:free",
         "openrouter/free",
@@ -66,8 +73,19 @@ def test_calculate_cost_usd_free_models_zero():
     for slug in free_slugs:
         assert calculate_cost_usd(slug, 1_000_000, 1_000_000) == 0.0, slug
 
-    # Priced and unknown models still produce a positive estimate.
+    assert calculate_cost_usd("gemini-2.5-pro", 1_000_000, 1_000_000, provider_name="google") == 0.0
+    assert (
+        calculate_cost_usd(
+            "meta/llama-3.1-70b-instruct", 1_000_000, 1_000_000, provider_name="nvidia"
+        )
+        == 0.0
+    )
+
+    # Priced and unknown models on paid providers still produce a positive estimate.
     assert calculate_cost_usd("anthropic/claude-3.7-sonnet", 1_000_000, 0) > 0.0
+    assert (
+        calculate_cost_usd("google/gemini-2.5-pro", 1_000_000, 0, provider_name="openrouter") > 0.0
+    )
     assert calculate_cost_usd("unknown/paid-model", 1_000_000, 0) > 0.0
 
 
@@ -107,6 +125,68 @@ def test_check_budget_limit_counts_today_spend():
     # Disabled limits never trigger.
     assert check_budget_limit(0.0) == (False, 0.0)
     assert check_budget_limit(-1.0) == (False, 0.0)
+
+
+def test_legacy_free_records_with_stale_cost_clamped_to_zero():
+    """Historical records for free models/providers that stored pseudo-cost > 0
+    must be clamped to $0.0 during aggregate_stats and check_budget_limit."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    records = [
+        {
+            "task_id": "leg-google",
+            "timestamp": f"{today}T10:00:00",
+            "model": "gemini-2.5-flash",
+            "provider": "google",
+            "status": "API_ERROR",
+            "prompt_tokens": 50000,
+            "completion_tokens": 2000,
+            "cost_usd": 0.026687,
+        },
+        {
+            "task_id": "leg-nvidia",
+            "timestamp": f"{today}T11:00:00",
+            "model": "meta/llama-3.2-11b-vision-instruct",
+            "provider": "nvidia",
+            "status": "DONE",
+            "prompt_tokens": 100000,
+            "completion_tokens": 5000,
+            "cost_usd": 0.105006,
+        },
+        {
+            "task_id": "leg-or-free",
+            "timestamp": f"{today}T12:00:00",
+            "model": "cohere/north-mini-code:free",
+            "provider": "openrouter-free",
+            "status": "DONE",
+            "prompt_tokens": 20000,
+            "completion_tokens": 1000,
+            "cost_usd": 0.028151,
+        },
+        {
+            "task_id": "paid-or",
+            "timestamp": f"{today}T13:00:00",
+            "model": "deepseek/deepseek-v3.2",
+            "provider": "openrouter",
+            "status": "DONE",
+            "prompt_tokens": 10000,
+            "completion_tokens": 1000,
+            "cost_usd": 0.05,
+        },
+    ]
+    save_analytics(records)
+    _, today_spend = check_budget_limit(10.0)
+    assert today_spend == pytest.approx(0.05)
+
+    stats = aggregate_stats(records)
+    assert stats["cost_usd"] == pytest.approx(0.05)
+    by_m = {m["model"]: m["cost_usd"] for m in stats["by_model"]}
+    assert by_m["gemini-2.5-flash"] == 0.0
+    assert by_m["meta/llama-3.2-11b-vision-instruct"] == 0.0
+    assert by_m["cohere/north-mini-code:free"] == 0.0
+    assert by_m["deepseek/deepseek-v3.2"] == pytest.approx(0.05)
+    for r in stats["recent"]:
+        if r["task_id"] != "paid-or":
+            assert r["cost_usd"] == 0.0
 
 
 def _fake_response(content: str):
