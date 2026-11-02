@@ -141,8 +141,11 @@ def test_in_flight_task_state_format_handoff_context():
 
 
 @pytest.mark.anyio
-async def test_run_botex_task_state_checkpoint_across_model_fallback(tmp_path: Path):
+async def test_run_botex_task_state_checkpoint_across_model_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """When the first model candidate fails, the second model candidate receives the handoff context."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-or-key")
     # Create test workspace
     test_file = tmp_path / "app.py"
     test_file.write_text("def hello(): pass\n", encoding="utf-8")
@@ -200,8 +203,12 @@ async def test_run_botex_task_state_checkpoint_across_model_fallback(tmp_path: P
 
 
 @pytest.mark.anyio
-async def test_run_botex_task_provider_fallback_rotation(tmp_path: Path):
+async def test_run_botex_task_provider_fallback_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """When all models of provider-1 fail, engine rotates to provider-2 per provider_fallbacks config."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-or-key")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-nv-key")
     cfg = copy.deepcopy(load_config())
     cfg["provider_fallbacks"] = {"openrouter-free": ["nvidia"]}
 
