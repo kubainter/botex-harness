@@ -35,6 +35,18 @@ export interface KeyStatusInfo {
   error: string | null
 }
 
+export interface ProviderRateLimitInfo {
+  rpm: number
+  tpm: number
+  burst_multiplier: number
+  requests_available: number | null
+  tokens_available: number | null
+  cooldown_s: number
+  wait_s: number
+}
+
+export type RateLimitsMap = Record<string, ProviderRateLimitInfo>
+
 export interface TaskCreateRequest {
   task: string
   files?: string[]
@@ -57,6 +69,8 @@ export interface TaskCreateRequest {
   recipe?: string
   allow_non_zdr?: boolean
   approval_policy?: string
+  executor?: 'botex' | 'devin'
+  agent_type?: string
 }
 
 export interface TaskSummary {
@@ -66,11 +80,79 @@ export interface TaskSummary {
   finished_at: number | null
 }
 
+export interface TaskTurn {
+  turn: number
+  prompt: string
+  summary: string
+  ok: boolean
+  run_id?: string | null
+  session_id?: string | null
+  resumed?: boolean | null
+  resume_mode?: string | null
+  ts?: number
+}
+
 export interface TaskDetail extends TaskSummary {
   result: string | null
   result_data: Record<string, any> | null
   task?: string | null
   request?: TaskCreateRequest | null
+  progress?: TaskProgress | null
+  executor?: 'botex' | 'devin' | string | null
+  session_id?: string | null
+  turns?: TaskTurn[]
+}
+
+export interface TaskFollowupResponse {
+  ok: boolean
+  task_id: string
+  status: string
+  session_id?: string | null
+  detail?: string
+}
+
+// ---------------------------------------------------------------------------
+// Live task-event observability
+// ---------------------------------------------------------------------------
+
+export const TASK_EVENT_KINDS = [
+  'task_started',
+  'turn_started',
+  'turn_completed',
+  'tool_call',
+  'tool_result',
+  'approval_requested',
+  'approval_decided',
+  'retry_scheduled',
+  'waiting_for_input',
+  'progress',
+  'error',
+  'warning',
+  'task_finished'
+] as const
+
+export type TaskEventKind = (typeof TASK_EVENT_KINDS)[number]
+
+export interface TaskEvent {
+  seq: number
+  ts: number
+  kind: string
+  data: Record<string, unknown>
+}
+
+export interface TaskEventsResponse {
+  events: TaskEvent[]
+  min_seq: number
+  dropped: number
+}
+
+export type TaskWaitingFor = 'approval' | 'retry' | 'input' | 'model'
+
+export interface TaskProgress {
+  turn: number | null
+  max_turns: number | null
+  cost_usd: number | null
+  waiting_for: TaskWaitingFor | null
 }
 
 export interface PendingAction {
@@ -352,4 +434,34 @@ export interface SkillInstallRequest {
   description?: string
   taxonomy?: string[]
 }
+
+// ---------------------------------------------------------------------------
+// Knowledge Graph Curator Types
+// ---------------------------------------------------------------------------
+
+export interface CuratorStatus {
+  last_run_id?: string | null
+  last_run_timestamp?: string | null
+  status: string
+  is_healthy: boolean
+  total_nodes: number
+  total_edges: number
+  orphan_count: number
+  broken_count: number
+  tier_used: string
+  duration_seconds: number
+  lock_active: boolean
+  beacon_path?: string | null
+  summary?: string
+  last_telegram_status?: Record<string, any>
+}
+
+export interface CuratorRunRequest {
+  workspace_dir?: string
+  scope?: string
+  force?: boolean
+  model_override?: string
+  notify_telegram?: boolean
+}
+
 

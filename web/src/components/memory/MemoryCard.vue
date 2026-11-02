@@ -73,30 +73,36 @@
 
     <!-- Tags -->
     <div v-if="entry.tags && entry.tags.length > 0" class="flex flex-wrap gap-1.5">
-      <span
+      <button
         v-for="tag in entry.tags"
         :key="tag"
-        class="text-xs font-mono px-2 py-0.5 rounded-md bg-botex-950 text-slate-300 border border-botex-800"
+        type="button"
+        class="text-xs font-mono px-2 py-0.5 rounded-md bg-botex-950 text-slate-300 border border-botex-800 hover:border-cyan-600 hover:text-cyan-300 transition cursor-pointer"
+        :title="locale === 'pl' ? 'Filtruj po tym tagu' : 'Filter by this tag'"
+        @click="emit('select-tag', tag)"
       >
         #{{ tag }}
-      </span>
+      </button>
     </div>
 
     <!-- Outbound Wikilinks -->
     <div v-if="entry.links && entry.links.length > 0" class="flex flex-wrap items-center gap-1.5 text-xs font-mono text-cyan-400">
       <span class="text-slate-400 text-xs">Links:</span>
-      <span
+      <button
         v-for="l in entry.links"
         :key="l"
-        class="px-1.5 py-0.5 rounded bg-botex-950/80 border border-cyan-900/60 text-cyan-300"
+        type="button"
+        class="px-1.5 py-0.5 rounded bg-botex-950/80 border border-cyan-900/60 text-cyan-300 hover:bg-botex-800 hover:text-cyan-200 hover:border-cyan-600 transition cursor-pointer"
+        :title="locale === 'pl' ? 'Otwórz powiązaną notatkę' : 'Open linked note'"
+        @click="emit('select-link', l)"
       >
         [[{{ l }}]]
-      </span>
+      </button>
     </div>
 
     <!-- Content Preview / Full -->
     <div :class="['overflow-hidden transition-all text-xs text-slate-200', expanded ? 'max-h-none' : 'max-h-24 relative']">
-      <MarkdownViewer :content="entry.content" />
+      <MarkdownViewer :content="entry.content" @navigate-wikilink="(id) => emit('select-link', id)" />
       <div v-if="!expanded" class="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-botex-900 to-transparent pointer-events-none"></div>
     </div>
   </div>
@@ -117,6 +123,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'select'): void
   (e: 'delete'): void
+  (e: 'select-link', id: string): void
+  (e: 'select-tag', tag: string): void
 }>()
 
 const { locale } = useI18n()

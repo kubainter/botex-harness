@@ -10,8 +10,15 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 ```
 ./ (repo root)
 ├── server.py              MCP server + CLI dispatcher
+├── ops/
+│   └── curator/           Knowledge Graph Curator daemon & Telegram alerts
 ├── botex/                 engine package
-│   ├── engine.py          tool loop, context pruning, termination statuses
+│   ├── engine.py          tool loop, context pruning, termination statuses, provider fallbacks
+│   ├── state.py           in-flight task state checkpointing across fallbacks
+│   ├── rate_limiter.py    asynchronous token-bucket rate limiter & cooldowns
+│   ├── curator.py         Memory Vault periodic curator & Telegram alerts
+│   ├── delegation.py      Devin ACP delegation bridge
+│   ├── events.py          engine event emitter taxonomy
 │   ├── contracts.py       task contract verification & status taxonomy
 │   ├── config.py          layered config loader (defaults < local < env)
 │   ├── capabilities.py    capability presets & agency middleware
@@ -38,6 +45,7 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 │   ├── meta_harness.py    task taxonomy, patch probing & meta-lesson recommendations
 │   ├── recipes.py         recipe loader & system prompt injection
 │   ├── skills.py          server-side Skill Vault, safe installer & L0 triage
+│   ├── tracing.py         OTel-style span helpers (landed; wiring in progress)
 │   ├── i18n.py            CLI localization (EN/PL); MCP responses are always EN
 │   ├── ui.py              ANSI helpers with plain-text fallback
 │   └── recipes/           bundled markdown persona prompts
@@ -50,16 +58,41 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 │   ├── test_approval.py       HITL approval and policy tests
 │   ├── test_chat.py           streaming chat and sandbox tests
 │   ├── test_memory_twotier.py two-tier memory vault scoping tests
+│   ├── test_memory_v2.py      memory vault v2 schema tests
 │   ├── test_server_cloud.py   FastAPI, SSE, and WebSocket tests
 │   ├── test_providers.py      provider registry and adapter tests
 │   ├── test_retry.py          shared retry/backoff layer tests
+│   ├── test_rate_limiter.py   token-bucket rate limiter and cooldown tests
+│   ├── test_state_checkpoint.py in-flight state carryover across fallbacks
+│   ├── test_curator.py        knowledge-graph curator and Telegram dispatch tests
+│   ├── test_delegation.py     Devin ACP delegation bridge tests
+│   ├── test_events.py         task event emitter taxonomy tests
+│   ├── test_circuit_breaker.py provider circuit breaker tests
+│   ├── test_tracing.py        tracing span and secret-sanitization tests
+│   ├── test_task_size_routing.py task-tier estimation tests
+│   ├── test_structured_contracts_v1.py canonical handoff schema tests
+│   ├── test_caller_skill_contract.py SKILL.md <-> server.py contract parity
+│   ├── test_skills_parity.py  skills <-> recipes parity invariant
+│   ├── test_config_safety.py  dotenv-isolation guard tests
 │   ├── test_catalog.py        dynamic catalog and ZDR tests
 │   ├── test_denylist.py       hierarchical denylist tests
 │   ├── test_wallet.py         wallet and credit query tests
 │   ├── test_context_guard.py  context pruning and compaction tests
-│   └── test_live_e2e.py       live end-to-end integration suite
+│   ├── test_analytics.py      cost/token ledger and digest tests
+│   ├── test_embeddings.py     local embedding helper tests
+│   ├── test_meta_harness.py   task taxonomy and meta-lesson tests
+│   ├── test_obsidian_graph.py Obsidian vault export and graph tests
+│   ├── test_obsidian_edge_cases.py obsidian edge-case tests
+│   ├── test_nvidia_streaming.py NVIDIA streaming adapter tests
+│   ├── test_credits_stress.py wallet credits stress tests
+│   ├── test_challenger_m4_3.py challenger suite M4.3
+│   ├── test_challenger_m5_empiric.py challenger suite M5 empiric
+│   ├── test_integration.py    cross-module integration tests
+│   └── test_live_e2e.py       live end-to-end integration suite (opt-in)
 ├── docs/
-│   └── TUTORIAL.md        this file
+│   ├── TUTORIAL.md        this file
+│   └── TELEGRAM_NOTIFICATIONS.md  curator alert setup guide
+├── deploy/oracle-vps/     systemd units & one-click installer for Oracle A1.Flex ARM64
 ├── skills/botex/SKILL.md  agent-facing usage contract
 ├── botex.cmd / botex.sh   zero-install execution launchers
 ├── pyproject.toml         package configuration & scripts
@@ -116,13 +149,13 @@ Every mutating tool snapshots the target file to `.snapshots/<task_id>/` first. 
 | `destructive` | edit + delete_file, move_file |
 | `full` | destructive + run_command |
 
-Explicit flags (`allow_destructive`, `allow_exec`, `allow_net`) can only widen a preset, never narrow it. `run_command` additionally requires `exec.enabled: true` in the config; without it `CAP_EXEC` is removed regardless of mode/flags.
+Explicit flags (`allow_destructive`, `allow_exec`, `allow_net`) can widen ordinary presets, but `readonly` and `chat` remain hard read-only modes: no local writes, deletions, moves, or command execution (flags cannot widen readonly to write/exec; `allow_net` adds only read-only network access via `read_url`). `output_path` requires a mutating mode (`edit`, `destructive`, `full`); `readonly` reports findings in `summary`. `run_command` additionally requires `exec.enabled: true` in the config; without it `CAP_EXEC` is removed regardless of mode/flags.
 
 `net` is deliberately **not** part of any preset: it is an exfiltration and prompt-injection axis, so it requires a separate `allow_net=true` opt-in. It exposes the restricted, read-only `read_url` tool, scoped by `net.policy` (`caller` / `allowlist` / `public` / `off`) plus per-run `net_allowed_hosts` / `net_allowed_urls` grants.
 
 ## 4. Human-in-the-Loop (HITL) & Approval System
 
-BoteX provides a policy-driven approval manager (`botex/approval.py`):
+BoteX provides a policy-driven approval manager (`botex/approval.py`). Both `run_subagent` and `start_task` accept the `approval_policy` parameter:
 
 - **Approval Policies**:
   - `none`: Disables interactive approval checks.
@@ -135,7 +168,7 @@ BoteX provides a policy-driven approval manager (`botex/approval.py`):
 
 ## 5. Chat Mode & Conversational Sandbox
 
-BoteX includes a conversational mode (`botex/chat.py`):
+BoteX includes a conversational mode (`botex/chat.py`) as a separate CLI/REST interface, not the normal task delegation API:
 
 - **Command**: `botex chat` launches an interactive REPL with real-time token streaming.
 - **Strict Read-Only Sandbox**: Only non-mutating inspection tools (`get_file_outline`, `read_file_lines`, `read_file`, `list_dir`, `search_memory`, `read_memory`) are exposed. File mutations and shell commands are blocked.
@@ -151,7 +184,8 @@ Persistent Memory Vault (`botex/memory.py`) supports two distinct scopes:
 
 Notes link to each other through `[[wikilinks]]`, forming a navigable knowledge graph; verbose execution logs are offloaded to `.botex/scratchpad/<memory_id>.log` instead of the note body.
 
-MCP tools: `save_memory`, `read_memory`, `search_memory`, `patch_memory_section` (surgical section update), `get_backlinks`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` (Obsidian config + `_GRAPH_INDEX.md`), `read_scratchpad`.
+Standard Memory Vault flow: `search_memory` -> `read_memory` -> `patch_memory_section` or `save_memory` -> optional `find_graph_health`.
+MCP tools: `save_memory`, `read_memory`, `search_memory`, `patch_memory_section` (surgical section update), `delete_memory`, `get_backlinks`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` (Obsidian config + `_GRAPH_INDEX.md`), `read_scratchpad`.
 
 ## 7. FastAPI Cloud Gateway & Remote MCP
 
@@ -187,11 +221,13 @@ BoteX can operate as a central HTTP/SSE daemon (`botex/server_cloud.py`):
 
 ## 9. Termination statuses
 
-`ok` is `true` **only** when `status == "DONE"`: it certifies that the task contract was verified (required output exists on disk or report delivered), not merely that the model claimed success.
+`ok` is `true` **only** when `status == "DONE"`: it certifies that the task contract was verified (required output exists on disk or report delivered), not merely that the model claimed success. For background tasks (`start_task` / `get_task_status`), the outer `status` is lifecycle (`QUEUED`, `RUNNING`, `DONE`, `FAILED`, `CANCELLED`); lifecycle `DONE` means finished, not success. Success strictly requires `result_data.ok == true` and `result_data.status == "DONE"`. Workspace note: `files` are primary target hints (not a security allowlist); `workspace_dir` is the hard boundary (located on the BoteX host machine for remote SSE). Keep API keys empty in examples; do not pass secrets in tasks or memories.
 
 | Status | Meaning |
 |---|---|
 | `DONE` | Task contract verified |
+| `BLOCKED` | Task halted by security/policy gate or approval failure in headless execution |
+| `FAILED` | Task failed contract criteria or internal error |
 | `UNSUPPORTED` | Explicit `STATUS: UNSUPPORTED` marker, or model lacks tool calls |
 | `INCOMPLETE` | No useful output after strikes and nudges |
 | `TOKEN_LIMIT` | `max_tokens` exhausted without visible output; common with reasoning models |
@@ -205,10 +241,18 @@ BoteX can operate as a central HTTP/SSE daemon (`botex/server_cloud.py`):
 | `PRICE_EXCEEDED` | Model over the configured price cap; rejected locally |
 | `ZDR_VIOLATION` | Model matched the ZDR deny list; requires allow_non_zdr or openrouter-free |
 | `CONFIG_ERROR` | Invalid provider, mode, policy, or parameters |
+| `ABORTED` | Task explicitly aborted mid-run by operator or API request |
 | `API_ERROR` | Provider call failed; rollback attempted if changes existed |
 | `ERROR` | Pre-run failure such as missing `workspace_dir` |
 
-## 10. CLI usage
+## 10. Rate limiting and state carryover
+
+Free-tier providers enforce strict request and token limits per minute. BoteX handles this with two layers:
+
+1. **`ProviderRateLimiter` (`botex/rate_limiter.py`)**: An asynchronous token bucket tracks both RPM and TPM per provider, using limits from `botex.config.json` (`rate_limits`). Requests that exceed the bucket wait until tokens refill. When an endpoint returns HTTP 429 or a `retry-after` header, the limiter activates a monotonic cooldown window.
+2. **`InFlightTaskState` (`botex/state.py`)**: When an attempt fails before completing the contract (due to rate limits, timeouts, or lack of progress), the engine snapshots accumulated plan steps, file inspection notes, and findings. Modified files are rolled back to clean snapshots, but the saved findings are passed directly into the user prompt of the next model candidate or fallback provider (`provider_fallbacks`).
+
+## 11. CLI usage
 
 ```bash
 # interactive REPL (in-session: `workspace` or `cd [DIR]` switches target project)
@@ -244,6 +288,9 @@ botex config workspace none
 botex memory save "note title" "content..." --kind decision --tags arch
 botex memory search "query" --scope all
 
+# knowledge graph curator
+python -m ops.curator.curator_service --force --notify
+
 # maintenance
 botex --stats
 botex --stats --month
@@ -256,11 +303,11 @@ botex models [--refresh]
 botex serve
 ```
 
-## 11. Test suite
+## 12. Test suite
 
 ```bash
 python -m pytest tests/
 ```
 
-Runs the complete hermetic test suite (501 tests across 26 test modules). All socket access is hermetically mocked.
+Runs the complete hermetic test suite (615 tests across 38 test modules). All socket access is hermetically mocked.
 A secondary, opt-in suite `tests/test_live_e2e.py` runs against live provider APIs when `OPENROUTER_API_TESTS_KEY` is provided.

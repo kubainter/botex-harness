@@ -15,10 +15,25 @@ const props = withDefaults(
   }
 )
 
+const emit = defineEmits<{
+  (e: 'navigate-wikilink', targetId: string): void
+}>()
+
 marked.setOptions({
   gfm: true,
   breaks: true
 })
+
+const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g
+const CODE_REGION_RE = /(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/gi
+
+function linkifyWikilinks(html: string): string {
+  return html.replace(WIKILINK_RE, (_match, target: string, label?: string) => {
+    const id = target.trim().replace(/"/g, '&quot;')
+    const text = (label || target).trim()
+    return `<button type="button" data-wikilink="${id}" class="inline-flex items-center px-1.5 py-0 mx-0.5 rounded bg-cyan-950/70 border border-cyan-800/60 text-cyan-300 font-mono text-[0.85em] leading-5 hover:bg-cyan-900/60 hover:text-cyan-100 hover:border-cyan-600 transition-colors cursor-pointer align-baseline">[[${text}]]</button>`
+  })
+}
 
 const renderedHtml = computed(() => {
   if (!props.content) return ''
@@ -44,6 +59,11 @@ const renderedHtml = computed(() => {
         `
       }
     )
+    // Linkify [[wikilinks]] only outside <pre>/<code> regions
+    raw = raw
+      .split(CODE_REGION_RE)
+      .map((seg) => (/^<(?:pre|code)/i.test(seg) ? seg : linkifyWikilinks(seg)))
+      .join('')
     return raw
   } catch (err) {
     return `<pre class="whitespace-pre-wrap">${props.content}</pre>`
@@ -52,6 +72,15 @@ const renderedHtml = computed(() => {
 
 function handleCopyClick(event: MouseEvent) {
   const target = event.target as HTMLElement
+  const wikilinkEl = target?.closest?.('[data-wikilink]') as HTMLElement | null
+  if (wikilinkEl) {
+    const targetId = wikilinkEl.getAttribute('data-wikilink')
+    if (targetId) {
+      event.preventDefault()
+      emit('navigate-wikilink', targetId)
+    }
+    return
+  }
   if (target && target.getAttribute('data-copy-code') === 'true') {
     const preWrapper = target.closest('.group')
     const codeEl = preWrapper?.querySelector('code')

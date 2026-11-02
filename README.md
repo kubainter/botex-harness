@@ -26,6 +26,8 @@ Instead of trusting the model to behave, BoteX wraps every action in safety gate
 * **Improper Output Handling (OWASP LLM10: Improper Output Handling)**: Strict Read-Before-Write gates ensure no blind writes occur, and every touched file is backed by a pre-mutation snapshot. If an agent hits an error, the automatic snapshot rollback reverts the workspace cleanly.
 * **Hard budget & pricing caps**: Pre-flight checks verify model pricing against live provider catalogs. If a task exceeds its budget or a model is overpriced, BoteX aborts before spending a cent.
 * **Strict privacy & Zero Data Retention (ZDR)**: Enforces `provider.data_collection: deny` on OpenRouter calls, blocks `.env`/secrets, masks API keys in logs, and prevents path traversal attacks. Free (`:free`) models that cannot guarantee ZDR are rejected locally. Opt out explicitly per run (`allow_non_zdr`) or via the `openrouter-free` provider preset.
+* **Proactive Rate Limiting & Cooldown Tracking**: Token-bucket rate limiter tracks RPM and TPM limits per provider with burst buffers and debt queues. When providers return rate-limit headers or 429 status codes, BoteX enters a cooldown window instead of repeatedly burning retries.
+* **In-Flight State Checkpointing & Provider Fallbacks**: Failed model runs take a snapshot of planned steps, observations, and read files before rolling back workspace changes. The next model or fallback provider receives this context directly, avoiding redundant exploration.
 * **Enhanced Permission Controls (OWASP LLM03: Excessive Agency)**: BoteX protects against Excessive Agency via a centralized Agency Middleware. Tools are strictly defined with Risk Levels (LOW, MEDIUM, HIGH) and required scopes. High-risk destructive actions automatically require explicit interactive operator approval (or pre-authorized task scopes in headless mode), limiting the potential damage of prompt injections or hallucinations.
 
 ---
@@ -106,7 +108,7 @@ Delegated Task
      └─► Failure   ──► Rollback snapshots ─► Try next candidate (model_fallbacks) or abort
 ```
 
-A task returns `ok: true` **only when its completion is verified on disk**, not just because an LLM said "I'm done".
+A task returns `ok: true` **only when its completion is verified on disk**, not just because an LLM said "I'm done". For background tasks (`start_task` / `get_task_status`), `status` reports the execution lifecycle (`QUEUED`, `RUNNING`, `DONE`, `FAILED`, `CANCELLED`); lifecycle `DONE` means the run finished, not success. Success requires `result_data.ok == true` and `result_data.status == "DONE"`.
 
 ---
 
@@ -123,6 +125,7 @@ BoteX exposes a focused set of MCP tools:
 * **`save_memory(title, content, workspace_dir, kind, tags, memory_id, scope)`**: Saves persistent notes, decisions, handoffs, or lessons. Scope can be `"local"` (`<workspace_dir>/.botex/memory/`) or `"global"` (`~/.botex/memory/`).
 * **`read_memory(memory_id, workspace_dir, scope)`** / **`search_memory(workspace_dir, query, tag, kind, scope)`**: Retrieves saved memory across local or global storage (`scope="all"` searches both).
 * **`patch_memory_section(memory_id, section, new_content, workspace_dir, scope, append)`**: Replaces or appends one Markdown section in a memory note without touching frontmatter, other sections, or the Timeline trail.
+* **`delete_memory(memory_id, workspace_dir, scope)`**: Deletes a specific memory note from local or global storage.
 * **`get_backlinks(memory_id, workspace_dir, scope)`**: Lists memories that link to the given note through `[[wikilinks]]`.
 * **`find_graph_health(workspace_dir, scope)`**: Audits the vault's wikilink graph — reports broken links, orphan notes, and cycles.
 * **`init_obsidian_vault(workspace_dir, scope, override_existing, export_index)`**: Writes `.obsidian/` config (per-kind graph colors) and optionally regenerates `_GRAPH_INDEX.md`.
@@ -140,7 +143,7 @@ BoteX exposes a focused set of MCP tools:
 
 ## Task Delegation & Parameters
 
-Example payload for `run_subagent`:
+`run_subagent` and `start_task` expose the exact same caller parameters, including `approval_policy`. Example payload:
 
 ```json
 {
@@ -156,15 +159,15 @@ Example payload for `run_subagent`:
 | Parameter | Default | Description |
 |---|---|---|
 | `task` | *(required)* | Clear description of what needs to be implemented or fixed. |
-| `files` | `[]` | List of primary target files to nudge the agent toward. |
-| `workspace_dir` | `""` | Root directory the agent is restricted to. Empty = `engine.default_workspace` from config, else the server's current directory. An explicit value (including `.`) always wins. |
+| `files` | `[]` | List of primary target files to nudge the agent toward (target hints, not a security allowlist; `workspace_dir` is the hard boundary). |
+| `workspace_dir` | `""` | Root directory the agent is restricted to. Empty = `engine.default_workspace` from config, else the server's current directory. For Remote SSE (`botex cloud`), `workspace_dir` is on the BoteX host. |
 | `provider` | `""` | API provider from `botex.config.json` (`openrouter`, `nvidia`, `google`, `openrouter-free`, `ollama`; empty = configured default or `BOTEX_PROVIDER`). |
 | `model` | `""` | Explicit provider model ID; overrides `profile`. |
 | `profile` | `""` | Model profile from `botex.config.json` (`default`, `coding`, `auto-beta`, `review`, `fast`). Empty = picked per mode via `engine.mode_profiles`. |
-| `api_key` | `""` | Provider API key per-request; highest priority (overrides env/.env/config). |
-| `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full` (empty = `engine.default_mode`). |
+| `api_key` | `""` | Provider API key per-request (keep empty in examples; do not pass secrets in task or memory). |
+| `mode` | `"edit"` | Capability preset: `readonly`, `edit`, `destructive`, `full`. `readonly` is hard read-only (no local write, delete/move, or exec; flags cannot widen it). |
 | `recipe` | `""` | Specialized workflow persona (`planner`, `code-explorer`, `reviewer`, `security-reviewer`, `security-taint-hardener`, `build-resolver`, `tdd`, `architecture-adr`, `ui-craftsman`). |
-| `max_turns` | `0` | Max tool-loop iterations (`0` uses `engine.max_turns`, usually 15, overridable per mode via `engine.mode_max_turns`). |
+| `max_turns` | `0` | Max tool-loop iterations (`0` uses `engine.max_turns`, 45 in the shipped config, overridable per mode via `engine.mode_max_turns`). |
 | `max_tokens` | `0` | Per-turn completion cap (`0` = config value; reasoning models need ~8000+). |
 | `max_duration_s` | `0` | Total wall-clock limit in seconds (`0` = config value). |
 | `budget_limit_usd`| `-1` | Hard spend limit for this task (`-1` uses global config, `0` = unlimited). |
@@ -174,7 +177,8 @@ Example payload for `run_subagent`:
 | `net_allowed_hosts` | `[]` | Per-run host authorization for `read_url` (interacts with `net.policy`). |
 | `net_allowed_urls` | `[]` | Per-run URL authorization; a trailing `/` authorizes that subtree. |
 | `allow_non_zdr` | `false` | Per-run consent to relax the ZDR gate; required for `:free` models (provider may log/train on prompts). The result carries `zdr_enforced: false`. |
-| `output_path` | `""` | Enforce that this exact file must be written and non-empty for `DONE` status. |
+| `output_path` | `""` | File-output contract: enforce that this exact file must be written and non-empty for `DONE` status. Requires mutating mode (`edit`, `destructive`, `full`); MUST NOT be used with `readonly` (readonly reports in `summary`). |
+| `approval_policy` | `"high_risk"` | Human-in-the-Loop policy: `none`, `high_risk`, `mutations`, `all_risky`. Shared by `run_subagent` and `start_task`. |
 | `verify_command` | `""` | Verification command (e.g. `pytest tests/test_auth.py`) that must pass before completion. Requires `exec.enabled: true` and exec authorization. |
 
 ---
@@ -221,6 +225,7 @@ Permissions follow the principle of least privilege. Modes are presets over core
 | `full` | Destructive tools + gated `run_command` execution. | Full autonomous loop (edit → test → fix). |
 
 > [!NOTE]
+> `readonly` and `chat` are hard read-only modes: no local writes, deletions, moves, or command execution. Capability flags cannot widen `readonly` to write or exec; `allow_net` adds only read-only network access (`read_url`). Chat is a separate CLI/REST interface (`botex chat`, `/api/chat`), not the normal task delegation API.
 > Network access (`allow_net`) is **never** enabled by default in any preset. It must be explicitly enabled per request or configured via `net.allowed_hosts`.
 
 ### Command Execution (`run_command`) Safety
@@ -249,10 +254,11 @@ If a model refuses a task, burns its token limit without output, or hits provide
 
 ```json
 "model_fallbacks": {
-  "default": ["deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4", "openai/gpt-5.4-mini"],
-  "coding": ["deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4", "openai/gpt-5.4-mini"],
-  "auto-beta": ["qwen/qwen3-coder", "deepseek/deepseek-v3.2", "anthropic/claude-sonnet-4"],
-  "fast": ["google/gemini-2.5-flash-lite", "deepseek/deepseek-v3.2"]
+  "default": ["anthropic/claude-sonnet-4", "qwen/qwen3-coder", "deepseek/deepseek-v3.2"],
+  "auto-beta": ["anthropic/claude-sonnet-4", "qwen/qwen3-coder", "deepseek/deepseek-v3.2"],
+  "coding": ["anthropic/claude-sonnet-4", "qwen/qwen3-coder", "deepseek/deepseek-v3.2"],
+  "review": ["openai/gpt-5.4", "google/gemini-2.5-pro", "deepseek/deepseek-r1"],
+  "fast": ["qwen/qwen3-coder-flash", "openai/gpt-4o-mini", "deepseek/deepseek-v3.2"]
 }
 ```
 
@@ -379,7 +385,7 @@ botex cloud --host 0.0.0.0 --port 8000
 ```
 *Zero-Friction Local mode runs unauthenticated when `BOTEX_ACCESS_TOKEN` is unset. Set `BOTEX_ACCESS_TOKEN` in `.env` to enforce Bearer token verification on all protected endpoints.*
 
-REST surface (all under `/api/`): `health`, `wallet`, `key/status`, `analytics` (+`POST analytics/digest`), `models`, `models/recommended`, `recipes`, `tasks` (+`/{id}`, `/{id}/cancel`), `approvals` (+`/{id}/decide`), `memory` (+`/graph`, `/backlinks`), `chat` (+`/abort`, `/sessions`, `/sessions/{id}`, `/sessions/{id}/save_to_memory`), and WebSocket `/api/chat/ws`. `/api/health` and the PWA shell stay public.
+REST surface (all under `/api/`): `health`, `wallet`, `key/status`, `analytics` (+`POST analytics/digest`), `models`, `models/recommended`, `recipes`, `skills` (+`/{name}`), `tasks` (+`/{id}`, `/{id}/cancel`, `/{id}/followup`, `/{id}/events` SSE), `approvals` (+`/{id}/decide`), `memory` (+`/graph`, `/backlinks`), `curator/status`, `curator/run`, `rate_limits`, `delegation/devin`, `chat` (+`/abort`, `/sessions`, `/sessions/{id}`, `/sessions/{id}/save_to_memory`), and WebSocket `/api/chat/ws`. `/api/health`, `/api/delegation/devin`, and the PWA shell stay public.
 
 ### Maintenance & Observability
 
@@ -416,6 +422,11 @@ botex/
   denylist.py          Hierarchical model exclusions (globs and regex)
   wallet.py            Key credits, spend analytics, and daily query limits
   engine.py            Autonomous execution loop, context management & rollback triggers
+  state.py             In-flight task state checkpointing across model and provider fallbacks
+  rate_limiter.py      Asynchronous token-bucket rate limiter (RPM/TPM) and cooldown tracking
+  curator.py           Memory Vault periodic curator and Telegram dispatch
+  delegation.py        Subagent delegation bridge (Devin ACP)
+  events.py            Engine event emitter taxonomy
   file_tools.py        Safe outline-first reading, file creation, moving & deletion
   patch_engine.py      Fuzzy patch matching, syntax validation & snapshot management
   security.py          Path traversal defenses, secret masking & gitignore filtering
@@ -431,16 +442,20 @@ botex/
   analytics.py         Cost/token ledger, budgeting & summary reporting
   pricing.py           Live model price guardrail & catalog checks
   providers.py         Provider adapters (OpenRouter, NVIDIA, Google AI Studio, etc.) & request normalizer
-  retry.py             Shared transient-failure backoff (429 / connection errors / Google 503 overload)
-  benchmarks.py        Live model recommendations (recommend_models)
-  contracts.py         Task completion verification & status taxonomy
+  retry.py             Shared transient-failure backoff (429 / connection errors / Google 503 overload) & provider circuit breaker
+  benchmarks.py        Live model recommendations (recommend_models) & task-tier estimator
+  contracts.py         Task completion verification, status taxonomy & canonical handoff schema
+  tracing.py           OTel-style span helpers (landed; wiring in progress)
+  skills.py            Server-side Skill Vault, safe install/update & L0 task triage
   recipes.py           Recipe loading & system-prompt injection
   i18n.py / ui.py      CLI language & status rendering
   recipes/             Specialized agent personas (planner, reviewer, tdd,
                        code-explorer, build-resolver, security-reviewer,
                        security-taint-hardener, architecture-adr, ui-craftsman)
-skills/botex/          Caller-side SKILL.md (delegation patterns)
-tests/                 Comprehensive test suite (unit, cloud gateway, chat, approvals)
+ops/curator/           Nightly Knowledge-Graph curator service & Telegram dispatch
+skills/                Caller-side SKILL.md (botex) + server-side skill packs
+tests/                 Comprehensive test suite (615 unit, cloud gateway, chat, approvals)
+deploy/oracle-vps/     systemd units & one-click installer for Oracle A1.Flex ARM64
 docs/
   TUTORIAL.md          Architecture deep dive and technical walkthrough
 ```

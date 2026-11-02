@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../api/client'
-import type { MemoryEntry, MemorySaveRequest, MemoryScope, GraphNode, GraphEdge, GraphHealth, BacklinkItem } from '../api/types'
+import type { MemoryEntry, MemorySaveRequest, MemoryScope, GraphNode, GraphEdge, GraphHealth, BacklinkItem, CuratorStatus, CuratorRunRequest } from '../api/types'
 
 export const useMemoryStore = defineStore('memory', () => {
   const entries = ref<MemoryEntry[]>([])
@@ -14,6 +14,10 @@ export const useMemoryStore = defineStore('memory', () => {
   const isSaving = ref<boolean>(false)
   const errorMessage = ref<string | null>(null)
 
+  // Curator State
+  const curatorStatus = ref<CuratorStatus | null>(null)
+  const isCuratorRunning = ref<boolean>(false)
+
   // Graph and Backlinks State
   const viewMode = ref<'cards' | 'graph'>('cards')
   const graphNodes = ref<GraphNode[]>([])
@@ -21,6 +25,7 @@ export const useMemoryStore = defineStore('memory', () => {
   const graphHealth = ref<GraphHealth | null>(null)
   const isGraphLoading = ref<boolean>(false)
   const activeBacklinks = ref<BacklinkItem[]>([])
+
 
   async function fetchMemory() {
     isLoading.value = true
@@ -153,7 +158,46 @@ export const useMemoryStore = defineStore('memory', () => {
     }
   }
 
+  async function fetchCuratorStatus() {
+    try {
+      const res = await api.getCuratorStatus()
+      if (res) {
+        curatorStatus.value = res
+      }
+    } catch (err) {
+      console.warn('Failed to fetch curator status:', err)
+    }
+  }
+
+  async function triggerCuratorRun(options: CuratorRunRequest = {}) {
+    isCuratorRunning.value = true
+    try {
+      const res = await api.runCurator({
+        force: true,
+        scope: activeScope.value,
+        ...options
+      })
+      if (res) {
+        await fetchCuratorStatus()
+        await fetchMemory()
+        if (viewMode.value === 'graph') {
+          await fetchGraph()
+        }
+      }
+      return res
+    } catch (err: any) {
+      errorMessage.value = err?.message || 'Curator run failed'
+      throw err
+    } finally {
+      isCuratorRunning.value = false
+    }
+  }
+
   return {
+    curatorStatus,
+    isCuratorRunning,
+    fetchCuratorStatus,
+    triggerCuratorRun,
     viewMode,
     graphNodes,
     graphEdges,
@@ -177,3 +221,4 @@ export const useMemoryStore = defineStore('memory', () => {
     deleteEntry
   }
 })
+

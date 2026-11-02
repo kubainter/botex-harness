@@ -28,8 +28,8 @@ A start/poll pattern (`start_task` → task_id → `get_task_status`) lets
 clients detach, poll, and run several chunks in parallel. The implementation
 uses an in-process task registry + `asyncio`, with a concurrency cap and TTL
 cleanup. The engine loop already returns a structured result dict.
-Mitigations in place today: `max_duration_s` (900s), `request_timeout_s`
-(300s per single call).
+Mitigations in place today: `max_duration_s` (2200s), `request_timeout_s`
+(3600s per single call).
 
 ### 2. Per-tier fallback chains — implemented
 Today `tier -> model_slug`; AGY's design review suggested
@@ -118,6 +118,28 @@ Stage 4.7 introduces a dedicated **Skill Vault** (`~/.botex/skills/<slug>/` with
 - **Centralized Skill Hub:** Installed skills can be attached to BoteX tasks (`skills=[...]`) alongside a `recipe`, and are also exposed via MCP (`list_skills`, `read_skill`) so any agent connecting over VPN shares one skill library.
 - **Workspace root normalization:** Keep the PWA bound to the server's configured workspace (no raw host path picker over HTTP) while normalizing self-referential workspace root paths (e.g. `list_dir("harness")` inside `.../harness` -> `"."`).
 
+### 11. Warning-shot nudge for failed mutations (symmetry with read-only nudge)
+Observed on NVIDIA `nemotron-3-ultra-550b`: reasoning models whose edit
+grammar does not match the engine's patch format retried an identical
+mutation call three times and were killed by `STAGNANT_ROLLBACK` — correct
+anti-burn behavior, but the read-only loop gets a coaching nudge at 3
+repeats (`"You are repeating identical read-only calls..."`) while
+`failed_mutations_streak`/`stagnant_turns` go straight to rollback with no
+warning. Add a symmetric pre-kill nudge at `failed_mutations_streak == 2`
+(or `stagnant_turns == 2`) injecting the last mutation's concrete error and
+a "simplify approach, N attempts left" message — gives good models a
+course-correction turn before the atomic rollback. ~15 lines in
+`engine.py` next to the existing nudge at ~line 2894. Optionally make the
+threshold configurable per mode (`edit` could tolerate 4-5).
+
+### 12. Task-event emitter TTL eviction
+`botex/events.py` keeps one emitter (≤1000-event ring) per task in
+`_REGISTRY` forever — mirroring the already-unbounded `_TASKS` history in
+`server_cloud.py`. Fine at hundreds of tasks, but a long-lived gateway
+accumulates ~200 KB per task worst-case. Add TTL/LRU eviction (e.g. drop
+emitters N hours after terminal state, or when the `_TASKS` entry is
+evicted) once `_TASKS` gains a bound of its own.
+
 ## Later — needs design or an external dependency
 
 ### Plan / dry-run mode (`mode="plan"`)
@@ -195,12 +217,15 @@ Implementation plan, when resumed:
    `decisions_models` docstring in `config.py` (it currently describes only
    the rejection path).
 
-### Smart Context Scaling (task-size-aware model routing)
-`recommend_models` exists and picks cost-effective models by task type, but
-does not estimate task size. Next step: derive expected context from the
-workspace outline (cheap) and route tiny tasks to small-context cheap
-models, huge repos to 1M+ context models. `engine.mode_profiles` already
-routes `readonly` -> `fast`; this generalizes the idea to size.
+### Smart Context Scaling (task-size-aware model routing) — partially implemented
+`recommend_models` exists and picks cost-effective models by task type, and
+`estimate_task_tier(prompt, files, outline_lines)` now lives in
+`botex/benchmarks.py` (`high` / `standard` / `budget` from prompt, file
+count, and outline size) — but it is not yet wired into task routing.
+Next step: call the estimator during candidate resolution and route tiny
+tasks to small-context cheap models, huge repos to 1M+ context models.
+`engine.mode_profiles` already routes `readonly` -> `fast`; this
+generalizes the idea to size.
 
 ### `net` tool (`read_url` / `fetch_url` / `search_web`) — implemented
 `read_url` is a restricted, read-only tool. It requires explicit
@@ -340,12 +365,31 @@ rest.
 
 ## Done recently (for reference)
 
+- Stage 4.8 groundwork: canonical handoff envelope
+  (`CANONICAL_HANDOFF_SCHEMA_V1` + `format_handoff_response` in
+  `botex/contracts.py`), `ProviderCircuitBreaker` in `botex/retry.py`,
+  `estimate_task_tier` in `botex/benchmarks.py`, OTel-style spans in
+  `botex/tracing.py`. Landed and unit-tested, but not yet invoked inside
+  the engine/provider request path — treat as foundation code, not shipped
+  behavior.
+- Task event emitters (`botex/events.py`): per-task `TaskEventEmitter` ring
+  feeding live `GET /api/tasks/{id}/events` SSE streams and
+  `POST /api/tasks/{id}/followup` continuation on the Cloud Gateway
+- Devin ACP delegation bridge (`botex/delegation.py`): spawn/monitor/cancel
+  external `devin` executor runs with a public `/api/delegation/devin`
+  availability probe (`delegation.devin` config)
+- Knowledge-Graph curator daemon (`ops/curator/` + `botex/curator.py`
+  shim): scheduled vault synthesis, `GET /api/curator/status`,
+  `POST /api/curator/run`, CLI `python -m ops.curator.curator_service`,
+  optional Telegram alerts (`docs/TELEGRAM_NOTIFICATIONS.md`),
+  `deploy/oracle-vps/botex-nightly-curator.{service,timer}` units
 - Google AI Studio provider (`GoogleAIStudioProvider` in `botex/providers.py`;
   `google`/`aistudio`/`gemini` registry aliases, `GEMINI_API_KEY` >
   `GOOGLE_API_KEY` > `secrets.google_api_key` key resolution, configured
   `pricing_overrides`/`capabilities` standing in for a catalog that publishes
   neither, no credits API, Gemini `thought_signature` echoed via
   `extra_content` so thinking turns stay valid)
+- Free-tier rate limiting and state carryover: token-bucket rate limiter (`botex/rate_limiter.py`) tracking RPM/TPM with debt queues and cooldown windows; in-flight task checkpointing (`botex/state.py`) capturing plan steps, findings, and inspected files across model and provider fallbacks without losing context after clean snapshot rollbacks
 - Shared retry layer (`botex/retry.py`): unbilled-failure backoff for
   provider calls — HTTP 429, connection errors, provider-blessed overloads
   (Google 503) — with server delay hints (`Retry-After`, `retryDelay`,
