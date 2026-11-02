@@ -208,6 +208,7 @@ async def test_run_botex_task_provider_fallback_rotation(
 ):
     """When all models of provider-1 fail, engine rotates to provider-2 per provider_fallbacks config."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-or-key")
+    monkeypatch.setenv("OPENROUTER_API_FREE_KEY", "test-or-free-key")
     monkeypatch.setenv("NVIDIA_API_KEY", "test-nv-key")
     cfg = copy.deepcopy(load_config())
     cfg["provider_fallbacks"] = {"openrouter-free": ["nvidia"]}
