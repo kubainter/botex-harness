@@ -451,10 +451,25 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         tc_deltas = _get(delta, "tool_calls")
         if tc_deltas:
             for tc in tc_deltas:
-                idx = _safe_int(_get(tc, "index", 0), 0)
+                raw_idx = _get(tc, "index")
+                tc_id_val = _get(tc, "id")
+                if raw_idx is not None:
+                    idx = _safe_int(raw_idx, 0)
+                elif tc_id_val:
+                    existing_idx = next(
+                        (k for k, v in accumulated_tool_calls.items() if v.get("id") == tc_id_val),
+                        None,
+                    )
+                    idx = (
+                        existing_idx
+                        if existing_idx is not None
+                        else (max(accumulated_tool_calls.keys(), default=-1) + 1)
+                    )
+                else:
+                    idx = max(accumulated_tool_calls.keys(), default=-1) + 1
                 if idx not in accumulated_tool_calls:
                     accumulated_tool_calls[idx] = {
-                        "id": _get(tc, "id") or f"call_{idx}",
+                        "id": tc_id_val or f"call_{idx}",
                         "name": _get(_get(tc, "function"), "name") or "",
                         "arguments": "",
                         "extra_content": None,
@@ -689,7 +704,19 @@ class BaseProvider(ABC):
     def get_model_capabilities(self, model: str) -> Dict[str, Any]:
         """Return model capability overrides declared in config."""
         caps = self.config.get("capabilities") or {}
-        return caps.get(model) or {}
+        if not isinstance(caps, dict):
+            return {}
+        raw_key = (model or "").strip()
+        if raw_key in caps:
+            return caps[raw_key] or {}
+        bare_key = raw_key.removeprefix("models/")
+        if bare_key in caps:
+            return caps[bare_key] or {}
+        low_bare = bare_key.lower()
+        for k, v in caps.items():
+            if isinstance(k, str) and k.removeprefix("models/").lower() == low_bare:
+                return v or {}
+        return {}
 
     def fetch_catalog(
         self,
