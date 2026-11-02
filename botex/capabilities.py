@@ -3,9 +3,9 @@
 """
 BoteX Capability Modes
 ======================
-Orthogonal capability flags + named mode presets. A mode is only a preset —
-explicit ``allow_*`` flags may ADD capabilities, never remove them
-(``readonly`` stays readonly).
+ Orthogonal capability flags + named mode presets. A mode is a preset with
+ explicit opt-ins, except that ``readonly`` and ``chat`` remain hard
+ read-only modes and cannot gain local mutation or execution capabilities.
 
 Resolution (fail-closed):
     explicit allow_* flags  >  preset mode  >  engine.default_mode  >  "edit"
@@ -53,20 +53,32 @@ TOOL_REGISTRY = {
     "apply_patch": ToolPolicy(required_scopes=[CAP_WRITE], risk=RiskLevel.MEDIUM),
     "create_file": ToolPolicy(required_scopes=[CAP_WRITE], risk=RiskLevel.MEDIUM),
     "delete_file": ToolPolicy(
-        required_scopes=[CAP_DESTRUCTIVE], risk=RiskLevel.HIGH, approval_required=True
+        required_scopes=[CAP_WRITE, CAP_DESTRUCTIVE],
+        risk=RiskLevel.HIGH,
+        approval_required=True,
     ),
     "move_file": ToolPolicy(
-        required_scopes=[CAP_DESTRUCTIVE], risk=RiskLevel.HIGH, approval_required=True
+        required_scopes=[CAP_WRITE, CAP_DESTRUCTIVE],
+        risk=RiskLevel.HIGH,
+        approval_required=True,
     ),
     "run_command": ToolPolicy(
-        required_scopes=[CAP_EXEC], risk=RiskLevel.HIGH, approval_required=True
+        required_scopes=[CAP_WRITE, CAP_EXEC],
+        risk=RiskLevel.HIGH,
+        approval_required=True,
     ),
     "read_url": ToolPolicy(required_scopes=[CAP_NET], risk=RiskLevel.MEDIUM),
 }
 
 # Backwards compatibility mapping for legacy capability lookups
 TOOL_CAPABILITY = {
-    name: policy.required_scopes[0]
+    name: (
+        CAP_DESTRUCTIVE
+        if CAP_DESTRUCTIVE in policy.required_scopes
+        else CAP_EXEC
+        if CAP_EXEC in policy.required_scopes
+        else policy.required_scopes[0]
+    )
     for name, policy in TOOL_REGISTRY.items()
     if policy.required_scopes
 }
@@ -111,11 +123,18 @@ def resolve_capabilities(
     ``engine.default_mode`` in the config, then ``edit``. An unknown mode
     raises ``ValueError`` (fail-closed — never silently downgrade or upgrade).
 
-    Explicit ``allow_*`` flags can only widen the preset, never narrow it.
-    ``net`` is deliberately not part of any preset — it is an exfiltration /
-    prompt-injection axis and must be opted into on its own.
+    Explicit ``allow_*`` flags can widen ordinary mutating presets, never
+    narrow them. ``readonly`` and ``chat`` are hard read-only modes: they may
+    opt into network reads, but not local writes, destructive tools, or
+    command execution. ``net`` is deliberately not part of any preset — it is
+    an exfiltration / prompt-injection axis and must be opted into on its own.
     """
     chosen = resolve_mode_name(mode)
+    if chosen in {"readonly", "chat"} and (allow_destructive or allow_exec):
+        raise ValueError(
+            f"Mode '{chosen}' is hard read-only and cannot enable "
+            "destructive operations or command execution."
+        )
     caps = set(MODES[chosen])
     if allow_destructive:
         caps.add(CAP_DESTRUCTIVE)

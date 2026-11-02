@@ -14,18 +14,19 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
+from dataclasses import replace as _dc_replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from .config import PROJECT_ROOT
     from .providers import BaseProvider, ProviderRegistry
-    from .security import coerce_text, mask_secrets
+    from .security import mask_secrets
     from .wallet import _sanitize_raw_payload
 except (ImportError, ValueError):
     from config import PROJECT_ROOT
     from providers import BaseProvider, ProviderRegistry
-    from security import coerce_text, mask_secrets
+    from security import mask_secrets
     from wallet import _sanitize_raw_payload
 
 # Allowlist of verified active models hosted on NVIDIA Cloud Functions
@@ -246,9 +247,12 @@ class ModelCatalog:
             self.load()
         if model_id in self._models:
             return self._models[model_id]
-        norm = model_id.strip().lower()
+        bare = (model_id or "").strip().removeprefix("models/")
+        if bare in self._models:
+            return self._models[bare]
+        norm = bare.lower()
         for mid, meta in self._models.items():
-            if mid.strip().lower() == norm:
+            if mid.strip().removeprefix("models/").lower() == norm:
                 return meta
         return None
 
@@ -355,9 +359,10 @@ class ModelCatalog:
             self._write_cache_entry(self._models)
             return self._models
         except Exception as exc:
-            masked_err = mask_secrets(str(exc))
-            err_msg = f"[BoteX] Catalog fetch failed ({masked_err}); using stale cache if any.\n"
-            sys.stderr.write(coerce_text(err_msg))
+            err_msg = (
+                f"[BoteX] Catalog fetch failed ({type(exc).__name__}); using stale cache if any.\n"
+            )
+            sys.stderr.write(err_msg)
 
         # Stale cache fallback on network/HTTP exception
         if isinstance(cached_entry, dict):
@@ -401,6 +406,8 @@ class ModelCatalog:
     def _parse_raw_entry(self, raw: Dict[str, Any], deny_patterns: Sequence[str]) -> ModelMetadata:
         """Parse raw provider JSON dictionary into standardized ModelMetadata."""
         slug = str(raw.get("id") or "")
+        if self.provider_name in ("google", "gemini", "aistudio") and slug.startswith("models/"):
+            slug = slug.removeprefix("models/")
         name = mask_secrets(str(raw.get("name") or slug))
         clean_raw = _sanitize_raw_payload(raw) if isinstance(raw, (dict, list)) else raw
 
@@ -529,8 +536,8 @@ class ModelCatalog:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
             self.cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:
-            err_msg = f"[BoteX] Failed to write catalog cache: {mask_secrets(str(exc))}\n"
-            sys.stderr.write(coerce_text(err_msg))
+            err_msg = f"[BoteX] Failed to write catalog cache: {type(exc).__name__}\n"
+            sys.stderr.write(err_msg)
 
 
 _VALID_PROVIDERS_MAP: Dict[str, str] = {
@@ -743,13 +750,19 @@ def get_consolidated_models(
     def _add_meta(meta: ModelMetadata, target_provider: str) -> None:
         prov_literal = _VALID_PROVIDERS_MAP.get(target_provider, "openrouter")
         prov_cfg = providers_cfg.get(prov_literal) if isinstance(providers_cfg, dict) else None
-        # Local endpoints (e.g. Ollama / Bielik) cannot bill per request —
-        # they are always free, and prompts never leave the operator's host.
+        # Local endpoints (e.g. Ollama / Bielik) and quota/package-bound
+        # providers (Google AI Studio, NVIDIA NIM) do not bill per token —
+        # they are zero-cost in BoteX.
         local_free = bool(
             isinstance(prov_cfg, dict)
-            and (prov_cfg.get("local") or prov_cfg.get("api_key_fallback"))
+            and (
+                prov_cfg.get("local")
+                or prov_cfg.get("free_tier")
+                or prov_cfg.get("api_key_fallback")
+            )
         )
-        free_flag = bool(meta.is_free) or local_free
+        provider_free = prov_literal in ("ollama", "nvidia", "google", "openrouter-free")
+        free_flag = bool(meta.is_free) or local_free or provider_free
         # Route OpenRouter free models to openrouter-free provider when enabled
         if prov_literal == "openrouter" and free_flag and "openrouter-free" in norm_providers:
             prov_literal = "openrouter-free"
@@ -760,7 +773,7 @@ def get_consolidated_models(
         comp_p = 0.0 if free_flag else round(float(meta.completion_price_per_m or 0.0), 4)
         zdr_flag = (
             bool(meta.is_zdr_compliant)
-            if local_free
+            if (local_free or prov_literal in ("nvidia", "google"))
             else False
             if (free_flag or prov_literal == "openrouter-free")
             else bool(meta.is_zdr_compliant)
@@ -784,6 +797,12 @@ def get_consolidated_models(
         entries_by_key[dedup_key] = item
 
     loaded_by_base_url: Dict[str, List[ModelMetadata]] = {}
+    try:
+        from .denylist import DenylistFilter
+    except ImportError:
+        from denylist import DenylistFilter
+
+    deny_filter = DenylistFilter(config)
     for prov_name in norm_providers:
         pcfg = providers_cfg.get(prov_name) if isinstance(providers_cfg, dict) else None
         cat = ModelCatalog(
@@ -802,6 +821,12 @@ def get_consolidated_models(
 
         for m in models_list:
             if prov_name == "nvidia" and m.id not in _ACTIVE_NVIDIA_MODELS:
+                continue
+            # Google's /models catalog prefixes ids ("models/gemini-…") — the
+            # OpenAI-compatible chat endpoint expects the bare slug.
+            if prov_name == "google" and m.id.startswith("models/"):
+                m = _dc_replace(m, id=m.id.removeprefix("models/"))
+            if not deny_filter.is_allowed(m.id, provider=prov_name):
                 continue
             _add_meta(m, prov_name)
 
@@ -900,7 +925,7 @@ def get_consolidated_models(
                 "id": nv_seed.id,
                 "name": nv_seed.name,
                 "provider": "nvidia",
-                "is_free": False,
+                "is_free": True,
                 "context_length": 131072,
                 "pricing": {"prompt_per_m": 0.0, "completion_per_m": 0.0},
                 "supports_tools": True,
@@ -932,26 +957,23 @@ def get_consolidated_models(
 
     # Seed configured Google AI Studio profile models — same reasoning as
     # the Ollama seed: the provider stays visible in offline/test
-    # environments where its /models fetch returns nothing. Prices come
-    # from pricing_overrides so the models are never shown as free.
+    # environments where its /models fetch returns nothing.
     if "google" in norm_providers:
         g_cfg = providers_cfg.get("google") if isinstance(providers_cfg, dict) else None
         g_models = (g_cfg.get("models") if isinstance(g_cfg, dict) else None) or {}
-        g_prices = (g_cfg.get("pricing_overrides") if isinstance(g_cfg, dict) else None) or {}
         g_caps = (g_cfg.get("capabilities") if isinstance(g_cfg, dict) else None) or {}
         seed_ids = [s for s in g_models.values() if isinstance(s, str) and s.strip()]
         for slug in dict.fromkeys(seed_ids):
             if f"google:{slug}" not in entries_by_key:
-                ov = g_prices.get(slug) or {}
                 caps = g_caps.get(slug) or {}
                 _add_meta(
                     ModelMetadata(
                         id=slug,
                         name="",
                         context_length=int(caps.get("context_length") or 0),
-                        prompt_price_per_m=ov.get("input"),
-                        completion_price_per_m=ov.get("output"),
-                        supports_tools=caps.get("supports_tools"),
+                        prompt_price_per_m=0.0,
+                        completion_price_per_m=0.0,
+                        supports_tools=caps.get("supports_tools", True),
                         is_zdr_compliant=True,
                     ),
                     "google",

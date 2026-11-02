@@ -47,7 +47,7 @@
         <button
           type="button"
           class="min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded-lg bg-brand-blue hover:bg-blue-600 text-xs font-semibold text-white transition flex items-center space-x-1 shrink-0"
-          @click="showCreateModal = true"
+          @click="openCreateModal"
         >
           <PlusIcon class="w-3.5 h-3.5" />
           <span>{{ t('addMemory') }}</span>
@@ -64,12 +64,74 @@
       <button type="button" class="shrink-0 underline hover:text-white min-h-[44px] px-2" @click="refreshCurrentView">{{ t('refresh') }}</button>
     </div>
 
+    <!-- Curator Status Banner / Card -->
+    <div
+      v-if="curatorStatus"
+      class="rounded-xl border border-botex-800 bg-botex-900/60 p-3.5 sm:p-4 text-xs transition space-y-2.5"
+    >
+      <div class="flex flex-wrap items-center justify-between gap-2.5">
+        <div class="flex items-center space-x-2.5">
+          <div
+            class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+            :class="curatorStatus.is_healthy ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60' : 'bg-amber-950/60 text-amber-400 border border-amber-800/60'"
+          >
+            <ShieldCheckIcon v-if="curatorStatus.is_healthy" class="w-4 h-4" />
+            <SparklesIcon v-else class="w-4 h-4" />
+          </div>
+          <div>
+            <div class="flex items-center space-x-2">
+              <span class="font-bold text-slate-100">
+                {{ locale === 'pl' ? 'Nocny Kurator Grafu Wiedzy' : 'Knowledge Graph Curator' }}
+              </span>
+              <span
+                class="px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold"
+                :class="curatorStatus.is_healthy ? 'bg-emerald-900/50 text-emerald-300 border border-emerald-700/50' : 'bg-amber-900/50 text-amber-300 border border-amber-700/50'"
+              >
+                {{ curatorStatus.is_healthy ? (locale === 'pl' ? 'Zdrowy' : 'Healthy') : (locale === 'pl' ? 'Wymaga uwagi' : 'Attention') }}
+              </span>
+              <span v-if="curatorStatus.tier_used && curatorStatus.tier_used !== 'none'" class="text-[10px] font-mono text-slate-400 bg-botex-950 px-1.5 py-0.5 rounded border border-botex-800">
+                {{ curatorStatus.tier_used }}
+              </span>
+            </div>
+            <p v-if="curatorStatus.summary" class="text-slate-300 text-[11px] mt-0.5 line-clamp-1">
+              {{ curatorStatus.summary }}
+            </p>
+          </div>
+        </div>
+
+        <div class="flex items-center space-x-2 shrink-0">
+          <button
+            type="button"
+            :disabled="isCuratorRunning"
+            class="min-h-[44px] lg:min-h-[32px] px-3 py-1 rounded-lg bg-botex-800 hover:bg-botex-700 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5 disabled:opacity-50"
+            @click="handleRunCurator"
+          >
+            <RefreshCwIcon class="w-3.5 h-3.5 text-cyan-400" :class="{ 'animate-spin': isCuratorRunning }" />
+            <span>{{ isCuratorRunning ? (locale === 'pl' ? 'Analiza w toku...' : 'Curating...') : (locale === 'pl' ? 'Uruchom Kuratora' : 'Run Curator') }}</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Quick Metrics Strip -->
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-slate-400 pt-1 border-t border-botex-800/60">
+        <span>{{ locale === 'pl' ? 'Węzły' : 'Nodes' }}: <strong class="text-slate-200">{{ curatorStatus.total_nodes }}</strong></span>
+        <span>{{ locale === 'pl' ? 'Relacje' : 'Edges' }}: <strong class="text-slate-200">{{ curatorStatus.total_edges }}</strong></span>
+        <span>{{ locale === 'pl' ? 'Osierocone' : 'Orphans' }}: <strong :class="curatorStatus.orphan_count > 0 ? 'text-amber-400 font-bold' : 'text-slate-200'">{{ curatorStatus.orphan_count }}</strong></span>
+        <span>{{ locale === 'pl' ? 'Martwe linki' : 'Broken' }}: <strong :class="curatorStatus.broken_count > 0 ? 'text-rose-400 font-bold' : 'text-slate-200'">{{ curatorStatus.broken_count }}</strong></span>
+        <span v-if="curatorStatus.last_run_timestamp" class="text-slate-400">
+          {{ locale === 'pl' ? 'Ostatni audyt' : 'Last run' }}: {{ new Date(curatorStatus.last_run_timestamp).toLocaleTimeString() }}
+        </span>
+      </div>
+    </div>
+
     <!-- Filter Component -->
     <MemoryFilter
+
       v-model:scope="activeScope"
       v-model:query="searchQuery"
       v-model:kind="filterKind"
       v-model:tag="filterTag"
+      v-model:hide-receipts="hideReceipts"
       @search="refreshCurrentView"
     />
 
@@ -83,8 +145,8 @@
       </div>
       <MemoryGraphView
         v-else
-        :nodes="graphNodes"
-        :edges="graphEdges"
+        :nodes="filteredGraphNodes"
+        :edges="filteredGraphEdges"
         :health="graphHealth"
         @select-node="handleSelectGraphNode"
       />
@@ -93,7 +155,7 @@
     <!-- CARDS LIST MODE -->
     <div v-else class="space-y-4">
       <div class="flex items-center justify-between text-xs text-slate-300 px-1">
-        <span class="font-semibold uppercase tracking-wider font-mono">{{ t('vaultEntries') }} ({{ entries.length }})</span>
+        <span class="font-semibold uppercase tracking-wider font-mono">{{ t('vaultEntries') }} ({{ visibleEntries.length }})</span>
       </div>
 
       <!-- Skeleton Loader -->
@@ -113,14 +175,14 @@
       </div>
 
       <div
-        v-else-if="entries.length === 0"
+        v-else-if="visibleEntries.length === 0"
         class="rounded-xl border border-botex-800 bg-botex-900/50 p-10 text-center text-slate-300 text-xs space-y-3"
       >
         <p>{{ t('noMemoryFound') }}</p>
         <button
           type="button"
           class="inline-flex items-center space-x-1.5 min-h-[44px] px-3.5 py-2 rounded-lg bg-botex-800 hover:bg-botex-700 border border-botex-700 text-xs font-medium text-slate-100 transition"
-          @click="showCreateModal = true"
+          @click="openCreateModal"
         >
           <PlusIcon class="w-3.5 h-3.5 text-cyan-400" />
           <span>{{ t('addMemory') }}</span>
@@ -129,11 +191,13 @@
 
       <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <MemoryCard
-          v-for="entry in entries"
+          v-for="entry in visibleEntries"
           :key="entry.memory_id"
           :entry="entry"
           @select="handleSelectCard(entry)"
           @delete="handleDeleteCard(entry)"
+          @select-link="loadOtherNode"
+          @select-tag="(t) => { filterTag = t }"
         />
       </div>
     </div>
@@ -188,7 +252,7 @@
             <h4 class="font-semibold text-slate-200 text-xs">{{ locale === 'pl' ? 'Treść Notatki' : 'Note Content' }}</h4>
             <span class="text-xs font-mono text-slate-400 uppercase">{{ selectedNode.scope }}</span>
           </div>
-          <MarkdownViewer v-if="nodeContent" :content="nodeContent" />
+          <MarkdownViewer v-if="nodeContent" :content="nodeContent" @navigate-wikilink="loadOtherNode" />
           <div v-else class="text-slate-400 italic text-xs py-4 text-center">
             {{ locale === 'pl' ? 'Ładowanie zawartości...' : 'Loading content...' }}
           </div>
@@ -222,7 +286,17 @@
               </Button>
             </template>
           </div>
-          <Button variant="secondary" size="sm" @click="showNodeModal = false; confirmingDeleteNode = false">{{ t('close') }}</Button>
+          <div class="flex items-center space-x-2">
+            <Button
+              v-if="selectedNode"
+              variant="secondary"
+              size="sm"
+              @click="handleEditSelectedNode"
+            >
+              {{ locale === 'pl' ? 'Edytuj' : 'Edit' }}
+            </Button>
+            <Button variant="secondary" size="sm" @click="showNodeModal = false; confirmingDeleteNode = false">{{ t('close') }}</Button>
+          </div>
         </div>
       </template>
     </Modal>
@@ -230,8 +304,8 @@
     <!-- Create Memory Modal -->
     <Modal
       :is-open="showCreateModal"
-      :title="locale === 'pl' ? 'Zapisz notatkę w pamięci' : 'Save Note to Memory Vault'"
-      :subtitle="locale === 'pl' ? 'Notatki są automatycznie indeksowane z wikilinkami [[target]] w Obsidianie.' : 'Notes are indexed with [[target]] wikilinks in Obsidian.'"
+      :title="isEditingEntry ? (locale === 'pl' ? 'Edytuj notatkę w pamięci' : 'Edit Memory Note') : (locale === 'pl' ? 'Zapisz notatkę w pamięci' : 'Save Note to Memory Vault')"
+      :subtitle="isEditingEntry ? `ID: ${newEntry.memory_id}` : (locale === 'pl' ? 'Notatki są automatycznie indeksowane z wikilinkami [[target]] w Obsidianie.' : 'Notes are indexed with [[target]] wikilinks in Obsidian.')"
       max-width="xl"
       @close="showCreateModal = false"
     >
@@ -315,7 +389,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMemoryStore } from '../stores/memory'
 import { useI18n } from '../i18n'
@@ -333,7 +407,9 @@ import {
   RefreshCw as RefreshCwIcon,
   LayoutGrid as LayoutGridIcon,
   Network as NetworkIcon,
-  Link2 as Link2Icon
+  Link2 as Link2Icon,
+  ShieldCheck as ShieldCheckIcon,
+  Sparkles as SparklesIcon
 } from 'lucide-vue-next'
 
 const memoryStore = useMemoryStore()
@@ -346,17 +422,30 @@ const {
   viewMode,
   graphNodes,
   graphEdges,
-  graphHealth
+  graphHealth,
+  curatorStatus,
+  isCuratorRunning
 } = storeToRefs(memoryStore)
 
 const { locale, t } = useI18n()
 
+async function handleRunCurator() {
+  try {
+    await memoryStore.triggerCuratorRun()
+  } catch (err) {
+    console.warn('Manual curator run failed:', err)
+  }
+}
+
 const showCreateModal = ref(false)
 const showNodeModal = ref(false)
 const selectedNode = ref<GraphNode | null>(null)
+const confirmingDeleteNode = ref(false)
+
 const nodeContent = ref<string>('')
 const nodeBacklinks = ref<BacklinkItem[]>([])
 const rawTags = ref('architecture, pkm')
+const hideReceipts = ref(false)
 
 const newEntry = ref<MemorySaveRequest>({
   title: '',
@@ -367,11 +456,43 @@ const newEntry = ref<MemorySaveRequest>({
   workspace_dir: '.'
 })
 
-onMounted(() => {
-  memoryStore.fetchMemory()
+const isEditingEntry = computed(() => Boolean(newEntry.value.memory_id))
+
+function isTaskReceipt(tags: string[] | undefined, id: string): boolean {
+  if (id.startsWith('mem_task_')) return true
+  return (tags || []).some((tag) => tag === 'task-receipt')
+}
+
+const visibleEntries = computed(() => {
+  if (!hideReceipts.value) return entries.value
+  return entries.value.filter((e) => !isTaskReceipt(e.tags, e.memory_id))
 })
 
-watch([activeScope, filterKind, filterTag], () => {
+const filteredGraphNodes = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  const kind = filterKind.value
+  const tag = filterTag.value.trim().toLowerCase().replace(/^#/, '')
+  return graphNodes.value.filter((n) => {
+    if (hideReceipts.value && isTaskReceipt(n.tags, n.id)) return false
+    if (kind && n.kind !== kind) return false
+    if (tag && !(n.tags || []).some((t) => t.toLowerCase() === tag)) return false
+    if (q && !`${n.title} ${n.id} ${(n.tags || []).join(' ')}`.toLowerCase().includes(q)) return false
+    return true
+  })
+})
+
+const filteredGraphEdges = computed(() => {
+  const ids = new Set(filteredGraphNodes.value.map((n) => n.id))
+  return graphEdges.value.filter((e) => ids.has(e.source) && ids.has(e.target))
+})
+
+onMounted(() => {
+  memoryStore.fetchMemory()
+  memoryStore.fetchCuratorStatus()
+})
+
+
+watch([activeScope, filterKind, filterTag, hideReceipts], () => {
   if (viewMode.value === 'graph') {
     memoryStore.fetchGraph()
   } else {
@@ -463,6 +584,37 @@ async function loadOtherNode(nodeId: string) {
   }
 }
 
+function openCreateModal() {
+  newEntry.value = {
+    title: '',
+    content: '',
+    kind: 'context',
+    tags: [],
+    scope: 'local',
+    workspace_dir: '.',
+    memory_id: undefined
+  }
+  rawTags.value = 'architecture, pkm'
+  showCreateModal.value = true
+}
+
+function handleEditSelectedNode() {
+  if (!selectedNode.value) return
+  newEntry.value = {
+    memory_id: selectedNode.value.id,
+    title: selectedNode.value.title,
+    kind: selectedNode.value.kind || 'context',
+    scope: selectedNode.value.scope === 'global' ? 'global' : 'local',
+    content: nodeContent.value,
+    tags: [...(selectedNode.value.tags || [])],
+    workspace_dir: '.'
+  }
+  rawTags.value = (selectedNode.value.tags || []).join(', ')
+  confirmingDeleteNode.value = false
+  showNodeModal.value = false
+  showCreateModal.value = true
+}
+
 async function handleSaveMemory() {
   if (!newEntry.value.title.trim() || !newEntry.value.content.trim()) return
 
@@ -476,6 +628,7 @@ async function handleSaveMemory() {
     showCreateModal.value = false
     newEntry.value.title = ''
     newEntry.value.content = ''
+    newEntry.value.memory_id = undefined
     if (viewMode.value === 'graph') {
       memoryStore.fetchGraph()
     }
@@ -489,7 +642,6 @@ async function handleDeleteCard(entry: MemoryEntry) {
   }
 }
 
-const confirmingDeleteNode = ref(false)
 
 async function handleDeleteSelectedNode() {
   if (!selectedNode.value) return

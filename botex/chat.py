@@ -519,7 +519,8 @@ class ChatSession:
         profile: str = "",
         system_prompt: Optional[str] = None,
     ) -> None:
-        self.session_id = session_id or f"chat_{uuid.uuid4().hex[:8]}"
+        clean_sid = sanitize_identifier(session_id) if session_id else ""
+        self.session_id = clean_sid or f"chat_{uuid.uuid4().hex[:8]}"
         self.workspace_dir = resolve_workspace(workspace_dir)
         self.model = model
         self.provider = provider
@@ -645,7 +646,12 @@ class ChatSession:
             if not safe_id:
                 return
             sessions_dir = get_chat_sessions_dir(self.workspace_dir)
-            file_path = sessions_dir / f"{safe_id}.json"
+            file_path = next(
+                (f for f in sessions_dir.iterdir() if f.is_file() and f.name == f"{safe_id}.json"),
+                None,
+            )
+            if file_path is None:
+                file_path = sessions_dir / f"{safe_id}.json"
             data = self.to_dict()
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -656,6 +662,20 @@ class ChatSession:
         self.messages.clear()
         self.updated_at = time.time()
         self.save_to_disk()
+
+
+def _find_existing_session_file(base_dir: Path, safe_id: str) -> Optional[Path]:
+    """Resolve an existing session JSON file via directory enumeration to decouple taint."""
+    if not base_dir.is_dir():
+        return None
+    target_name = f"{safe_id}.json"
+    try:
+        for entry in base_dir.iterdir():
+            if entry.is_file() and entry.name == target_name:
+                return entry
+    except Exception:
+        pass
+    return None
 
 
 class ChatManager:
@@ -670,12 +690,11 @@ class ChatManager:
             return None
         ws = resolve_workspace(workspace_dir)
         sessions_dir = get_chat_sessions_dir(ws)
-        file_path = sessions_dir / f"{safe_id}.json"
-        if not file_path.is_file():
-            legacy_path = Path(ws) / ".botex" / "chat_sessions" / f"{safe_id}.json"
-            if legacy_path.is_file():
-                file_path = legacy_path
-            else:
+        file_path = _find_existing_session_file(sessions_dir, safe_id)
+        if file_path is None:
+            legacy_dir = Path(ws) / ".botex" / "chat_sessions"
+            file_path = _find_existing_session_file(legacy_dir, safe_id)
+            if file_path is None:
                 return None
         try:
             with open(file_path, encoding="utf-8") as f:
@@ -780,15 +799,16 @@ class ChatManager:
         if safe_id:
             ws = resolve_workspace(workspace_dir)
             sessions_dir = get_chat_sessions_dir(ws)
-            file_path = sessions_dir / f"{safe_id}.json"
-            if file_path.is_file():
+            file_path = _find_existing_session_file(sessions_dir, safe_id)
+            if file_path is not None:
                 try:
                     file_path.unlink()
                     removed = True
                 except Exception:
                     pass
-            legacy_path = Path(ws) / ".botex" / "chat_sessions" / f"{safe_id}.json"
-            if legacy_path.is_file():
+            legacy_dir = Path(ws) / ".botex" / "chat_sessions"
+            legacy_path = _find_existing_session_file(legacy_dir, safe_id)
+            if legacy_path is not None:
                 try:
                     legacy_path.unlink()
                     removed = True
@@ -1141,7 +1161,11 @@ async def stream_chat_turn(
         # Price guardrail
         _pricing_cfg = load_config().get("pricing", {})
         price_ok, price_reason = check_model_price(
-            effective_model, active_provider_cfg, _pricing_cfg, api_key=api_key or ""
+            effective_model,
+            active_provider_cfg,
+            _pricing_cfg,
+            api_key=api_key or "",
+            provider_name=active_provider_name,
         )
         if not price_ok:
             _rollback_user_message()
@@ -1313,11 +1337,27 @@ async def stream_chat_turn(
                     if tc_deltas:
                         for tc in tc_deltas:
                             raw_idx = (
-                                getattr(tc, "index", 0)
+                                getattr(tc, "index", None)
                                 if not isinstance(tc, dict)
-                                else tc.get("index", 0)
+                                else tc.get("index")
                             )
-                            idx = 0 if raw_idx is None else int(raw_idx)
+                            tc_id = getattr(tc, "id", None) or (
+                                tc.get("id") if isinstance(tc, dict) else None
+                            )
+                            if raw_idx is not None:
+                                idx = int(raw_idx)
+                            elif tc_id:
+                                existing_idx = next(
+                                    (k for k, v in tool_calls_map.items() if v.get("id") == tc_id),
+                                    None,
+                                )
+                                idx = (
+                                    existing_idx
+                                    if existing_idx is not None
+                                    else (max(tool_calls_map.keys(), default=-1) + 1)
+                                )
+                            else:
+                                idx = max(tool_calls_map.keys(), default=-1) + 1
                             if idx not in tool_calls_map:
                                 tool_calls_map[idx] = {
                                     "id": "",
@@ -1330,11 +1370,8 @@ async def stream_chat_turn(
                             )
                             if isinstance(tc_extra, dict):
                                 tool_calls_map[idx]["extra_content"] = tc_extra
-                            tc_id = getattr(tc, "id", None) or (
-                                tc.get("id") if isinstance(tc, dict) else None
-                            )
-                            if tc_id:
-                                tool_calls_map[idx]["id"] += tc_id
+                            if tc_id and not tool_calls_map[idx]["id"]:
+                                tool_calls_map[idx]["id"] = str(tc_id)
                             fn = getattr(tc, "function", None) or (
                                 tc.get("function") if isinstance(tc, dict) else None
                             )

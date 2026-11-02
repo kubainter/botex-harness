@@ -130,11 +130,24 @@
             <option value="">{{ locale === 'pl' ? 'Wszystkie typy' : 'All Types' }}</option>
             <option value="context">Context</option>
             <option value="decision">Architectural Decision</option>
+            <option value="lesson">Meta Lesson</option>
             <option value="handoff">Handoff</option>
-            <option value="bug">Known Bug / Issue</option>
           </select>
         </div>
       </div>
+
+      <!-- Hide auto-generated task receipts -->
+      <label class="flex items-center gap-2 pt-1 cursor-pointer select-none w-fit">
+        <input
+          :checked="hideReceipts"
+          type="checkbox"
+          class="w-4 h-4 rounded border-botex-700 bg-botex-950 accent-cyan-500 cursor-pointer"
+          @change="$emit('update:hideReceipts', ($event.target as HTMLInputElement).checked)"
+        />
+        <span class="text-xs text-slate-300">
+          {{ locale === 'pl' ? 'Ukryj auto-raporty (task-receipt)' : 'Hide auto-reports (task-receipt)' }}
+        </span>
+      </label>
     </div>
   </div>
 </template>
@@ -150,6 +163,7 @@ const props = defineProps<{
   query: string
   kind: string
   tag?: string
+  hideReceipts?: boolean
 }>()
 
 defineEmits<{
@@ -157,6 +171,7 @@ defineEmits<{
   (e: 'update:query', val: string): void
   (e: 'update:kind', val: string): void
   (e: 'update:tag', val: string): void
+  (e: 'update:hideReceipts', val: boolean): void
   (e: 'search'): void
 }>()
 
@@ -180,6 +195,7 @@ const activeCount = computed(() => {
   if (props.query?.trim()) n++
   if (props.kind) n++
   if (props.tag?.trim()) n++
+  if (props.hideReceipts) n++
   return n
 })
 
@@ -191,6 +207,7 @@ const activeChips = computed(() => {
   if (props.kind) chips.push(props.kind)
   if (props.tag?.trim()) chips.push('#' + props.tag.trim())
   if (props.query?.trim()) chips.push('"' + props.query.trim() + '"')
+  if (props.hideReceipts) chips.push('!task-receipt')
   return chips
 })
 </script>

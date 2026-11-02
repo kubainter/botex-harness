@@ -25,6 +25,7 @@ import time
 import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
+from botex.analytics import is_free_model
 from botex.config import PROJECT_ROOT
 
 CACHE_FILE = PROJECT_ROOT / ".model_pricing.json"
@@ -147,10 +148,12 @@ def check_model_tools(
         return True, ""
 
     # Explicit operator declaration wins over catalog metadata — for
-    # providers that publish no capability fields (e.g. NVIDIA), a
+    # providers that publish no capability fields (e.g. NVIDIA, Google), a
     # per-model "supports_tools" flag in providers.<name>.capabilities
     # is the only way to make a model verifiable.
-    overrides = (provider_cfg.get("capabilities") or {}).get(model) or {}
+    caps_map = provider_cfg.get("capabilities") or {}
+    bare_model = (model or "").strip().removeprefix("models/")
+    overrides = caps_map.get(model) or caps_map.get(bare_model) or {}
     if "supports_tools" in overrides:
         supports: Optional[bool] = bool(overrides["supports_tools"])
     else:
@@ -163,6 +166,8 @@ def check_model_tools(
             ttl_hours=float(pricing_cfg.get("cache_ttl_hours", DEFAULT_TTL_H)),
         )
         supports = model_supports_tools(catalog, model)
+        if supports is None and bare_model != model:
+            supports = model_supports_tools(catalog, bare_model)
     if supports is False:
         return False, (
             f"[COMPAT BLOCK] Model '{model}' does not support tool calling "
@@ -182,9 +187,16 @@ def check_model_price(
     provider_cfg: Dict[str, Any],
     pricing_cfg: Dict[str, Any],
     api_key: str = "",
+    provider_name: str = "",
 ) -> Tuple[bool, str]:
     """
     Gate a resolved model against configured price caps.
+
+    Applies strictly to paid, token-billed providers that dynamically
+    publish model pricing in their catalog (e.g. OpenRouter) or carry explicit
+    operator ``pricing_overrides``. Free-tier / quota-bound providers
+    (``nvidia``, ``google`` / ``gemini``, ``openrouter-free``, ``ollama``)
+    bypass the price gate.
 
     Returns (allowed, message). Message is a warning for unknown/dynamic
     pricing or the rejection reason when disallowed.
@@ -192,15 +204,19 @@ def check_model_price(
     if not pricing_cfg.get("enabled", True):
         return True, ""
 
+    if is_free_model(model, provider_cfg, provider_name):
+        return True, ""
+
     base_url = provider_cfg.get("base_url", "")
     if not base_url:
         return True, ""
 
-    # Operator-declared prices win over the catalog — providers that
-    # publish no price list (e.g. Google AI Studio) are only verifiable
-    # through providers.<name>.pricing_overrides.
+    # Operator-declared prices win over the catalog when explicitly set on a
+    # paid provider.
     price: Optional[Tuple[float, float]] = None
-    over = (provider_cfg.get("pricing_overrides") or {}).get(model)
+    bare_model = (model or "").strip().removeprefix("models/")
+    overrides_map = provider_cfg.get("pricing_overrides") or {}
+    over = overrides_map.get(model) or overrides_map.get(bare_model)
     if isinstance(over, dict):
         try:
             price = (float(over.get("input")), float(over.get("output")))
@@ -213,6 +229,8 @@ def check_model_price(
             ttl_hours=float(pricing_cfg.get("cache_ttl_hours", DEFAULT_TTL_H)),
         )
         price = model_price(catalog, model)
+        if price is None and bare_model != model:
+            price = model_price(catalog, bare_model)
 
     if price is None:
         on_unknown = pricing_cfg.get("on_unknown", "allow")

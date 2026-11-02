@@ -34,8 +34,8 @@ try:
         SecurityError,
         coerce_text,
         mask_secrets,
-        resolve_safe_path,
         sanitize_for_storage,
+        sanitize_identifier,
     )
 except (ImportError, ValueError):
     from config import PROJECT_ROOT, load_config
@@ -45,8 +45,8 @@ except (ImportError, ValueError):
         SecurityError,
         coerce_text,
         mask_secrets,
-        resolve_safe_path,
         sanitize_for_storage,
+        sanitize_identifier,
     )
 
 __all__ = [
@@ -150,7 +150,25 @@ def _sanitize_skill_name(name: str) -> str:
         raise SecurityError(
             f"Invalid skill name '{name}'. Only alphanumeric characters, '-' and '_' (max 64 chars) are allowed."
         )
-    return coerce_text(clean)
+    safe = sanitize_identifier(clean)
+    if not safe:
+        raise SecurityError(
+            f"Invalid skill name '{name}'. Only alphanumeric characters, '-' and '_' (max 64 chars) are allowed."
+        )
+    return safe
+
+
+def _find_existing_skill_dir(root: Path, clean_name: str) -> Optional[Path]:
+    """Resolve an existing skill directory via enumeration to decouple taint."""
+    if not root.is_dir():
+        return None
+    try:
+        for entry in root.iterdir():
+            if entry.is_dir() and entry.name == clean_name:
+                return entry
+    except Exception:
+        pass
+    return None
 
 
 def get_skills_dir() -> Path:
@@ -354,8 +372,10 @@ def get_skill(name: str, skills_dir: Optional[Path] = None) -> Dict[str, Any]:
     try:
         clean_name = _sanitize_skill_name(name)
         root = (skills_dir or get_skills_dir()).resolve()
-        skill_dir = resolve_safe_path(root, clean_name)
-        skill_file = resolve_safe_path(skill_dir, "SKILL.md")
+        skill_dir = _find_existing_skill_dir(root, clean_name)
+        if skill_dir is None:
+            return {"ok": False, "error": f"Skill '{clean_name}' not found."}
+        skill_file = skill_dir / "SKILL.md"
         if not skill_file.is_file():
             return {"ok": False, "error": f"Skill '{clean_name}' not found."}
 
@@ -475,9 +495,10 @@ def _validate_and_write_skill(
 
     root = (skills_dir or get_skills_dir()).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    target_dir = resolve_safe_path(root, clean_name)
+    existing_dir = _find_existing_skill_dir(root, clean_name)
+    target_dir = existing_dir if existing_dir is not None else (root / clean_name)
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_file = resolve_safe_path(target_dir, "SKILL.md")
+    target_file = target_dir / "SKILL.md"
     target_file.write_text(full_doc, encoding="utf-8")
 
     parsed = _parse_skill_file(target_file, root)
@@ -669,8 +690,10 @@ def delete_skill(name: str, skills_dir: Optional[Path] = None) -> Dict[str, Any]
     try:
         clean_name = _sanitize_skill_name(name)
         root = (skills_dir or get_skills_dir()).resolve()
-        target_dir = resolve_safe_path(root, clean_name)
-        skill_file = resolve_safe_path(target_dir, "SKILL.md")
+        target_dir = _find_existing_skill_dir(root, clean_name)
+        if target_dir is None:
+            return {"ok": False, "error": f"Skill '{clean_name}' not found."}
+        skill_file = target_dir / "SKILL.md"
         if not skill_file.exists():
             return {"ok": False, "error": f"Skill '{clean_name}' not found."}
 

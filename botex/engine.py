@@ -15,7 +15,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from openai import APITimeoutError, AsyncOpenAI
@@ -29,6 +29,7 @@ try:
         print_run_summary,
     )
     from .approval import ApprovalPolicy, TaskAbortedError, default_approval_manager
+    from .benchmarks import estimate_task_tier, resolve_tier_profile
     from .capabilities import (
         CAP_EXEC,
         CAP_NET,
@@ -58,6 +59,7 @@ try:
         resolve_task_contract,
         should_fallback,
     )
+    from .events import EventKind
     from .exec_tools import command_policy_error, run_command
     from .file_tools import (
         create_file,
@@ -68,7 +70,7 @@ try:
         read_file,
         read_file_lines,
     )
-    from .memory import save_memory
+    from .memory import extract_implicit_links, save_memory
     from .meta_harness import (
         classify_task_taxonomy,
         extract_meta_lesson,
@@ -89,15 +91,20 @@ try:
         sanitize_provider_error,
     )
     from .recipes import list_recipes, load_recipe
-    from .retry import call_with_backoff, describe_retry_error
+    from .retry import (
+        ProviderCircuitBreaker,
+        call_with_backoff,
+        describe_retry_error,
+        get_circuit_breaker,
+    )
     from .security import (
         SecurityError,
         check_model_zdr,
-        coerce_text,
         resolve_safe_path,
         zdr_enforced,
     )
     from .skills import format_skills_prompt_block, triage_skills_for_task
+    from .state import InFlightTaskState
 except (ImportError, ValueError):
     from analytics import (
         calculate_cost_usd,
@@ -107,6 +114,7 @@ except (ImportError, ValueError):
         print_run_summary,
     )
     from approval import ApprovalPolicy, TaskAbortedError, default_approval_manager
+    from benchmarks import estimate_task_tier, resolve_tier_profile
     from capabilities import (
         CAP_EXEC,
         CAP_NET,
@@ -136,6 +144,7 @@ except (ImportError, ValueError):
         resolve_task_contract,
         should_fallback,
     )
+    from events import EventKind
     from exec_tools import command_policy_error, run_command
     from file_tools import (
         create_file,
@@ -146,7 +155,7 @@ except (ImportError, ValueError):
         read_file,
         read_file_lines,
     )
-    from memory import save_memory
+    from memory import extract_implicit_links, save_memory
     from meta_harness import (
         classify_task_taxonomy,
         extract_meta_lesson,
@@ -166,14 +175,19 @@ except (ImportError, ValueError):
         sanitize_provider_error,
     )
     from recipes import list_recipes, load_recipe
-    from retry import call_with_backoff, describe_retry_error
+    from retry import (
+        ProviderCircuitBreaker,
+        call_with_backoff,
+        describe_retry_error,
+        get_circuit_breaker,
+    )
     from security import (
         SecurityError,
         check_model_zdr,
-        coerce_text,
         resolve_safe_path,
         zdr_enforced,
     )
+    from state import InFlightTaskState
 
     from skills import format_skills_prompt_block, triage_skills_for_task
 
@@ -443,6 +457,17 @@ def _tool_signature(name: str) -> str:
         f"{pname}: {(pdef or {}).get('type', 'any')}" for pname, pdef in props.items()
     )
     return f"{name}({inner})"
+
+
+def _emit(progress_cb, event_kind: str, **data) -> None:
+    """Fire a task-progress event; the callback and its consumer must never
+    break the run, so all failures are swallowed here."""
+    if progress_cb is None:
+        return
+    try:
+        progress_cb(event_kind, **data)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -738,6 +763,37 @@ def prune_tool_history(
 # ---------------------------------------------------------------------------
 # Main BoteX Execution Loop
 # ---------------------------------------------------------------------------
+def _task_size_profile(prompt: str, files: Any, engine_cfg: Dict[str, Any]) -> Tuple[str, str]:
+    """Estimate the task tier and map it to a configured model profile.
+
+    Opt-in: an absent or disabled ``engine.task_size_routing`` block
+    returns ``("", "")``. ``files`` is the caller's original file list;
+    the tier->profile map resolves through a module-constant allowlist
+    in ``benchmarks`` so a malformed config entry never leaks a raw
+    string into profile resolution.
+    """
+    routing = engine_cfg.get("task_size_routing")
+    if not isinstance(routing, dict) or not routing.get("enabled"):
+        return "", ""
+    tier = estimate_task_tier(
+        prompt or "", files=files if isinstance(files, list) else None, outline_lines=0
+    )
+    profile = resolve_tier_profile(tier, routing.get("tiers"))
+    return tier, profile
+
+
+def _breaker_cfg_raw(provider_cfg: Optional[Dict[str, Any]]) -> Any:
+    """Raw ``circuit_breaker`` block for a request.
+
+    ``providers.<name>.circuit_breaker`` overrides the engine-level
+    default; ``False`` anywhere disables the breaker for that provider.
+    """
+    provider_raw = (provider_cfg or {}).get("circuit_breaker")
+    if provider_raw is not None:
+        return provider_raw
+    return load_config().get("engine", {}).get("circuit_breaker")
+
+
 async def run_botex_task(
     task: str,
     files: Optional[List[str]] = None,
@@ -765,18 +821,25 @@ async def run_botex_task(
     approval_policy: Optional[str] = None,
     response_format: Optional[Dict[str, Any]] = None,
     fallback_models: Optional[List[str]] = None,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    handoff_context: str = "",
+    files_read_out: Optional[set] = None,
 ) -> Dict[str, Any]:
     """Run one task, using configured model failover only before any write."""
     workspace_dir = resolve_workspace(workspace_dir)
     resolved_profile = profile
+    routed_tier = ""
     if not model and not resolved_profile:
+        engine_cfg = load_config().get("engine", {})
         try:
             chosen_mode = resolve_mode_name(mode)
         except ValueError:
             chosen_mode = ""
-        resolved_profile = (load_config().get("engine", {}).get("mode_profiles") or {}).get(
-            chosen_mode
-        ) or ""
+        resolved_profile = (engine_cfg.get("mode_profiles") or {}).get(chosen_mode) or ""
+        if not resolved_profile:
+            # Task-size routing fills only a fully empty resolution —
+            # explicit model/profile and mode_profiles keep precedence.
+            routed_tier, resolved_profile = _task_size_profile(task, files, engine_cfg)
     candidates = resolve_model_candidates(model, resolved_profile, provider)
     if not candidates:
         denied_msg = (
@@ -798,6 +861,17 @@ async def run_botex_task(
     last_result: Dict[str, Any] = {}
     attempts: List[Dict[str, Any]] = []
     chain_start = time.time()
+    _resolved_kw: Dict[str, Any] = {}
+    if routed_tier:
+        _resolved_kw["routed_tier"] = routed_tier
+    _emit(
+        progress_cb,
+        EventKind.PROVIDER_RESOLVED,
+        provider=provider or "default",
+        profile=resolved_profile,
+        candidates=list(candidates),
+        **_resolved_kw,
+    )
     # A turns_exhausted result may trigger at most one fallback per chain:
     # the next candidate gets the same step budget, so repeating that retry
     # just re-burns the whole read budget on the same starvation pattern.
@@ -818,12 +892,37 @@ async def run_botex_task(
             max_task_duration_s = int(engine_setting("max_duration_s", max_duration_s) or 0)
         except (TypeError, ValueError):
             max_task_duration_s = 0
-    for index, candidate in enumerate(candidates):
+    in_flight_state = InFlightTaskState(goal=task)
+    handoff_context = ""
+    current_prov = _zdr_pname
+
+    cfg = load_config()
+    provider_fallbacks_map = cfg.get("provider_fallbacks", {})
+    fallback_providers: List[str] = []
+    if isinstance(provider_fallbacks_map, dict):
+        configured_fb = provider_fallbacks_map.get(_zdr_pname) or []
+        if isinstance(configured_fb, list):
+            fallback_providers = [str(p) for p in configured_fb if p and p != _zdr_pname]
+        elif isinstance(configured_fb, str) and configured_fb != _zdr_pname:
+            fallback_providers = [configured_fb]
+
+    candidate_list: List[str] = list(candidates)
+    candidate_idx = 0
+    while candidate_idx < len(candidate_list):
+        candidate = candidate_list[candidate_idx]
         attempt_task_id = str(uuid.uuid4())[:8]
         # The attempt stays registered (prune-protected) until the rollback
         # decision is made — a missing registry can never be mistaken for a
         # verified-clean workspace.
         snapshot_manager.begin_task(attempt_task_id, Path(workspace_dir))
+        _emit(
+            progress_cb,
+            EventKind.ATTEMPT_START,
+            model=candidate,
+            provider=current_prov,
+            attempt_index=candidate_idx,
+            attempt_count=len(candidate_list),
+        )
         try:
             try:
                 _extra_once_kw: Dict[str, Any] = {}
@@ -831,6 +930,9 @@ async def run_botex_task(
                     _extra_once_kw["response_format"] = response_format
                 if fallback_models is not None:
                     _extra_once_kw["fallback_models"] = fallback_models
+                _extra_once_kw["progress_cb"] = progress_cb
+                if handoff_context:
+                    _extra_once_kw["handoff_context"] = handoff_context
                 last_result = await _run_botex_task_once(
                     task=task,
                     files=files,
@@ -845,7 +947,7 @@ async def run_botex_task(
                     allow_destructive=allow_destructive,
                     confirm_fn=confirm_fn,
                     api_key=api_key,
-                    provider=provider,
+                    provider=current_prov,
                     mode=mode,
                     allow_exec=allow_exec,
                     output_path=output_path,
@@ -878,6 +980,7 @@ async def run_botex_task(
             last_result["zdr_enforced"] = zdr_on
             attempt_record = {
                 "model": candidate,
+                "provider": current_prov,
                 "task_id": attempt_task_id,
                 "status": last_result.get("status"),
                 "failure_kind": last_result.get("failure_kind"),
@@ -885,6 +988,25 @@ async def run_botex_task(
                 "cost_usd": float(last_result.get("cost_usd") or 0.0),
                 "zdr_enforced": zdr_on,
             }
+            # Record state in in_flight_state checkpoint
+            for f in last_result.get("files_read", []):
+                in_flight_state.add_inspected_file(f)
+            if last_result.get("observations"):
+                for obs in last_result.get("observations", []):
+                    in_flight_state.add_observation(obs)
+            elif last_result.get("summary"):
+                in_flight_state.add_observation(str(last_result["summary"]))
+            elif last_result.get("message"):
+                in_flight_state.add_observation(str(last_result["message"]))
+            in_flight_state.record_attempt(
+                model=candidate,
+                provider=current_prov,
+                failure_kind=last_result.get("failure_kind"),
+                reason=str(last_result.get("message") or ""),
+                turns=int(last_result.get("steps") or 0),
+            )
+            handoff_context = in_flight_state.format_handoff_context()
+
             # Fallback policy: a mutated workspace is handed to the next
             # candidate only after a confirmed full rollback — coverage is
             # the snapshot mutation registry (authoritative) plus the
@@ -909,13 +1031,20 @@ async def run_botex_task(
                 else:
                     last_result["rollback_unconfirmed"] = unconfirmed
             attempts.append(attempt_record)
+            _emit(
+                progress_cb,
+                EventKind.ATTEMPT_END,
+                model=candidate,
+                status=last_result.get("status"),
+                failure_kind=last_result.get("failure_kind"),
+                cost_usd=float(last_result.get("cost_usd") or 0.0),
+            )
             has_mutations = files_dirty or exec_dirty
             chain_expired = (
                 max_task_duration_s > 0 and time.time() - chain_start > max_task_duration_s
             )
             if (
-                index == len(candidates) - 1
-                or last_result.get("ok")
+                last_result.get("ok")
                 or not should_fallback(last_result, has_mutations)
                 or chain_expired
             ):
@@ -924,9 +1053,53 @@ async def run_botex_task(
                 exhaustion_retries += 1
                 if exhaustion_retries > 1:
                     break
+
+            candidate_idx += 1
+            if candidate_idx >= len(candidate_list) and fallback_providers:
+                # A provider whose circuit is OPEN is already failing
+                # upstream — skip it so fallback never burns request
+                # budget on a provider known to be down. get_state is
+                # read-only: a HALF_OPEN provider still gets probed by
+                # call_with_backoff, no probe slot leaks here.
+                breaker = get_circuit_breaker()
+                next_provider = ""
+                while fallback_providers and not next_provider:
+                    candidate_prov = fallback_providers.pop(0)
+                    if breaker.get_state(candidate_prov) == ProviderCircuitBreaker.OPEN:
+                        _emit(
+                            progress_cb,
+                            EventKind.PROVIDER_RESOLVED,
+                            provider=candidate_prov,
+                            profile=resolved_profile,
+                            candidates=[],
+                            skipped="circuit_open",
+                        )
+                        continue
+                    next_provider = candidate_prov
+                next_candidates = (
+                    resolve_model_candidates("", resolved_profile, next_provider)
+                    if next_provider
+                    else []
+                )
+                if next_candidates:
+                    current_prov = next_provider
+                    _zdr_pname, _zdr_pcfg = resolve_provider(current_prov)
+                    zdr_on = zdr_enforced(_zdr_pcfg, bool(allow_non_zdr))
+                    _emit(
+                        progress_cb,
+                        EventKind.PROVIDER_RESOLVED,
+                        provider=current_prov,
+                        profile=resolved_profile,
+                        candidates=list(next_candidates),
+                    )
+                    candidate_list.extend(next_candidates)
         finally:
             snapshot_manager.end_task(attempt_task_id)
     last_result["attempts"] = attempts
+    if routed_tier:
+        last_result["routed_tier"] = routed_tier
+        last_result["routed_profile"] = resolved_profile
+    last_result["in_flight_state"] = in_flight_state.to_dict()
     last_result.setdefault("duration_s", 0.0)
     last_result.setdefault("cost_usd", 0.0)
     last_result.setdefault("applied_skills", [])
@@ -963,6 +1136,8 @@ async def _run_botex_task_once(*args, task_id: Optional[str] = None, **kwargs):
     prune-protected until the fallback policy has finished its
     rollback/verify decision for this attempt."""
     result: Dict[str, Any] = {}
+    attempt_files_read: set = set()
+    kwargs.setdefault("files_read_out", attempt_files_read)
     try:
         result = await _run_botex_task_once_impl(*args, task_id=task_id, **kwargs)
     finally:
@@ -988,6 +1163,8 @@ async def _run_botex_task_once(*args, task_id: Optional[str] = None, **kwargs):
             result["applied_skills"] = [str(s["name"]) for s in matched if s.get("name")]
         except Exception:
             result["applied_skills"] = []
+    if "files_read" not in result and attempt_files_read:
+        result["files_read"] = sorted(attempt_files_read)
     return result
 
 
@@ -1015,9 +1192,21 @@ def _save_task_receipt(
     try:
         clean_prompt = prompt.strip().replace("\r\n", "\n")
         safe_quoted_prompt = clean_prompt[:2000].replace("[[", "[\\[")
-        first_line = (
-            clean_prompt.split("\n")[0].strip()[:80].replace("[[", "[\\[") or "Task Completion"
-        )
+        first_line = "Task Completion"
+        for raw_ln in clean_prompt.split("\n"):
+            cand_ln = raw_ln.strip()
+            if not cand_ln:
+                continue
+            if re.match(
+                r"^#+\s*(?:GOAL|ROLE|CONSTRAINTS|CONTEXT|REFS|TASK|OBJECTIVE)\b",
+                cand_ln,
+                re.IGNORECASE,
+            ):
+                continue
+            first_line = (
+                cand_ln.lstrip("#*- ").strip()[:80].replace("[[", "[\\[") or "Task Completion"
+            )
+            break
         title = f"Task {task_id[:8]} Receipt: {first_line}"
         files_md = (
             "\n".join(f"- `{f}`" for f in sorted(files_touched))
@@ -1052,12 +1241,21 @@ def _save_task_receipt(
             f"```text\n{safe_quoted_prompt}\n```\n"
         )
 
+        mem_dir = root_path / ".botex" / "memory"
+        known_ids = (
+            {f.stem for f in mem_dir.glob("*.md") if f.is_file() and not f.name.startswith("_")}
+            if mem_dir.is_dir()
+            else set()
+        )
+        dedup_refs = extract_implicit_links(clean_prompt, "", known_ids)
+
         return save_memory(
             workspace_dir=str(root_path),
             title=title,
             content=body,
             kind="handoff",
             tags=["task-receipt", "auto-handoff", "done"],
+            links=dedup_refs or None,
             origin="engine",
             scope="local",
         )
@@ -1094,6 +1292,9 @@ async def _run_botex_task_once_impl(
     approval_policy: Optional[str] = None,
     response_format: Optional[Dict[str, Any]] = None,
     fallback_models: Optional[List[str]] = None,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    handoff_context: str = "",
+    files_read_out: Optional[set] = None,
 ) -> Dict[str, Any]:
     """
     Executes an autonomous coding task in workspace_dir using the BoteX engine.
@@ -1364,6 +1565,7 @@ async def _run_botex_task_once_impl(
         model,
         provider_cfg,
         load_config().get("pricing", {}),
+        provider_name=provider_name,
     )
     if not price_ok:
         return {
@@ -1574,7 +1776,11 @@ async def _run_botex_task_once_impl(
                     if not fb_zdr_ok:
                         continue
                     fb_price_ok, _ = await asyncio.to_thread(
-                        check_model_price, fb_clean, provider_cfg, pricing_cfg
+                        check_model_price,
+                        fb_clean,
+                        provider_cfg,
+                        pricing_cfg,
+                        provider_name=provider_name,
                     )
                     if not fb_price_ok:
                         continue
@@ -1597,6 +1803,8 @@ async def _run_botex_task_once_impl(
 
     # 4. Construct Initial Messages with Ephemeral Cache Control
     initial_user_prompt = f"TASK: {task}\n"
+    if handoff_context:
+        initial_user_prompt += f"\n{handoff_context}\n\n"
     if files:
         initial_user_prompt += f"PRIMARY TARGET FILES: {', '.join(files)}\n"
     initial_user_prompt += f"WORKSPACE ROOT: {root_path.as_posix()}\n"
@@ -1656,7 +1864,7 @@ async def _run_botex_task_once_impl(
     ]
 
     files_touched = set()
-    files_read = set()
+    files_read = files_read_out if files_read_out is not None else set()
     lines_added_total = 0
     lines_removed_total = 0
     total_prompt_tokens = 0
@@ -1746,16 +1954,27 @@ async def _run_botex_task_once_impl(
             raw_api_resp = await client.chat.completions.create(**create_kwargs)
             return normalize_response(raw_api_resp)
 
+        def _on_retry_wait(delay, exc):
+            sys.stderr.write(
+                f"[BoteX] {provider_name}/{model}: transient error ({type(exc).__name__}), "
+                f"retrying in {delay:.1f}s\n"
+            )
+            _emit(
+                progress_cb,
+                EventKind.RETRY_WAIT,
+                delay_s=round(float(delay), 2),
+                error=describe_retry_error(exc),
+            )
+
         try:
             nresp = await call_with_backoff(
                 prov_adapter,
                 _run_model_request,
                 provider_cfg,
                 deadline_ts=(start_time + max_duration_s) if max_duration_s > 0 else None,
-                on_wait=lambda delay, exc: sys.stderr.write(
-                    f"[BoteX] {provider_name}/{model}: transient error, "
-                    f"retrying in {delay:.1f}s — {describe_retry_error(exc)}\n"
-                ),
+                on_wait=_on_retry_wait,
+                circuit_breaker_cfg=_breaker_cfg_raw(provider_cfg),
+                provider_name=provider_name,
             )
         except APITimeoutError:
             rollback_verified = _rollback_attempt(task_id, files_touched)
@@ -1837,6 +2056,20 @@ async def _run_botex_task_once_impl(
         if getattr(usage, "cost_usd", None) is not None:
             inline_cost_usd += float(usage.cost_usd)
             has_inline_cost = True
+        _emit(
+            progress_cb,
+            EventKind.USAGE,
+            turn=turn,
+            max_turns=max_turns,
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
+            cost_usd=round(
+                inline_cost_usd
+                if has_inline_cost
+                else calculate_cost_usd(model, total_prompt_tokens, total_completion_tokens),
+                6,
+            ),
+        )
         gen_id = getattr(nresp, "generation_id", "")
         if isinstance(gen_id, str) and gen_id.startswith("gen-"):
             generation_ids.append(gen_id)
@@ -2021,12 +2254,20 @@ async def _run_botex_task_once_impl(
                 summary_text = _DONE_RE.sub("", content).strip()
 
             if is_done:
+                _emit(progress_cb, EventKind.COMPLETION_PARSE, status="DONE")
                 # Contract check: DONE is accepted only when the task
                 # contract is fulfilled — verified on disk, never from the
                 # model's claims about what it wrote.
                 if contract.kind == "file_output":
                     if not _output_file_ready(contract.required_output_path, root_path):
                         if contract_nudges < 1:
+                            _emit(
+                                progress_cb,
+                                EventKind.CONTRACT_GATE,
+                                ok=False,
+                                kind=contract.kind,
+                                missing=contract.required_output_path,
+                            )
                             contract_nudges += 1
                             messages.append(
                                 {
@@ -2304,8 +2545,9 @@ async def _run_botex_task_once_impl(
                             if models_used and not actual_model:
                                 actual_model = str(models_used[-1])
                     except Exception as exc:
-                        telemetry_err = f"OpenRouter generation telemetry skipped: {sanitize_provider_error(exc)}\n"
-                        sys.stderr.write(coerce_text(telemetry_err))
+                        sys.stderr.write(
+                            f"OpenRouter generation telemetry skipped ({type(exc).__name__})\n"
+                        )
 
                 # Zero-cost runs report exactly 0 — otherwise the ledger
                 # falls back to pseudo-pricing for providers without
@@ -2847,6 +3089,13 @@ async def _run_botex_task_once_impl(
                 if fn_name not in READ_ONLY_TOOLS and fn_name != "run_command":
                     turn_mutated = True
 
+            _emit(
+                progress_cb,
+                EventKind.TOOL_CALL,
+                tool=fn_name,
+                ok=bool(isinstance(tool_result, dict) and tool_result.get("ok")),
+                turn=turn,
+            )
             messages.append(
                 {
                     "role": "tool",
@@ -2916,6 +3165,13 @@ async def _run_botex_task_once_impl(
 
         if stagnant_turns >= 3 or failed_mutations_streak >= 3:
             # Stagnation deadlock detected: rollback and exit
+            _emit(
+                progress_cb,
+                EventKind.NO_PROGRESS,
+                stagnant_turns=stagnant_turns,
+                failed_mutations=failed_mutations_streak,
+                turn=turn,
+            )
             rollback_verified = _rollback_attempt(task_id, files_touched)
             rolled_ok = rollback_verified is not False
             duration = time.time() - start_time

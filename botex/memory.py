@@ -11,6 +11,7 @@ Fast Hybrid Search: SQLite WAL + FTS5 Full-Text Index with RRF fusion.
 """
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -25,8 +26,8 @@ try:
         SecurityError,
         coerce_text,
         mask_secrets,
-        resolve_safe_path,
         sanitize_for_storage,
+        sanitize_identifier,
         wrap_untrusted_content,
     )
 except (ImportError, ValueError):
@@ -34,12 +35,15 @@ except (ImportError, ValueError):
         SecurityError,
         coerce_text,
         mask_secrets,
-        resolve_safe_path,
         sanitize_for_storage,
+        sanitize_identifier,
         wrap_untrusted_content,
     )
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
+    "extract_implicit_links",
     "save_memory",
     "search_memory",
     "read_memory",
@@ -81,16 +85,53 @@ SCHEMA_VERSION = "ecc.memory.v2"
 MAX_MEMORY_BYTES = 1_048_576  # 1 MB cap
 
 # Regex for extracting Obsidian-style wikilinks [[target]] or [[target|display]]
-_WIKILINK_RE = re.compile(r"\[\[([a-zA-Z0-9_\-\./]+)(?:\|([^\]]+))?\]\]")
+_WIKILINK_RE = re.compile(r"\[\[([a-zA-Z0-9_\-\./]+)(?:\|([^\[\]\n\r]+))?\]\]")
+# Regex for discovering implicit references to canonical memory IDs (e.g. mem_a1b2c3d4, lesson_xyz, handoff_xyz)
+_IMPLICIT_REF_RE = re.compile(r"\b((?:mem|lesson|skill|handoff|cr|research)_[a-zA-Z0-9_\-]+)\b")
+
+
+def _strip_code_spans(text: str) -> str:
+    """Linear O(n) stripper for fenced code blocks and inline code spans (zero ReDoS)."""
+    if not text:
+        return ""
+    lines_out: List[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        lstripped = line.lstrip()
+        if lstripped.startswith("```") and len(lstripped) < 32 and "`" not in lstripped.lstrip("`"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        # Strip inline single/multi-backtick spans in a single pass
+        out_chars: List[str] = []
+        i = 0
+        n = len(line)
+        while i < n:
+            if line[i] == "`":
+                j = i
+                while j < n and line[j] == "`":
+                    j += 1
+                delim = line[i:j]
+                end_pos = line.find(delim, j)
+                if end_pos != -1:
+                    i = end_pos + len(delim)
+                    continue
+                else:
+                    out_chars.append(delim)
+                    i = j
+            else:
+                out_chars.append(line[i])
+                i += 1
+        lines_out.append("".join(out_chars))
+    return "\n".join(lines_out)
 
 
 def extract_wikilinks(text: str) -> List[str]:
     """Extract unique wikilink target IDs from markdown body (ignoring fenced/inline code blocks)."""
     if not text:
         return []
-    # Strip fenced code blocks and inline code so prompt examples like `[[wikilink]]` never create edges
-    cleaned = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-    cleaned = re.sub(r"`+[^`\n]+`+", "", cleaned)
+    cleaned = _strip_code_spans(text)
     matches = _WIKILINK_RE.findall(cleaned)
     targets: List[str] = []
     for m in matches:
@@ -100,6 +141,26 @@ def extract_wikilinks(text: str) -> List[str]:
         if tgt and tgt not in targets:
             targets.append(tgt)
     return targets
+
+
+def extract_implicit_links(
+    text: str,
+    self_id: str,
+    known_ids: set[str],
+    existing_links: Optional[List[str]] = None,
+) -> List[str]:
+    """Discover bare or inline-code references to existing memory IDs in text."""
+    if not text or not known_ids:
+        return []
+    seen = set(existing_links or [])
+    seen.add(self_id)
+    discovered: List[str] = []
+    for match in _IMPLICIT_REF_RE.findall(text):
+        cand = match.strip()
+        if cand in known_ids and cand not in seen:
+            seen.add(cand)
+            discovered.append(cand)
+    return discovered
 
 
 def reciprocal_rank_fusion(
@@ -149,11 +210,26 @@ def _sanitize_id(memory_id: str) -> str:
     clean = str(memory_id).strip()
     if clean.endswith(".md"):
         clean = clean[:-3]
-    if not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+    safe = sanitize_identifier(clean)
+    if not safe:
         raise SecurityError(
             f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed."
         )
-    return coerce_text(clean)
+    return safe
+
+
+def _find_existing_memory_file(mem_dir: Path, mid: str) -> Optional[Path]:
+    """Resolve an existing memory Markdown file via directory enumeration to decouple taint."""
+    if not mem_dir.is_dir():
+        return None
+    target_name = f"{mid}.md"
+    try:
+        for entry in mem_dir.iterdir():
+            if entry.is_file() and entry.name == target_name:
+                return entry
+    except Exception:
+        pass
+    return None
 
 
 def _serialize_val(val: Any) -> str:
@@ -370,7 +446,12 @@ def _sanitize_fts_query(q: str) -> str:
     return " ".join(f'"{t}"*' for t in tokens)
 
 
-def _index_memory_file(mem_dir: Path, conn: sqlite3.Connection, file_p: Path) -> None:
+def _index_memory_file(
+    mem_dir: Path,
+    conn: sqlite3.Connection,
+    file_p: Path,
+    known_ids: Optional[set[str]] = None,
+) -> None:
     """Index or update a single memory markdown file in SQLite."""
     if file_p.name.startswith("_"):
         return
@@ -386,11 +467,28 @@ def _index_memory_file(mem_dir: Path, conn: sqlite3.Connection, file_p: Path) ->
         tags_str = " ".join(str(t) for t in raw_tags)
         body_links = extract_wikilinks(body)
         if "[[" in body or not meta.get("links"):
-            raw_links = body_links
+            raw_links = list(body_links)
         else:
             raw_links = meta.get("links") or []
         if isinstance(raw_links, str):
             raw_links = [l.strip() for l in raw_links.strip("[]").split(",") if l.strip()]
+        else:
+            raw_links = [str(l).strip() for l in raw_links if str(l).strip()]
+        for bl in body_links:
+            if bl not in raw_links:
+                raw_links.append(bl)
+
+        effective_known_ids = (
+            known_ids
+            if known_ids is not None
+            else {
+                f.stem for f in mem_dir.glob("*.md") if f.is_file() and not f.name.startswith("_")
+            }
+        )
+        for il in extract_implicit_links(body, mid, effective_known_ids, raw_links):
+            if il not in raw_links:
+                raw_links.append(il)
+
         links_str = " ".join(str(l) for l in raw_links)
         ts = meta.get("timestamp") or ""
         status = str(meta.get("status") or "active").lower()
@@ -433,8 +531,8 @@ def _index_memory_file(mem_dir: Path, conn: sqlite3.Connection, file_p: Path) ->
                         """,
                         (mid, target_id, "wikilink"),
                     )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to index memory file: %s", type(exc).__name__)
 
 
 def sync_memory_index(mem_dir: Path) -> None:
@@ -446,15 +544,15 @@ def sync_memory_index(mem_dir: Path) -> None:
         try:
             rows = conn.execute("SELECT id, mtime FROM memories_meta;").fetchall()
             indexed = {row["id"]: float(row["mtime"]) for row in rows}
-            seen_files = set()
-            for file_p in mem_dir.glob("*.md"):
-                if not file_p.is_file() or file_p.name.startswith("_"):
-                    continue
+            md_files = [
+                f for f in mem_dir.glob("*.md") if f.is_file() and not f.name.startswith("_")
+            ]
+            seen_files = {f.stem for f in md_files}
+            for file_p in md_files:
                 mid = file_p.stem
-                seen_files.add(mid)
                 st_mtime = file_p.stat().st_mtime
                 if mid not in indexed or abs(indexed[mid] - st_mtime) > 0.001:
-                    _index_memory_file(mem_dir, conn, file_p)
+                    _index_memory_file(mem_dir, conn, file_p, known_ids=seen_files)
 
             to_delete = set(indexed.keys()) - seen_files
             if to_delete:
@@ -468,8 +566,8 @@ def sync_memory_index(mem_dir: Path) -> None:
                         )
         finally:
             conn.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to synchronize memory index: %s", type(exc).__name__)
 
 
 # ============================================================================
@@ -546,12 +644,20 @@ def save_memory(
             mem_dir = _ensure_workspace_memory_dir(root_path)
             rel_path = f".botex/memory/{mid}.md"
 
-        file_path = resolve_safe_path(mem_dir, f"{mid}.md")
+        existing_file = _find_existing_memory_file(mem_dir, mid)
+        file_path = existing_file if existing_file is not None else (mem_dir / f"{mid}.md")
 
-        # Extract wikilinks if not provided
+        # Extract wikilinks and implicit references to existing notes
         clean_links = [str(l).strip() for l in (links or []) if str(l).strip()]
-        if not clean_links:
-            clean_links = extract_wikilinks(masked_content)
+        for wl in extract_wikilinks(masked_content):
+            if wl not in clean_links and wl != mid:
+                clean_links.append(wl)
+        known_ids = {
+            f.stem for f in mem_dir.glob("*.md") if f.is_file() and not f.name.startswith("_")
+        }
+        for il in extract_implicit_links(masked_content, mid, known_ids, clean_links):
+            if il not in clean_links:
+                clean_links.append(il)
 
         norm_status = str(status).strip().lower() if status else "active"
         if norm_status not in VALID_STATUSES:
@@ -585,11 +691,11 @@ def save_memory(
         try:
             conn = _get_index_db(mem_dir)
             try:
-                _index_memory_file(mem_dir, conn, file_path)
+                _index_memory_file(mem_dir, conn, file_path, known_ids=known_ids | {mid})
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("SQLite index update skipped on save: %s", type(exc).__name__)
 
         return {
             "ok": True,
@@ -706,15 +812,19 @@ def search_memory(
                         if tag_lower not in tags_lower:
                             continue
 
-                    # Filter by query (FTS match OR manual substring fallback)
+                    # Filter by query (FTS match OR multi-token substring fallback)
                     if q_lower:
                         if entry_id not in fts_candidates:
-                            searchable = f"{entry_title} {body} {' '.join(entry_tags)}".lower()
-                            if q_lower not in searchable:
+                            searchable = f"{entry_title} {body} {' '.join(str(t) for t in entry_tags)}".lower()
+                            q_tokens = [tok for tok in re.findall(r"[\w]+", q_lower) if tok]
+                            if q_tokens:
+                                if not all(tok in searchable for tok in q_tokens):
+                                    continue
+                            elif q_lower not in searchable:
                                 continue
 
                     seen_ids.add(entry_id)
-                    preview = body[:200] + ("…" if len(body) > 200 else "")
+                    preview = body[:240] + ("…" if len(body) > 240 else "")
                     path_str = (
                         f"~/.botex/memory/{file_p.name}"
                         if sc == "global"
@@ -785,16 +895,11 @@ def read_memory(
         found_path: Optional[Path] = None
         found_scope: str = "local"
         for mem_dir, sc in candidates:
-            if not mem_dir.exists():
-                continue
-            try:
-                cand_file = resolve_safe_path(mem_dir, f"{mid}.md")
-                if cand_file.exists() and cand_file.is_file():
-                    found_path = cand_file
-                    found_scope = sc
-                    break
-            except SecurityError:
-                continue
+            cand_file = _find_existing_memory_file(mem_dir, mid)
+            if cand_file is not None:
+                found_path = cand_file
+                found_scope = sc
+                break
 
         if not found_path:
             return {"ok": False, "error": f"Memory entry '{mid}' not found."}
@@ -849,17 +954,12 @@ def delete_memory(
         found_dir: Optional[Path] = None
         found_scope: str = "local"
         for mem_dir, sc in candidates:
-            if not mem_dir.exists():
-                continue
-            try:
-                cand_file = resolve_safe_path(mem_dir, f"{mid}.md")
-                if cand_file.exists() and cand_file.is_file():
-                    found_path = cand_file
-                    found_dir = mem_dir
-                    found_scope = sc
-                    break
-            except SecurityError:
-                continue
+            cand_file = _find_existing_memory_file(mem_dir, mid)
+            if cand_file is not None:
+                found_path = cand_file
+                found_dir = mem_dir
+                found_scope = sc
+                break
 
         if not found_path or not found_dir:
             return {"ok": False, "error": f"Memory entry '{mid}' not found."}
@@ -1005,7 +1105,8 @@ def get_backlinks(
         return {"ok": False, "error": "Missing memory_id"}
 
     try:
-        search_dirs = _resolve_scope_dirs(workspace_dir, scope)
+        norm_sc = _VALID_SCOPES_MAP.get(str(scope).strip().lower(), "local")
+        search_dirs = _resolve_scope_dirs(workspace_dir, "all" if norm_sc == "local" else norm_sc)
         backlinks: List[Dict[str, Any]] = []
         seen_sources: set[str] = set()
 
@@ -1081,16 +1182,14 @@ def patch_memory_section(
             "error": "Section 'Timeline' is an append-only audit trail and cannot be overwritten",
         }
 
-    search_dirs = _resolve_scope_dirs(workspace_dir, scope)
+    norm_sc = _VALID_SCOPES_MAP.get(str(scope).strip().lower(), "local")
+    search_dirs = _resolve_scope_dirs(workspace_dir, "all" if norm_sc == "local" else norm_sc)
     file_path: Optional[Path] = None
     for mem_dir, _ in search_dirs:
-        try:
-            cand = resolve_safe_path(mem_dir, f"{clean_id}.md")
-            if cand.exists() and cand.is_file():
-                file_path = cand
-                break
-        except SecurityError:
-            continue
+        cand = _find_existing_memory_file(mem_dir, clean_id)
+        if cand is not None:
+            file_path = cand
+            break
 
     if not file_path or not file_path.exists():
         return {"ok": False, "error": f"Memory entry '{clean_id}' not found"}
@@ -1165,8 +1264,8 @@ def patch_memory_section(
                 _index_memory_file(mem_dir, conn, file_path)
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to re-index memory note after patch: %s", type(exc).__name__)
 
         return {
             "ok": True,
@@ -1186,9 +1285,10 @@ def find_graph_health(
 ) -> Dict[str, Any]:
     """
     Audits Memory Vault graph integrity:
-    1. Broken Links: links pointing to memory_ids that do not exist.
-    2. Orphan Notes: notes with zero incoming and zero outgoing links.
-    3. Cycles: detects circular references in graph links via iterative DFS.
+    1. Broken Links: links pointing to memory_ids that do not exist (sets is_healthy=False).
+    2. Orphan Notes: notes with zero incoming and zero outgoing links (topological metric).
+    3. Cycles: detects mutual/circular references via iterative DFS (topological metric;
+       bidirectional PKM links do not invalidate is_healthy).
     """
     try:
         search_dirs = _resolve_scope_dirs(workspace_dir, scope)
@@ -1208,12 +1308,19 @@ def find_graph_health(
                 for r in rows:
                     mid = r["id"]
                     all_ids.add(mid)
+                    raw_tags = r["tags"] or ""
+                    tags_list = [
+                        t.strip().lstrip("#")
+                        for t in re.split(r"[\s,]+", str(raw_tags))
+                        if t.strip()
+                    ]
                     node_metadata[mid] = {
                         "id": mid,
                         "title": r["title"] or mid,
                         "kind": r["kind"] or "context",
                         "status": r["status"] or "active",
                         "compiled_truth": bool(r["compiled_truth"]),
+                        "tags": tags_list,
                         "scope": sc,
                     }
 
@@ -1293,7 +1400,9 @@ def find_graph_health(
                     stack.pop()
                     path.pop()
 
-        is_healthy = len(broken_links) == 0 and len(cycles) == 0
+        # In PKM / Zettelkasten graphs, bidirectional links (A <-> B) are valid and healthy;
+        # only broken references degrade graph integrity.
+        is_healthy = len(broken_links) == 0
 
         return {
             "ok": True,

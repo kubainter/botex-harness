@@ -13,7 +13,12 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `pyproject.toml` / `requirements.txt` - Project packaging and dependencies.
     *   `ROADMAP.md` - Technical roadmap, deferred features, and architecture rationale.
 *   **`botex/`** - Main application package.
-    *   `engine.py` - Autonomous execution loop, 5-gate in-payload failovers, context management, deterministic task receipts, and rollback triggers.
+    *   `engine.py` - Autonomous execution loop, 5-gate in-payload failovers, in-flight state checkpointing, provider fallbacks, context management, deterministic task receipts, and rollback triggers.
+    *   `state.py` - In-flight execution checkpoints (`InFlightTaskState`), plan/finding carryover across model/provider fallbacks.
+    *   `rate_limiter.py` - Token-bucket rate limiting (RPM/TPM) and cooldown tracking for free and cloud providers.
+    *   `curator.py` - Periodic Memory Vault synthesis and telemetry digests with optional Telegram alerts.
+    *   `delegation.py` - Delegation bridge to external specialized agents (e.g. Devin).
+    *   `events.py` - Engine and lifecycle event taxonomy (`EventKind`).
     *   `contracts.py` - Task completion contract verification, strict JSON Schema (`TASK_COMPLETION_JSON_SCHEMA`), and status taxonomy.
     *   `patch_engine.py` - Fuzzy patch mechanism, in-memory syntax validation, and snapshot management.
     *   `file_tools.py` - Safe file reading (outline-first), creation, moving, and deletion.
@@ -22,7 +27,7 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`) and agency middleware.
     *   `approval.py` - Human-in-the-Loop approval manager, async pending actions, and risk policies.
     *   `chat.py` - Conversational chat sessions, SSE/WebSocket token streaming, and read-only sandbox.
-    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE server, and REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/analytics`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/recipes`, `/api/skills`, `/api/chat`).
+    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE server, rate-limited task queue, and REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/analytics`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/recipes`, `/api/skills`, `/api/chat`).
     *   `pricing.py` - Model pricing guardrail, live catalog checks, and cost caps.
     *   `analytics.py` - Cost/token ledger, generation latency/cache telemetry, budget tracking, and CLI reports.
     *   `providers.py` - Provider registry, adapters (`OpenRouterProvider`, `NvidiaProvider`, `GoogleAIStudioProvider`, `GenericOpenAIProvider`), `/api/v1/generation` telemetry reconciliation, and request normalizer.
@@ -44,15 +49,21 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `ui.py` - ANSI styling helpers with plain-text fallback.
     *   `recipes/` - Bundled persona prompts (`planner`, `reviewer`, `tdd`, `build-resolver`, `security-reviewer`, `security-taint-hardener`, `code-explorer`, `architecture-adr`, `ui-craftsman`).
 *   **`web/`** - Vue 3 + Vite + Pinia + Tailwind CSS PWA frontend for the Cloud Gateway.
-*   **`tests/`** - Test suite (27 files, 501 collected tests: `test_botex.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_stage_4_8.py`, `test_retry.py`, `test_skills_parity.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_context_guard.py`, `test_analytics.py`, `test_embeddings.py`, `test_meta_harness.py`, `test_obsidian_graph.py`, `test_obsidian_edge_cases.py`, `test_nvidia_streaming.py`, `test_credits_stress.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_integration.py`, and live integration tests in `test_live_e2e.py`).
+*   **`tests/`** - Test suite (38 files, 615 collected tests: `test_botex.py`, `test_rate_limiter.py`, `test_state_checkpoint.py`, `test_curator.py`, `test_delegation.py`, `test_events.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_stage_4_8.py`, `test_retry.py`, `test_skills_parity.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_context_guard.py`, `test_analytics.py`, `test_embeddings.py`, `test_meta_harness.py`, `test_obsidian_graph.py`, `test_obsidian_edge_cases.py`, `test_nvidia_streaming.py`, `test_credits_stress.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_integration.py`, `test_circuit_breaker.py`, `test_tracing.py`, `test_task_size_routing.py`, `test_structured_contracts_v1.py`, `test_caller_skill_contract.py`, `test_config_safety.py`, and live integration tests in `test_live_e2e.py`).
 *   **`docs/`** - Documentation (`TUTORIAL.md`).
 *   **`skills/`** - Skill definitions: caller-side contract (`skills/botex/SKILL.md`) plus server-side packs (`architecture-planner`, `build-resolver`, `code-review`, `security-audit`, `tdd-verification`) managed by `botex/skills.py`.
 
 ## 2. Tools and Commands
 
-*   **Testing (Pytest):** To run the full test suite, use the following command with the environment variable set:
+*   **Testing (Pytest):** The test harness forcibly disables dotenv loading, so tests cannot consume provider keys from `.env`. Prefer targeted tests during iteration; run the full suite only when the change warrants it:
     ```bash
-    PYTHONPATH=. python -m pytest tests/
+    BOTEX_DISABLE_DOTENV=1 PYTHONPATH=. python -m pytest tests/
+    ```
+    On PowerShell:
+    ```powershell
+    $env:BOTEX_DISABLE_DOTENV='1'
+    $env:PYTHONPATH='.'
+    python -m pytest tests/
     ```
 *   **Linting and Formatting (Ruff):** The project uses Ruff. Always run both check and format validation before committing changes:
     ```bash

@@ -35,7 +35,9 @@ except (ImportError, ValueError):
 
 # Environment variables whose names look like credentials are not propagated
 # into the child process.
-_SECRET_ENV_RE = re.compile(r"(?i)(api[_-]?key|token|secret|passwd|password|credential|auth)")
+_SECRET_ENV_RE = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?key|token|secret|passwd|password|credential|auth|_key$|^key_)"
+)
 
 
 def _split_command(command: str) -> List[str]:
@@ -83,6 +85,20 @@ def _deny_hit(tokens: List[str], deny_args: List[str]) -> str:
     return ""
 
 
+def _node_inline_eval(args: List[str]) -> bool:
+    """True if node options (before the script name) request inline code evaluation,
+    including clustered short flags such as '-pe'."""
+    for tok in args:
+        if not tok.startswith("-"):
+            return False  # first positional = script; the rest belong to the script
+        low = tok.lower()
+        if low in ("--eval", "--print") or low.startswith(("--eval=", "--print=")):
+            return True
+        if not low.startswith("--") and any(c in low[1:] for c in ("e", "p")):
+            return True
+    return False
+
+
 def command_policy_error(command: str, *, allowlist: List[str], deny_args: List[str]) -> str:
     """Return a policy error for a command, or an empty string if allowed."""
     try:
@@ -101,6 +117,8 @@ def command_policy_error(command: str, *, allowlist: List[str], deny_args: List[
         )
     if binary in {"python", "python3", "py"} and "-m" in tokens[1:]:
         return "Python module execution is denied by exec policy."
+    if binary == "node" and _node_inline_eval(tokens[1:]):
+        return "Node.js inline evaluation (-e/-p/--eval/--print) is denied by exec policy."
     hit = _deny_hit(tokens, deny_args)
     if hit:
         return f"Argument '{hit}' is denied by exec policy."

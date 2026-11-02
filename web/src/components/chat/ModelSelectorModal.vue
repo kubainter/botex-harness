@@ -10,7 +10,7 @@
     >
       <div
         v-if="isOpen"
-        class="fixed inset-0 z-50 bg-botex-950/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
+        class="fixed inset-0 z-[10010] bg-botex-950/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
         role="dialog"
         aria-modal="true"
         aria-label="Model Selector"
