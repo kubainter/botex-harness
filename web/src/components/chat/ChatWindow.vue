@@ -8,6 +8,7 @@
         <div class="flex items-center flex-1 min-w-0 sm:flex-none bg-botex-950 p-0.5 sm:p-1 rounded-lg border border-botex-800">
           <button
             type="button"
+            :title="t('chat.mode.chat')"
             :class="[
               'min-h-[44px] lg:min-h-[36px] px-2.5 sm:px-3 py-1 rounded-md text-xs font-medium transition-colors flex items-center space-x-1.5 min-w-0',
               activeMode === 'chat'
@@ -21,6 +22,7 @@
           </button>
           <button
             type="button"
+            :title="t('chat.mode.agent')"
             :class="[
               'min-h-[44px] lg:min-h-[36px] px-2.5 sm:px-3 py-1 rounded-md text-xs font-medium transition-colors flex items-center space-x-1.5 min-w-0',
               activeMode === 'agent'
