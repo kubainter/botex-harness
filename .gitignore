@@ -44,6 +44,7 @@ venv.bak/
 .Trashes
 ehthumbs.db
 Thumbs.db
+*.db
 
 # Environment variables and secrets
 .env
