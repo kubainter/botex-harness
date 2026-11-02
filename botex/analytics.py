@@ -56,18 +56,21 @@ MODEL_PRICING_ESTIMATES = {
     "anthropic/claude-3.7-sonnet": {"prompt": 3.00, "completion": 15.00},
     "google/gemini-2.5-pro": {"prompt": 1.25, "completion": 5.00},
     "google/gemini-2.5-flash": {"prompt": 0.075, "completion": 0.30},
-    # Bare slugs served by the Google AI Studio OpenAI-compat endpoint
-    # (provider "google"); OpenRouter carries the same models under
-    # "google/" prefixes above.
-    "gemini-2.5-pro": {"prompt": 1.25, "completion": 10.00},
-    "gemini-2.5-flash": {"prompt": 0.30, "completion": 2.50},
-    "gemini-2.5-flash-lite": {"prompt": 0.10, "completion": 0.40},
 }
 
 
 _FREE_MODEL_MARKERS = (":free", "openrouter/free")
-_FREE_MODEL_PREFIXES = ("openrouter-free/", "ollama/", "nvidia/")
-_FREE_PROVIDER_NAMES = frozenset({"ollama"})
+_FREE_MODEL_PREFIXES = ("openrouter-free/", "ollama/", "nvidia/", "gemini-", "models/gemini-")
+_FREE_PROVIDER_NAMES = frozenset(
+    {
+        "ollama",
+        "nvidia",
+        "google",
+        "gemini",
+        "aistudio",
+        "openrouter-free",
+    }
+)
 
 
 def is_free_model(
@@ -78,9 +81,10 @@ def is_free_model(
     """Whether a model run is guaranteed zero-cost.
 
     Covers free-tier slugs (``:free``, ``openrouter/free``, ``openrouter-free/``),
-    zero-cost namespaces (``ollama/``, ``nvidia/``), and providers that cannot
-    bill per request — ``local: true`` endpoints (e.g. local Ollama / Bielik)
-    or any provider carrying a static ``api_key_fallback``.
+    zero-cost namespaces (``ollama/``, ``nvidia/``), package/quota-bound
+    providers (``nvidia``, ``google`` / ``gemini`` / ``aistudio``, ``ollama``,
+    ``openrouter-free``), and providers that cannot bill per request —
+    ``local: true``, ``free_tier: true``, or static ``api_key_fallback``.
     """
     slug = (model or "").strip().lower()
     if any(marker in slug for marker in _FREE_MODEL_MARKERS):
@@ -90,7 +94,7 @@ def is_free_model(
     if (provider_name or "").strip().lower() in _FREE_PROVIDER_NAMES:
         return True
     cfg = provider_cfg if isinstance(provider_cfg, dict) else {}
-    return bool(cfg.get("local") or cfg.get("api_key_fallback"))
+    return bool(cfg.get("local") or cfg.get("free_tier") or cfg.get("api_key_fallback"))
 
 
 # Cached prompt reads are billed at a discount on OpenAI-compatible endpoints
@@ -179,7 +183,9 @@ def log_run(
     ``analytics.store_full_text`` is enabled, only a truncated preview is
     stored; the complete text survives solely as ``summary_sha256``.
     """
-    if cost_usd is None:
+    if is_free_model(model, provider_name=provider or ""):
+        cost_usd = 0.0
+    elif cost_usd is None:
         cost_usd = calculate_cost_usd(model, prompt_tokens, completion_tokens, provider or "")
     else:
         cost_usd = round(float(cost_usd), 6)
@@ -226,6 +232,19 @@ def log_run(
     return entry
 
 
+def _effective_record_cost_usd(
+    record: Dict[str, Any],
+    prov_cfgs: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> float:
+    """Return a record's USD cost, clamping free-tier models/providers to 0.0."""
+    m = str(record.get("model") or "")
+    pname = (record.get("provider") or "").strip().lower()
+    pcfg = (prov_cfgs or {}).get(pname) if pname and isinstance(prov_cfgs, dict) else None
+    if is_free_model(m, pcfg, pname):
+        return 0.0
+    return float(record.get("cost_usd", 0.0) or 0.0)
+
+
 def check_budget_limit(daily_limit_usd: float) -> tuple[bool, float]:
     """
     Check if today's total spending exceeds daily_limit_usd.
@@ -237,7 +256,9 @@ def check_budget_limit(daily_limit_usd: float) -> tuple[bool, float]:
     today_str = datetime.now().strftime("%Y-%m-%d")
     records = load_analytics()
     today_spend = sum(
-        r.get("cost_usd", 0.0) for r in records if r.get("timestamp", "").startswith(today_str)
+        _effective_record_cost_usd(r)
+        for r in records
+        if r.get("timestamp", "").startswith(today_str)
     )
     return today_spend >= daily_limit_usd, round(today_spend, 4)
 
@@ -293,13 +314,6 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
         else:
             fk = r.get("failure_kind") or st or "unknown"
             bm["failures"][fk] = bm["failures"].get(fk, 0) + 1
-        cost = r.get("cost_usd", 0.0) or 0.0
-        toks = (r.get("prompt_tokens", 0) or 0) + (r.get("completion_tokens", 0) or 0)
-        bm["cost_usd"] += cost
-        bm["tokens"] += toks
-        bm["prompt_tokens"] += r.get("prompt_tokens", 0) or 0
-        cached_i = r.get("cached_tokens", 0) or 0
-        bm["cached_tokens"] += cached_i
         pname = (r.get("provider") or "").strip().lower()
         if pname and pname not in prov_cfgs:
             try:
@@ -307,6 +321,13 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
                 prov_cfgs[pname] = pcfg if isinstance(pcfg, dict) else {}
             except Exception:
                 prov_cfgs[pname] = {}
+        cost = _effective_record_cost_usd(r, prov_cfgs)
+        toks = (r.get("prompt_tokens", 0) or 0) + (r.get("completion_tokens", 0) or 0)
+        bm["cost_usd"] += cost
+        bm["tokens"] += toks
+        bm["prompt_tokens"] += r.get("prompt_tokens", 0) or 0
+        cached_i = r.get("cached_tokens", 0) or 0
+        bm["cached_tokens"] += cached_i
         bm["cache_savings_usd"] += _cache_savings_usd(
             m, cached_i, pname, prov_cfgs.get(pname) if pname else None
         )
@@ -351,7 +372,7 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
             "provider": r.get("provider"),
             "status": r.get("status"),
             "failure_kind": r.get("failure_kind"),
-            "cost_usd": r.get("cost_usd", 0.0),
+            "cost_usd": _effective_record_cost_usd(r, prov_cfgs),
             "duration_s": r.get("duration_s"),
             "tokens": (r.get("prompt_tokens", 0) or 0) + (r.get("completion_tokens", 0) or 0),
         }
@@ -363,7 +384,7 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
         "done_runs": done,
         "failed_runs": len(filtered) - done,
         "done_pct": round(done / len(filtered) * 100, 1) if filtered else 0.0,
-        "cost_usd": round(sum(r.get("cost_usd", 0.0) or 0.0 for r in filtered), 6),
+        "cost_usd": round(sum(_effective_record_cost_usd(r, prov_cfgs) for r in filtered), 6),
         "prompt_tokens": prompt_tok,
         "completion_tokens": sum(r.get("completion_tokens", 0) or 0 for r in filtered),
         "cached_tokens": cached_tok,
@@ -532,7 +553,8 @@ def cli_history(task_id: Optional[str] = None):
         if not match:
             print(t("an.not_found", id=task_id))
             return
-        entry = match[-1]
+        entry = dict(match[-1])
+        entry["cost_usd"] = _effective_record_cost_usd(entry)
         print(json.dumps(entry, indent=2, ensure_ascii=False))
         return
 
@@ -542,6 +564,7 @@ def cli_history(task_id: Optional[str] = None):
     print(t("an.recent"))
     for r in recent:
         ts = r.get("timestamp", "")[:16].replace("T", " ")
+        eff_cost = _effective_record_cost_usd(r)
         print(
-            f"[{r.get('task_id')}] {ts} | {r.get('model')} | {r.get('status')} | ${r.get('cost_usd', 0):.4f} | {r.get('summary', '')[:60]}"
+            f"[{r.get('task_id')}] {ts} | {r.get('model')} | {r.get('status')} | ${eff_cost:.4f} | {r.get('summary', '')[:60]}"
         )
