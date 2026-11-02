@@ -95,15 +95,33 @@ def test_auth_strict_cloud_accepts_valid_bearer_token(client, monkeypatch):
 
 
 def test_auth_strict_cloud_accepts_query_token_on_sse_path(client, monkeypatch):
-    """Token passed as query parameter ?token=... is accepted on streaming SSE paths."""
+    """Token passed as query parameter ?token=... is accepted only on the GET /mcp/sse handshake."""
     monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
-    # Allowed on /mcp path (returns 400 Bad Request from handler, not 401 Unauthorized)
+    # State-changing POSTs must use the Bearer header, never the URL.
     mcp_resp = client.post("/mcp/messages?token=super-secret-key-12345", json={})
-    assert mcp_resp.status_code != 401
+    assert mcp_resp.status_code == 401
+    mcp_ok = client.post(
+        "/mcp/messages", json={}, headers={"Authorization": "Bearer super-secret-key-12345"}
+    )
+    assert mcp_ok.status_code != 401
 
     # Rejected on non-streaming REST routes to prevent token leakage in access logs
     rest_resp = client.get("/api/tasks?token=super-secret-key-12345")
     assert rest_resp.status_code == 401
+
+    # Chat POST must not accept URL tokens either
+    chat_resp = client.post("/api/chat?token=super-secret-key-12345", json={})
+    assert chat_resp.status_code == 401
+
+
+def test_devin_status_requires_auth_in_strict_mode(client, monkeypatch):
+    """/api/delegation/devin leaks run metadata, so it is no longer an unauthenticated probe."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
+    assert client.get("/api/delegation/devin").status_code == 401
+    ok = client.get(
+        "/api/delegation/devin", headers={"Authorization": "Bearer super-secret-key-12345"}
+    )
+    assert ok.status_code == 200
 
 
 def test_auth_strict_cloud_allows_health_unauthenticated(client, monkeypatch):
@@ -120,11 +138,21 @@ def test_auth_strict_cloud_allows_cors_preflight(client, monkeypatch):
     resp = client.options(
         "/api/tasks",
         headers={
-            "Origin": "https://dashboard.botex.dev",
+            "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "POST",
         },
     )
     assert resp.status_code == 200
+
+    # Default CORS is local-dev only: arbitrary foreign origins are not allowed.
+    foreign = client.options(
+        "/api/tasks",
+        headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert foreign.headers.get("access-control-allow-origin") is None
 
 
 # ---------------------------------------------------------------------------
@@ -624,3 +652,17 @@ def test_memory_graph_and_backlinks_endpoints(client, tmp_path):
     assert bl_data["count"] >= 1
     source_ids = [b["id"] for b in bl_data["backlinks"]]
     assert m1.get("id") in source_ids
+
+
+def test_get_rate_limits_endpoint(client: TestClient) -> None:
+    """GET /api/rate_limits returns live provider bucket stats."""
+    resp = client.get("/api/rate_limits")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, dict)
+    assert "openrouter-free" in data
+    free_stats = data["openrouter-free"]
+    assert "rpm" in free_stats
+    assert "tpm" in free_stats
+    assert "cooldown_s" in free_stats
+    assert "requests_available" in free_stats
