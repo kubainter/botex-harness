@@ -1,11 +1,12 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { api } from '../api/client'
-import type { WalletInfo, KeyStatusInfo, RecommendedModel } from '../api/types'
+import type { WalletInfo, KeyStatusInfo, RateLimitsMap, RecommendedModel } from '../api/types'
 
 export const useWalletStore = defineStore('wallet', () => {
   const walletInfo = ref<WalletInfo | null>(null)
   const keyStatus = ref<KeyStatusInfo | null>(null)
+  const rateLimits = ref<RateLimitsMap | null>(null)
   const isLoading = ref<boolean>(false)
   const errorMessage = ref<string | null>(null)
 
@@ -72,13 +73,17 @@ export const useWalletStore = defineStore('wallet', () => {
     isLoading.value = true
     errorMessage.value = null
     try {
-      const [wData, kData] = await Promise.all([
+      const [wData, kData, rData] = await Promise.all([
         api.getWallet('openrouter', forceRefresh),
-        api.getKeyStatus('openrouter', forceRefresh).catch(() => null)
+        api.getKeyStatus('openrouter', forceRefresh).catch(() => null),
+        api.getRateLimits().catch(() => null)
       ])
       walletInfo.value = wData
       if (kData) {
         keyStatus.value = kData
+      }
+      if (rData) {
+        rateLimits.value = rData
       }
     } catch (err: any) {
       errorMessage.value = err?.message || 'Failed to fetch wallet info'
@@ -98,6 +103,7 @@ export const useWalletStore = defineStore('wallet', () => {
   return {
     walletInfo,
     keyStatus,
+    rateLimits,
     isBudgetLow,
     isLoading,
     errorMessage,

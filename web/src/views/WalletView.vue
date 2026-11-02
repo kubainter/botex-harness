@@ -133,6 +133,51 @@
       <strong>Provider Notice:</strong> {{ walletInfo.error }}
     </div>
 
+    <!-- Rate Limits & Token Buckets Strip -->
+    <div v-if="rateLimits && Object.keys(rateLimits).length" class="space-y-3">
+      <div class="flex items-center justify-between text-xs text-slate-300 px-1 border-b border-botex-800 pb-2">
+        <span class="font-semibold uppercase tracking-wider font-mono">
+          {{ locale === 'pl' ? 'Budżety Token Bucket & Cooldown Providerów' : 'Provider Rate Limits & Token Buckets' }}
+        </span>
+        <span class="text-slate-400">
+          {{ locale === 'pl' ? 'Zabezpieczenie przed limitami TPM/RPM' : 'Proactive TPM/RPM throttle telemetry' }}
+        </span>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div
+          v-for="(info, prov) in rateLimits"
+          :key="prov"
+          class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm space-y-2"
+        >
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-mono font-bold text-slate-100 uppercase">{{ prov }}</span>
+            <Badge :variant="info.cooldown_s > 0 ? 'warning' : 'info'">
+              {{ info.cooldown_s > 0 ? `Cooldown ${info.cooldown_s.toFixed(0)}s` : 'Active' }}
+            </Badge>
+          </div>
+
+          <div class="space-y-1 font-mono text-xs">
+            <div class="flex justify-between text-slate-300">
+              <span>RPM:</span>
+              <span class="text-slate-100 font-semibold">
+                {{ info.requests_available !== null ? Math.round(info.requests_available) : info.rpm }} / {{ info.rpm }}
+              </span>
+            </div>
+            <div class="flex justify-between text-slate-300">
+              <span>TPM:</span>
+              <span class="text-slate-100 font-semibold">
+                {{ info.tokens_available !== null ? (Math.round(info.tokens_available) / 1000).toFixed(0) + 'k' : (info.tpm / 1000).toFixed(0) + 'k' }} / {{ (info.tpm / 1000).toFixed(0) + 'k' }}
+              </span>
+            </div>
+            <div v-if="info.wait_s > 0" class="text-amber-400 text-xs">
+              Wait: {{ info.wait_s.toFixed(1) }}s
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Token & Cost Analytics Ledger Table -->
     <div class="space-y-3">
       <div class="flex items-center justify-between text-xs text-slate-300 px-1 border-b border-botex-800 pb-2">
@@ -296,7 +341,7 @@ import {
 
 const walletStore = useWalletStore()
 const analyticsStore = useAnalyticsStore()
-const { walletInfo, recommendedModels } = storeToRefs(walletStore)
+const { walletInfo, rateLimits, recommendedModels } = storeToRefs(walletStore)
 const { locale, t } = useI18n()
 
 const selectedRole = ref<'all' | 'planner' | 'coder' | 'chat' | 'reviewer'>('all')
