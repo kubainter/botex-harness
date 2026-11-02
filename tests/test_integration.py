@@ -241,7 +241,12 @@ def test_m4_cfg_01_default_config_loading():
 
     # Helper getters
     assert catalog_setting("cache_ttl_hours") == 24
-    assert catalog_cache_file().name == ".model_pricing.json"
+    # Correctly resolves to the isolated test catalog file from conftest env override
+    assert catalog_cache_file().name == (
+        os.path.basename(os.environ["BOTEX_CATALOG_CACHE_FILE"])
+        if os.environ.get("BOTEX_CATALOG_CACHE_FILE")
+        else ".model_pricing.json"
+    )
     assert wallet_setting("enabled") is True
     assert denylist_setting() == []
 
@@ -952,3 +957,93 @@ def test_m4_wal_11_unmocked_fallback_execution(capsys: pytest.CaptureFixture):
         data = json.loads(capsys.readouterr().out)
         assert data["provider"] == "nvidia"
         assert data["supported"] is False
+
+
+@pytest.mark.anyio
+async def test_provider_fallback_skips_open_circuit(tmp_path: Any):
+    """Fallback provider selection skips providers whose circuit is OPEN."""
+    import httpx
+    from openai import APIConnectionError
+
+    import botex.engine as engine
+    from botex.retry import get_circuit_breaker
+
+    cfg = copy.deepcopy(load_config())
+    cfg["provider_fallbacks"] = {"nvidia": ["openrouter-free", "google"]}
+    cfg["providers"]["nvidia"]["models"]["default"] = "cand/nvidia"
+    cfg["providers"]["nvidia"]["retry"] = {"max_waits": 0}
+    cfg["providers"]["google"]["models"]["default"] = "cand/google"
+
+    # Trip openrouter-free's breaker — it must be skipped without a request.
+    breaker = get_circuit_breaker(failure_threshold=1)
+    breaker.record_failure("openrouter-free")
+
+    clients = {
+        "nvidia": FakeClient([APIConnectionError(request=httpx.Request("POST", "http://x"))]),
+        "google": FakeClient([FakeCompletionResponse("STATUS: DONE\nresolved")]),
+    }
+    built_for: List[str] = []
+    events = []
+
+    def _client_for(provider_name, provider_cfg, api_key, **kwargs):
+        built_for.append(provider_name)
+        return clients[provider_name]
+
+    with (
+        patch("botex.config.load_config", return_value=cfg),
+        patch("botex.engine.load_config", return_value=cfg),
+        patch("botex.engine.build_async_client", side_effect=_client_for),
+        patch("botex.engine.check_model_price", return_value=(True, "")),
+        patch("botex.engine.check_model_tools", return_value=(True, "")),
+    ):
+        result = await engine.run_botex_task(
+            task="fix",
+            workspace_dir=str(tmp_path),
+            profile="default",
+            mode="edit",
+            provider="nvidia",
+            api_key="sk-test",
+            progress_cb=lambda kind, **data: events.append((kind, data)),
+        )
+
+    assert result["status"] == "DONE"
+    providers_attempted = [a["provider"] for a in result["attempts"]]
+    assert providers_attempted == ["nvidia", "google"]
+    # The OPEN provider never had a client built, and its skip is observable.
+    assert "openrouter-free" not in built_for
+    skipped = [d for k, d in events if d.get("skipped") == "circuit_open"]
+    assert skipped and skipped[0].get("provider") == "openrouter-free"
+
+
+@pytest.mark.anyio
+async def test_call_with_backoff_breaker_open_becomes_provider_unavailable(tmp_path: Any):
+    """An OPEN provider fails fast as provider_unavailable, not a generic crash."""
+    from botex.retry import get_circuit_breaker
+
+    cfg = copy.deepcopy(load_config())
+    cfg["providers"]["openrouter"]["models"]["default"] = "cand/one"
+
+    breaker = get_circuit_breaker(failure_threshold=1)
+    breaker.record_failure("openrouter")
+
+    fake_client = FakeClient([FakeCompletionResponse("STATUS: DONE\nnever")])
+
+    with (
+        patch("botex.config.load_config", return_value=cfg),
+        patch("botex.engine.load_config", return_value=cfg),
+        patch("botex.engine.build_async_client", return_value=fake_client),
+        patch("botex.engine.check_model_price", return_value=(True, "")),
+        patch("botex.engine.check_model_tools", return_value=(True, "")),
+    ):
+        result = await run_botex_task(
+            task="fix",
+            workspace_dir=str(tmp_path),
+            profile="default",
+            mode="edit",
+            api_key="sk-test",
+        )
+
+    assert result["ok"] is False
+    assert result["attempts"][0]["failure_kind"] == "provider_unavailable"
+    # The breaker gate fires before any request reaches the provider.
+    assert fake_client.calls == []

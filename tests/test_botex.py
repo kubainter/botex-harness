@@ -358,9 +358,13 @@ def test_capability_modes():
     except ValueError:
         pass
 
-    # 4. allow_* flags can only widen, never narrow
-    caps = resolve_capabilities("readonly", allow_destructive=True)
-    assert CAP_DESTRUCTIVE in caps
+    # 4. readonly stays hard read-only for local mutation and execution
+    for flag in ("allow_destructive", "allow_exec"):
+        try:
+            resolve_capabilities("readonly", **{flag: True})
+            assert False, f"readonly must reject {flag}"
+        except ValueError:
+            pass
     assert resolve_capabilities("edit", allow_net=True) == {CAP_READ, CAP_WRITE, CAP_NET}
 
     # 5. tool_allowed: write tools need write, gated tools may be confirmed
@@ -483,6 +487,23 @@ def test_pricing_guardrail():
             {**caps, "max_input_per_mtok": 1.0, "max_output_per_mtok": 99.0},
         )
         assert not ok and "input" in msg
+
+        # 6. Free-tier / quota-bound providers (google, nvidia, ollama, openrouter-free)
+        # bypass the price cap even under on_unknown=deny and strict $0.01 caps.
+        strict_caps = {
+            "enabled": True,
+            "max_input_per_mtok": 0.01,
+            "max_output_per_mtok": 0.01,
+            "on_unknown": "deny",
+        }
+        for free_prov, slug in [
+            ("google", "gemini-2.5-pro"),
+            ("nvidia", "meta/llama-3.1-70b-instruct"),
+            ("ollama", "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M"),
+            ("openrouter-free", "google/gemma-4-31b-it:free"),
+        ]:
+            ok, msg = pricing.check_model_price(slug, pcfg, strict_caps, provider_name=free_prov)
+            assert ok and msg == "", f"Expected {free_prov}:{slug} to bypass price gate"
     finally:
         pricing.load_catalog = orig_loader
     print("[PASS] Pricing Guardrail Tests")

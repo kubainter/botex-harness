@@ -219,9 +219,40 @@
           ></textarea>
         </div>
 
-        <!-- Model & Mode -->
+        <!-- Executor & Model/Agent -->
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
+            <label class="block font-medium text-slate-200 mb-1">{{ t('executorLabel') }}</label>
+            <select
+              v-model="newTask.executor"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
+            >
+              <option value="botex">{{ t('executorBotex') }}</option>
+              <option value="devin" :disabled="devinStatus !== null && !devinStatus.available">
+                {{ t('executorDevin') }}{{ devinStatus && !devinStatus.available ? ` (${t('devinOffline')})` : '' }}
+              </option>
+            </select>
+            <p
+              v-if="devinStatus && !devinStatus.available"
+              class="mt-1 text-xs text-amber-400 font-mono"
+            >
+              {{ t('devinOffline') }}: {{ devinStatus.reason }}
+            </p>
+          </div>
+
+          <div v-if="newTask.executor === 'devin'">
+            <label class="block font-medium text-slate-200 mb-1">{{ t('agentTypeLabel') }}</label>
+            <select
+              v-model="newTask.agent_type"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
+            >
+              <option value="default">Agent (full tools)</option>
+              <option value="review">Reviewer (read-only)</option>
+              <option value="summarizer">Summarizer (no tools)</option>
+            </select>
+          </div>
+
+          <div v-else>
             <label class="block font-medium text-slate-200 mb-1">{{ t('execModelLabel') }}</label>
             <button
               type="button"
@@ -237,7 +268,10 @@
               </span>
             </button>
           </div>
+        </div>
 
+        <!-- Mode (botex executor only) -->
+        <div v-if="newTask.executor !== 'devin'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block font-medium text-slate-200 mb-1">{{ t('permModeLabel') }}</label>
             <select
@@ -252,8 +286,8 @@
           </div>
         </div>
 
-        <!-- Capability Toggles -->
-        <div class="p-3 bg-botex-950 rounded-lg border border-botex-800 space-y-2">
+        <!-- Capability Toggles (botex executor only) -->
+        <div v-if="newTask.executor !== 'devin'" class="p-3 bg-botex-950 rounded-lg border border-botex-800 space-y-2">
           <span class="block font-mono text-xs font-semibold text-slate-300 uppercase">
             {{ locale === 'pl' ? 'Uprawnienia wykonawcze' : 'Capabilities & Guards' }}
           </span>
@@ -273,8 +307,8 @@
           </div>
         </div>
 
-        <!-- Budget & Turns -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <!-- Budget & Turns (botex executor only — the devin harness runs its own loop) -->
+        <div v-if="newTask.executor !== 'devin'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Input
             v-model="newTask.budget_limit_usd"
             type="number"
@@ -320,12 +354,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTasksStore } from '../stores/tasks'
 import { useChatStore } from '../stores/chat'
 import { useI18n } from '../i18n'
 import type { CatalogModel, TaskCreateRequest, TaskDetail, TaskSummary } from '../api/types'
+import { api } from '../api/client'
 import Modal from '../components/common/Modal.vue'
 import Button from '../components/common/Button.vue'
 import Badge from '../components/common/Badge.vue'
@@ -370,7 +405,32 @@ const newTask = ref<TaskCreateRequest>({
   allow_destructive: false,
   allow_non_zdr: false,
   budget_limit_usd: -1,
-  max_turns: 0
+  max_turns: 0,
+  executor: 'botex',
+  agent_type: 'default'
+})
+
+const devinStatus = ref<Awaited<ReturnType<typeof api.fetchDevinExecutorStatus>> | null>(null)
+
+async function refreshDevinStatus() {
+  try {
+    const s = await api.fetchDevinExecutorStatus()
+    devinStatus.value = s
+  } catch (err: any) {
+    devinStatus.value = {
+      enabled: false,
+      available: false,
+      exe_resolved: false,
+      credential_resolved: false,
+      reason: err?.detail || err?.message || 'probe_failed'
+    }
+  }
+}
+
+watch(showCreateModal, (open) => {
+  if (open) {
+    refreshDevinStatus()
+  }
 })
 
 onMounted(() => {
@@ -380,6 +440,7 @@ onMounted(() => {
   if (chatStore.catalogModels.length === 0) {
     chatStore.fetchCatalogModels()
   }
+  refreshDevinStatus()
 
   if (chatStore.pendingTaskDraft) {
     newTask.value.task = chatStore.pendingTaskDraft

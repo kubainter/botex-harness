@@ -99,3 +99,38 @@ def test_reciprocal_rank_fusion():
     assert merged[0][0] == "docB"
     ids = [item[0] for item in merged]
     assert set(ids) == {"docA", "docB", "docC", "docD"}
+
+
+def test_implicit_linker_and_multi_token_search(memory_dirs):
+    """Verify bare/backticked IDs auto-link to existing notes and multi-token search works."""
+    ws_dir, _ = memory_dirs
+
+    target = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_base_arch01",
+        title="Base Architecture Spec",
+        content="Core specification for token validation and retry backoff.",
+        kind="decision",
+    )
+    assert target["ok"] is True
+
+    # Save a second note mentioning `mem_base_arch01` in inline code without [[wikilinks]]
+    child = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Followup Implementation",
+        content="Implemented changes according to `mem_base_arch01` specification.",
+        kind="handoff",
+    )
+    assert child["ok"] is True
+    assert "mem_base_arch01" in child["links"]
+
+    # Backlinks should immediately report child -> mem_base_arch01
+    bl = memory.get_backlinks(workspace_dir=str(ws_dir), memory_id="mem_base_arch01")
+    assert bl["ok"] is True
+    assert any(b["id"] == child["id"] for b in bl["backlinks"])
+
+    # Multi-token out-of-order search fallback
+    s_res = memory.search_memory(workspace_dir=str(ws_dir), query="backoff specification")
+    assert s_res["ok"] is True
+    assert s_res["count"] >= 1
+    assert any(m["id"] == "mem_base_arch01" for m in s_res["memories"])

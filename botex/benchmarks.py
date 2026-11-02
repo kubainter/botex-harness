@@ -299,6 +299,9 @@ def get_recommended_models(
     models = data.get("data", []) if isinstance(data, dict) else []
 
     scored_models: List[Dict[str, Any]] = []
+    prov_caps = (pcfg or {}).get("capabilities") if isinstance(pcfg, dict) else {}
+    if not isinstance(prov_caps, dict):
+        prov_caps = {}
     for m in models:
         if not isinstance(m, dict):
             continue
@@ -306,26 +309,35 @@ def get_recommended_models(
         if not slug:
             continue
         is_nv = (pname == "nvidia") or ("nvidia" in str(provider or "").lower())
+        is_google = (pname == "google") or (
+            str(provider or "").strip().lower() in ("google", "gemini", "aistudio")
+        )
+        if is_google and slug.startswith("models/"):
+            slug = slug.removeprefix("models/")
 
         if denylist_filter is not None and not denylist_filter.is_allowed(
             slug, provider=pname or provider, profile=profile
         ):
             continue
 
+        model_caps = prov_caps.get(slug) or prov_caps.get(f"models/{slug}") or {}
         params = m.get("supported_parameters")
         param_set = (
             {str(p).lower() for p in params} if isinstance(params, (list, tuple, set)) else set()
         )
         if require_tools:
-            if params is not None and isinstance(params, (list, tuple, set)):
+            if "supports_tools" in model_caps:
+                if not model_caps["supports_tools"]:
+                    continue
+            elif params is not None and isinstance(params, (list, tuple, set)):
                 if "tools" not in param_set:
                     continue
-            elif is_nv:
-                # Active NVIDIA chat/coding models support tools
+            elif is_nv or is_google:
+                # Active NVIDIA and Google AI Studio chat/coding models support tools
                 pass
 
         pricing = m.get("pricing") or {}
-        context_length = int(m.get("context_length") or 0)
+        context_length = int(model_caps.get("context_length") or m.get("context_length") or 0)
         if context_length <= 0:
             context_length = _infer_context_length(slug, 0)
 
@@ -397,7 +409,7 @@ def get_recommended_models(
         for cap in ("tools", "reasoning", "structured_outputs", "response_format"):
             if cap in param_set:
                 capabilities.append(cap)
-        if is_nv and "tools" not in capabilities:
+        if (is_nv or is_google or model_caps.get("supports_tools")) and "tools" not in capabilities:
             capabilities.append("tools")
         if "reasoning" not in capabilities and is_reasoning_capable_slug(slug):
             capabilities.append("reasoning")
@@ -427,3 +439,90 @@ def get_recommended_models(
 
 # Alias for backward compatibility and MCP tool parity
 recommend_models = get_recommended_models
+
+
+def estimate_task_tier(
+    prompt: str = "",
+    files: Optional[List[str]] = None,
+    outline_lines: int = 0,
+) -> str:
+    """Heuristic estimator mapping task scale/complexity to a recommended tier.
+
+    - "high": multi-file refactoring, architecture, deep design, or large codebases.
+    - "budget": lightweight inspection, single-file typo/syntax, formatting, or quick q&a.
+    - "standard": typical 1-2 file edits or standard bugfixes.
+    """
+    p_low = (prompt or "").lower().strip()
+    file_count = len(files or [])
+
+    # High complexity triggers
+    if (
+        file_count >= 4
+        or outline_lines > 2000
+        or any(
+            k in p_low
+            for k in (
+                "architect",
+                "adr",
+                "migration",
+                "redesign",
+                "security audit",
+                "deadlock",
+            )
+        )
+    ):
+        return "high"
+
+    # Budget / Flash triggers
+    if (
+        file_count <= 1
+        and outline_lines < 300
+        and len(p_low) < 400
+        and any(
+            k in p_low
+            for k in (
+                "inspect",
+                "check",
+                "explain",
+                "lint",
+                "syntax",
+                "format",
+                "ping",
+                "unit test for",
+            )
+        )
+    ):
+        return "budget"
+
+    return "standard"
+
+
+# Task-size routing tiers normalize through a module-constant allowlist —
+# a malformed or prompt-derived token degrades to "standard" instead of
+# leaking a raw string into profile resolution (CodeQL CWE-020 invariant).
+_VALID_TASK_TIER_MAP: Dict[str, str] = {
+    "high": "high",
+    "standard": "standard",
+    "budget": "budget",
+}
+
+
+def normalize_task_tier(tier: Any) -> str:
+    """Normalize a raw tier token to a canonical module-constant tier name."""
+    return _VALID_TASK_TIER_MAP.get(str(tier or "").strip().lower(), "standard")
+
+
+def resolve_tier_profile(raw_tier: Any, tiers_cfg: Any) -> str:
+    """Map an estimated task tier to a configured model profile.
+
+    ``tiers_cfg`` is ``engine.task_size_routing.tiers`` — a tier-name ->
+    profile-name map. A non-dict block or a missing/blank entry resolves
+    to ``""`` so the caller simply keeps the existing resolution.
+    """
+    tier = normalize_task_tier(raw_tier)
+    if not isinstance(tiers_cfg, dict):
+        return ""
+    profile = tiers_cfg.get(tier)
+    if not isinstance(profile, str) or not profile.strip():
+        return ""
+    return profile.strip()

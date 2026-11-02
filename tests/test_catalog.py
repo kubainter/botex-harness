@@ -973,3 +973,53 @@ def test_consolidated_models_includes_ollama_local_free(isolated_cache_path: Pat
         assert entry["pricing"]["prompt_per_m"] == 0.0
         assert entry["pricing"]["completion_per_m"] == 0.0
         assert entry["context_length"] > 0
+
+
+def test_google_catalog_strips_models_prefix_and_marks_free(isolated_cache_path: Path):
+    """TEST-CAT-31: Google AI Studio /models entries strip 'models/' prefix,
+    resolve capabilities, and appear as free ($0.0) in consolidated catalog."""
+    from botex.catalog import get_consolidated_models
+
+    mock_provider = MagicMock(spec=BaseProvider)
+    mock_provider.name = "google"
+    mock_provider.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    mock_provider.config = {
+        "capabilities": {
+            "gemini-2.5-flash": {"supports_tools": True, "context_length": 1048576},
+            "gemini-2.5-pro": {"supports_tools": True, "context_length": 1048576},
+        }
+    }
+    mock_provider.resolve_api_key.return_value = "gai-key"
+    mock_provider.get_model_capabilities.side_effect = lambda mid: mock_provider.config[
+        "capabilities"
+    ].get(mid.removeprefix("models/"), {})
+    mock_provider.fetch_catalog.return_value = [
+        {"id": "models/gemini-2.5-flash", "object": "model"},
+        {"id": "models/gemini-2.5-pro", "object": "model"},
+    ]
+
+    cat = ModelCatalog(
+        provider_name="google",
+        provider=mock_provider,
+        cache_file=isolated_cache_path,
+    )
+    loaded = cat.load(force_refresh=True)
+    assert "gemini-2.5-flash" in loaded
+    assert "models/gemini-2.5-flash" not in loaded
+    assert loaded["gemini-2.5-flash"].supports_tools is True
+    assert loaded["gemini-2.5-flash"].context_length == 1048576
+    assert cat.get_model("models/gemini-2.5-flash") is not None
+
+    consolidated = get_consolidated_models(
+        providers=("google",),
+        cache_file=isolated_cache_path,
+        force_refresh=False,
+    )
+    g_entries = [m for m in consolidated if m["provider"] == "google"]
+    assert any(m["id"] == "gemini-2.5-flash" for m in g_entries)
+    assert any(m["id"] == "gemini-2.5-pro" for m in g_entries)
+    for entry in g_entries:
+        assert entry["is_free"] is True
+        assert entry["pricing"]["prompt_per_m"] == 0.0
+        assert entry["pricing"]["completion_per_m"] == 0.0
+        assert entry["supports_tools"] is True

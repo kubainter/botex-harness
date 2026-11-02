@@ -40,6 +40,11 @@ STATUS_FAILURE_KIND: Dict[str, Optional[str]] = {
     "ERROR": "workspace_or_security",
 }
 
+ENGINE_STATUSES = frozenset(STATUS_FAILURE_KIND)
+TASK_LIFECYCLE_STATUSES = frozenset(
+    {"QUEUED", "RUNNING", "DONE", "FAILED", "CANCELLED", "NOT_FOUND", "TOO_MANY_QUEUED"}
+)
+
 # Kinds that justify trying the next model candidate — resource limits,
 # provider-side failures, semantic refusals and tool-call misuse (a
 # stronger candidate forms valid calls). Caller/config/workspace
@@ -86,6 +91,8 @@ def classify_api_error(exc: BaseException) -> str:
     cannot help. 403/404 are policy/availability decisions that another
     model may pass. 429 and 5xx mean provider-side pressure.
     """
+    if "CircuitBreakerOpenError" in type(exc).__name__ or "circuit breaker" in str(exc).lower():
+        return "provider_unavailable"
     if isinstance(exc, APITimeoutError):
         return "request_timeout"
     status = getattr(exc, "status_code", None)
@@ -287,10 +294,64 @@ def parse_structured_completion(text: str) -> Optional[Dict[str, Any]]:
     blocking_reason = str(blocking_reason_val).strip() if blocking_reason_val is not None else None
 
     return {
+        "version": str(parsed.get("version") or "1.0"),
         "status": mapped_status,
         "summary": summary_str,
         "artifact_refs": artifact_refs,
         "memory_keys": memory_keys,
         "blocking_reason": blocking_reason,
+        "trace_id": str(parsed.get("trace_id")).strip() if parsed.get("trace_id") else None,
         "data": parsed,
     }
+
+
+CANONICAL_HANDOFF_SCHEMA_V1: Dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "CanonicalHandoffV1",
+    "type": "object",
+    "properties": {
+        "version": {"type": "string", "enum": ["1.0"]},
+        "status": {
+            "type": "string",
+            "enum": ["DONE", "FAILED", "BLOCKED", "INCOMPLETE", "UNSUPPORTED"],
+        },
+        "summary": {"type": "string"},
+        "artifact_refs": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "memory_keys": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "blocking_reason": {"type": ["string", "null"]},
+        "trace_id": {"type": ["string", "null"]},
+    },
+    "required": ["version", "status", "summary", "artifact_refs", "memory_keys"],
+    "additionalProperties": True,
+}
+
+
+def format_handoff_response(
+    status: str,
+    summary: str,
+    artifact_refs: Optional[list[str]] = None,
+    memory_keys: Optional[list[str]] = None,
+    blocking_reason: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Format a response dictionary compliant with CANONICAL_HANDOFF_SCHEMA_V1."""
+    norm_status = _VALID_STRUCTURED_STATUS_MAP.get(str(status).strip().lower(), "FAILED")
+    payload: Dict[str, Any] = {
+        "version": "1.0",
+        "status": norm_status,
+        "summary": str(summary or "").strip(),
+        "artifact_refs": [str(r) for r in (artifact_refs or []) if r],
+        "memory_keys": [str(k) for k in (memory_keys or []) if k],
+        "blocking_reason": str(blocking_reason).strip() if blocking_reason else None,
+        "trace_id": str(trace_id).strip() if trace_id else None,
+    }
+    if data:
+        payload["data"] = data
+    return payload

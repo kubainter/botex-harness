@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import os
 import socket
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+
+os.environ["BOTEX_DISABLE_DOTENV"] = "1"
 
 
 @pytest.fixture(autouse=True)
@@ -72,10 +75,29 @@ def isolate_botex_test_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("BOTEX_ACCESS_TOKEN", raising=False)
 
     try:
-        from botex.config import load_config
+        import botex.config as _cfg_mod
 
-        load_config(reload=True)
+        monkeypatch.setattr(_cfg_mod, "LOCAL_CONFIG_FILE", t_path / ".test_env_local.json")
+        _cfg_mod.load_config(reload=True)
     except Exception:
         pass
 
     yield
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker_state():
+    """Reset the shared provider circuit breaker between tests.
+
+    The breaker singleton intentionally persists provider health across
+    runs in production; tests must start each case CLOSED so one test's
+    failures never bleed into another's fallback decisions.
+    """
+    try:
+        from botex.retry import reset_circuit_breaker
+    except ImportError:
+        from retry import reset_circuit_breaker
+
+    reset_circuit_breaker()
+    yield
+    reset_circuit_breaker()

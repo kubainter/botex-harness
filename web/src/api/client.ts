@@ -3,9 +3,12 @@ import type {
   HealthStatus,
   WalletInfo,
   KeyStatusInfo,
+  RateLimitsMap,
   TaskCreateRequest,
   TaskSummary,
   TaskDetail,
+  TaskEventsResponse,
+  TaskFollowupResponse,
   PendingAction,
   ApprovalDecisionRequest,
   MemoryEntry,
@@ -19,8 +22,11 @@ import type {
   AnalyticsResponse,
   SkillCatalogItem,
   SkillDetail,
-  SkillInstallRequest
+  SkillInstallRequest,
+  CuratorStatus,
+  CuratorRunRequest
 } from './types'
+
 
 const STORAGE_KEY_URL = 'botex_backend_url'
 const STORAGE_KEY_TOKEN = 'botex_access_token'
@@ -135,6 +141,11 @@ export const api = {
     return request<KeyStatusInfo>(`/api/key/status?${params.toString()}`)
   },
 
+  // 2b. Live Provider Rate Limits & Token Buckets
+  async getRateLimits(): Promise<RateLimitsMap> {
+    return request<RateLimitsMap>('/api/rate_limits')
+  },
+
   // 2b. Consolidated Model Catalog
   async getModels(provider?: string, forceRefresh: boolean = false): Promise<CatalogModel[]> {
     const params = new URLSearchParams()
@@ -168,6 +179,38 @@ export const api = {
       `/api/tasks/${encodeURIComponent(taskId)}/cancel`,
       { method: 'POST' }
     )
+  },
+
+  // 3c. Multi-turn follow-up: resumes the Devin ACP session stored on the task.
+  async sendTaskFollowup(taskId: string, prompt: string): Promise<TaskFollowupResponse> {
+    return request<TaskFollowupResponse>(
+      `/api/tasks/${encodeURIComponent(taskId)}/followup`,
+      { method: 'POST', body: JSON.stringify({ prompt }) }
+    )
+  },
+
+  // 3a. Live Task Event Stream (buffered tail + incremental `since` cursor)
+  async fetchTaskEvents(taskId: string, since?: number): Promise<TaskEventsResponse> {
+    const params = new URLSearchParams()
+    if (since !== undefined && since !== null) {
+      params.set('since', String(since))
+    }
+    const qs = params.toString()
+    return request<TaskEventsResponse>(
+      `/api/tasks/${encodeURIComponent(taskId)}/events${qs ? '?' + qs : ''}`
+    )
+  },
+
+  // 3b. Devin executor availability probe (exe + credential resolved server-side)
+  async fetchDevinExecutorStatus(): Promise<{
+    enabled: boolean
+    available: boolean
+    exe_resolved: boolean
+    credential_resolved: boolean
+    reason: string
+    runs?: Array<Record<string, unknown>>
+  }> {
+    return request('/api/delegation/devin')
   },
 
   // 4. Approvals
@@ -411,6 +454,22 @@ export const api = {
       `/api/skills/${encodeURIComponent(skillName)}`,
       { method: 'DELETE' }
     )
+  },
+
+  // 10. Autonomous Knowledge Graph Curator
+  async getCuratorStatus(workspaceDir: string = '.'): Promise<CuratorStatus> {
+    const q = new URLSearchParams()
+    if (workspaceDir && workspaceDir !== '.') q.set('workspace_dir', workspaceDir)
+    const qs = q.toString()
+    return request<CuratorStatus>(`/api/curator/status${qs ? '?' + qs : ''}`)
+  },
+
+  async runCurator(body: CuratorRunRequest = {}): Promise<any> {
+    return request<any>('/api/curator/run', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    })
   }
 }
+
 

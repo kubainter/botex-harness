@@ -898,3 +898,62 @@ def test_google_resolve_key_dual_env_precedence(monkeypatch):
     assert provider.resolve_api_key() == "gemini-a"
     assert provider._key_precedence_warned is True
     assert provider.resolve_api_key() == "gemini-a"
+
+
+def test_google_parallel_tool_calls_streaming_index_none():
+    """TEST-GAI-11: Google AI Studio streaming parallel tool_calls emit index=None;
+    each tool call must be allocated its own slot rather than colliding at slot 0."""
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": None,
+                                "id": "function-call-1",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path":"a.py"}',
+                                },
+                            },
+                            {
+                                "index": None,
+                                "id": "function-call-2",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path":"b.py"}',
+                                },
+                            },
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    ]
+    nresp = providers.normalize_streaming_chunks(chunks, raw_model="gemini-2.5-flash")
+    assert nresp.finish_reason == "tool_call"
+    assert len(nresp.tool_calls) == 2
+    assert nresp.tool_calls[0].id == "function-call-1"
+    assert nresp.tool_calls[0].name == "read_file"
+    assert json.loads(nresp.tool_calls[0].arguments) == {"path": "a.py"}
+    assert nresp.tool_calls[1].id == "function-call-2"
+    assert nresp.tool_calls[1].name == "read_file"
+    assert json.loads(nresp.tool_calls[1].arguments) == {"path": "b.py"}
+
+
+def test_get_model_capabilities_strips_models_prefix():
+    """TEST-GAI-12: BaseProvider.get_model_capabilities matches both bare and 'models/'-prefixed slugs."""
+    provider = GoogleAIStudioProvider(
+        "google",
+        {"capabilities": {"gemini-2.5-flash": {"supports_tools": True, "context_length": 1048576}}},
+    )
+    assert provider.get_model_capabilities("gemini-2.5-flash") == {
+        "supports_tools": True,
+        "context_length": 1048576,
+    }
+    assert provider.get_model_capabilities("models/gemini-2.5-flash") == {
+        "supports_tools": True,
+        "context_length": 1048576,
+    }

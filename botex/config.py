@@ -28,7 +28,14 @@ except ImportError:
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parent
 
-if load_dotenv is not None:
+_DOTENV_DISABLED = {"1", "true", "yes", "on"}
+
+
+def _dotenv_is_disabled() -> bool:
+    return os.environ.get("BOTEX_DISABLE_DOTENV", "").strip().lower() in _DOTENV_DISABLED
+
+
+if load_dotenv is not None and not _dotenv_is_disabled():
     _root_env = PROJECT_ROOT / ".env"
     if _root_env.exists():
         load_dotenv(dotenv_path=_root_env, override=False)
@@ -75,11 +82,6 @@ DEFAULTS: Dict[str, Any] = {
             # Optional ordered failover candidates. Used only when the first
             # model fails before touching files; explicit model= disables it.
             "model_fallbacks": {},
-            # Slugs/globs of decisions-only models served by a dedicated
-            # endpoint (e.g. OpenRouter /api/alpha/decisions). They answer
-            # typed questions instead of running a chat tool loop — the
-            # engine rejects them locally before any billable call.
-            "decisions_models": [],
         },
         "nvidia": {
             "default": False,
@@ -209,14 +211,6 @@ DEFAULTS: Dict[str, Any] = {
                 "gemini-2.5-pro": {"supports_tools": True, "context_length": 1048576},
                 "gemini-2.5-flash-lite": {"supports_tools": True, "context_length": 1048576},
             },
-            # USD per 1M tokens, paid tier (<=200k context bracket) — the
-            # catalog does not publish prices, so the price gate reads
-            # these instead. Keep in sync with ai.google.dev/gemini-api/pricing.
-            "pricing_overrides": {
-                "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
-                "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
-                "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
-            },
             "models": {
                 "default": "gemini-2.5-flash",
                 "coding": "gemini-2.5-pro",
@@ -313,6 +307,29 @@ DEFAULTS: Dict[str, Any] = {
             "destructive": 0,
             "full": 0,
         },
+        # Task-size routing (Stage 4.8): disabled by default. When enabled
+        # and the caller names neither model nor profile (and mode_profiles
+        # resolved empty), estimate_task_tier classifies the prompt/files
+        # into a tier and `tiers` maps it to a model profile — cheap tiers
+        # for small jobs, stronger tiers for multi-file work.
+        "task_size_routing": {
+            "enabled": False,
+            "tiers": {
+                "high": "coding",
+                "standard": "default",
+                "budget": "fast",
+            },
+        },
+        # Provider circuit breaker (Stage 4.8): consecutive server-side or
+        # network failures trip a provider OPEN so dead endpoints fail fast
+        # instead of burning request budget; after recovery_timeout_s a
+        # single HALF_OPEN probe may retry. Per-provider override:
+        # providers.<name>.circuit_breaker.
+        "circuit_breaker": {
+            "enabled": True,
+            "failure_threshold": 3,
+            "recovery_timeout_s": 60.0,
+        },
         # When False, delete_file/move_file are not exposed to the agent at all.
         # Callers may still gate them per-run via confirm_fn / CLI prompt.
         "allow_destructive": False,
@@ -391,6 +408,16 @@ DEFAULTS: Dict[str, Any] = {
         "timeout_s": 120,
         "max_output_bytes": 20000,
     },
+    # OpenTelemetry export (Stage 4.8): disabled by default — every span is
+    # a NullSpan until an operator opts in AND installs the `otel` extra.
+    # exporter: none | otlp | console; endpoint falls back to
+    # OTEL_EXPORTER_OTLP_ENDPOINT; OTEL_SDK_DISABLED always wins.
+    "tracing": {
+        "enabled": False,
+        "exporter": "none",
+        "endpoint": "",
+        "sample_ratio": 1.0,
+    },
     # Context-Guard: large tool output is offloaded to the Memory Vault and
     # replaced by a failure-aware preview + Vault reference.
     "context_guard": {
@@ -406,7 +433,6 @@ DEFAULTS: Dict[str, Any] = {
         "snapshot_max_age_days": 7,
         "snapshot_max_total_mb": 50,
         "analytics_file": ".agent_analytics.json",
-        "catalog_file": ".model_pricing.json",
         "global_memory_dir": "~/.botex/memory",
         "chat_sessions_dir": "",
         # Optional extra dotenv file to load (relative to project root or absolute).
@@ -455,7 +481,6 @@ DEFAULTS: Dict[str, Any] = {
     "catalog": {
         "enabled": True,
         "cache_file": ".model_pricing.json",
-        "cache_path": ".model_pricing.json",
         "ttl_hours": 24.0,
         "cache_ttl_hours": 24,
         "timeout_s": 10.0,
@@ -479,6 +504,17 @@ DEFAULTS: Dict[str, Any] = {
     "secrets": {
         "openrouter_api_key": "",
         "google_api_key": "",
+    },
+    # Direct-ACP delegation to the Devin CLI (executor="devin"). exe_path is a
+    # validated executable path (must exist and be named devin.exe/devin) —
+    # never a free-form command. Empty = executor reports unavailable.
+    "delegation": {
+        "devin": {
+            "enabled": True,
+            "exe_path": "",
+            "poll_interval_s": 3,
+            "idle_timeout_s": 90,
+        },
     },
 }
 
@@ -748,15 +784,17 @@ def engine_setting(key: str, override: Optional[Any] = None) -> Any:
 
 
 def snapshot_dir() -> Path:
-    return _resolve_path(load_config()["paths"]["snapshot_dir"])
+    value = load_config().get("paths", {}).get("snapshot_dir")
+    return _resolve_path(value or DEFAULTS["paths"]["snapshot_dir"])
 
 
 def analytics_file() -> Path:
-    return _resolve_path(load_config()["paths"]["analytics_file"])
+    value = load_config().get("paths", {}).get("analytics_file")
+    return _resolve_path(value or DEFAULTS["paths"]["analytics_file"])
 
 
 def env_file() -> Optional[Path]:
-    value = load_config()["paths"].get("env_file") or ""
+    value = load_config().get("paths", {}).get("env_file") or ""
     return _resolve_path(value) if value else None
 
 
@@ -821,7 +859,13 @@ def catalog_setting(key: str, override: Optional[Any] = None) -> Any:
 
 
 def catalog_cache_file() -> Path:
-    """Return resolved path to the catalog cache file."""
+    """Return resolved path to the catalog cache file.
+
+    ``catalog.cache_file`` is the canonical declaration (also reachable via
+    ``BOTEX_CATALOG_CACHE_FILE``). ``paths.catalog_file`` and
+    ``catalog.cache_path`` remain honoured as legacy aliases when a local
+    config still sets them explicitly.
+    """
     path_str = (
         load_config().get("paths", {}).get("catalog_file")
         or catalog_setting("cache_file")
