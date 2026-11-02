@@ -311,6 +311,7 @@ async def start_task(
     verify_command: str = "",
     recipe: str = "",
     allow_non_zdr: bool = False,
+    approval_policy: str = "",
 ) -> dict[str, Any]:
     """Start a detached BoteX task and return its task_id immediately.
 
@@ -325,8 +326,9 @@ async def start_task(
     - mode: capability preset — 'readonly' (read tools only; the contract
       is an analysis report), 'edit' (read + write; default), 'destructive'
       (+ delete/move), 'full' (+ run_command). Empty = engine.default_mode.
-    - allow_destructive / allow_exec / allow_net only ever WIDEN the
-      preset, never narrow it — a readonly task cannot gain file writes.
+    - allow_destructive / allow_exec / allow_net widen ordinary presets,
+      never narrow them. 'readonly' and 'chat' are hard read-only modes and
+      cannot gain local writes, destructive operations, or command execution.
       allow_exec additionally requires exec.enabled=true in the config.
       None of these is a sandbox: grant them only with the user's consent.
     - output_path makes the contract file_output: DONE requires the file
@@ -344,6 +346,8 @@ async def start_task(
     - allow_non_zdr: per-run consent to relax Zero Data Retention — needed
       for free (:free) models whose endpoints may log or train on prompts.
       Same semantics as in run_subagent.
+    - approval_policy: Operator approval policy for risky operations:
+      'none', 'high_risk', 'mutations', or 'all_risky'.
 
     Returns:
         {"task_id": str, "status": "QUEUED"} — poll with get_task_status.
@@ -383,6 +387,7 @@ async def start_task(
         "verify_command": verify_command,
         "recipe": recipe,
         "allow_non_zdr": allow_non_zdr,
+        "approval_policy": approval_policy,
     }
     task_obj = asyncio.create_task(_background_task(task_id, kwargs))
     _TASKS[task_id] = {
@@ -534,8 +539,9 @@ async def run_subagent(
                analysis report, DONE requires non-empty findings), 'edit'
                (read + edit — default), 'destructive' (+delete/move),
                'full' (+run_command). Empty = engine.default_mode from
-               config. Explicit allow_* flags may only WIDEN a preset —
-               they never narrow it (readonly can never gain file writes).
+               config. Explicit allow_* flags may widen ordinary presets,
+                but 'readonly' and 'chat' are hard read-only modes and cannot
+                gain local writes, destructive operations, or command execution.
                In headless mode this is pre-authorization — grant it
                consciously.
         max_turns: Maximum tool-loop steps (0 = config value).
@@ -691,13 +697,17 @@ async def search_memory(
         kind: Filter by entry kind ('context', 'decision', 'handoff', 'lesson').
         scope: Search scope ('local', 'global', or 'all'). Default is 'local'.
     """
-    return _search_memory(
+    res = _search_memory(
         workspace_dir=resolve_workspace(workspace_dir),
         query=query,
         tag=tag or None,
         kind=kind or None,
         scope=scope,
     )
+    if isinstance(res, dict) and isinstance(res.get("memories"), list):
+        res = dict(res)
+        res["memories"] = [{k: v for k, v in m.items() if k != "content"} for m in res["memories"]]
+    return res
 
 
 @mcp.tool()
@@ -1738,10 +1748,21 @@ def _cli_cloud(argv: list[str]) -> None:
         prog="botex cloud",
         description="Launch BoteX FastAPI Cloud Gateway & Remote MCP SSE server.",
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
     parser.add_argument("--log-level", default="info", help="Log level (default: info)")
     args = parser.parse_args(argv)
+
+    if (
+        args.host not in ("127.0.0.1", "::1", "localhost")
+        and not os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
+    ):
+        print(
+            f"CRITICAL: refusing to bind to {args.host} without BOTEX_ACCESS_TOKEN set. "
+            "Set BOTEX_ACCESS_TOKEN or bind to 127.0.0.1 for local mode.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     print(title(f"BoteX FastAPI Cloud Gateway & Remote MCP SSE on http://{args.host}:{args.port}"))
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level, workers=1)
