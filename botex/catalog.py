@@ -21,12 +21,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 try:
     from .config import PROJECT_ROOT
     from .providers import BaseProvider, ProviderRegistry
-    from .security import coerce_text, mask_secrets
+    from .security import mask_secrets
     from .wallet import _sanitize_raw_payload
 except (ImportError, ValueError):
     from config import PROJECT_ROOT
     from providers import BaseProvider, ProviderRegistry
-    from security import coerce_text, mask_secrets
+    from security import mask_secrets
     from wallet import _sanitize_raw_payload
 
 # Allowlist of verified active models hosted on NVIDIA Cloud Functions
@@ -359,9 +359,10 @@ class ModelCatalog:
             self._write_cache_entry(self._models)
             return self._models
         except Exception as exc:
-            masked_err = mask_secrets(str(exc))
-            err_msg = f"[BoteX] Catalog fetch failed ({masked_err}); using stale cache if any.\n"
-            sys.stderr.write(coerce_text(err_msg))
+            err_msg = (
+                f"[BoteX] Catalog fetch failed ({type(exc).__name__}); using stale cache if any.\n"
+            )
+            sys.stderr.write(err_msg)
 
         # Stale cache fallback on network/HTTP exception
         if isinstance(cached_entry, dict):
@@ -535,8 +536,8 @@ class ModelCatalog:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
             self.cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except Exception as exc:
-            err_msg = f"[BoteX] Failed to write catalog cache: {mask_secrets(str(exc))}\n"
-            sys.stderr.write(coerce_text(err_msg))
+            err_msg = f"[BoteX] Failed to write catalog cache: {type(exc).__name__}\n"
+            sys.stderr.write(err_msg)
 
 
 _VALID_PROVIDERS_MAP: Dict[str, str] = {

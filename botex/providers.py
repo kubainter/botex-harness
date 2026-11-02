@@ -34,11 +34,11 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitEr
 try:
     from .config import app_headers
     from .retry import parse_retry_delay, resolve_retry_config, status_code_of
-    from .security import coerce_text, mask_secrets
+    from .security import mask_secrets
 except (ImportError, ValueError):
     from config import app_headers
     from retry import parse_retry_delay, resolve_retry_config, status_code_of
-    from security import coerce_text, mask_secrets
+    from security import mask_secrets
 
 
 # Canonical finish kind constants for CodeQL CWE-312 compliance
@@ -1451,8 +1451,7 @@ async def fetch_openrouter_generations_async(
     try:
         provider = ProviderRegistry.get(provider_name or "openrouter", provider_cfg or {})
     except Exception as exc:
-        msg = f"OpenRouter provider lookup failed: {sanitize_provider_error(exc)}\n"
-        sys.stderr.write(coerce_text(msg))
+        sys.stderr.write(f"OpenRouter provider lookup failed ({type(exc).__name__})\n")
         return {}
 
     if not isinstance(provider, OpenRouterProvider):
@@ -1474,8 +1473,7 @@ async def fetch_openrouter_generations_async(
         except _GenerationNotIndexedError:
             return gid, None, True
         except Exception as exc:
-            err_msg = f"OpenRouter generation query error ({mask_secrets(str(gid))}): {sanitize_provider_error(exc)}\n"
-            sys.stderr.write(coerce_text(err_msg))
+            sys.stderr.write(f"OpenRouter generation query error ({type(exc).__name__})\n")
             return gid, None, False
 
     first_pass = await asyncio.gather(*(_query_one(gid) for gid in unique_ids))

@@ -80,12 +80,19 @@ _TASKS: Dict[str, Dict[str, Any]] = botex_server._TASKS
 def _save_task_persistent(task_id: str, entry: Dict[str, Any], workspace_dir: str = "") -> None:
     """Persist task metadata and receipt to .botex/tasks/<task_id>.json across server restarts."""
     try:
+        safe_tid = sanitize_identifier(task_id)
+        if not safe_tid:
+            return
         tasks_dir = get_tasks_dir(workspace_dir)
-        p = tasks_dir / f"{task_id}.json"
+        existing = next(
+            (f for f in tasks_dir.iterdir() if f.is_file() and f.name == f"{safe_tid}.json"),
+            None,
+        )
+        p = existing if existing is not None else (tasks_dir / f"{safe_tid}.json")
         clean = {k: v for k, v in entry.items() if k != "async_task"}
         p.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception as exc:
-        logger.warning(f"Failed to persist task {task_id}: {exc}")
+        logger.warning("Failed to persist task metadata: %s", type(exc).__name__)
 
 
 def _load_tasks_persistent(workspace_dir: str = "") -> None:
@@ -1391,11 +1398,7 @@ async def get_memory(
             )
         res = read_memory(workspace_dir=ws, memory_id=clean_mid, scope=scope)
         if not res.get("ok"):
-            logger.warning(
-                "Memory read failed for ID '%s': %s",
-                clean_mid,
-                coerce_text(mask_secrets(str(res.get("error") or ""))),
-            )
+            logger.warning("Memory read failed: entry not found or inaccessible.")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Memory entry '{clean_mid}' not found.",
@@ -1410,10 +1413,7 @@ async def get_memory(
         scope=scope,
     )
     if not res.get("ok"):
-        logger.warning(
-            "Memory search failed: %s",
-            coerce_text(mask_secrets(str(res.get("error") or ""))),
-        )
+        logger.warning("Memory search failed.")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to search memory entries.",
@@ -1442,10 +1442,7 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
         scope=body.scope,
     )
     if not res.get("ok"):
-        logger.warning(
-            "Memory save failed: %s",
-            coerce_text(mask_secrets(str(res.get("error") or ""))),
-        )
+        logger.warning("Memory save failed.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to save memory entry.",
@@ -1763,11 +1760,7 @@ async def save_chat_session_to_memory(
         tags=body.tags,
     )
     if not res.get("ok"):
-        logger.warning(
-            "Save chat to memory failed for '%s': %s",
-            clean_sid,
-            coerce_text(mask_secrets(str(res.get("error") or ""))),
-        )
+        logger.warning("Save chat to memory failed.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to save chat transcript to memory vault.",
@@ -1943,8 +1936,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        clean_err = coerce_text(mask_secrets(str(exc)))
-        logger.warning("WebSocket session terminated: %s", clean_err)
+        logger.warning("WebSocket session terminated: %s", type(exc).__name__)
     finally:
         heartbeat_task.cancel()
         _ACTIVE_WEBSOCKETS.pop(websocket, None)

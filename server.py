@@ -86,7 +86,13 @@ from botex.obsidian import (
 from botex.patch_engine import snapshot_manager
 from botex.pricing import load_catalog, model_price
 from botex.providers import ProviderRegistry
-from botex.security import coerce_text, mask_secrets, wrap_untrusted_content, zdr_enforced
+from botex.security import (
+    coerce_text,
+    mask_secrets,
+    sanitize_identifier,
+    wrap_untrusted_content,
+    zdr_enforced,
+)
 from botex.ui import accent, dim, err, mark_status, ok, title, warn
 
 mcp = MCPServer("BoteX-Harness")
@@ -1527,14 +1533,12 @@ def _cli_chat(argv: list[str]) -> None:
                 sys.stdout.write(delta)
                 sys.stdout.flush()
             elif ev_type == "tool_call_start":
-                t_name = event.get("name", "")
-                t_args = event.get("arguments", {})
-                tool_line = dim(f"\n[Tool: {t_name}({json.dumps(t_args)})]")
-                sys.stdout.write(coerce_text(mask_secrets(tool_line)) + "\n")
+                t_name = sanitize_identifier(str(event.get("name", ""))) or "tool"
+                tool_line = dim(f"\n[Tool: {t_name}]")
+                sys.stdout.write(tool_line + "\n")
                 sys.stdout.flush()
             elif ev_type == "error":
-                err_text = err(f"\nError: {mask_secrets(str(event.get('error', '')))}")
-                sys.stdout.write(coerce_text(err_text) + "\n")
+                sys.stdout.write(err("\nError: chat turn failed.") + "\n")
                 sys.stdout.flush()
         print()
 

@@ -107,3 +107,16 @@ def test_node_script_with_script_args_allowed():
         "node build.js -e production", allowlist=["node"], deny_args=[]
     )
     assert err == ""
+
+
+def test_wikilink_redos_resilience():
+    import time
+
+    from botex.memory import extract_wikilinks
+
+    payload = "`" * 100_000 + "a\n[[valid_link]]"
+    t0 = time.monotonic()
+    links = extract_wikilinks(payload)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.25
+    assert links == ["valid_link"]
