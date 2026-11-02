@@ -19,12 +19,6 @@
           "openrouter/free"
         ]
       },
-      "denylist": [],
-      "profile_denylists": {},
-      "decisions_models": [
-        "typesafe/jev-*",
-        "~typesafe/jev-*"
-      ],
       "models": {
         "default": "openrouter/auto",
         "auto-beta": "openrouter/auto-beta",
@@ -64,10 +58,6 @@
       "default": false,
       "base_url": "https://integrate.api.nvidia.com/v1",
       "api_key_env": "NVIDIA_API_KEY",
-      "extra_body": {},
-      "denylist": [],
-      "profile_denylists": {},
-      "capabilities": {},
       "models": {
         "default": "meta/llama-3.2-11b-vision-instruct",
         "coding": "poolside/laguna-xs-2.1",
@@ -95,8 +85,6 @@
         "max_wait_s": 90.0,
         "jitter_s": 1.5
       },
-      "denylist": [],
-      "profile_denylists": {},
       "models": {
         "default": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "coding": "cohere/north-mini-code:free",
@@ -135,28 +123,56 @@
         "jitter_s": 1.5
       },
       "denylist": [
-        "*image*", "*imagen*", "*veo*",
-        "*embedding*", "*gecko*",
-        "*tts*", "*speech*", "*audio*", "*transcribe*", "*lyria*", "*music*", "*chirp*",
-        "*realtime*", "*-live*", "*antigravity*",
-        "*gemma*", "*paligemma*", "*codegemma*",
-        "*robotics*", "*rt-*", "*computer-use*", "*deep-research*",
-        "*nano*", "*banana*",
-        "*learnlm*", "*aqa*", "*medlm*", "*med-gemini*",
-        "*bison*", "*gemini-1.0*", "*gemini-pro*", "*gemini-ultra*",
-        "tunedmodels/*", "*tuned*",
-        "*-exp*", "*-experimental*"
+        "*image*",
+        "*imagen*",
+        "*veo*",
+        "*embedding*",
+        "*gecko*",
+        "*tts*",
+        "*speech*",
+        "*audio*",
+        "*transcribe*",
+        "*lyria*",
+        "*music*",
+        "*chirp*",
+        "*realtime*",
+        "*-live*",
+        "*antigravity*",
+        "*gemma*",
+        "*paligemma*",
+        "*codegemma*",
+        "*robotics*",
+        "*rt-*",
+        "*computer-use*",
+        "*deep-research*",
+        "*nano*",
+        "*banana*",
+        "*learnlm*",
+        "*aqa*",
+        "*medlm*",
+        "*med-gemini*",
+        "*bison*",
+        "*gemini-1.0*",
+        "*gemini-pro*",
+        "*gemini-ultra*",
+        "tunedmodels/*",
+        "*tuned*",
+        "*-exp*",
+        "*-experimental*"
       ],
-      "profile_denylists": {},
       "capabilities": {
-        "gemini-2.5-flash": {"supports_tools": true, "context_length": 1048576},
-        "gemini-2.5-pro": {"supports_tools": true, "context_length": 1048576},
-        "gemini-2.5-flash-lite": {"supports_tools": true, "context_length": 1048576}
-      },
-      "pricing_overrides": {
-        "gemini-2.5-pro": {"input": 1.25, "output": 10.0},
-        "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
-        "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40}
+        "gemini-2.5-flash": {
+          "supports_tools": true,
+          "context_length": 1048576
+        },
+        "gemini-2.5-pro": {
+          "supports_tools": true,
+          "context_length": 1048576
+        },
+        "gemini-2.5-flash-lite": {
+          "supports_tools": true,
+          "context_length": 1048576
+        }
       },
       "models": {
         "default": "gemini-2.5-flash",
@@ -181,12 +197,9 @@
       "api_key_env": "OLLAMA_API_KEY",
       "api_key_fallback": "ollama",
       "local": true,
-      "extra_body": {},
       "zdr": {
         "enabled": false
       },
-      "denylist": [],
-      "profile_denylists": {},
       "models": {
         "default": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
         "coding": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
@@ -222,8 +235,25 @@
       "destructive": 0,
       "full": 0
     },
-    "denylist": [],
-    "profile_denylists": {}
+    "task_size_routing": {
+      "enabled": false,
+      "tiers": {
+        "high": "coding",
+        "standard": "default",
+        "budget": "fast"
+      }
+    },
+    "circuit_breaker": {
+      "enabled": true,
+      "failure_threshold": 3,
+      "recovery_timeout_s": 60.0
+    }
+  },
+  "tracing": {
+    "enabled": false,
+    "exporter": "none",
+    "endpoint": "",
+    "sample_ratio": 1.0
   },
   "net": {
     "enabled": true,
@@ -301,18 +331,17 @@
   },
   "paths": {
     "snapshot_dir": ".snapshots",
-    "snapshot_auto_prune": true,
-    "snapshot_max_age_days": 7,
-    "snapshot_max_total_mb": 50,
     "global_memory_dir": "~/.botex/memory",
-    "analytics_file": ".agent_analytics.json",
-    "catalog_file": ".model_pricing.json",
-    "env_file": ""
+    "analytics_file": ".agent_analytics.json"
   },
   "app": {
     "referer": "https://github.com/kubainter/botex-harness"
   },
   "analytics": {
+    "digest_enabled": true,
+    "digest_interval_s": 3600,
+    "digest_provider": "ollama",
+    "digest_model": "bielik-direct:latest",
     "store_full_text": false,
     "preview_chars": 160
   },
@@ -329,23 +358,62 @@
   "catalog": {
     "enabled": true,
     "cache_file": ".model_pricing.json",
-    "cache_path": ".model_pricing.json",
     "ttl_hours": 24.0,
-    "cache_ttl_hours": 24,
     "timeout_s": 10.0,
     "on_unknown": "allow"
   },
   "wallet": {
     "enabled": true,
     "cache_ttl_s": 60.0,
-    "timeout_s": 10.0,
-    "auto_check": false,
-    "min_balance_usd": 0.0
+    "timeout_s": 10.0
   },
-  "analytics": {
-  "digest_enabled": true,
-  "digest_interval_s": 3600,
-  "digest_provider": "ollama",
-  "digest_model": "bielik-direct:latest"
+  "delegation": {
+    "devin": {
+      "enabled": true,
+      "exe_path": "",
+      "idle_timeout_s": 90
+    }
+  },
+  "rate_limits": {
+    "openrouter-free": {
+      "rpm": 20,
+      "tpm": 100000,
+      "burst_multiplier": 1.2,
+      "cooldown_s": 60.0
+    },
+    "nvidia": {
+      "rpm": 40,
+      "tpm": 150000,
+      "burst_multiplier": 1.5,
+      "cooldown_s": 30.0
+    },
+    "google": {
+      "rpm": 15,
+      "tpm": 1000000,
+      "burst_multiplier": 1.0,
+      "cooldown_s": 60.0
+    },
+    "openrouter": {
+      "rpm": 200,
+      "tpm": 2000000,
+      "burst_multiplier": 2.0,
+      "cooldown_s": 10.0
+    }
+  },
+  "provider_fallbacks": {
+    "openrouter-free": [
+      "nvidia",
+      "google",
+      "openrouter"
+    ],
+    "nvidia": [
+      "openrouter-free",
+      "google",
+      "openrouter"
+    ],
+    "google": [
+      "nvidia",
+      "openrouter"
+    ]
   }
 }
