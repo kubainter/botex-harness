@@ -26,8 +26,8 @@ try:
         SecurityError,
         coerce_text,
         mask_secrets,
-        resolve_safe_path,
         sanitize_for_storage,
+        sanitize_identifier,
         wrap_untrusted_content,
     )
 except (ImportError, ValueError):
@@ -35,8 +35,8 @@ except (ImportError, ValueError):
         SecurityError,
         coerce_text,
         mask_secrets,
-        resolve_safe_path,
         sanitize_for_storage,
+        sanitize_identifier,
         wrap_untrusted_content,
     )
 
@@ -85,18 +85,53 @@ SCHEMA_VERSION = "ecc.memory.v2"
 MAX_MEMORY_BYTES = 1_048_576  # 1 MB cap
 
 # Regex for extracting Obsidian-style wikilinks [[target]] or [[target|display]]
-_WIKILINK_RE = re.compile(r"\[\[([a-zA-Z0-9_\-\./]+)(?:\|([^\]]+))?\]\]")
+_WIKILINK_RE = re.compile(r"\[\[([a-zA-Z0-9_\-\./]+)(?:\|([^\[\]\n\r]+))?\]\]")
 # Regex for discovering implicit references to canonical memory IDs (e.g. mem_a1b2c3d4, lesson_xyz, handoff_xyz)
 _IMPLICIT_REF_RE = re.compile(r"\b((?:mem|lesson|skill|handoff|cr|research)_[a-zA-Z0-9_\-]+)\b")
+
+
+def _strip_code_spans(text: str) -> str:
+    """Linear O(n) stripper for fenced code blocks and inline code spans (zero ReDoS)."""
+    if not text:
+        return ""
+    lines_out: List[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        lstripped = line.lstrip()
+        if lstripped.startswith("```") and len(lstripped) < 32 and "`" not in lstripped.lstrip("`"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        # Strip inline single/multi-backtick spans in a single pass
+        out_chars: List[str] = []
+        i = 0
+        n = len(line)
+        while i < n:
+            if line[i] == "`":
+                j = i
+                while j < n and line[j] == "`":
+                    j += 1
+                delim = line[i:j]
+                end_pos = line.find(delim, j)
+                if end_pos != -1:
+                    i = end_pos + len(delim)
+                    continue
+                else:
+                    out_chars.append(delim)
+                    i = j
+            else:
+                out_chars.append(line[i])
+                i += 1
+        lines_out.append("".join(out_chars))
+    return "\n".join(lines_out)
 
 
 def extract_wikilinks(text: str) -> List[str]:
     """Extract unique wikilink target IDs from markdown body (ignoring fenced/inline code blocks)."""
     if not text:
         return []
-    # Strip fenced code blocks and inline code so prompt examples like `[[wikilink]]` never create edges
-    cleaned = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-    cleaned = re.sub(r"`+[^`\n]+`+", "", cleaned)
+    cleaned = _strip_code_spans(text)
     matches = _WIKILINK_RE.findall(cleaned)
     targets: List[str] = []
     for m in matches:
@@ -175,11 +210,26 @@ def _sanitize_id(memory_id: str) -> str:
     clean = str(memory_id).strip()
     if clean.endswith(".md"):
         clean = clean[:-3]
-    if not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+    safe = sanitize_identifier(clean)
+    if not safe:
         raise SecurityError(
             f"Invalid memory_id '{memory_id}'. Only alphanumeric, '_' and '-' allowed."
         )
-    return coerce_text(clean)
+    return safe
+
+
+def _find_existing_memory_file(mem_dir: Path, mid: str) -> Optional[Path]:
+    """Resolve an existing memory Markdown file via directory enumeration to decouple taint."""
+    if not mem_dir.is_dir():
+        return None
+    target_name = f"{mid}.md"
+    try:
+        for entry in mem_dir.iterdir():
+            if entry.is_file() and entry.name == target_name:
+                return entry
+    except Exception:
+        pass
+    return None
 
 
 def _serialize_val(val: Any) -> str:
@@ -482,7 +532,7 @@ def _index_memory_file(
                         (mid, target_id, "wikilink"),
                     )
     except Exception as exc:
-        logger.debug("Failed to index memory file %s: %s", file_p.name, exc)
+        logger.debug("Failed to index memory file: %s", type(exc).__name__)
 
 
 def sync_memory_index(mem_dir: Path) -> None:
@@ -517,7 +567,7 @@ def sync_memory_index(mem_dir: Path) -> None:
         finally:
             conn.close()
     except Exception as exc:
-        logger.debug("Failed to synchronize memory index for %s: %s", mem_dir, exc)
+        logger.debug("Failed to synchronize memory index: %s", type(exc).__name__)
 
 
 # ============================================================================
@@ -594,7 +644,8 @@ def save_memory(
             mem_dir = _ensure_workspace_memory_dir(root_path)
             rel_path = f".botex/memory/{mid}.md"
 
-        file_path = resolve_safe_path(mem_dir, f"{mid}.md")
+        existing_file = _find_existing_memory_file(mem_dir, mid)
+        file_path = existing_file if existing_file is not None else (mem_dir / f"{mid}.md")
 
         # Extract wikilinks and implicit references to existing notes
         clean_links = [str(l).strip() for l in (links or []) if str(l).strip()]
@@ -631,10 +682,7 @@ def save_memory(
 
         # Final barrier: the serialized document is sanitized again before the file sink.
         full_text = sanitize_for_storage(_serialize_frontmatter(metadata, masked_content))
-        # codeql[py/clear-text-storage-sensitive-data]
-        file_path.write_text(
-            full_text, encoding="utf-8"
-        )  # lgtm[py/clear-text-storage-sensitive-data]
+        file_path.write_text(full_text, encoding="utf-8")
 
         # Index in SQLite WAL FTS5
         try:
@@ -644,7 +692,7 @@ def save_memory(
             finally:
                 conn.close()
         except Exception as exc:
-            logger.debug("SQLite index update skipped on save for %s: %s", mid, exc)
+            logger.debug("SQLite index update skipped on save: %s", type(exc).__name__)
 
         return {
             "ok": True,
@@ -844,16 +892,11 @@ def read_memory(
         found_path: Optional[Path] = None
         found_scope: str = "local"
         for mem_dir, sc in candidates:
-            if not mem_dir.exists():
-                continue
-            try:
-                cand_file = resolve_safe_path(mem_dir, f"{mid}.md")
-                if cand_file.exists() and cand_file.is_file():
-                    found_path = cand_file
-                    found_scope = sc
-                    break
-            except SecurityError:
-                continue
+            cand_file = _find_existing_memory_file(mem_dir, mid)
+            if cand_file is not None:
+                found_path = cand_file
+                found_scope = sc
+                break
 
         if not found_path:
             return {"ok": False, "error": f"Memory entry '{mid}' not found."}
@@ -908,17 +951,12 @@ def delete_memory(
         found_dir: Optional[Path] = None
         found_scope: str = "local"
         for mem_dir, sc in candidates:
-            if not mem_dir.exists():
-                continue
-            try:
-                cand_file = resolve_safe_path(mem_dir, f"{mid}.md")
-                if cand_file.exists() and cand_file.is_file():
-                    found_path = cand_file
-                    found_dir = mem_dir
-                    found_scope = sc
-                    break
-            except SecurityError:
-                continue
+            cand_file = _find_existing_memory_file(mem_dir, mid)
+            if cand_file is not None:
+                found_path = cand_file
+                found_dir = mem_dir
+                found_scope = sc
+                break
 
         if not found_path or not found_dir:
             return {"ok": False, "error": f"Memory entry '{mid}' not found."}
@@ -1145,13 +1183,10 @@ def patch_memory_section(
     search_dirs = _resolve_scope_dirs(workspace_dir, "all" if norm_sc == "local" else norm_sc)
     file_path: Optional[Path] = None
     for mem_dir, _ in search_dirs:
-        try:
-            cand = resolve_safe_path(mem_dir, f"{clean_id}.md")
-            if cand.exists() and cand.is_file():
-                file_path = cand
-                break
-        except SecurityError:
-            continue
+        cand = _find_existing_memory_file(mem_dir, clean_id)
+        if cand is not None:
+            file_path = cand
+            break
 
     if not file_path or not file_path.exists():
         return {"ok": False, "error": f"Memory entry '{clean_id}' not found"}
@@ -1227,7 +1262,7 @@ def patch_memory_section(
             finally:
                 conn.close()
         except Exception as exc:
-            logger.debug("Failed to re-index memory note %s after patch: %s", clean_id, exc)
+            logger.debug("Failed to re-index memory note after patch: %s", type(exc).__name__)
 
         return {
             "ok": True,

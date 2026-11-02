@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 import time
 import uuid
@@ -353,14 +354,12 @@ class CuratorService:
             parsed = urlparse(local_url)
             host = parsed.hostname or "127.0.0.1"
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.25)
             try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port), timeout=0.25
-                )
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                return None
+                s.connect((host, port))
+            finally:
+                s.close()
         except Exception:
             return None
 

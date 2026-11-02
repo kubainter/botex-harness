@@ -100,7 +100,6 @@ try:
     from .security import (
         SecurityError,
         check_model_zdr,
-        coerce_text,
         resolve_safe_path,
         zdr_enforced,
     )
@@ -185,7 +184,6 @@ except (ImportError, ValueError):
     from security import (
         SecurityError,
         check_model_zdr,
-        coerce_text,
         resolve_safe_path,
         zdr_enforced,
     )
@@ -1958,8 +1956,8 @@ async def _run_botex_task_once_impl(
 
         def _on_retry_wait(delay, exc):
             sys.stderr.write(
-                f"[BoteX] {provider_name}/{model}: transient error, "
-                f"retrying in {delay:.1f}s — {describe_retry_error(exc)}\n"
+                f"[BoteX] {provider_name}/{model}: transient error ({type(exc).__name__}), "
+                f"retrying in {delay:.1f}s\n"
             )
             _emit(
                 progress_cb,
@@ -2547,8 +2545,9 @@ async def _run_botex_task_once_impl(
                             if models_used and not actual_model:
                                 actual_model = str(models_used[-1])
                     except Exception as exc:
-                        telemetry_err = f"OpenRouter generation telemetry skipped: {sanitize_provider_error(exc)}\n"
-                        sys.stderr.write(coerce_text(telemetry_err))
+                        sys.stderr.write(
+                            f"OpenRouter generation telemetry skipped ({type(exc).__name__})\n"
+                        )
 
                 # Zero-cost runs report exactly 0 — otherwise the ledger
                 # falls back to pseudo-pricing for providers without

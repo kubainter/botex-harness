@@ -27,7 +27,7 @@ try:
         snapshot_dir as _cfg_snapshot_dir,
     )
     from .contracts import STATUS_FAILURE_KIND
-    from .security import coerce_text, mask_secrets
+    from .security import mask_secrets, sanitize_identifier
 except (ImportError, ValueError):
     from config import (
         analytics_file as _cfg_analytics_file,
@@ -42,7 +42,7 @@ except (ImportError, ValueError):
         snapshot_dir as _cfg_snapshot_dir,
     )
     from contracts import STATUS_FAILURE_KIND
-    from security import coerce_text, mask_secrets
+    from security import mask_secrets, sanitize_identifier
 
 ANALYTICS_FILE = _cfg_analytics_file()
 SNAPSHOT_DIR = _cfg_snapshot_dir()
@@ -438,18 +438,27 @@ def print_run_summary(entry: Dict[str, Any]):
         if entry.get("summary"):
             console.print(Panel(entry["summary"], title="Summary", style="dim"))
     except ImportError:
-        # Fallback to plain ASCII
+        # Fallback to plain ASCII (metrics only, no untrusted summary text)
+        safe_tid = sanitize_identifier(str(entry.get("task_id") or "")) or "run"
+        safe_status = sanitize_identifier(str(entry.get("status") or "DONE")) or "DONE"
+        safe_model = sanitize_identifier(str(entry.get("model") or "").replace("/", "_")) or "model"
+        dur_s = float(entry.get("duration_s") or 0.0)
+        steps_n = int(entry.get("steps") or 0)
+        p_tok = int(entry.get("prompt_tokens") or 0)
+        c_tok = int(entry.get("completion_tokens") or 0)
+        k_tok = int(entry.get("cached_tokens") or 0)
+        cost_v = float(entry.get("cost_usd") or 0.0)
+        l_add = int(entry.get("lines_added") or 0)
+        l_rem = int(entry.get("lines_removed") or 0)
+        f_cnt = len(entry.get("files_touched") or [])
         lines = [
-            f"=== BOTEX RUN: {entry.get('task_id')} ===",
-            f"Status: {entry.get('status')} | Model: {entry.get('model')} | Time: {entry.get('duration_s')}s | Steps: {entry.get('steps')}",
-            f"Tokens: prompt={entry.get('prompt_tokens')} comp={entry.get('completion_tokens')} cached={entry.get('cached_tokens')}",
-            f"Cost: ${entry.get('cost_usd'):.5f} | Lines: +{entry.get('lines_added')}/-{entry.get('lines_removed')}",
-            f"Files: {', '.join(entry.get('files_touched', [])) or '(none)'}",
-            f"Summary: {entry.get('summary', '')}",
+            f"=== BOTEX RUN: {safe_tid} ===",
+            f"Status: {safe_status} | Model: {safe_model} | Time: {dur_s:.2f}s | Steps: {steps_n}",
+            f"Tokens: prompt={p_tok} comp={c_tok} cached={k_tok}",
+            f"Cost: ${cost_v:.5f} | Lines: +{l_add}/-{l_rem} | Files: {f_cnt}",
             "=" * 40,
         ]
-        output_str = "\n".join(lines) + "\n"
-        sys.stderr.write(coerce_text(output_str))
+        sys.stderr.write("\n".join(lines) + "\n")
 
 
 def cli_stats(period: str = "week"):
