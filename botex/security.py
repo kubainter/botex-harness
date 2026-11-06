@@ -282,10 +282,12 @@ def resolve_safe_path(workspace_root: str | Path, requested_path: str | Path) ->
     # Every segment matters, not just the filename: `.env/backup.txt` must
     # not be readable just because `backup.txt` itself is a safe name.
     for segment in target.relative_to(root).parts:
-        if segment.lower() in BLOCKED_DIR_SEGMENTS:
+        segment_lower = segment.lower()
+        if segment_lower in BLOCKED_DIR_SEGMENTS:
             raise SecurityError(f"Access through '{segment}' is blocked for security reasons.")
         for pattern in BLOCKED_FILE_PATTERNS:
-            if fnmatch.fnmatch(segment, pattern) or segment == pattern:
+            # Enforce case-insensitive matching to prevent bypasses on case-insensitive filesystems (macOS/Windows)
+            if fnmatch.fnmatch(segment_lower, pattern.lower()) or segment_lower == pattern.lower():
                 raise SecurityError(
                     f"Access to '{segment}' is blocked for security reasons (matches pattern '{pattern}')."
                 )
