@@ -121,6 +121,7 @@
                 <button
                   type="button"
                   title="Save conversation to Memory Vault"
+                  aria-label="Save conversation to Memory Vault"
                   class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] p-0 rounded text-slate-300 hover:text-sky-300 hover:bg-botex-800 transition flex items-center justify-center"
                   @click.stop="$emit('save-memory', s)"
                 >
@@ -129,6 +130,7 @@
                 <button
                   type="button"
                   title="Delete conversation"
+                  aria-label="Delete conversation"
                   class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] p-0 rounded text-slate-300 hover:text-rose-400 hover:bg-botex-800 transition flex items-center justify-center"
                   @click.stop="handleDelete(s.session_id)"
                 >
