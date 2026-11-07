@@ -1,3 +1,8 @@
+## 2026-11-07 - Add explicit aria-label attributes to icon-only buttons
+
+**Learning:** Icon-only Vue components must include both `title` and `aria-label` attributes to ensure proper visual tooltips and screen-reader accessibility.
+**Action:** Ensure both `title` and `aria-label` attributes are added to any new or existing icon-only buttons to maintain compatibility with screen readers.
+
 ## 2026-10-31 - Missing aria-label/title attributes on key mode switcher and modal buttons
 
 **Learning:** Important interactive buttons like Mode Switchers (`ChatWindow.vue`) and generic Modal closes (`Modal.vue`) lacked proper visual tooltips (title) which help screen-reader users via fallback and sighted users via tooltips.
