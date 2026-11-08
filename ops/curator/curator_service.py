@@ -29,8 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from botex import memory, obsidian
 from botex.config import resolve_workspace
+
+from botex import memory, obsidian
 from ops.curator.prompts import CURATOR_SYSTEM_PROMPT, build_curator_user_prompt
 from ops.curator.telegram import TelegramNotifier
 
