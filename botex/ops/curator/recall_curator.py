@@ -46,9 +46,8 @@ from collections import OrderedDict
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from urllib.parse import urlparse
 
+from botex.ops.curator.prompts import RECALL_SYSTEM_PROMPT, build_recall_user_prompt
 from botex.security import coerce_text, mask_secrets
-
-from ops.curator.prompts import RECALL_SYSTEM_PROMPT, build_recall_user_prompt
 
 logger = logging.getLogger(__name__)
 

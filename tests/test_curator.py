@@ -32,8 +32,8 @@ from botex.curator import (
 )
 from botex.memory import read_memory, save_memory, search_memory
 from botex.server_cloud import app
-from ops.curator.curator_service import CuratorLock, check_active_agent_tasks
-from ops.curator.telegram import (
+from botex.ops.curator.curator_service import CuratorLock, check_active_agent_tasks
+from botex.ops.curator.telegram import (
     format_curator_telegram_message,
     get_telegram_config,
     mask_telegram_token,

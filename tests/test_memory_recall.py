@@ -101,7 +101,7 @@ def test_deterministic_recall_digest():
 
 
 def _fake_curator(result):
-    mod = types.ModuleType("ops.curator")
+    mod = types.ModuleType("botex.ops.curator")
 
     async def synthesize_recall(query, nodes):
         return result(query, nodes) if callable(result) else result
@@ -120,7 +120,7 @@ def test_recall_uses_llm_result(vault):
             "tier_used": "local-ollama",
         }
     )
-    with patch.dict(sys.modules, {"ops.curator": fake}):
+    with patch.dict(sys.modules, {"botex.ops.curator": fake}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "JWT refresh cron"))
     assert out["ok"] is True
     assert out["tier_used"] == "local-ollama"
@@ -130,7 +130,7 @@ def test_recall_uses_llm_result(vault):
 
 def test_recall_falls_back_when_cascade_returns_none(vault):
     ws_dir, ids = vault
-    with patch.dict(sys.modules, {"ops.curator": _fake_curator(None)}):
+    with patch.dict(sys.modules, {"botex.ops.curator": _fake_curator(None)}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "JWT refresh cron"))
     assert out["tier_used"] == "deterministic"
     assert ids["main"] in out["sources"]
@@ -142,7 +142,7 @@ def test_recall_falls_back_when_cascade_raises(vault):
     def boom(q, n):
         raise RuntimeError("provider down")
 
-    with patch.dict(sys.modules, {"ops.curator": _fake_curator(boom)}):
+    with patch.dict(sys.modules, {"botex.ops.curator": _fake_curator(boom)}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "JWT refresh cron"))
     assert out["ok"] is True
     assert out["tier_used"] == "deterministic"
@@ -154,7 +154,7 @@ def test_recall_not_found_skips_llm(vault):
     def must_not_call(q, n):
         raise AssertionError("LLM called without context")
 
-    with patch.dict(sys.modules, {"ops.curator": _fake_curator(must_not_call)}):
+    with patch.dict(sys.modules, {"botex.ops.curator": _fake_curator(must_not_call)}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "kubernetes helm zzqx"))
     assert out["confidence"] == "NOT_FOUND"
     assert out["sources"] == []

@@ -3,11 +3,11 @@
 """
 BoteX Curator Module Facade
 ===========================
-Exports Curator service methods from ops/curator/.
+Exports Curator service methods from botex/ops/curator/.
 Preserves zero recipe pollution and avoids circular dependencies.
 """
 
-from ops.curator import (
+from botex.ops.curator import (
     CuratorResult,
     CuratorService,
     TelegramNotifier,

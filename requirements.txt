@@ -1,5 +1,5 @@
 # BoteX core dependencies
-openai>=1.40
+openai>=3.0
 python-dotenv>=1.0
 mcp>=2.0
 typing_extensions>=4.0

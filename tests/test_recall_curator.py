@@ -25,8 +25,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ops.curator import recall_curator
-from ops.curator.recall_curator import synthesize_recall
+from botex.ops.curator import recall_curator
+from botex.ops.curator.recall_curator import synthesize_recall
 
 RECALL_ENV_VARS = [
     "OLLAMA_HOST",
@@ -794,7 +794,7 @@ def test_ollama_native_base_strips_v1_and_defaults(monkeypatch):
 
 def test_build_recall_user_prompt_contains_ids_and_untrusted_notes():
     """Prompt embeds node metadata and wraps content in untrusted <note> tags."""
-    from ops.curator.prompts import build_recall_user_prompt
+    from botex.ops.curator.prompts import build_recall_user_prompt
 
     prompt = build_recall_user_prompt("query?", _nodes())
     assert "query?" in prompt
