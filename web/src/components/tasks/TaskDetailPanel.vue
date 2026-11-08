@@ -123,6 +123,47 @@
       </div>
     </div>
 
+    <!-- Creator Mode & Temporal Snapshots Telemetry -->
+    <div
+      v-if="synthesizedPlugins.length > 0 || stagedPluginsList.length > 0 || stepSnapshotsList.length > 0"
+      class="p-3 rounded-lg bg-botex-950 border border-botex-800 space-y-2 text-xs"
+    >
+      <div class="font-semibold text-slate-200 flex items-center justify-between">
+        <span>{{ locale === 'pl' ? 'Utworzone wtyczki i migawki kroków' : 'Created plugins and step snapshots' }}</span>
+        <code class="text-sky-400 text-[11px]">TwoTierLifoStack</code>
+      </div>
+      <div v-if="synthesizedPlugins.length > 0" class="flex flex-wrap items-center gap-1.5">
+        <span class="text-slate-400">{{ locale === 'pl' ? 'Wtyczki z tego zadania:' : 'Task plugins:' }}</span>
+        <code
+          v-for="pl in synthesizedPlugins"
+          :key="pl"
+          class="px-2 py-0.5 rounded bg-sky-950/60 border border-sky-500/40 text-sky-200"
+        >
+          {{ pl }}
+        </code>
+      </div>
+      <div v-if="stagedPluginsList.length > 0" class="flex flex-wrap items-center gap-1.5">
+        <span class="text-amber-300">{{ locale === 'pl' ? 'Czekają w poczekalni:' : 'Waiting in staging:' }}</span>
+        <code
+          v-for="st in stagedPluginsList"
+          :key="st"
+          class="px-2 py-0.5 rounded bg-amber-950/60 border border-amber-500/40 text-amber-200"
+        >
+          {{ st }}
+        </code>
+      </div>
+      <div v-if="stepSnapshotsList.length > 0" class="flex flex-wrap items-center gap-1.5 tabular-nums">
+        <span class="text-emerald-300">{{ locale === 'pl' ? 'Migawki kroków:' : 'Step snapshots:' }}</span>
+        <code
+          v-for="(snap, idx) in stepSnapshotsList"
+          :key="idx"
+          class="px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-500/40 text-emerald-200"
+        >
+          {{ locale === 'pl' ? 'Krok' : 'Step' }} #{{ snap.step ?? idx + 1 }}
+        </code>
+      </div>
+    </div>
+
     <!-- Result Data JSON -->
     <div v-if="task.result_data" class="space-y-1.5">
       <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
@@ -198,6 +239,27 @@ const canFollowup = computed(
     props.task.status !== 'QUEUED'
 )
 
+const inFlight = computed<Record<string, any>>(() => props.task.result_data?.in_flight_state || {})
+const synthesizedPlugins = computed<string[]>(() => {
+  const tp = inFlight.value.task_plugins || props.task.result_data?.task_plugins
+  if (Array.isArray(tp)) return tp.map((x: any) => (typeof x === 'string' ? x : x?.name || JSON.stringify(x)))
+  if (tp && typeof tp === 'object') return Object.keys(tp)
+  return []
+})
+const stagedPluginsList = computed<string[]>(() => {
+  const sp = inFlight.value.staged_plugins || props.task.result_data?.staged_plugins
+  if (Array.isArray(sp)) return sp.map((x: any) => (typeof x === 'string' ? x : x?.name || JSON.stringify(x)))
+  return []
+})
+const stepSnapshotsList = computed<any[]>(() => {
+  const ss = inFlight.value.step_snapshots || props.task.result_data?.step_snapshots
+  if (Array.isArray(ss)) return ss
+  if (ss && typeof ss === 'object') {
+    return Object.entries(ss).map(([step, snap]) => ({ ...(snap !== null && typeof snap === 'object' ? snap : { id: snap }), step }))
+  }
+  return []
+})
+
 async function submitFollowup() {
   const text = followupText.value.trim()
   if (!text || !canFollowup.value) return
@@ -233,7 +295,7 @@ const KIND_COLORS: Record<string, string> = {
   provider_resolved: 'text-cyan-300',
   attempt_start: 'text-sky-300',
   attempt_end: 'text-sky-400',
-  tool_call: 'text-violet-300',
+  tool_call: 'text-teal-300',
   completion_parse: 'text-emerald-300',
   contract_gate: 'text-amber-300',
   retry_wait: 'text-amber-400',
