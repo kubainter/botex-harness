@@ -955,6 +955,8 @@ def _enforce_workspace_containment(real_path: str) -> None:
         norm_root = os.path.normcase(root)
         if candidate == norm_root or candidate.startswith(norm_root + os.sep):
             return
+    # Path detail is for SERVER LOGS ONLY — HTTP/MCP boundaries must return
+    # a generic message (absolute-path disclosure to remote callers).
     raise WorkspaceOutOfBounds(
         f"workspace_dir {real_path!r} is outside cloud.allowed_workspaces"
     )
@@ -963,10 +965,13 @@ def _enforce_workspace_containment(real_path: str) -> None:
 def resolve_workspace(value: str = "") -> str:
     """Return the effective workspace path (see ``resolve_workspace_source``)."""
     raw_path = resolve_workspace_source(value)[0]
-    if raw_path == ".":
-        return "."
+    # The cwd fallback ("." when no explicit/default workspace) goes through
+    # containment too — otherwise an empty workspace_dir bypasses the
+    # allowlist entirely (cross-review blocker: containment bypass).
     real_path = os.path.realpath(os.path.abspath(raw_path))
     _enforce_workspace_containment(real_path)
+    if raw_path == ".":
+        return "."
     return "".join(chr(cp) for cp in [ord(c) for c in real_path])
 
 

@@ -1,1 +1,2 @@
-# SPDX-License-Identifier: Apache-2.0"""BoteX ops domain package (curator services, recall synthesis)."""
+# SPDX-License-Identifier: Apache-2.0
+"""BoteX ops domain package (curator services, recall synthesis)."""
