@@ -55,7 +55,7 @@ def vault(tmp_path: Path):
 
 
 def _fake_curator(result):
-    mod = types.ModuleType("ops.curator")
+    mod = types.ModuleType("botex.ops.curator")
 
     async def synthesize_recall(query, nodes):
         return result(query, nodes) if callable(result) else result
@@ -81,7 +81,7 @@ def test_recall_status_synthesized(vault):
             "tier_attempts": ATTEMPTS,
         }
     )
-    with patch.dict(sys.modules, {"ops.curator": fake}):
+    with patch.dict(sys.modules, {"botex.ops.curator": fake}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "JWT refresh cron"))
 
     assert out["ok"] is True
@@ -105,7 +105,7 @@ def test_recall_status_fallback_models_failed_on_failure_dict(vault):
             "tier_attempts": ATTEMPTS,
         }
     )
-    with patch.dict(sys.modules, {"ops.curator": fake}):
+    with patch.dict(sys.modules, {"botex.ops.curator": fake}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "JWT refresh cron"))
 
     assert out["ok"] is True
@@ -117,7 +117,7 @@ def test_recall_status_fallback_models_failed_on_failure_dict(vault):
 
 def test_recall_status_fallback_when_cascade_returns_none(vault):
     ws_dir, _ = vault
-    with patch.dict(sys.modules, {"ops.curator": _fake_curator(None)}):
+    with patch.dict(sys.modules, {"botex.ops.curator": _fake_curator(None)}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "JWT refresh cron"))
 
     assert out["recall_status"] == "FALLBACK_MODELS_FAILED"
@@ -131,7 +131,7 @@ def test_recall_status_fallback_when_cascade_raises(vault):
     def boom(q, n):
         raise RuntimeError("provider down")
 
-    with patch.dict(sys.modules, {"ops.curator": _fake_curator(boom)}):
+    with patch.dict(sys.modules, {"botex.ops.curator": _fake_curator(boom)}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "JWT refresh cron"))
 
     assert out["ok"] is True
@@ -145,7 +145,7 @@ def test_recall_status_zero_nodes_found_skips_llm(vault):
     def must_not_call(q, n):
         raise AssertionError("LLM called without context")
 
-    with patch.dict(sys.modules, {"ops.curator": _fake_curator(must_not_call)}):
+    with patch.dict(sys.modules, {"botex.ops.curator": _fake_curator(must_not_call)}):
         out = asyncio.run(server._recall_memory_impl(str(ws_dir), "kubernetes helm zzqx"))
 
     assert out["ok"] is True
@@ -167,7 +167,7 @@ def test_recall_observability_with_real_cascade_no_keys(vault, monkeypatch):
     ):
         monkeypatch.delenv(var, raising=False)
     ws_dir, _ = vault
-    from ops.curator import recall_curator
+    from botex.ops.curator import recall_curator
 
     # Real vault notes are ~4k chars; lift the prompt guard so tier-1 reaches
     # the (mocked) probe instead of short-circuiting on size.

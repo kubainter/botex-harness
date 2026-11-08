@@ -52,8 +52,8 @@ if [[ "$BIELIK_UP" == *"DOWN"* ]] && [[ "$BIELIK_UP" != *"ok"* ]] && [[ "$BIELIK
 fi
 
 # 3. Execute Curator Logic via Unified Python Service
-log "Dispatching curation engine via ops.curator.curator_service..."
-"$PYTHON_BIN" -m ops.curator.curator_service --scope all
+log "Dispatching curation engine via botex.ops.curator.curator_service..."
+"$PYTHON_BIN" -m botex.ops.curator.curator_service --scope all
 
 log "Nightly Knowledge Graph Curation cycle completed successfully."
 
