@@ -11,7 +11,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Jakub Grzesiak" }]
 keywords = ["mcp", "agent", "code-editing", "openrouter", "subagent"]
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "openai>=1.40",
     "python-dotenv>=1.0",
@@ -36,7 +36,7 @@ perf = ["uvloop>=0.19; sys_platform != 'win32'"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 exclude = [
     "typing_extensions.py",
     ".snapshots",

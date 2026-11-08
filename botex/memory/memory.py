@@ -1193,7 +1193,7 @@ def search_memory(
                     # DISTINCT matched tokens; the single-token exemption
                     # applies ONLY to 1-token queries (Agy review blocker #4
                     # — multi-token queries matching a single token stay out).
-                    if q_lower:
+                    if q_lower and entry_id not in activation_candidates:
                         searchable = (
                             f"{entry_title} {body} {' '.join(str(t) for t in entry_tags)}".lower()
                         )
