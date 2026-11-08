@@ -16,7 +16,11 @@ from typing import Dict, List, Set
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "skills"
-RECIPES_DIR = REPO_ROOT / "botex" / "recipes"
+RECIPES_DIR = (
+    (REPO_ROOT / "botex" / "skills" / "recipes")
+    if (REPO_ROOT / "botex" / "skills" / "recipes").exists()
+    else (REPO_ROOT / "botex" / "recipes")
+)
 
 # Recipes that MUST have corresponding public skill interfaces for multi-agent workflows
 CORE_WORKFLOW_RECIPES: Set[str] = {
