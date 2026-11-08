@@ -257,7 +257,7 @@ class TestEmpiricalProductionBuild:
     def test_npm_run_build_succeeds(self):
         """Run npm run build in web/ and verify exit code 0."""
         res = subprocess.run(
-            ["npm", "run", "build"],
+            "npm run build",
             cwd=str(WEB_DIR),
             capture_output=True,
             text=True,
