@@ -1488,7 +1488,7 @@ def test_provider_adapter():
     assert classify_api_error(_status_err(429)) == "provider_rate_limited"
     assert classify_api_error(_status_err(500)) == "provider_unavailable"
     assert classify_api_error(Exception("weird")) == "provider_error"
-    import httpx
+    import httpx2 as httpx
     from openai import APITimeoutError, APIConnectionError
 
     _req = httpx.Request("GET", "https://example.invalid")
