@@ -364,7 +364,7 @@ class ContextKnapsack:
         pointer: Optional[str] = None
 
         if overflow_parts:
-            from botex.security import mask_secrets
+            from botex.security import coerce_text, mask_secrets
 
             root = Path(base_dir).resolve() if base_dir is not None else Path(".").resolve()
             scratch_dir = (root / self.scratchpad_dir).resolve()
@@ -376,7 +376,7 @@ class ContextKnapsack:
             log_path = (scratch_dir / log_name).resolve()
             if not log_path.is_relative_to(scratch_dir):
                 log_path = scratch_dir / "context.log"
-            payload = mask_secrets("\n".join(overflow_parts))
+            payload = coerce_text(mask_secrets("\n".join(overflow_parts)))
             try:
                 log_path.write_text(payload, encoding="utf-8")
             except OSError:

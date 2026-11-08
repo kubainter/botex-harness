@@ -46,7 +46,7 @@ from collections import OrderedDict
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from urllib.parse import urlparse
 
-from botex.security import mask_secrets
+from botex.security import coerce_text, mask_secrets
 
 from ops.curator.prompts import RECALL_SYSTEM_PROMPT, build_recall_user_prompt
 
@@ -342,7 +342,7 @@ async def _try_local_ollama(prompt: str, tcfg: dict) -> Optional[str]:
     except Exception as exc:
         logger.info(
             "Recall tier local-ollama native /api/chat failed, trying shim: %s",
-            mask_secrets(str(exc)),
+            coerce_text(mask_secrets(str(exc))),
         )
     try:
         from openai import AsyncOpenAI
@@ -356,7 +356,10 @@ async def _try_local_ollama(prompt: str, tcfg: dict) -> Optional[str]:
         )
         return resp.choices[0].message.content
     except Exception as exc:
-        logger.info("Recall tier local-ollama unavailable or failed: %s", mask_secrets(str(exc)))
+        logger.info(
+            "Recall tier local-ollama unavailable or failed: %s",
+            coerce_text(mask_secrets(str(exc))),
+        )
         return None
 
 
@@ -387,7 +390,9 @@ async def _try_nvidia(prompt: str, tcfg: dict) -> Optional[str]:
         )
         return resp.choices[0].message.content
     except Exception as exc:
-        logger.info("Recall tier nvidia unavailable or failed: %s", mask_secrets(str(exc)))
+        logger.info(
+            "Recall tier nvidia unavailable or failed: %s", coerce_text(mask_secrets(str(exc)))
+        )
         return None
 
 
@@ -414,7 +419,9 @@ async def _try_gemini(prompt: str, tcfg: dict) -> Optional[str]:
         )
         return resp.choices[0].message.content
     except Exception as exc:
-        logger.info("Recall tier gemini unavailable or failed: %s", mask_secrets(str(exc)))
+        logger.info(
+            "Recall tier gemini unavailable or failed: %s", coerce_text(mask_secrets(str(exc)))
+        )
         return None
 
 
@@ -441,7 +448,10 @@ async def _try_openrouter_free(prompt: str, tcfg: dict) -> Optional[str]:
         )
         return resp.choices[0].message.content
     except Exception as exc:
-        logger.info("Recall tier openrouter-free unavailable or failed: %s", mask_secrets(str(exc)))
+        logger.info(
+            "Recall tier openrouter-free unavailable or failed: %s",
+            coerce_text(mask_secrets(str(exc))),
+        )
         return None
 
 
@@ -546,7 +556,9 @@ async def _attempt(
         return None
     except Exception as exc:
         _mark_tier_down(name)
-        logger.info("Recall tier %s raised unexpectedly: %s", name, mask_secrets(str(exc)))
+        logger.info(
+            "Recall tier %s raised unexpectedly: %s", name, coerce_text(mask_secrets(str(exc)))
+        )
         rec(ST_ERROR)
         return None
     if not raw:
@@ -629,7 +641,9 @@ async def _tier1_flow(
         return None
     except Exception as exc:
         _mark_tier_down(name)
-        logger.info("Recall tier %s raised unexpectedly: %s", name, mask_secrets(str(exc)))
+        logger.info(
+            "Recall tier %s raised unexpectedly: %s", name, coerce_text(mask_secrets(str(exc)))
+        )
         rec(ST_ERROR)
         return None
     finally:
