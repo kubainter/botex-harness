@@ -28,6 +28,7 @@ Instead of trusting the model to behave, BoteX wraps every action in safety gate
 * **Strict privacy & Zero Data Retention (ZDR)**: Enforces `provider.data_collection: deny` on OpenRouter calls, blocks `.env`/secrets, masks API keys in logs, and prevents path traversal attacks. Free (`:free`) models that cannot guarantee ZDR are rejected locally. Opt out explicitly per run (`allow_non_zdr`) or via the `openrouter-free` provider preset.
 * **Proactive Rate Limiting & Cooldown Tracking**: Token-bucket rate limiter tracks RPM and TPM limits per provider with burst buffers and debt queues. When providers return rate-limit headers or 429 status codes, BoteX enters a cooldown window instead of repeatedly burning retries.
 * **In-Flight State Checkpointing & Provider Fallbacks**: Failed model runs take a snapshot of planned steps, observations, and read files before rolling back workspace changes. The next model or fallback provider receives this context directly, avoiding redundant exploration.
+* **Memory Vault with hedged recall cascade**: Persistent two-tier memory (plus an optional read-only swarm scope) with a `[[wikilink]]` graph. `recall_memory` answers a natural-language query in one call: a local Qwen model synthesizes first, and NVIDIA/Gemini/`:free` fallbacks hedge in only after a configurable idle window. Every response reports `recall_status`, per-tier attempts, and the workspace searched.
 * **Enhanced Permission Controls (OWASP LLM03: Excessive Agency)**: BoteX protects against Excessive Agency via a centralized Agency Middleware. Tools are strictly defined with Risk Levels (LOW, MEDIUM, HIGH) and required scopes. High-risk destructive actions automatically require explicit interactive operator approval (or pre-authorized task scopes in headless mode), limiting the potential damage of prompt injections or hallucinations.
 
 ---
@@ -121,14 +122,29 @@ BoteX exposes a focused set of MCP tools:
 * **`start_task(task, ...)`**: Launches a task asynchronously in the background and returns a `task_id`.
 * **`get_task_status(task_id)`**: Polls progress, logs, and results for a background task.
 
-### Two-Tier Memory Vault
-* **`save_memory(title, content, workspace_dir, kind, tags, memory_id, scope)`**: Saves persistent notes, decisions, handoffs, or lessons. Scope can be `"local"` (`<workspace_dir>/.botex/memory/`) or `"global"` (`~/.botex/memory/`).
-* **`read_memory(memory_id, workspace_dir, scope)`** / **`search_memory(workspace_dir, query, tag, kind, scope)`**: Retrieves saved memory across local or global storage (`scope="all"` searches both).
+#
+## Context Inclusion Layer (Swarm Relay)
+
+BoteX provides an in-process, deterministic Context Inclusion Layer (`botex/context_inclusion.py`) for multi-agent swarm collaboration (Antigravity, Devin, ZCode, BoteX):
+
+- **`OutputNormalizer`**: Zero-LLM deterministic parser that extracts statuses, summaries, mutated files, memory keys, and blocking reasons from heterogeneous agent outputs (Devin JSON, ZCode Markdown, BoteX receipts, plain text), converting all Windows paths to POSIX repo-relative paths (`/`).
+- **`DeterministicSignalGate`**:
+  - `collapse_passed_tests`: Collapses consecutive passed tests into concise milestone summaries.
+  - `pinpoint_failure_trace`: Isolates exception headers and innermost stack frames, pruning verbose tracebacks.
+  - `prune_diff_to_ast_manifest`: Prunes multi-thousand line diffs into a compact manifest of modified AST symbols.
+  - `deduplicate_observations`: Eliminates repetitive observation turns using Jaccard word-similarity thresholding (>0.80).
+- **`ContextKnapsack`**: Enforces strict byte budgets (default 4096B) for inter-agent context forwarding. Overflow is safely offloaded to `.botex/scratchpad/<scratch_id>.log` with secret masking and traversal guards.
+
+## Two-Tier Memory Vault
+* **`save_memory(title, content, workspace_dir, kind, tags, memory_id, scope, confidence)`**: Saves persistent notes, decisions, handoffs, beliefs, heuristics, or lessons (`confidence` from 0.0 to 1.0). Scope can be `"local"` (`<workspace_dir>/.botex/memory/`) or `"global"` (`~/.botex/memory/`).
+* **`read_memory(memory_id, workspace_dir, scope)`** / **`search_memory(workspace_dir, query, tag, kind, scope, since, until, min_confidence)`**: Retrieves saved memory across local or global storage (`scope="all"` searches both). Supports temporal range filters (`since`, `until` in ISO 8601), confidence thresholds (`min_confidence`), and spreading activation across linked notes combined with FTS5 via Reciprocal Rank Fusion (RRF).
 * **`patch_memory_section(memory_id, section, new_content, workspace_dir, scope, append)`**: Replaces or appends one Markdown section in a memory note without touching frontmatter, other sections, or the Timeline trail.
 * **`delete_memory(memory_id, workspace_dir, scope)`**: Deletes a specific memory note from local or global storage.
 * **`get_backlinks(memory_id, workspace_dir, scope)`**: Lists memories that link to the given note through `[[wikilinks]]`.
 * **`find_graph_health(workspace_dir, scope)`**: Audits the vault's wikilink graph — reports broken links, orphan notes, and cycles.
 * **`init_obsidian_vault(workspace_dir, scope, override_existing, export_index)`**: Writes `.obsidian/` config (per-kind graph colors) and optionally regenerates `_GRAPH_INDEX.md`.
+* **`recall_memory(query, workspace_dir, topic, scope)`**: One-shot natural language memory recall. Expands search hits via 1-hop graph traversal (wikilinks + backlinks) and synthesizes facts with cited sources via a server-side curator cascade (`local-ollama` -> `nvidia` -> `gemini` -> `openrouter-free` -> `deterministic`), cutting context bloat by up to 98%.
+* **`reflect_memory(workspace_dir, topic, scope, min_confidence, limit)`**: Clusters and synthesizes related memories, beliefs, and heuristics into higher-order architectural takeaways and patterns without external database engines.
 * **`read_scratchpad(memory_id, workspace_dir)`**: Reads an execution or terminal log offloaded to `.botex/scratchpad/<memory_id>.log`.
 
 ### Diagnostics & Utility

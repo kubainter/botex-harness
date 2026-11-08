@@ -38,6 +38,7 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 │   ├── wallet.py          credit balance, usage, and limit checker
 │   ├── benchmarks.py      live model benchmarks & recommend_models
 │   ├── context_guard.py   context compaction & verification output pruning
+│   ├── context_inclusion.py deterministic in-process context relay for swarm agents
 │   ├── net_tools.py       SSRF-safe network fetching (read_url, fetch_url)
 │   ├── memory.py          two-tier Memory Vault with wikilink graph (local & global)
 │   ├── embeddings.py      local embedding helpers for memory/graph features
@@ -176,16 +177,20 @@ BoteX includes a conversational mode (`botex/chat.py`) as a separate CLI/REST in
 
 ## 6. Two-Tier Memory Vault
 
-Persistent Memory Vault (`botex/memory.py`) supports two distinct scopes:
+Persistent Memory Vault (`botex/memory.py`) supports three distinct scopes:
 
 1. **Local Scope (`scope="local"`)**: Stored at `<workspace_dir>/.botex/memory/`. Holds project-specific architecture notes, decisions, and deterministic task receipts (`_save_task_receipt` written automatically at 0 LLM tokens upon `DONE`, enriched with live OpenRouter `/api/v1/generation` telemetry when available).
 2. **Global Scope (`scope="global"`)**: Stored centrally at `~/.botex/memory/` (or `paths.global_memory_dir`). Shared across projects and VPS sessions.
-3. **Consolidated Search (`scope="all"`)**: Searches across both local and global memory entries concurrently using outline-first FTS5 retrieval.
+3. **Swarm Scope (`scope="swarm"`)**: Third read-only root at `paths.swarm_memory_dir` (empty by default). Makes one shared vault reachable from any workspace; write tools never inherit this root.
+4. **Consolidated Search (`scope="all"`)**: Searches local, global, and (when configured) swarm entries concurrently. Matching is per-token OR with a coverage admission gate (≥2 distinct tokens; single-token queries admit on non-stop-word matches), so partial keyword overlap no longer returns zero hits.
 
 Notes link to each other through `[[wikilinks]]`, forming a navigable knowledge graph; verbose execution logs are offloaded to `.botex/scratchpad/<memory_id>.log` instead of the note body.
 
-Standard Memory Vault flow: `search_memory` -> `read_memory` -> `patch_memory_section` or `save_memory` -> optional `find_graph_health`.
-MCP tools: `save_memory`, `read_memory`, `search_memory`, `patch_memory_section` (surgical section update), `delete_memory`, `get_backlinks`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` (Obsidian config + `_GRAPH_INDEX.md`), `read_scratchpad`.
+Standard Memory Vault flow: one-shot synthesized query via `recall_memory` (preferred for agentic swarms to cut token bloat by up to 98.8%), or classical multi-turn `search_memory` -> `read_memory` -> `patch_memory_section` or `save_memory` -> optional `find_graph_health`.
+
+`recall_memory` runs a hedged curator cascade configured in `memory.recall` (Schema v2): local Qwen (`qwen2.5:3b` by default, 7b opt-in) synthesizes first; NVIDIA hedges in only after `hedge_s` of silence, then Gemini and an OpenRouter `:free` model follow sequentially. A prompt-size guard skips the local tier when gathered context exceeds `num_ctx_guard_tokens`. Every response carries `recall_status` (`SYNTHESIZED` / `ZERO_NODES_FOUND` / `FALLBACK_MODELS_FAILED`), `tier_attempts` with per-tier timings, and `workspace_searched` — check these before assuming the vault lacks an answer.
+
+MCP tools: `recall_memory` (one-shot graph recall with hedged curator cascade), `save_memory` (supports `confidence`, `belief`, `heuristic`), `read_memory`, `search_memory` (temporal `since`/`until`, `min_confidence`, spreading activation via RRF), `reflect_memory` (topic clustering & synthesis), `patch_memory_section` (surgical section update), `delete_memory`, `get_backlinks`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` (Obsidian config + `_GRAPH_INDEX.md`), `read_scratchpad`.
 
 ## 7. FastAPI Cloud Gateway & Remote MCP
 
