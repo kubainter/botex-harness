@@ -41,6 +41,7 @@ from botex.chat import (
     stream_chat_turn,
 )
 from botex.config import (
+    WorkspaceOutOfBounds,
     load_config,
     resolve_provider,
     resolve_workspace,
@@ -71,6 +72,7 @@ from botex.ui import accent, dim, err, mark_status, ok, title, warn
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 
+from botex.core.events import drop_emitter
 from botex.memory import (
     close_index_dbs,
 )
@@ -488,6 +490,9 @@ def _cleanup_tasks() -> None:
         fin = entry.get("finished_at") or entry.get("created_at") or 0
         if entry.get("status") in {"DONE", "FAILED", "CANCELLED"} and (now - fin) > ttl:
             _TASKS.pop(task_id, None)
+            # arena v2.1.0 F6: evict the event emitter alongside the task —
+            # drop_emitter had zero production callers -> unbounded growth.
+            drop_emitter(task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1002,13 +1007,70 @@ async def recall_memory(
     )
 
 
+_RECALL_GATE_LOCK = asyncio.Lock()
+_RECALL_GATE = {"tokens": 0.0, "ts": 0.0, "initialized": False}
+_RECALL_GATE_MAX_WAIT_S = 10.0
+
+
+async def _recall_rate_gate() -> Optional[dict[str, Any]]:
+    """Token-bucket gate enforcing ``rate_limits.recall_rpm`` (arena v2.1.0 F3).
+
+    Concurrent swarm recalls queue instead of cascading into upstream 429s;
+    beyond a 10s wait the caller gets a RECALL_RATE_LIMITED envelope.
+    ``recall_rpm <= 0`` or missing -> gate disabled.
+    """
+    raw = (load_config().get("rate_limits", {}) or {}).get("recall_rpm", 0)
+    try:
+        rpm = float(raw)
+    except (TypeError, ValueError):
+        rpm = 0.0
+    if rpm <= 0:
+        return None
+    rate = rpm / 60.0
+    capacity = max(1.0, rpm)
+    async with _RECALL_GATE_LOCK:
+        now = time.monotonic()
+        if not _RECALL_GATE["initialized"]:
+            _RECALL_GATE["tokens"] = capacity
+            _RECALL_GATE["ts"] = now
+            _RECALL_GATE["initialized"] = True
+        _RECALL_GATE["tokens"] = min(
+            capacity, _RECALL_GATE["tokens"] + (now - _RECALL_GATE["ts"]) * rate
+        )
+        _RECALL_GATE["ts"] = now
+        if _RECALL_GATE["tokens"] >= 1.0:
+            _RECALL_GATE["tokens"] -= 1.0
+            return None
+        await asyncio.sleep(min((1.0 - _RECALL_GATE["tokens"]) / rate, _RECALL_GATE_MAX_WAIT_S))
+        now = time.monotonic()
+        _RECALL_GATE["tokens"] = min(
+            capacity, _RECALL_GATE["tokens"] + (now - _RECALL_GATE["ts"]) * rate
+        )
+        _RECALL_GATE["ts"] = now
+        if _RECALL_GATE["tokens"] >= 1.0:
+            _RECALL_GATE["tokens"] -= 1.0
+            return None
+    return {
+        "ok": False,
+        "error": "RECALL_RATE_LIMITED",
+        "detail": f"recall_rpm={int(rpm)} exceeded; retry shortly",
+        "retry_after_s": round(60.0 / rpm, 3),
+    }
+
+
 async def _recall_memory_impl(
     workspace_dir: str,
     query: str,
     topic: Optional[str] = None,
     scope: str = "all",
 ) -> dict[str, Any]:
-    ctx = _gather_recall_context(workspace_dir=workspace_dir, query=query, topic=topic, scope=scope)
+    limited = await _recall_rate_gate()
+    if limited is not None:
+        return limited
+    try:
+        ctx = _gather_recall_context(workspace_dir=workspace_dir, query=query, topic=topic, scope=scope)
+    except WorkspaceOutOfBounds as exc:
+        return {"ok": False, "error": "WORKSPACE_OUT_OF_BOUNDS", "detail": mask_secrets(str(exc))}
     if not ctx.get("ok"):
         return ctx
     nodes = ctx.get("nodes") or []
@@ -1016,7 +1078,7 @@ async def _recall_memory_impl(
     tier_attempts: list[dict[str, Any]] = []
     if nodes:
         try:
-            from ops.curator import synthesize_recall
+            from botex.ops.curator import synthesize_recall
 
             result = await synthesize_recall(query, nodes)
         except Exception as exc:  # cascade unavailable -> deterministic
