@@ -46,7 +46,16 @@ if _root_dir not in sys.path:
 
 from urllib.parse import parse_qs
 
-from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mcp.server.transport_security import TransportSecuritySettings
@@ -59,7 +68,13 @@ from botex.analytics import aggregate_stats, load_analytics
 from botex.approval import PendingAction, default_approval_manager
 from botex.catalog import get_consolidated_models
 from botex.chat import default_chat_manager, stream_chat_turn
-from botex.config import analytics_setting, get_tasks_dir, resolve_provider, resolve_workspace
+from botex.config import (
+    WorkspaceOutOfBounds,
+    analytics_setting,
+    get_tasks_dir,
+    resolve_provider,
+    resolve_workspace,
+)
 from botex.engine import run_botex_task
 from botex.events import EventKind, emitter_or_none, get_emitter
 from botex.memory import (
@@ -565,6 +580,22 @@ app = FastAPI(
     version="2.1.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(WorkspaceOutOfBounds)
+async def _workspace_out_of_bounds_handler(
+    request: Request,  # noqa: ARG001 - FastAPI handler signature
+    exc: WorkspaceOutOfBounds,
+) -> JSONResponse:
+    """Any route resolving an out-of-allowlist workspace_dir -> 403."""
+    return JSONResponse(
+        status_code=403,
+        content={
+            "ok": False,
+            "error": "WORKSPACE_OUT_OF_BOUNDS",
+            "detail": mask_secrets(str(exc)),
+        },
+    )
 
 
 class CloudAuthMiddleware:

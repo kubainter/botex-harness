@@ -911,12 +911,62 @@ def resolve_workspace_source(value: str = "") -> tuple:
     return ".", "cwd"
 
 
+class WorkspaceOutOfBounds(ValueError):
+    """Raised when a workspace path falls outside ``cloud.allowed_workspaces``."""
+
+
+def allowed_workspaces() -> list[str]:
+    """Realpath-normalized entries of ``cloud.allowed_workspaces``.
+
+    Empty/missing key = containment feature off (local/dev semantics
+    unchanged). Each entry is expanded (``~``) and realpath-resolved so
+    later comparisons close both ``..`` traversal and symlink escapes.
+    """
+    raw = (load_config().get("cloud", {}) or {}).get("allowed_workspaces")
+    if raw is None:
+        raw = DEFAULTS.get("cloud", {}).get("allowed_workspaces") or []
+    roots: list[str] = []
+    for entry in raw or []:
+        text = str(entry).strip()
+        if not text:
+            continue
+        try:
+            roots.append(
+                os.path.realpath(os.path.abspath(Path(text).expanduser()))
+            )
+        except (OSError, ValueError):
+            continue
+    return roots
+
+
+def _enforce_workspace_containment(real_path: str) -> None:
+    """Fail-closed containment for ``cloud.allowed_workspaces``.
+
+    Non-empty allowlist: the resolved path must be equal to or under one
+    of the allowed roots. Runs BEFORE any ``mkdir`` side-effect in
+    ``get_tasks_dir``/``get_chat_sessions_dir``, so out-of-bounds paths
+    never materialize on disk (arena v2.1.0 merge-blocker B1).
+    """
+    roots = allowed_workspaces()
+    if not roots:
+        return
+    candidate = os.path.normcase(real_path)
+    for root in roots:
+        norm_root = os.path.normcase(root)
+        if candidate == norm_root or candidate.startswith(norm_root + os.sep):
+            return
+    raise WorkspaceOutOfBounds(
+        f"workspace_dir {real_path!r} is outside cloud.allowed_workspaces"
+    )
+
+
 def resolve_workspace(value: str = "") -> str:
     """Return the effective workspace path (see ``resolve_workspace_source``)."""
     raw_path = resolve_workspace_source(value)[0]
     if raw_path == ".":
         return "."
     real_path = os.path.realpath(os.path.abspath(raw_path))
+    _enforce_workspace_containment(real_path)
     return "".join(chr(cp) for cp in [ord(c) for c in real_path])
 
 
