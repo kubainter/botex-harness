@@ -1028,28 +1028,27 @@ async def _recall_rate_gate() -> Optional[dict[str, Any]]:
         return None
     rate = rpm / 60.0
     capacity = max(1.0, rpm)
-    async with _RECALL_GATE_LOCK:
-        now = time.monotonic()
-        if not _RECALL_GATE["initialized"]:
-            _RECALL_GATE["tokens"] = capacity
+    deadline = time.monotonic() + _RECALL_GATE_MAX_WAIT_S
+    while True:
+        async with _RECALL_GATE_LOCK:
+            now = time.monotonic()
+            if not _RECALL_GATE["initialized"]:
+                _RECALL_GATE["tokens"] = capacity
+                _RECALL_GATE["ts"] = now
+                _RECALL_GATE["initialized"] = True
+            _RECALL_GATE["tokens"] = min(
+                capacity, _RECALL_GATE["tokens"] + (now - _RECALL_GATE["ts"]) * rate
+            )
             _RECALL_GATE["ts"] = now
-            _RECALL_GATE["initialized"] = True
-        _RECALL_GATE["tokens"] = min(
-            capacity, _RECALL_GATE["tokens"] + (now - _RECALL_GATE["ts"]) * rate
-        )
-        _RECALL_GATE["ts"] = now
-        if _RECALL_GATE["tokens"] >= 1.0:
-            _RECALL_GATE["tokens"] -= 1.0
-            return None
-        await asyncio.sleep(min((1.0 - _RECALL_GATE["tokens"]) / rate, _RECALL_GATE_MAX_WAIT_S))
-        now = time.monotonic()
-        _RECALL_GATE["tokens"] = min(
-            capacity, _RECALL_GATE["tokens"] + (now - _RECALL_GATE["ts"]) * rate
-        )
-        _RECALL_GATE["ts"] = now
-        if _RECALL_GATE["tokens"] >= 1.0:
-            _RECALL_GATE["tokens"] -= 1.0
-            return None
+            if _RECALL_GATE["tokens"] >= 1.0:
+                _RECALL_GATE["tokens"] -= 1.0
+                return None
+            wait = min((1.0 - _RECALL_GATE["tokens"]) / rate, _RECALL_GATE_MAX_WAIT_S)
+        # Sleep OUTSIDE the lock — a queued caller must not head-of-line
+        # block callers the bucket could admit right now (cross-review).
+        await asyncio.sleep(wait)
+        if time.monotonic() >= deadline:
+            break
     return {
         "ok": False,
         "error": "RECALL_RATE_LIMITED",
@@ -1070,7 +1069,18 @@ async def _recall_memory_impl(
     try:
         ctx = _gather_recall_context(workspace_dir=workspace_dir, query=query, topic=topic, scope=scope)
     except WorkspaceOutOfBounds as exc:
-        return {"ok": False, "error": "WORKSPACE_OUT_OF_BOUNDS", "detail": mask_secrets(str(exc))}
+        # Generic detail for the agent-facing envelope; the absolute path
+        # stays in the server log only (cross-review: path disclosure).
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "workspace containment: %s", mask_secrets(str(exc))
+        )
+        return {
+            "ok": False,
+            "error": "WORKSPACE_OUT_OF_BOUNDS",
+            "detail": "workspace_dir is outside cloud.allowed_workspaces",
+        }
     if not ctx.get("ok"):
         return ctx
     nodes = ctx.get("nodes") or []

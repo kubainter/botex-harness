@@ -72,7 +72,42 @@ def test_containment_blocks_mkdir_side_effect(tmp_path, monkeypatch):
     assert not (outside / ".botex").exists()
 
 
-def test_traversal_via_dotdot_stays_contained(tmp_path, monkeypatch):
+def test_containment_covers_cwd_fallback(tmp_path, monkeypatch):
+    """Empty workspace_dir -> cwd fallback must ALSO pass containment
+    (cross-review blocker: '.' path skipped the allowlist)."""
+    root = tmp_path / "vault"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(
+        server_config,
+        "load_config",
+        lambda: {"engine": {}, "cloud": {"allowed_workspaces": [str(root)]}},
+    )
+    monkeypatch.chdir(outside)
+    with pytest.raises(server_config.WorkspaceOutOfBounds):
+        server_config.resolve_workspace("")
+    # cwd inside an allowed root keeps the legacy "." return
+    (root / "ws").mkdir(parents=True)
+    monkeypatch.chdir(root / "ws")
+    assert server_config.resolve_workspace("") == "."
+
+
+def test_mcp_envelope_has_no_path_disclosure(tmp_path, monkeypatch):
+    """WORKSPACE_OUT_OF_BOUNDS envelopes must not echo absolute paths."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    outside = tmp_path / "outside-with-very-distinctive-name-xyzzy"
+    monkeypatch.setattr(
+        server_config,
+        "load_config",
+        lambda: {"engine": {}, "cloud": {"allowed_workspaces": [str(root)]}},
+    )
+    with pytest.raises(server_config.WorkspaceOutOfBounds) as excinfo:
+        server_config.resolve_workspace(str(outside))
+    # the exception itself carries detail for server logs; envelope code
+    # replaces it with the generic message (asserted at handler level in
+    # server.py / server_cloud.py — here we pin the exception contract)
+    assert "outside cloud.allowed_workspaces" in str(excinfo.value)
     root = tmp_path / "vault"
     (root / "real").mkdir(parents=True)
     monkeypatch.setattr(

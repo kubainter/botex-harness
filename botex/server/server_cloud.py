@@ -588,12 +588,17 @@ async def _workspace_out_of_bounds_handler(
     exc: WorkspaceOutOfBounds,
 ) -> JSONResponse:
     """Any route resolving an out-of-allowlist workspace_dir -> 403."""
+    # Full path goes to server logs only; remote callers get a generic
+    # message (no absolute-path disclosure).
+    logging.getLogger(__name__).warning(
+        "workspace containment: %s", mask_secrets(str(exc))
+    )
     return JSONResponse(
         status_code=403,
         content={
             "ok": False,
             "error": "WORKSPACE_OUT_OF_BOUNDS",
-            "detail": mask_secrets(str(exc)),
+            "detail": "workspace_dir is outside cloud.allowed_workspaces",
         },
     )
 
