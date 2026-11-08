@@ -133,6 +133,35 @@ course-correction turn before the atomic rollback. ~15 lines in
 threshold configurable per mode (`edit` could tolerate 4-5).
 
 ### 12. Task-event emitter TTL eviction
+
+### 13. Recall modernization (OR+coverage retrieval, hedged cascade, swarm scope) — implemented
+`recall_memory` silently returned zero hits whenever one query token was
+missing from the vault: `_sanitize_fts_query` joined tokens with implicit
+AND (`memory.py:615-620`), the substring fallback required all tokens, and
+spreading activation only fired on FTS hits. Local Qwen (bielik:latest) was
+also not installed, so the curator cascade burned its first tier on a 404.
+
+Shipped (arena-recall-20261107, GLM + Devin with Gemini/NIM review):
+per-token OR matching with a coverage admission gate (≥2 distinct tokens,
+stop-word list), `paths.swarm_memory_dir` as a third read-only search root
+(scope `swarm`), a `memory.recall` config section with qwen2.5:3b as the
+committed local default (7b opt-in), a hedged cascade (tier-2 fires only
+after `hedge_s` of tier-1 silence, so a healthy local model spends zero
+quota), an answer cache keyed on query+node ids+mtimes, and
+`recall_status`/`tier_attempts`/`workspace_searched` on every response.
+
+Deliberately deferred: semantic (embedding) retrieval — `reciprocal_rank_fusion`
+already has a `vec_ranks` slot, but FTS OR plus coverage ranking solves the
+observed failure class cheaper. See "Later" below.
+
+### 14. VPS containment for memory routes (`cloud.allowed_workspaces`) — next
+Config keys exist (`cloud.allowed_workspaces`, `rate_limits.recall_rpm`),
+but `server_cloud.py` does not consume them yet: memory routes still resolve
+`workspace_dir` without realpath containment for non-loopback callers, and
+recall has no dedicated limiter. Auth itself is fail-closed
+(`server_cloud.py:637`, Bearer `compare_digest`), so this blocks the VPS
+exposure phase only — local stdio sessions are unaffected. Required before
+`botex cloud` faces WAN.
 `botex/events.py` keeps one emitter (≤1000-event ring) per task in
 `_REGISTRY` forever — mirroring the already-unbounded `_TASKS` history in
 `server_cloud.py`. Fine at hundreds of tasks, but a long-lived gateway
@@ -396,6 +425,14 @@ rest.
   `quotaResetDelay`, "retry in Xs"), immediate re-raise on daily-quota
   errors, and `max_retries=0` on the SDK client while enabled; 429 now
   classifies `provider_rate_limited` so fallbacks trigger after waits
+- **One-Shot Knowledge Recall & Curator Cascade (Stage 4.10 / Memory Distillation)**:
+  - `recall_memory` MCP tool: single-turn natural language knowledge recall answering questions directly from the Memory Vault graph.
+  - Graph Context Expansion: FTS match seed + 1-hop outgoing wikilinks (`[[...]]`) and incoming backlinks with strict token budget (~5000 tokens) and obsolete note pruning.
+  - Multi-tier LLM Curator Cascade (`ops/curator/recall_curator.py`): `local-ollama` (Bielik/Ollama auto-probe) -> `nvidia` (Nemotron 3.5 Lightning, `thinking=False`) -> `gemini` (Gemini Flash) -> `openrouter-free` -> `deterministic_recall` fallback.
+  - Anti-hallucination & ground-truth guards: strict citation enforcement, secret masking (`mask_secrets`), and untrusted note boundary encapsulation (`wrap_untrusted_content`), eliminating client-side context bloat by up to 98.8%.
+- **Context Inclusion Layer & Hindsight Memory Evolution (Stage 4.9)**:
+  - In-process deterministic context relay for swarm agents (`botex/context_inclusion.py`): `OutputNormalizer` (agent-agnostic output normalization and POSIX path enforcement), `DeterministicSignalGate` (AST diff pruning, failure traceback isolation, observation deduplication), `ContextKnapsack` (4KB token budget with traversal-hardened scratchpad offload).
+  - Memory Evolution (`botex/memory.py`, `server.py`): `belief` and `heuristic` memory kinds, SQLite `confidence` column with frontmatter synchronization, temporal query filters (`since`, `until`), confidence filtering (`min_confidence`), spreading activation along `memories_edges` wikilink graph blended via Reciprocal Rank Fusion (RRF), and the `reflect_memory` MCP tool.
 - Memory knowledge graph (Stage 4.7 partial): `[[wikilinks]]` between notes, `get_backlinks`, `patch_memory_section`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` with per-kind graph colors + `_GRAPH_INDEX.md`, `read_scratchpad` for offloaded execution logs
 - Meta-lessons layer: `botex/meta_harness.py` (task taxonomy classification, patch probing, meta-lesson extraction & recommendations)
 - Analytics & stats: `aggregate_stats()` shared by CLI and `GET /api/analytics?period=`, per-model/daily aggregates with cache-hit metrics, `POST /api/analytics/digest` + optional local-LLM (Bielik) digest loop writing to the Memory Vault, SVG stats panel inside WalletView
