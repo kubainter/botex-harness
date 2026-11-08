@@ -37,7 +37,7 @@ from ops.curator.telegram import TelegramNotifier
 logger = logging.getLogger(__name__)
 
 # Default model configurations
-DEFAULT_PRIMARY_MODEL = "nvidia/llama-3.1-nemotron-70b-instruct"
+DEFAULT_PRIMARY_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 DEFAULT_LOCAL_MODEL = "bielik:latest"
 LOCK_MAX_STALE_SECONDS = 1800.0  # 30 minutes
 
@@ -325,6 +325,11 @@ class CuratorService:
 
             provider = ProviderRegistry.get("nvidia")
             client = provider.get_client(api_key=api_key)
+            extra_body = (
+                {"chat_template_kwargs": {"thinking": False}}
+                if "nemotron-3" in self.primary_model
+                else None
+            )
             resp = await client.chat.completions.create(
                 model=self.primary_model,
                 messages=[
@@ -334,6 +339,7 @@ class CuratorService:
                 temperature=0.2,
                 max_tokens=2048,
                 timeout=30.0,
+                extra_body=extra_body,
             )
             content = resp.choices[0].message.content
             return content

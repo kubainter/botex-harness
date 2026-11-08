@@ -267,3 +267,50 @@ async def test_run_botex_task_provider_fallback_rotation(
         inflight = result["in_flight_state"]
         assert len(inflight["failed_attempts"]) >= 1
         assert inflight["failed_attempts"][0]["provider"] == "openrouter-free"
+
+
+def test_in_flight_state_plugins_and_step_snapshots():
+    """Verify task_plugins, step_snapshots, and staged_plugins serialization on InFlightTaskState."""
+    state = InFlightTaskState(task_id="task-plug-1", goal="Test plugin state")
+    state.register_task_plugin("proto_lint", {"name": "proto_lint", "reusability": "reusable"})
+    state.record_step_snapshot(1, "step_1")
+    state.add_staged_plugin({"name": "proto_lint", "scope": "staging"})
+    state.add_staged_plugin({"name": "proto_lint", "scope": "staging"})  # duplicate ignored
+
+    serialized = state.to_dict()
+    assert "proto_lint" in serialized["task_plugins"]
+    assert serialized["step_snapshots"][1] == "step_1"
+    assert len(serialized["staged_plugins"]) == 1
+
+    restored = InFlightTaskState.from_dict(serialized)
+    assert restored.task_plugins["proto_lint"]["reusability"] == "reusable"
+    assert restored.step_snapshots[1] == "step_1"
+    assert len(restored.staged_plugins) == 1
+
+
+def test_snapshot_manager_step_indexed_snapshots(tmp_path: Path):
+    """Verify O(1) create_step_snapshot and restore_step_snapshot across existing and newly created files."""
+    from botex.patch_engine import SnapshotManager
+
+    snap_dir = tmp_path / ".snapshots"
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    existing_file = ws / "app.py"
+    existing_file.write_text("x = 1\n", encoding="utf-8")
+    future_file = ws / "new_helper.py"
+
+    mgr = SnapshotManager(base_dir=snap_dir)
+    mgr.begin_task("t1", workspace_root=ws)
+
+    step_id = mgr.create_step_snapshot("t1", 1, [existing_file, future_file], workspace_root=ws)
+    assert step_id == "step_1"
+
+    # Mutate existing file and create future_file in step 1
+    existing_file.write_text("x = 999  # formatted and mutated\n", encoding="utf-8")
+    future_file.write_text("def helper(): pass\n", encoding="utf-8")
+
+    restored = mgr.restore_step_snapshot("t1", 1)
+    assert len(restored) == 2
+    assert existing_file.read_text(encoding="utf-8") == "x = 1\n"
+    assert not future_file.exists()
+    mgr.end_task("t1")

@@ -14,6 +14,7 @@ from .curator_service import (
     run_curation_async,
     run_curation_sync,
 )
+from .recall_curator import synthesize_recall
 from .telegram import TelegramNotifier, send_telegram_notification
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "get_curator_status",
     "run_curation_async",
     "run_curation_sync",
+    "synthesize_recall",
     "TelegramNotifier",
     "send_telegram_notification",
 ]

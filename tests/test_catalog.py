@@ -1023,3 +1023,24 @@ def test_google_catalog_strips_models_prefix_and_marks_free(isolated_cache_path:
         assert entry["pricing"]["prompt_per_m"] == 0.0
         assert entry["pricing"]["completion_per_m"] == 0.0
         assert entry["supports_tools"] is True
+
+
+def test_consolidated_models_zai_not_active_provider():
+    """Verify 'zai' is not an active seeded provider and produces no entries."""
+    from botex.catalog import get_consolidated_models
+
+    models = get_consolidated_models(providers=("zai",), force_refresh=True)
+    zai_entries = [m for m in models if m["provider"] == "zai"]
+    assert len(zai_entries) == 0
+
+
+def test_consolidated_models_glm_not_openrouter_free():
+    """Verify GLM models never appear under 'openrouter-free' in consolidated catalog."""
+    from botex.catalog import get_consolidated_models
+
+    models = get_consolidated_models(providers=("openrouter-free",), force_refresh=True)
+    free_entries = [m for m in models if m["provider"] == "openrouter-free"]
+    free_ids = {m["id"] for m in free_entries}
+
+    assert "glm-5.3" not in free_ids
+    assert "glm-5.3-flash" not in free_ids

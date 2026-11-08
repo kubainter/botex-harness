@@ -60,7 +60,10 @@ def test_caller_tool_catalog_matches_skill():
 
 
 def test_skill_documents_all_engine_statuses():
-    contracts = _module(ROOT / "botex" / "contracts.py")
+    contracts_file = ROOT / "botex" / "core" / "contracts.py"
+    if not contracts_file.exists():
+        contracts_file = ROOT / "botex" / "contracts.py"
+    contracts = _module(contracts_file)
     status_assignment = next(
         node
         for node in contracts.body
@@ -94,7 +97,10 @@ def test_skill_explains_caller_and_worker_layers():
 
 
 def test_hard_readonly_policy_is_present_in_capabilities():
-    source = (ROOT / "botex" / "capabilities.py").read_text(encoding="utf-8")
+    cap_file = ROOT / "botex" / "core" / "capabilities.py"
+    if not cap_file.exists():
+        cap_file = ROOT / "botex" / "capabilities.py"
+    source = cap_file.read_text(encoding="utf-8")
     assert '{"readonly", "chat"}' in source
     assert "Mode '{chosen}' is hard read-only" in source
     assert '"delete_file": ToolPolicy(' in source

@@ -993,3 +993,56 @@ def test_format_credits_summary_masks_lowercase_bearer_all_branches():
     # Static facade verification
     s_facade = WalletService.format_credits_summary(info_paid, compact=False)
     assert raw_token not in s_facade and "[REDACTED]" in s_facade
+
+
+def test_format_key_status_dict_units_and_quota_windows():
+    """Verify _format_key_status_dict populates units, quota_windows, and guards low_budget_warning."""
+    from botex.providers.providers import CreditsInfo
+    from botex.providers.wallet import WalletService
+
+    sample_windows = (
+        {
+            "label": "5 Hours",
+            "unit": "hours",
+            "number": 5,
+            "limit": 1000000.0,
+            "current_usage": 150000.0,
+            "percentage": 15.0,
+            "next_reset_time": "2026-11-06T18:00:00Z",
+        },
+    )
+
+    # 1. Quota provider: units="quota", low_budget_warning must be False even if remaining < threshold
+    info_quota = CreditsInfo(
+        supported=True,
+        provider="zai",
+        limit_remaining_usd=0.50,
+        units="quota",
+        quota_windows=sample_windows,
+    )
+    d_quota = WalletService._format_key_status_dict(info_quota, low_budget_threshold_usd=1.0)
+    assert d_quota["units"] == "quota"
+    assert d_quota["quota_windows"] == list(sample_windows)
+    assert d_quota["low_budget_warning"] is False
+
+    # 2. USD provider: units="usd", low_budget_warning must be True when remaining < threshold
+    info_usd_low = CreditsInfo(
+        supported=True,
+        provider="openrouter",
+        balance_usd=0.50,
+        units="usd",
+    )
+    d_usd_low = WalletService._format_key_status_dict(info_usd_low, low_budget_threshold_usd=1.0)
+    assert d_usd_low["units"] == "usd"
+    assert d_usd_low["quota_windows"] == []
+    assert d_usd_low["low_budget_warning"] is True
+
+    # 3. USD provider: units="usd", low_budget_warning must be False when remaining >= threshold
+    info_usd_ok = CreditsInfo(
+        supported=True,
+        provider="openrouter",
+        balance_usd=15.0,
+        units="usd",
+    )
+    d_usd_ok = WalletService._format_key_status_dict(info_usd_ok, low_budget_threshold_usd=1.0)
+    assert d_usd_ok["low_budget_warning"] is False
