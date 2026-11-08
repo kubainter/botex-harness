@@ -347,6 +347,200 @@
       </div>
     </div>
 
+    <!-- Creator Mode: Dynamic Plugins & Staging Vault -->
+    <div class="rounded-xl border border-botex-800 bg-botex-900 p-5 space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-botex-800 pb-3">
+        <div>
+          <div class="flex flex-wrap items-center gap-2">
+            <BlocksIcon class="w-4 h-4 text-cyan-400" />
+            <h3 class="text-sm font-semibold text-slate-100">
+              {{ locale === 'pl' ? 'Wtyczki i poczekalnia (Creator Mode)' : 'Plugins and staging vault (Creator Mode)' }}
+            </h3>
+            <Badge variant="info">{{ pluginsStore.localPlugins.length + pluginsStore.globalPlugins.length }}</Badge>
+            <Badge v-if="pluginsStore.stagedCount > 0" variant="warning">
+              {{ pluginsStore.stagedCount }} {{ locale === 'pl' ? 'do decyzji' : 'pending' }}
+            </Badge>
+          </div>
+          <p class="text-xs text-slate-300 mt-0.5">
+            {{ locale === 'pl'
+              ? 'Skrypty napisane przez agentów w trakcie zadań. Po zatwierdzeniu trafiają do katalogu projektu lub katalogu globalnego.'
+              : 'Scripts written by agents during tasks. Approved scripts move to your project or global vault.' }}
+          </p>
+        </div>
+
+        <Button variant="secondary" size="sm" :loading="pluginsStore.isLoading" @click="pluginsStore.fetchPlugins()">
+          <RefreshCwIcon class="w-3.5 h-3.5 mr-1" />
+          <span>{{ locale === 'pl' ? 'Odśwież' : 'Refresh' }}</span>
+        </Button>
+      </div>
+
+      <div v-if="pluginsStore.errorMessage" class="p-3 rounded-lg border text-xs bg-rose-950/40 border-rose-700 text-rose-200">
+        {{ pluginsStore.errorMessage }}
+      </div>
+
+      <!-- Staging Gate: pending promotion decisions -->
+      <div
+        v-if="pluginsStore.stagedPlugins.length > 0"
+        class="p-3.5 rounded-lg border border-amber-600/50 bg-amber-950/30 space-y-3"
+      >
+        <h4 class="text-xs font-semibold text-amber-200">
+          {{ locale === 'pl' ? 'Nowe wtyczki czekają na zatwierdzenie' : 'New plugins waiting for approval' }}
+        </h4>
+
+        <div
+          v-for="pl in pluginsStore.stagedPlugins"
+          :key="`staged-${pl.name}`"
+          class="p-3 rounded-lg bg-botex-950 border border-amber-800/40 space-y-2"
+        >
+          <div class="flex flex-wrap items-center gap-2">
+            <code class="text-xs font-semibold text-amber-200">{{ pl.name }}</code>
+            <span
+              :class="[
+                'px-2 py-0.5 rounded text-xs font-medium border',
+                pl.requires_net
+                  ? 'bg-amber-950/60 text-amber-300 border-amber-700/60'
+                  : 'bg-emerald-950/60 text-emerald-300 border-emerald-700/60'
+              ]"
+            >
+              {{ pl.requires_net ? (locale === 'pl' ? 'Wymaga sieci' : 'Network access') : 'Offline' }}
+            </span>
+            <code class="text-[11px] text-slate-400">sha256:{{ pl.sha256.slice(0, 8) }}</code>
+          </div>
+          <p class="text-xs text-slate-300">{{ pl.description }}</p>
+          <div class="flex flex-wrap items-center gap-2 pt-1">
+            <Button variant="success" size="sm" @click="pluginsStore.resolveStagedPlugin(pl.name, 'local')">
+              {{ locale === 'pl' ? 'Zapisz w projekcie' : 'Save to project' }}
+            </Button>
+            <Button variant="primary" size="sm" @click="pluginsStore.resolveStagedPlugin(pl.name, 'global')">
+              {{ locale === 'pl' ? 'Zapisz globalnie' : 'Save globally' }}
+            </Button>
+            <Button variant="danger" size="sm" @click="pluginsStore.resolveStagedPlugin(pl.name, 'discard')">
+              {{ locale === 'pl' ? 'Odrzuć' : 'Discard' }}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Vault Tabs -->
+      <div class="flex items-center bg-botex-950 p-1 rounded-lg border border-botex-800 space-x-1 w-fit">
+        <button
+          type="button"
+          :class="[
+            'min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded text-xs font-medium transition-colors',
+            activePluginTab === 'local' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
+          ]"
+          @click="activePluginTab = 'local'"
+        >
+          {{ locale === 'pl' ? 'W projekcie' : 'Project' }} ({{ pluginsStore.localPlugins.length }})
+        </button>
+        <button
+          type="button"
+          :class="[
+            'min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded text-xs font-medium transition-colors',
+            activePluginTab === 'global' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
+          ]"
+          @click="activePluginTab = 'global'"
+        >
+          {{ locale === 'pl' ? 'Globalne' : 'Global' }} ({{ pluginsStore.globalPlugins.length }})
+        </button>
+        <button
+          type="button"
+          :class="[
+            'min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded text-xs font-medium transition-colors',
+            activePluginTab === 'index' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
+          ]"
+          @click="activePluginTab = 'index'"
+        >
+          <code>_PLUGIN_INDEX.md</code>
+        </button>
+      </div>
+
+      <!-- Local / Global Vault listing -->
+      <template v-if="activePluginTab !== 'index'">
+        <div v-if="pluginsStore.isLoading && activeTabPlugins.length === 0" class="text-xs text-slate-400 py-4 text-center">
+          {{ locale === 'pl' ? 'Wczytuję wtyczki...' : 'Loading plugins...' }}
+        </div>
+
+        <div v-else-if="activeTabPlugins.length === 0" class="p-6 rounded-lg bg-botex-950 border border-botex-800 text-center text-xs text-slate-400">
+          {{ locale === 'pl' ? 'Nie masz jeszcze zapisanych wtyczek w tym katalogu.' : 'No saved plugins in this vault yet.' }}
+        </div>
+
+        <div v-else class="grid grid-cols-1 gap-3">
+          <div
+            v-for="pl in activeTabPlugins"
+            :key="`${activePluginTab}-${pl.name}`"
+            class="p-4 rounded-lg bg-botex-950 border border-botex-800 hover:border-botex-700 transition-colors space-y-2.5"
+          >
+            <div class="flex flex-wrap items-center gap-2">
+              <code class="text-xs font-bold text-cyan-300">{{ pl.name }}</code>
+              <span
+                :class="[
+                  'px-2 py-0.5 rounded text-xs font-medium border',
+                  pl.requires_net
+                    ? 'bg-amber-950/60 text-amber-300 border-amber-700/60'
+                    : 'bg-emerald-950/60 text-emerald-300 border-emerald-700/60'
+                ]"
+              >
+                {{ pl.requires_net ? (locale === 'pl' ? 'Wymaga sieci' : 'Network access') : 'Offline' }}
+              </span>
+              <code class="text-[11px] text-slate-400">sha256:{{ pl.sha256.slice(0, 8) }}</code>
+            </div>
+            <p class="text-xs text-slate-200">{{ pl.description }}</p>
+            <p class="text-[11px] text-slate-400 truncate" :title="pl.script_path"><code>{{ pl.script_path }}</code></p>
+
+            <details class="rounded-lg bg-botex-900/60 border border-botex-800 px-3 py-2">
+              <summary class="cursor-pointer text-xs font-medium text-slate-300 hover:text-cyan-300 select-none">
+                {{ locale === 'pl' ? 'Parametry i przykład wywołania' : 'Parameters and usage example' }}
+              </summary>
+              <div class="mt-2 space-y-2">
+                <div v-if="pl.example_usage?.input !== undefined">
+                  <span class="block text-xs text-slate-400 mb-1">{{ locale === 'pl' ? 'Wejście (input)' : 'Example input' }}</span>
+                  <pre class="p-2 rounded bg-botex-950 border border-botex-800 text-[11px] text-slate-200 overflow-x-auto">{{ formatJson(pl.example_usage.input) }}</pre>
+                </div>
+                <div v-if="pl.example_usage?.output !== undefined">
+                  <span class="block text-xs text-slate-400 mb-1">{{ locale === 'pl' ? 'Wynik (output)' : 'Example output' }}</span>
+                  <pre class="p-2 rounded bg-botex-950 border border-botex-800 text-[11px] text-slate-200 overflow-x-auto">{{ formatJson(pl.example_usage.output) }}</pre>
+                </div>
+                <div>
+                  <span class="block text-xs text-slate-400 mb-1"><code>parameters_schema</code></span>
+                  <pre class="p-2 rounded bg-botex-950 border border-botex-800 text-[11px] text-slate-200 overflow-x-auto">{{ formatJson(pl.parameters_schema) }}</pre>
+                </div>
+                <p v-if="pl.reusability" class="text-xs text-slate-300">
+                  <span class="text-slate-400">{{ locale === 'pl' ? 'Tryb życia:' : 'Lifecycle:' }}</span> {{ pl.reusability }}
+                </p>
+              </div>
+            </details>
+          </div>
+        </div>
+      </template>
+
+      <!-- _PLUGIN_INDEX.md inspector -->
+      <div v-else class="space-y-4">
+        <div v-if="pluginsStore.indexMarkdown.local" class="space-y-1.5">
+          <h4 class="text-xs font-medium text-slate-300">
+            <code>_PLUGIN_INDEX.md</code> ({{ locale === 'pl' ? 'katalog projektu' : 'project vault' }})
+          </h4>
+          <div class="rounded-lg bg-botex-950 border border-botex-800 p-4 max-h-[50dvh] overflow-y-auto">
+            <MarkdownViewer :content="pluginsStore.indexMarkdown.local" />
+          </div>
+        </div>
+        <div v-if="pluginsStore.indexMarkdown.global" class="space-y-1.5">
+          <h4 class="text-xs font-medium text-slate-300">
+            <code>_PLUGIN_INDEX.md</code> ({{ locale === 'pl' ? 'katalog globalny' : 'global vault' }})
+          </h4>
+          <div class="rounded-lg bg-botex-950 border border-botex-800 p-4 max-h-[50dvh] overflow-y-auto">
+            <MarkdownViewer :content="pluginsStore.indexMarkdown.global" />
+          </div>
+        </div>
+        <div
+          v-if="!pluginsStore.indexMarkdown.local && !pluginsStore.indexMarkdown.global"
+          class="p-6 rounded-lg bg-botex-950 border border-botex-800 text-center text-xs text-slate-400"
+        >
+          {{ locale === 'pl' ? 'Indeks _PLUGIN_INDEX.md powstanie po zapisaniu pierwszej wtyczki.' : '_PLUGIN_INDEX.md will be generated once you save your first plugin.' }}
+        </div>
+      </div>
+    </div>
+
     <!-- Skill Preview Modal -->
     <Modal
       :is-open="showSkillPreviewModal"
@@ -469,9 +663,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
+import { usePluginsStore } from '../stores/plugins'
 import { useI18n } from '../i18n'
 import { api } from '../api/client'
 import type { SkillCatalogItem, SkillDetail } from '../api/types'
@@ -487,6 +682,7 @@ import {
   Palette as PaletteIcon,
   Smartphone as SmartphoneIcon,
   BookOpen as BookOpenIcon,
+  Blocks as BlocksIcon,
   RefreshCw as RefreshCwIcon,
   Plus as PlusIcon,
   Trash2 as Trash2Icon
@@ -494,6 +690,7 @@ import {
 
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
+const pluginsStore = usePluginsStore()
 const { locale, setLocale, t } = useI18n()
 
 const urlInput = ref(authStore.backendUrl)
@@ -565,10 +762,10 @@ async function fetchSkills() {
   skillsLoading.value = true
   try {
     const res = await api.getSkills()
-    if (res.ok) {
-      skillsList.value = res.skills || []
-    }
+    if (!res.ok) throw new Error('Failed to load skills catalog')
+    skillsList.value = res.skills || []
   } catch (err: any) {
+    skillStatusBanner.value = { ok: false, message: err?.message || 'Failed to load skills catalog' }
     console.warn('Failed to fetch skills catalog:', err)
   } finally {
     skillsLoading.value = false
@@ -578,6 +775,7 @@ async function fetchSkills() {
 async function openSkillPreview(skillName: string) {
   try {
     const res = await api.getSkill(skillName)
+    if (!res.ok || !res.skill) throw new Error('Failed to load skill details')
     if (res.ok && res.skill) {
       activeSkillDetail.value = res.skill
       showSkillPreviewModal.value = true
@@ -613,6 +811,7 @@ async function handleInstallSkill() {
       content: installForm.value.content.trim() || undefined,
       taxonomy
     })
+    if (!res.ok) throw new Error('Failed to install skill')
     if (res.ok) {
       showInstallSkillModal.value = false
       installForm.value = {
@@ -645,6 +844,7 @@ async function handleDeleteSkill(skillName: string) {
   confirmDeleteSkill.value = null
   try {
     const res = await api.deleteSkill(skillName)
+    if (!res.ok || !res.deleted) throw new Error('Skill deletion was not confirmed')
     if (res.ok) {
       skillsList.value = skillsList.value.filter((s) => s.name !== skillName)
       skillStatusBanner.value = {
@@ -660,7 +860,22 @@ async function handleDeleteSkill(skillName: string) {
   }
 }
 
+// Dynamic Plugins & Staging Vault State
+const activePluginTab = ref<'local' | 'global' | 'index'>('local')
+const activeTabPlugins = computed(() =>
+  activePluginTab.value === 'global' ? pluginsStore.globalPlugins : pluginsStore.localPlugins
+)
+
+function formatJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
 onMounted(() => {
   fetchSkills()
+  pluginsStore.fetchPlugins()
 })
 </script>
