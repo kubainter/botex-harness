@@ -34,7 +34,7 @@ def test_get_sync_client_singleton():
     assert client1 is client2
     assert isinstance(client1, httpx2.Client)
     assert not client1.is_closed
-    assert client1.timeout.connect == 600.0
+    assert client1.timeout.connect == 10.0
 
 
 def test_get_async_client_singleton():
@@ -46,7 +46,7 @@ def test_get_async_client_singleton():
         assert client1 is client2
         assert isinstance(client1, NonClosingAsyncClient)
         assert not client1.is_closed
-        assert client1.timeout.connect == 600.0
+        assert client1.timeout.connect == 10.0
 
     asyncio.run(_run())
 

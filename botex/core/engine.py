@@ -10,6 +10,7 @@ Quota Optimization, and Automatic Self-Healing.
 import asyncio
 import contextlib
 import copy
+import inspect
 import json
 import re
 import sys
@@ -2336,8 +2337,21 @@ async def _run_botex_task_once_impl(
                 stream_resp = await client.chat.completions.create(**create_kwargs)
                 if hasattr(stream_resp, "__aiter__"):
                     chunks = []
-                    async for chunk in stream_resp:
-                        chunks.append(chunk)
+                    try:
+                        async for chunk in stream_resp:
+                            chunks.append(chunk)
+                    finally:
+                        # Deterministically release the HTTP stream (mirror of
+                        # chat.py): an unclosed httpx2 stream leaks an async
+                        # generator and holds the pooled connection until GC.
+                        _stream_close = getattr(stream_resp, "aclose", None) or getattr(
+                            stream_resp, "close", None
+                        )
+                        if callable(_stream_close):
+                            with contextlib.suppress(Exception):
+                                _close_res = _stream_close()
+                                if inspect.isawaitable(_close_res):
+                                    await _close_res
                     return normalize_streaming_chunks(chunks, raw_model=model)
                 if hasattr(stream_resp, "__iter__") and not hasattr(stream_resp, "choices"):
                     return normalize_streaming_chunks(list(stream_resp), raw_model=model)

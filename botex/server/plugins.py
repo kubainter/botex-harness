@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -51,6 +52,8 @@ try:
     from botex.tools.security import mask_secrets, sanitize_identifier
 except (ImportError, ValueError):
     from security import mask_secrets, sanitize_identifier
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -170,6 +173,11 @@ class ZeroTrustSubprocessRunner:
     """
 
     DEFAULT_TIMEOUT_S = 15.0
+    # Output contract cap: a plugin may emit at most this many bytes on
+    # stdout AND stderr (excess is discarded while draining, so the child
+    # never deadlocks on a full pipe and the host never buffers unbounded
+    # output into memory).
+    MAX_OUTPUT_BYTES = 1024 * 1024
 
     # Rule 0 (Zero Secret Leakage): ONLY these parent variables propagate.
     _SAFE_ENV_KEYS: FrozenSet[str] = frozenset(
@@ -235,9 +243,40 @@ class ZeroTrustSubprocessRunner:
             env=env,
             cwd=str(self.workspace_dir),
         )
+
+        async def _drain(stream: asyncio.StreamReader, cap: int):
+            """Drain a pipe fully, retaining only the first ``cap`` bytes."""
+            kept = bytearray()
+            total = 0
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if len(kept) < cap:
+                    kept += chunk[: cap - len(kept)]
+            return bytes(kept), total
+
+        async def _io() -> tuple:
+            # stdin feed + stdout/stderr drains run concurrently — sequential
+            # write-then-read on pipes deadlocks beyond the OS pipe buffer.
+            async def _feed() -> None:
+                assert proc.stdin is not None
+                proc.stdin.write(payload)
+                await proc.stdin.drain()
+                proc.stdin.close()
+
+            out_task = asyncio.create_task(_drain(proc.stdout, self.MAX_OUTPUT_BYTES))
+            err_task = asyncio.create_task(_drain(proc.stderr, self.MAX_OUTPUT_BYTES))
+            await asyncio.gather(_feed(), out_task, err_task)
+            await proc.wait()
+            stdout_b, stdout_total = out_task.result()
+            stderr_b, stderr_total = err_task.result()
+            return stdout_b, stdout_total, stderr_b, stderr_total
+
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(input=payload), timeout=effective_timeout
+            stdout_b, stdout_total, stderr_b, stderr_total = await asyncio.wait_for(
+                _io(), timeout=effective_timeout
             )
         except (asyncio.TimeoutError, TimeoutError):
             proc.kill()
@@ -251,11 +290,22 @@ class ZeroTrustSubprocessRunner:
 
         stdout_text = mask_secrets((stdout_b or b"").decode("utf-8", errors="replace"))
         stderr_text = mask_secrets((stderr_b or b"").decode("utf-8", errors="replace"))
+        if stderr_total > self.MAX_OUTPUT_BYTES:
+            stderr_text += (
+                f" [stderr truncated at {self.MAX_OUTPUT_BYTES} bytes; {stderr_total} bytes total]"
+            )
 
         if proc.returncode != 0:
             raise PluginExecutionError(
                 f"Plugin '{plugin.name}' exited with code {proc.returncode}: "
                 f"{stderr_text.strip()[:500] or 'no stderr output'}"
+            )
+
+        if stdout_total > self.MAX_OUTPUT_BYTES:
+            raise PluginExecutionError(
+                f"Plugin '{plugin.name}' exceeded the "
+                f"{self.MAX_OUTPUT_BYTES // (1024 * 1024)} MiB stdout cap "
+                f"({stdout_total} bytes emitted; output truncated)."
             )
 
         try:
@@ -526,6 +576,26 @@ class PluginVaultManager:
             # machines, execution always uses the runner inside this dir.
             runner = child / self.RUNNER_FILENAME
             if runner.is_file():
+                # Integrity gate: when the manifest carries a sha256, the
+                # on-disk runner must match it — a mismatch means post-
+                # promotion tampering, so the plugin is skipped (quarantined
+                # by exclusion; operator must re-stage it to reactivate).
+                if plugin.sha256:
+                    try:
+                        actual_sha = plugin_code_sha256(runner.read_text(encoding="utf-8"))
+                    except OSError:
+                        actual_sha = ""
+                    if actual_sha != plugin.sha256:
+                        logger.warning(
+                            "Plugin '%s' skipped: runner sha256 mismatch "
+                            "(manifest %s != on-disk %s) — possible tampering "
+                            "in %s",
+                            plugin.name,
+                            plugin.sha256,
+                            actual_sha or "<unreadable>",
+                            child,
+                        )
+                        continue
                 plugin.script_path = str(runner)
             plugin.scope = scope
             plugins.append(plugin)

@@ -18,6 +18,7 @@ Key features:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from typing import Optional
@@ -34,7 +35,10 @@ __all__ = [
     "reset_http_pool",
 ]
 
-_DEFAULT_TIMEOUT = httpx2.Timeout(600.0)
+# Per-phase timeouts: connect must stay short (a blackholed endpoint must not
+# hold a pool slot for 10 min), while read/write/pool tolerate long LLM
+# reasoning chains.
+_DEFAULT_TIMEOUT = httpx2.Timeout(connect=10.0, read=600.0, write=600.0, pool=600.0)
 _DEFAULT_LIMITS = httpx2.Limits(
     max_connections=100,
     max_keepalive_connections=20,
@@ -116,9 +120,22 @@ def reset_http_pool() -> None:
     """Synchronously drop and close pool singletons for test isolation."""
     global _ASYNC_CLIENT, _SYNC_CLIENT
     with _HTTP_POOL_LOCK:
+        async_client = _ASYNC_CLIENT
         sync_client = _SYNC_CLIENT
         _ASYNC_CLIENT = None
         _SYNC_CLIENT = None
+
+    if async_client is not None and not async_client.is_closed:
+        try:
+            asyncio.run(async_client.force_aclose())
+        except RuntimeError:
+            # A running event loop owns this thread — asyncio.run() cannot be
+            # nested; the caller must use close_http_pool() instead.
+            logger.warning(
+                "reset_http_pool() skipped async client close inside a running event loop"
+            )
+        except Exception:
+            logger.exception("Error closing async HTTP client during pool reset")
 
     if sync_client is not None and not sync_client.is_closed:
         try:

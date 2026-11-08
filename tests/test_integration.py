@@ -962,7 +962,7 @@ def test_m4_wal_11_unmocked_fallback_execution(capsys: pytest.CaptureFixture):
 @pytest.mark.anyio
 async def test_provider_fallback_skips_open_circuit(tmp_path: Any):
     """Fallback provider selection skips providers whose circuit is OPEN."""
-    import httpx
+    import httpx2 as httpx
     from openai import APIConnectionError
 
     import botex.engine as engine
