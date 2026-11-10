@@ -191,6 +191,11 @@ export interface ApprovalDecisionRequest {
 export type MemoryKind = 'context' | 'decision' | 'handoff' | 'bug' | 'architecture' | string
 export type MemoryScope = 'local' | 'global' | 'all'
 
+export interface MemoryProjectItem {
+  project: string
+  count: number
+}
+
 export interface MemoryEntry {
   memory_id: string
   title: string
@@ -201,6 +206,7 @@ export interface MemoryEntry {
   created_at?: string | number
   updated_at?: string | number
   scope?: string
+  project?: string
   path?: string
   status?: string
   compiled_truth?: boolean
@@ -216,6 +222,7 @@ export interface MemorySaveRequest {
   memory_id?: string
   origin?: string
   scope: 'local' | 'global'
+  project?: string
   workspace_dir?: string
 }
 

@@ -38,6 +38,15 @@ def client(monkeypatch):
         yield test_client
 
 
+@pytest.fixture(autouse=True)
+def _block_lifespan_project_migration(monkeypatch):
+    """Stub the warmup backfill so TestClient lifespan never migrates the real vault."""
+    monkeypatch.setattr(
+        "botex.ops.migrate_projects.ensure_projects_migrated",
+        lambda *args, **kwargs: {"ok": True, "roots": [], "total_updated": 0},
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. Health Probe Endpoint
 # ---------------------------------------------------------------------------
@@ -909,3 +918,103 @@ def test_security_masks_btx_tokens_and_blocks_env():
         for blocked_name in [".env", ".env.production", ".secrets.yaml", "secrets.json"]:
             with pytest.raises(SecurityError):
                 resolve_safe_path(tmpdir, blocked_name)
+
+
+# ---------------------------------------------------------------------------
+# Memory Vault Project Partitioning (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+def test_memory_project_field_api_roundtrip(client, tmp_path):
+    """POST /api/memory accepts project; GET /api/memory?project= filters results."""
+    ws = str(tmp_path)
+
+    r1 = client.post(
+        "/api/memory",
+        json={
+            "workspace_dir": ws,
+            "title": "Partitioned Architecture Note",
+            "content": "Recall pipeline partitioning decision.",
+            "kind": "decision",
+            "project": "Botex Harness",
+        },
+    )
+    assert r1.status_code == 200
+    d1 = r1.json()
+    assert d1["ok"] is True
+    assert d1["project"] == "botex-harness"
+
+    r2 = client.post(
+        "/api/memory",
+        json={
+            "workspace_dir": ws,
+            "title": "Unassigned Scratch Note",
+            "content": "No project attached.",
+        },
+    )
+    assert r2.status_code == 200
+    d2 = r2.json()
+    assert d2["project"] == ""
+
+    proj_resp = client.get(f"/api/memory?workspace_dir={ws}&project=botex-harness&scope=local")
+    assert proj_resp.status_code == 200
+    ids = {m["id"] for m in proj_resp.json()["memories"]}
+    assert d1["id"] in ids
+    assert d2["id"] not in ids
+
+    un_resp = client.get(f"/api/memory?workspace_dir={ws}&project=_unassigned&scope=local")
+    assert un_resp.status_code == 200
+    ids_un = {m["id"] for m in un_resp.json()["memories"]}
+    assert d2["id"] in ids_un
+    assert d1["id"] not in ids_un
+
+    read_resp = client.get(f"/api/memory?workspace_dir={ws}&memory_id={d1['id']}&scope=local")
+    assert read_resp.status_code == 200
+    assert read_resp.json()["metadata"]["project"] == "botex-harness"
+
+
+def test_memory_projects_endpoint(client, tmp_path, monkeypatch):
+    """GET /api/memory/projects aggregates project counts across local+global scopes."""
+    ws = str(tmp_path)
+    # Keep scope="all" hermetic: configured swarm root is the repo working tree.
+    monkeypatch.setattr("botex.memory.get_swarm_memory_dir", lambda: None)
+
+    client.post(
+        "/api/memory",
+        json={"workspace_dir": ws, "title": "H1", "content": "x", "project": "botex-harness"},
+    )
+    client.post(
+        "/api/memory",
+        json={"workspace_dir": ws, "title": "H2", "content": "x", "project": "Botex Harness"},
+    )
+    client.post(
+        "/api/memory",
+        json={"workspace_dir": ws, "title": "M1", "content": "x", "project": "media-gen"},
+    )
+    client.post(
+        "/api/memory",
+        json={
+            "workspace_dir": ws,
+            "title": "G1",
+            "content": "x",
+            "project": "media-gen",
+            "scope": "global",
+        },
+    )
+    client.post("/api/memory", json={"workspace_dir": ws, "title": "U1", "content": "x"})
+
+    resp = client.get(f"/api/memory/projects?workspace_dir={ws}&scope=all")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    counts = {p["project"]: p["count"] for p in data["projects"]}
+    assert counts["botex-harness"] == 2
+    assert counts["media-gen"] == 2
+    assert counts[""] == 1
+    assert data["total"] == 5
+    assert data["projects"][-1]["project"] == ""
+
+    resp_local = client.get(f"/api/memory/projects?workspace_dir={ws}&scope=local")
+    assert resp_local.status_code == 200
+    counts_local = {p["project"]: p["count"] for p in resp_local.json()["projects"]}
+    assert counts_local == {"botex-harness": 2, "media-gen": 1, "": 1}
