@@ -872,6 +872,28 @@ def test_access_token_hash_authentication(monkeypatch):
     assert res_missing.status_code == 401
 
 
+def test_access_token_in_botex_access_token_auto_detected_as_sha256(monkeypatch):
+    """Verify server auto-detects sha256:... hash placed directly in BOTEX_ACCESS_TOKEN."""
+    import hashlib
+
+    raw_token = "btx_live_test_direct_hash_987"
+    token_hash = "sha256:" + hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN_HASH", raising=False)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", f'"{token_hash}"')  # with quotes as in .env
+    monkeypatch.setenv("BOTEX_STRICT_AUTH", "1")
+
+    client = TestClient(app)
+
+    # Valid raw token authenticated against sha256 hash placed in BOTEX_ACCESS_TOKEN
+    res_ok = client.get("/api/wallet", headers={"Authorization": f"Bearer {raw_token}"})
+    assert res_ok.status_code == 200
+
+    # Wrong token rejected
+    res_err = client.get("/api/wallet", headers={"Authorization": "Bearer wrong"})
+    assert res_err.status_code == 401
+
+
 def test_security_masks_btx_tokens_and_blocks_env():
     """Verify security layer redacts btx_ tokens and blocks .env variations."""
     from botex.tools.security import mask_secrets, resolve_safe_path, SecurityError
