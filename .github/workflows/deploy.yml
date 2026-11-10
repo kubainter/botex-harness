@@ -97,7 +97,7 @@ jobs:
           cd "$DEPLOY_PATH"
 
           # Record previous commit SHA for rollback gate
-          PREV_SHA=$(git rev-parse HEAD)
+          PREV_SHA=$(sudo -u botex git rev-parse HEAD)
           echo "Current deployment commit: $PREV_SHA"
 
           # Pull latest main without touching .env
@@ -106,7 +106,7 @@ jobs:
           sudo -u botex git reset --hard origin/main
 
           # Install new dependencies if requirements.txt changed
-          if ! git diff --quiet "$PREV_SHA" HEAD -- requirements.txt; then
+          if ! sudo -u botex git diff --quiet "$PREV_SHA" HEAD -- requirements.txt; then
               echo "requirements.txt modified - updating virtual environment dependencies..."
               sudo -u botex "$DEPLOY_PATH/.venv/bin/pip" install -r requirements.txt
           fi
@@ -120,7 +120,7 @@ jobs:
           fi
 
           # Synchronize deploy service scripts & reload systemd if modified
-          if ! git diff --quiet "$PREV_SHA" HEAD -- deploy/oracle-vps/; then
+          if ! sudo -u botex git diff --quiet "$PREV_SHA" HEAD -- deploy/oracle-vps/; then
               echo "Deployment units modified - refreshing systemd units..."
               sudo cp "$DEPLOY_PATH/deploy/oracle-vps/botex-cloud.service" /etc/systemd/system/
               sudo cp "$DEPLOY_PATH/deploy/oracle-vps/bielik.service" /etc/systemd/system/
