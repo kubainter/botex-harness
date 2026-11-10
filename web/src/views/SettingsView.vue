@@ -194,12 +194,25 @@
 
     <!-- Progressive Web App Info -->
     <div class="rounded-xl border border-botex-800 bg-botex-900 p-5 space-y-4 shadow-sm">
-      <div class="flex items-center space-x-2 border-b border-botex-800 pb-3">
-        <SmartphoneIcon class="w-4 h-4 text-cyan-400" />
-        <h3 class="text-sm font-semibold text-slate-100">PWA Runtime</h3>
+      <div class="flex items-center justify-between border-b border-botex-800 pb-3">
+        <div class="flex items-center space-x-2">
+          <SmartphoneIcon class="w-4 h-4 text-cyan-400" />
+          <h3 class="text-sm font-semibold text-slate-100">PWA Runtime</h3>
+        </div>
+        <div class="flex items-center space-x-2">
+          <span v-if="pwaUpdateMsg" class="text-xs text-amber-300 font-mono">{{ pwaUpdateMsg }}</span>
+          <Button variant="secondary" size="sm" :loading="checkingPwa" @click="checkPwaUpdate">
+            <RefreshCwIcon class="w-3.5 h-3.5 mr-1" />
+            <span>{{ locale === 'pl' ? 'Sprawdź aktualizacje PWA' : 'Check PWA Update' }}</span>
+          </Button>
+        </div>
       </div>
 
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
+        <div class="p-3 bg-botex-950 rounded-lg border border-botex-800">
+          <span class="block text-xs text-slate-300 uppercase">App Version</span>
+          <span class="text-sky-300 font-semibold font-mono">v{{ authStore.healthData?.version || '2.1.0' }}</span>
+        </div>
         <div class="p-3 bg-botex-950 rounded-lg border border-botex-800">
           <span class="block text-xs text-slate-300 uppercase">Service Worker</span>
           <span class="text-emerald-300 font-semibold">Active & Precached</span>
@@ -742,6 +755,30 @@ async function testConnection() {
     }
   } finally {
     testingConnection.value = false
+  }
+}
+
+// PWA Update Check
+const checkingPwa = ref(false)
+const pwaUpdateMsg = ref('')
+
+async function checkPwaUpdate() {
+  if (checkingPwa.value) return
+  checkingPwa.value = true
+  pwaUpdateMsg.value = locale.value === 'pl' ? 'Sprawdzam...' : 'Checking...'
+  try {
+    await authStore.checkHealth()
+    if (typeof window !== 'undefined' && window.__checkPwaUpdate) {
+      await window.__checkPwaUpdate()
+    }
+    pwaUpdateMsg.value = locale.value === 'pl' ? 'PWA jest aktualne' : 'PWA is up to date'
+  } catch {
+    pwaUpdateMsg.value = locale.value === 'pl' ? 'Błąd sprawdzania' : 'Check failed'
+  } finally {
+    setTimeout(() => {
+      checkingPwa.value = false
+      pwaUpdateMsg.value = ''
+    }, 3000)
   }
 }
 
