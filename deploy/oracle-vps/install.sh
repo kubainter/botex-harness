@@ -64,11 +64,11 @@ fi
 # 5. Virtual environment & dependencies
 log_info "Setting up Python virtual environment..."
 cd "$INSTALL_DIR"
-PYTHON_BIN=$(command -v python3.12 || command -v python3.11 || command -v python3)
+PYTHON_BIN=$(command -v python3.14 || command -v python3.13 || command -v python3.12 || command -v python3)
 if [ -d ".venv" ]; then
-    VENV_PY_VER=$(.venv/bin/python3 -c "import sys; print(sys.version_info[:2] >= (3, 11))" 2>/dev/null || echo "False")
+    VENV_PY_VER=$(.venv/bin/python3 -c "import sys; print(sys.version_info[:2] >= (3, 13))" 2>/dev/null || echo "False")
     if [ "$VENV_PY_VER" != "True" ]; then
-        log_info "Recreating virtual environment with $PYTHON_BIN (requires Python >= 3.11)..."
+        log_info "Recreating virtual environment with $PYTHON_BIN (requires Python >= 3.13)..."
         rm -rf .venv
     fi
 fi

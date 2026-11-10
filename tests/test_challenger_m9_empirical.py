@@ -34,6 +34,15 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = REPO_ROOT / "web"
 SRC_DIR = WEB_DIR / "src"
+WEB_NODE_MODULES = WEB_DIR / "node_modules"
+# These tests shell out to npm/vue tooling that only exists after `npm ci` in
+# web/. The PWA build itself is gated by the dedicated CI web job, so skip
+# instead of failing when frontend deps are absent (mirrors the web/dist skip
+# in test_server_cloud.py).
+requires_web_deps = pytest.mark.skipif(
+    not WEB_NODE_MODULES.is_dir(),
+    reason="web/node_modules not installed (run `npm ci` in web/) — PWA build is gated by the dedicated CI web job",
+)
 QUOTA_CARD_PATH = SRC_DIR / "components" / "wallet" / "QuotaWindowCard.vue"
 WALLET_VIEW_PATH = SRC_DIR / "views" / "WalletView.vue"
 WALLET_STORE_PATH = SRC_DIR / "stores" / "wallet.ts"
@@ -254,6 +263,7 @@ class TestEmpiricalSourceIsolation:
 class TestEmpiricalProductionBuild:
     """Empirical verification that web builds successfully in production mode."""
 
+    @requires_web_deps
     def test_npm_run_build_succeeds(self):
         """Run npm run build in web/ and verify exit code 0."""
         res = subprocess.run(
@@ -273,6 +283,7 @@ class TestEmpiricalProductionBuild:
             "web/dist/manifest.webmanifest must exist"
         )
 
+    @requires_web_deps
     def test_node_empirical_v8_harness(self):
         """Execute the standalone Node.js V8 empirical harness (tests/test_m9_frontend_empirical.mjs)."""
         node_script = REPO_ROOT / "tests" / "test_m9_frontend_empirical.mjs"
