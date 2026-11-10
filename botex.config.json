@@ -194,17 +194,15 @@
   "provider_fallbacks": {
     "openrouter-free": [
       "nvidia",
-      "google",
-      "openrouter"
+      "google"
     ],
     "nvidia": [
       "openrouter-free",
-      "google",
-      "openrouter"
+      "google"
     ],
     "google": [
       "nvidia",
-      "openrouter"
+      "openrouter-free"
     ]
   },
   "paths": {

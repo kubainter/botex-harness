@@ -626,7 +626,7 @@ function initSimulation() {
     const radius = Math.min(24, Math.max(12, 11 + (n.in_degree + n.out_degree) * 2))
     const cluster = getNodeCluster(n)
     const offsetAngle = Math.random() * Math.PI * 2
-    const offsetDist = 25 + Math.random() * 95
+    const offsetDist = 45 + Math.random() * 160
 
     return {
       ...n,
@@ -730,7 +730,7 @@ function updateSimulation() {
   const nodeMap = new Map<string, SimNode>()
   for (const n of simNodes) nodeMap.set(n.id, n)
 
-  // 1. Repulsion
+  // 1. Repulsion & Anti-overlap Collision (avoids dense clumps with 300+ nodes)
   for (let i = 0; i < simNodes.length; i++) {
     for (let j = i + 1; j < simNodes.length; j++) {
       const a = simNodes[i]
@@ -739,8 +739,20 @@ function updateSimulation() {
       const dy = b.y - a.y
       const distSq = dx * dx + dy * dy || 1
       const dist = Math.sqrt(distSq)
-      if (dist < 360) {
-        const force = (320 / (distSq + 120)) * 2.2
+
+      // A. Hard collision / clearance buffer: prevents overlapping planetary discs
+      const minDist = a.radius + b.radius + 18
+      if (dist < minDist) {
+        const overlap = (minDist - dist) * 0.45
+        const ox = (dx / dist) * overlap
+        const oy = (dy / dist) * overlap
+        a.vx -= ox
+        a.vy -= oy
+        b.vx += ox
+        b.vy += oy
+      } else if (dist < 420) {
+        // B. Electrostatic field repulsion
+        const force = (650 / (distSq + 180)) * 2.4
         const fx = (dx / dist) * force
         const fy = (dy / dist) * force
         a.vx -= fx
@@ -759,8 +771,8 @@ function updateSimulation() {
       const dx = tgt.x - src.x
       const dy = tgt.y - src.y
       const dist = Math.sqrt(dx * dx + dy * dy) || 1
-      const desiredDist = 110
-      const force = (dist - desiredDist) * 0.022
+      const desiredDist = 130
+      const force = (dist - desiredDist) * 0.018
       const fx = (dx / dist) * force
       const fy = (dy / dist) * force
       src.vx += fx
@@ -770,23 +782,23 @@ function updateSimulation() {
     }
   }
 
-  // 3. Dedicated Galaxy Gravity & Damping
+  // 3. Dedicated Galaxy Gravity & Damping (softened pull prevents planetary collapse)
   for (const n of simNodes) {
     if (n === draggedNode) continue
     const cluster = getNodeCluster(n)
 
-    // Pull towards cluster center
+    // Pull towards cluster center - organic planetary orbit rather than singularity collapse
     const cdx = cluster.targetX - n.x
     const cdy = cluster.targetY - n.y
-    n.vx += cdx * 0.007
-    n.vy += cdy * 0.007
+    n.vx += cdx * 0.0022
+    n.vy += cdy * 0.0022
 
     // Weak anchor to canvas origin
-    n.vx -= n.x * 0.0006
-    n.vy -= n.y * 0.0006
+    n.vx -= n.x * 0.00025
+    n.vy -= n.y * 0.00025
 
-    n.vx *= 0.82
-    n.vy *= 0.82
+    n.vx *= 0.85
+    n.vy *= 0.85
     n.x += n.vx
     n.y += n.vy
   }
@@ -1163,11 +1175,12 @@ function render() {
     ctx.stroke()
 
     // E. Intelligent Level-of-Detail (LOD) Label Filtering
-    // Far (k < 0.65): hide all node labels so energy flows & galaxy badges remain clean
-    // Mid (0.65 <= k <= 1.05): show only hovered, spotlit, or compiled_truth
-    // Near (k > 1.05): show all labels
-    const isPriorityNode = n.compiled_truth || isActive || isSpotlit
-    const shouldShowLabel = isActive || (transform.k > 1.05) || (transform.k >= 0.65 && isPriorityNode)
+    // Far (k < 1.15): hide regular labels so galaxy orbits & badges remain uncluttered
+    // Mid (1.15 <= k < 2.0): show only hovered, focused, spotlight, compiled_truth, or major hubs (degree >= 3)
+    // Deep zoom (k >= 2.0): show regular labels with anti-collision clarity
+    const isMajorHub = (n.in_degree + n.out_degree) >= 3
+    const isPriorityNode = n.compiled_truth || isActive || isSpotlit || isMajorHub
+    const shouldShowLabel = isActive || (transform.k >= 2.0) || (transform.k >= 1.15 && isPriorityNode)
 
     if (shouldShowLabel && !isDimmed) {
       ctx.font = isActive ? '700 11.5px Inter, system-ui, sans-serif' : '500 10.5px Inter, system-ui, sans-serif'
