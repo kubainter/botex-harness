@@ -20,6 +20,7 @@ expensive underlying model internally; the cap cannot see inside it.
 """
 
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -76,10 +77,15 @@ def _read_cache() -> Dict[str, Any]:
 
 def _write_cache(catalogs: Dict[str, Any]) -> None:
     try:
-        CACHE_FILE.write_text(
+        # Atomic replace: the cache file is shared between the live server
+        # (request-time refresh) and the idle maintenance job — a torn or
+        # interleaved write would wipe the other writers' provider entries.
+        tmp_path = CACHE_FILE.with_name(f"{CACHE_FILE.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(
             json.dumps({"fetched_at": time.time(), "catalogs": catalogs}),
             encoding="utf-8",
         )
+        os.replace(str(tmp_path), str(CACHE_FILE))
     except Exception:
         pass
 

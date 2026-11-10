@@ -56,7 +56,7 @@ def test_policy_rejection_401_classification() -> None:
         _FakeProviderError(401, "No auth credentials"),
         phase="request",
     )
-    assert payload["error_class"] == "policy_rejection"
+    assert payload["error_class"] == "auth_failure"
     assert "401" in payload["error"]
     assert "API key" in payload["error"]
 

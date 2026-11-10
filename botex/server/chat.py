@@ -128,6 +128,7 @@ def _provider_error_payload(
     model: str,
     exc: Exception,
     phase: str = "request",
+    message_prefix: str = "API Error: ",
 ) -> Dict[str, Any]:
     """Log a sanitized provider failure server-side and build the client error event.
 
@@ -153,11 +154,11 @@ def _provider_error_payload(
             f"not rate-limit). Not retrying. Detail: {sanitized}"
         )
     elif status == 401:
-        error_class = "policy_rejection"
+        error_class = "auth_failure"
         message = f"Provider authentication failed (401 - check the API key). Detail: {sanitized}"
     else:
         error_class = "provider_error"
-        message = f"API Error: {sanitized}"
+        message = f"{message_prefix}{sanitized}"
     return {
         "type": "error",
         "session_id": session.session_id,
@@ -1268,12 +1269,14 @@ async def stream_chat_turn(
             )
         except Exception as exc:
             _rollback_user_message()
-            sanitized = sanitize_provider_error(exc)
-            yield {
-                "type": "error",
-                "session_id": session.session_id,
-                "error": f"Client Init Error: {sanitized}",
-            }
+            yield _provider_error_payload(
+                session,
+                active_provider_name,
+                effective_model,
+                exc,
+                phase="client_init",
+                message_prefix="Client Init Error: ",
+            )
             return
 
     provider_adapter = ProviderRegistry.get(active_provider_name, active_provider_cfg)

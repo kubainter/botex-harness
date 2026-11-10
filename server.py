@@ -585,6 +585,22 @@ async def start_task(
                 f"Specify one of: {avail_provs}."
             ),
         }
+    if provider and provider.strip():
+        # Mirror create_task: an unknown provider must never fall through to a
+        # generic client silently bound to the paid OpenRouter endpoint.
+        from botex.server.config import resolve_provider
+
+        _resolved_prov, _prov_cfg = resolve_provider(provider.strip())
+        if not _prov_cfg:
+            avail_provs = ", ".join((load_config().get("providers") or {}).keys())
+            return {
+                "ok": False,
+                "status": "CONFIG_ERROR",
+                "failure_kind": "security_or_policy_block",
+                "message": (
+                    f"Unknown provider '{provider.strip()}'. Available providers: {avail_provs}."
+                ),
+            }
     max_queued = int(load_config().get("engine", {}).get("max_queued_tasks", 32))
     active_count = sum(entry.get("status") in {"QUEUED", "RUNNING"} for entry in _TASKS.values())
     if active_count >= max_queued:
@@ -856,6 +872,32 @@ async def run_subagent(
             content=[TextContent(type="text", text=_format_result_text(err_res))],
             structured_content=err_res,
         )
+    if provider and provider.strip():
+        # Mirror create_task: reject unknown providers instead of silently
+        # binding them to the generic (paid OpenRouter) client.
+        from botex.server.config import resolve_provider
+
+        _resolved_prov, _prov_cfg = resolve_provider(provider.strip())
+        if not _prov_cfg:
+            avail_provs = ", ".join((load_config().get("providers") or {}).keys())
+            err_res = {
+                "ok": False,
+                "status": "CONFIG_ERROR",
+                "failure_kind": "security_or_policy_block",
+                "message": (
+                    f"Unknown provider '{provider.strip()}'. Available providers: {avail_provs}."
+                ),
+                "files_touched": [],
+                "exec_ran": False,
+                "steps": 0,
+                "attempts": [],
+                "duration_s": 0.0,
+                "cost_usd": 0.0,
+            }
+            return CallToolResult(
+                content=[TextContent(type="text", text=_format_result_text(err_res))],
+                structured_content=err_res,
+            )
     res = await run_botex_task(
         task=task,
         files=files,

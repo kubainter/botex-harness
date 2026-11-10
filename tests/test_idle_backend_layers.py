@@ -87,7 +87,6 @@ def test_get_models_marks_stale_headers(tmp_path: Any, monkeypatch: Any) -> None
     )
     cache_file = tmp_path / "meta_cache.json"
     cache_file.write_text("{}", encoding="utf-8")
-    old = asyncio.get_event_loop_policy()  # noqa: F841 — policy unused, kept minimal
     stale_ts = 1_000_000.0  # far in the past → age far beyond TTL
     os.utime(cache_file, (stale_ts, stale_ts))
     monkeypatch.setattr(sc, "CACHE_FILE_DEFAULT", cache_file)

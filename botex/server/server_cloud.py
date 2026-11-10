@@ -860,6 +860,9 @@ class _MCPSseErrorGuard:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
         try:
             await self.app(scope, receive, send)
         except ValueError as exc:
