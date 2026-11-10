@@ -844,3 +844,46 @@ def test_lifespan_teardown_invokes_cleanup():
             mock_close_dbs.assert_called_once()
 
     asyncio.run(_test())
+
+
+def test_access_token_hash_authentication(monkeypatch):
+    """Verify server authenticates raw bearer token when BOTEX_ACCESS_TOKEN_HASH is configured."""
+    import hashlib
+
+    raw_token = "btx_live_test_secret_12345"
+    token_hash = "sha256:" + hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN_HASH", token_hash)
+    monkeypatch.setenv("BOTEX_STRICT_AUTH", "1")
+
+    client = TestClient(app)
+
+    # 1. Valid token -> 200 OK
+    res_ok = client.get("/api/health", headers={"Authorization": f"Bearer {raw_token}"})
+    assert res_ok.status_code == 200
+
+    # 2. Invalid token on protected endpoint -> 401
+    res_err = client.get("/api/wallet", headers={"Authorization": "Bearer wrong-token"})
+    assert res_err.status_code == 401
+
+    # 3. Missing token on protected endpoint -> 401
+    res_missing = client.get("/api/wallet")
+    assert res_missing.status_code == 401
+
+
+def test_security_masks_btx_tokens_and_blocks_env():
+    """Verify security layer redacts btx_ tokens and blocks .env variations."""
+    from botex.tools.security import mask_secrets, resolve_safe_path, SecurityError
+    import pytest
+    import tempfile
+
+    # Token redaction
+    assert "[REDACTED]" in mask_secrets("token: btx_live_abc1234567890def")
+    assert "[REDACTED]" in mask_secrets("token: btx_sec_xyz9876543210qwe")
+
+    # Path traversal and blocked file checks
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for blocked_name in [".env", ".env.production", ".secrets.yaml", "secrets.json"]:
+            with pytest.raises(SecurityError):
+                resolve_safe_path(tmpdir, blocked_name)

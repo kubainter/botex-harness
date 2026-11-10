@@ -17,6 +17,7 @@ Invariant: Single-worker process (workers=1) for in-memory state consistency.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -602,13 +603,44 @@ async def _workspace_out_of_bounds_handler(
     )
 
 
+def _is_auth_configured() -> bool:
+    """Return True if either plain token or token hash is configured in environment."""
+    return bool(
+        os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip()
+        or os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
+    )
+
+
+def _verify_access_token(candidate_token: Optional[str]) -> bool:
+    """
+    Verify candidate bearer token against configured token or SHA-256 hash.
+    Constant-time comparison via hmac.compare_digest.
+    """
+    if not candidate_token:
+        return False
+    candidate_bytes = candidate_token.encode("utf-8")
+
+    expected_hash = os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip()
+    if expected_hash:
+        raw_hash = hashlib.sha256(candidate_bytes).hexdigest()
+        if expected_hash.lower().startswith("sha256:"):
+            return hmac.compare_digest(f"sha256:{raw_hash}".lower(), expected_hash.lower())
+        return hmac.compare_digest(raw_hash.lower(), expected_hash.lower())
+
+    expected_token = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
+    if expected_token:
+        return hmac.compare_digest(candidate_bytes, expected_token.encode("utf-8"))
+
+    return False
+
+
 class CloudAuthMiddleware:
     """ASGI Authentication middleware supporting Zero Friction Local and Strict Cloud modes.
 
     - CORS preflight (OPTIONS) requests pass through unhindered.
     - /api/health probe passes through unhindered without authentication.
-    - If BOTEX_ACCESS_TOKEN is not configured or empty: allow local unauthenticated requests with a log note.
-    - If BOTEX_ACCESS_TOKEN is set: strictly verify Bearer token via constant-time comparison.
+    - If BOTEX_ACCESS_TOKEN / BOTEX_ACCESS_TOKEN_HASH is not configured or empty: allow local unauthenticated requests with a log note.
+    - If configured: strictly verify Bearer token via constant-time comparison against token or SHA-256 hash.
     - Normalizes /mcp/messages path to /mcp/messages/ to prevent 307 Temporary Redirects.
     """
 
@@ -652,8 +684,7 @@ class CloudAuthMiddleware:
             await resp(scope, receive, send)
             return
 
-        expected_token = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
-        if not expected_token:
+        if not _is_auth_configured():
             # Check strict auth env or non-loopback remote origin
             client = scope.get("client")
             client_host = client[0] if client and len(client) > 0 else ""
@@ -673,7 +704,7 @@ class CloudAuthMiddleware:
                 resp = JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
                     content={
-                        "detail": "Forbidden: Remote VPS access requires BOTEX_ACCESS_TOKEN to be configured."
+                        "detail": "Forbidden: Remote VPS access requires BOTEX_ACCESS_TOKEN or BOTEX_ACCESS_TOKEN_HASH to be configured."
                     },
                 )
                 await resp(scope, receive, send)
@@ -708,11 +739,8 @@ class CloudAuthMiddleware:
                     await self.app(scope, receive, send)
                     return
 
-        # Constant-time token verification (compute compare_digest unconditionally)
-        candidate_bytes = (token or "").encode("utf-8")
-        expected_bytes = expected_token.encode("utf-8")
-        digest_matches = hmac.compare_digest(candidate_bytes, expected_bytes)
-        is_valid = bool(token) and digest_matches
+        # Constant-time token verification (supports plain token and SHA-256 hash)
+        is_valid = _verify_access_token(token)
 
         if not is_valid:
             resp = JSONResponse(
@@ -1997,8 +2025,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
     """Bidirectional WebSocket chat endpoint with 15s ping heartbeat and auth support."""
     await websocket.accept()
 
-    expected_token = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
-    if not expected_token:
+    if not _is_auth_configured():
         client_host = websocket.client.host if websocket.client else ""
         forwarded_for = websocket.headers.get("x-forwarded-for", "").strip()
         strict_auth = os.environ.get("BOTEX_STRICT_AUTH", "").lower() in ("1", "true", "yes")
@@ -2010,10 +2037,10 @@ async def chat_websocket(websocket: WebSocket) -> None:
         if strict_auth or not is_loopback:
             await websocket.close(
                 code=status.WS_1008_POLICY_VIOLATION,
-                reason="Forbidden: Remote access requires BOTEX_ACCESS_TOKEN",
+                reason="Forbidden: Remote access requires BOTEX_ACCESS_TOKEN or BOTEX_ACCESS_TOKEN_HASH",
             )
             return
-    elif expected_token:
+    else:
         # Check token in query parameters or Authorization header
         token = websocket.query_params.get("token", "").strip()
         if not token:
@@ -2021,20 +2048,15 @@ async def chat_websocket(websocket: WebSocket) -> None:
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:].strip()
 
-        authenticated = False
-        if token and hmac.compare_digest(token.encode("utf-8"), expected_token.encode("utf-8")):
-            authenticated = True
-        else:
+        authenticated = _verify_access_token(token)
+        if not authenticated:
             # Allow auth via first message: {"type": "auth", "token": "..."}
             try:
                 auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
                 if (
                     isinstance(auth_msg, dict)
                     and auth_msg.get("type") == "auth"
-                    and hmac.compare_digest(
-                        str(auth_msg.get("token", "")).encode("utf-8"),
-                        expected_token.encode("utf-8"),
-                    )
+                    and _verify_access_token(str(auth_msg.get("token", "")))
                 ):
                     authenticated = True
                     await websocket.send_json({"type": "auth_ok"})

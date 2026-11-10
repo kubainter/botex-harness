@@ -141,17 +141,13 @@ def test_rate_gate_disabled_without_rpm(monkeypatch):
 
 
 def test_rate_gate_passes_when_tokens_available(monkeypatch):
-    monkeypatch.setattr(
-        server, "load_config", lambda: {"rate_limits": {"recall_rpm": 6000}}
-    )
+    monkeypatch.setattr(server, "load_config", lambda: {"rate_limits": {"recall_rpm": 6000}})
     _reset_gate()  # first call initializes with full burst capacity
     assert asyncio.run(server._recall_rate_gate()) is None
 
 
 def test_rate_gate_returns_limited_envelope(monkeypatch):
-    monkeypatch.setattr(
-        server, "load_config", lambda: {"rate_limits": {"recall_rpm": 0.6}}
-    )
+    monkeypatch.setattr(server, "load_config", lambda: {"rate_limits": {"recall_rpm": 0.6}})
     monkeypatch.setattr(server, "_RECALL_GATE_MAX_WAIT_S", 0.05)
     _reset_gate(initialized=True, tokens=0.0)  # drained bucket, tiny refill rate
     result = asyncio.run(server._recall_rate_gate())
@@ -162,9 +158,7 @@ def test_rate_gate_returns_limited_envelope(monkeypatch):
 
 def test_rate_gate_queues_instead_of_failing(monkeypatch):
     """Second immediate call under a healthy rpm must queue (sleep), not fail."""
-    monkeypatch.setattr(
-        server, "load_config", lambda: {"rate_limits": {"recall_rpm": 6000}}
-    )
+    monkeypatch.setattr(server, "load_config", lambda: {"rate_limits": {"recall_rpm": 6000}})
     _reset_gate()
     assert asyncio.run(server._recall_rate_gate()) is None
 

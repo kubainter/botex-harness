@@ -667,6 +667,8 @@ import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
 import { usePluginsStore } from '../stores/plugins'
+import { useChatStore } from '../stores/chat'
+import { useWalletStore } from '../stores/wallet'
 import { useI18n } from '../i18n'
 import { api } from '../api/client'
 import type { SkillCatalogItem, SkillDetail } from '../api/types'
@@ -691,6 +693,8 @@ import {
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const pluginsStore = usePluginsStore()
+const chatStore = useChatStore()
+const walletStore = useWalletStore()
 const { locale, setLocale, t } = useI18n()
 
 const urlInput = ref(authStore.backendUrl)
@@ -703,6 +707,8 @@ const testResult = ref<{ ok: boolean; title: string; detail: string } | null>(nu
 function saveSettings() {
   authStore.updateBackendUrl(urlInput.value)
   authStore.updateAccessToken(tokenInput.value)
+  chatStore.fetchCatalogModels(true)
+  walletStore.fetchWallet(true)
   saveMessage.value = locale.value === 'pl' ? 'Zapisano w localStorage.' : 'Settings saved to localStorage.'
   setTimeout(() => {
     saveMessage.value = ''

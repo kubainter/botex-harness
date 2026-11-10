@@ -28,7 +28,7 @@
                   {{ t('models.title') }}
                 </h3>
                 <p class="text-xs text-slate-300 mt-0.5">
-                  {{ t('models.subtitle') }} ({{ filteredModels.length }} / {{ availableModels.length }})
+                  {{ t('models.subtitle') }}<template v-if="availableModels.length > 0"> ({{ filteredModels.length }} / {{ availableModels.length }})</template>
                 </p>
               </div>
               <div class="flex items-center space-x-1.5">
@@ -51,91 +51,94 @@
               </div>
             </div>
 
-            <!-- Search Input -->
-            <div class="relative">
-              <SearchIcon class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                ref="searchInputRef"
-                v-model="searchQuery"
-                type="text"
-                :placeholder="t('models.search.placeholder')"
-                class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg pl-10 pr-20 py-2 text-base sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-sans"
-              />
-              <button
-                v-if="searchQuery"
-                type="button"
-                class="absolute right-2.5 top-1/2 -translate-y-1/2 min-h-[32px] px-2.5 py-1 text-xs font-mono text-slate-300 hover:text-white bg-botex-800 rounded flex items-center"
-                @click="searchQuery = ''"
-              >
-                Clear
-              </button>
-              <span
-                v-else
-                class="hidden sm:inline-block absolute right-3 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-xs font-mono text-slate-400 bg-botex-900 border border-botex-700 rounded"
-              >
-                ESC
-              </span>
-            </div>
-
-            <!-- Provider Filter Pills / Tabs -->
-            <div
-              class="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar"
-              role="tablist"
-              @wheel="onWheelScrollX"
-            >
-              <button
-                v-for="pTab in providerTabs"
-                :key="pTab.id"
-                type="button"
-                role="tab"
-                :aria-selected="activeProvider === pTab.id"
-                :class="[
-                  'min-h-[40px] lg:min-h-[36px] px-2.5 py-1 rounded-md text-xs font-mono font-medium whitespace-nowrap transition border flex items-center space-x-1.5 shrink-0',
-                  activeProvider === pTab.id
-                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/50 font-semibold'
-                    : 'bg-botex-950 text-slate-400 border-botex-800 hover:border-botex-700 hover:text-white'
-                ]"
-                @click="activeProvider = pTab.id"
-              >
-                <span>{{ pTab.label }}</span>
-                <span
-                  class="text-xs font-mono px-1 py-px rounded"
-                  :class="activeProvider === pTab.id ? 'bg-emerald-500/20 text-emerald-200' : 'bg-botex-900 text-slate-500'"
+            <!-- Search & Filter Controls (only when models are available) -->
+            <template v-if="availableModels.length > 0">
+              <!-- Search Input -->
+              <div class="relative">
+                <SearchIcon class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  ref="searchInputRef"
+                  v-model="searchQuery"
+                  type="text"
+                  :placeholder="t('models.search.placeholder')"
+                  class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg pl-10 pr-20 py-2 text-base sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-sans"
+                />
+                <button
+                  v-if="searchQuery"
+                  type="button"
+                  class="absolute right-2.5 top-1/2 -translate-y-1/2 min-h-[32px] px-2.5 py-1 text-xs font-mono text-slate-300 hover:text-white bg-botex-800 rounded flex items-center"
+                  @click="searchQuery = ''"
                 >
-                  {{ pTab.count }}
-                </span>
-              </button>
-            </div>
-
-            <!-- Category Filter Pills / Tabs -->
-            <div
-              class="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar"
-              role="tablist"
-              @wheel="onWheelScrollX"
-            >
-              <button
-                v-for="tab in categoryTabs"
-                :key="tab.id"
-                type="button"
-                role="tab"
-                :aria-selected="activeCategory === tab.id"
-                :class="[
-                  'min-h-[40px] lg:min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition border flex items-center space-x-1.5 shrink-0',
-                  activeCategory === tab.id
-                    ? 'bg-sky-500/15 text-sky-300 border-sky-500/50 font-semibold'
-                    : 'bg-botex-950 text-slate-300 border-botex-800 hover:border-botex-700 hover:text-white'
-                ]"
-                @click="setCategory(tab.id)"
-              >
-                <span>{{ tab.label }}</span>
+                  Clear
+                </button>
                 <span
-                  class="text-xs font-mono px-1.5 py-px rounded"
-                  :class="activeCategory === tab.id ? 'bg-sky-500/20 text-sky-200' : 'bg-botex-900 text-slate-400'"
+                  v-else
+                  class="hidden sm:inline-block absolute right-3 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-xs font-mono text-slate-400 bg-botex-900 border border-botex-700 rounded"
                 >
-                  {{ tab.count }}
+                  ESC
                 </span>
-              </button>
-            </div>
+              </div>
+
+              <!-- Provider Filter Pills / Tabs -->
+              <div
+                class="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar"
+                role="tablist"
+                @wheel="onWheelScrollX"
+              >
+                <button
+                  v-for="pTab in providerTabs"
+                  :key="pTab.id"
+                  type="button"
+                  role="tab"
+                  :aria-selected="activeProvider === pTab.id"
+                  :class="[
+                    'min-h-[40px] lg:min-h-[36px] px-2.5 py-1 rounded-md text-xs font-mono font-medium whitespace-nowrap transition border flex items-center space-x-1.5 shrink-0',
+                    activeProvider === pTab.id
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/50 font-semibold'
+                      : 'bg-botex-950 text-slate-400 border-botex-800 hover:border-botex-700 hover:text-white'
+                  ]"
+                  @click="activeProvider = pTab.id"
+                >
+                  <span>{{ pTab.label }}</span>
+                  <span
+                    class="text-xs font-mono px-1 py-px rounded"
+                    :class="activeProvider === pTab.id ? 'bg-emerald-500/20 text-emerald-200' : 'bg-botex-900 text-slate-500'"
+                  >
+                    {{ pTab.count }}
+                  </span>
+                </button>
+              </div>
+
+              <!-- Category Filter Pills / Tabs -->
+              <div
+                class="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar"
+                role="tablist"
+                @wheel="onWheelScrollX"
+              >
+                <button
+                  v-for="tab in categoryTabs"
+                  :key="tab.id"
+                  type="button"
+                  role="tab"
+                  :aria-selected="activeCategory === tab.id"
+                  :class="[
+                    'min-h-[40px] lg:min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition border flex items-center space-x-1.5 shrink-0',
+                    activeCategory === tab.id
+                      ? 'bg-sky-500/15 text-sky-300 border-sky-500/50 font-semibold'
+                      : 'bg-botex-950 text-slate-300 border-botex-800 hover:border-botex-700 hover:text-white'
+                  ]"
+                  @click="setCategory(tab.id)"
+                >
+                  <span>{{ tab.label }}</span>
+                  <span
+                    class="text-xs font-mono px-1.5 py-px rounded"
+                    :class="activeCategory === tab.id ? 'bg-sky-500/20 text-sky-200' : 'bg-botex-900 text-slate-400'"
+                  >
+                    {{ tab.count }}
+                  </span>
+                </button>
+              </div>
+            </template>
           </div>
 
           <!-- Skeleton Loader when refreshing empty list -->
@@ -150,6 +153,24 @@
                 <div class="h-2.5 bg-botex-800 rounded w-3/4"></div>
               </div>
               <div class="h-6 bg-botex-800 rounded w-20"></div>
+            </div>
+          </div>
+
+          <!-- Unauthenticated / Empty State when availableModels is 0 and not loading -->
+          <div
+            v-else-if="availableModels.length === 0"
+            class="flex-1 p-8 sm:p-12 text-center flex flex-col items-center justify-center space-y-4 my-auto bg-botex-950/60"
+          >
+            <div class="w-12 h-12 rounded-full bg-botex-900 border border-botex-700 flex items-center justify-center text-slate-300">
+              <LockIcon class="w-6 h-6 text-slate-400" />
+            </div>
+            <div class="space-y-1.5 max-w-sm">
+              <h4 class="text-sm font-semibold text-slate-100">
+                {{ t('models.auth_required') }}
+              </h4>
+              <p class="text-xs text-slate-300 leading-relaxed">
+                {{ t('models.auth_required_desc') }}
+              </p>
             </div>
           </div>
 
@@ -265,7 +286,8 @@ import {
   Search as SearchIcon,
   X as XIcon,
   RefreshCw as RefreshCwIcon,
-  Check as CheckIcon
+  Check as CheckIcon,
+  Lock as LockIcon
 } from 'lucide-vue-next'
 
 export type ModelCategory = 'all' | 'free' | 'cheap' | 'reasoning' | 'coding'

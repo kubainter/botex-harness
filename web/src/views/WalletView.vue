@@ -334,7 +334,11 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div v-if="filteredModels.length === 0" class="p-8 text-center text-slate-400 text-xs font-mono rounded-xl border border-botex-800 bg-botex-900/40">
+        {{ t('models.empty') }}
+      </div>
+
+      <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div
           v-for="model in filteredModels"
           :key="model.id"
