@@ -867,6 +867,7 @@ async def save_memory(
     memory_id: str = "",
     scope: str = "local",
     confidence: float = 1.0,
+    project: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Saves a persistent context note, architectural decision, task handoff, lesson,
@@ -883,6 +884,7 @@ async def save_memory(
         memory_id: Optional custom identifier (alphanumeric/hyphen/underscore). Auto-generated if omitted.
         scope: Storage scope ('local' for workspace, 'global' for cross-workspace). Default is 'local'.
         confidence: Certainty score in [0.0, 1.0] for belief/heuristic-style entries. Default 1.0.
+        project: Optional project slug (e.g. 'botex', 'tw3se') for logical partitioning.
     """
     return _save_memory(
         workspace_dir=resolve_workspace(workspace_dir),
@@ -893,6 +895,7 @@ async def save_memory(
         memory_id=memory_id or None,
         scope=scope,
         confidence=confidence,
+        project=project,
     )
 
 
@@ -906,6 +909,7 @@ async def search_memory(
     since: str = "",
     until: str = "",
     min_confidence: Optional[float] = None,
+    project: str = "",
 ) -> dict[str, Any]:
     """
     Searches the Memory Vault by keyword query, tag, or entry kind
@@ -923,6 +927,7 @@ async def search_memory(
         since: Optional ISO-8601 date/datetime lower bound on entry timestamps.
         until: Optional ISO-8601 date/datetime upper bound on entry timestamps.
         min_confidence: Optional minimum certainty threshold in [0.0, 1.0].
+        project: Optional project slug filter (or '_unassigned' for entries without a project).
     """
     res = _search_memory(
         workspace_dir=resolve_workspace(workspace_dir),
@@ -933,6 +938,7 @@ async def search_memory(
         since=since or None,
         until=until or None,
         min_confidence=min_confidence,
+        project=project or None,
     )
     if isinstance(res, dict) and isinstance(res.get("memories"), list):
         res = dict(res)
@@ -947,6 +953,7 @@ async def reflect_memory(
     topic: Optional[str] = None,
     min_confidence: float = 0.5,
     scope: str = "all",
+    project: str = "",
 ) -> dict[str, Any]:
     """
     Synthesizes gathered facts, decisions, beliefs, and heuristics from the
@@ -962,6 +969,7 @@ async def reflect_memory(
         topic: Optional tag restricting the reflection to a thematic bucket.
         min_confidence: Minimum certainty threshold in [0.0, 1.0]. Default 0.5.
         scope: Reflection scope ('local', 'global', or 'all'). Default is 'all'.
+        project: Optional project slug filter.
     """
     return _reflect_memory(
         workspace_dir=resolve_workspace(workspace_dir),
@@ -969,6 +977,7 @@ async def reflect_memory(
         topic=topic,
         min_confidence=min_confidence,
         scope=scope,
+        project=project or None,
     )
 
 
@@ -978,6 +987,7 @@ async def recall_memory(
     workspace_dir: str = "",
     topic: Optional[str] = None,
     scope: str = "all",
+    project: str = "",
 ) -> dict[str, Any]:
     """
     One-shot recall: ask the Memory Vault a natural-language question and get a
@@ -994,6 +1004,7 @@ async def recall_memory(
                from the config, else the server's current directory.
         topic: Optional tag restricting the search to a thematic bucket.
         scope: 'local', 'global', or 'all'. Default is 'all'.
+        project: Optional project slug filter restricting initial search hits.
 
     Returns:
         {ok, answer, sources, confidence (HIGH|MEDIUM|LOW|NOT_FOUND), tier_used,
@@ -1004,6 +1015,7 @@ async def recall_memory(
         query=query,
         topic=topic,
         scope=scope,
+        project=project or None,
     )
 
 
@@ -1062,13 +1074,18 @@ async def _recall_memory_impl(
     query: str,
     topic: Optional[str] = None,
     scope: str = "all",
+    project: Optional[str] = None,
 ) -> dict[str, Any]:
     limited = await _recall_rate_gate()
     if limited is not None:
         return limited
     try:
         ctx = _gather_recall_context(
-            workspace_dir=workspace_dir, query=query, topic=topic, scope=scope
+            workspace_dir=workspace_dir,
+            query=query,
+            topic=topic,
+            scope=scope,
+            project=project,
         )
     except WorkspaceOutOfBounds:
         # Rejected path is request-tainted: static log text only (CodeQL).

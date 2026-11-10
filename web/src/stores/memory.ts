@@ -1,12 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../api/client'
-import type { MemoryEntry, MemorySaveRequest, MemoryScope, GraphNode, GraphEdge, GraphHealth, BacklinkItem, CuratorStatus, CuratorRunRequest } from '../api/types'
+import type { MemoryEntry, MemoryProjectItem, MemorySaveRequest, MemoryScope, GraphNode, GraphEdge, GraphHealth, BacklinkItem, CuratorStatus, CuratorRunRequest } from '../api/types'
 
 export const useMemoryStore = defineStore('memory', () => {
   const entries = ref<MemoryEntry[]>([])
+  const projects = ref<MemoryProjectItem[]>([])
   const activeEntry = ref<MemoryEntry | null>(null)
   const activeScope = ref<MemoryScope>('all')
+  const filterProject = ref<string>('')
   const searchQuery = ref<string>('')
   const filterKind = ref<string>('')
   const filterTag = ref<string>('')
@@ -27,6 +29,17 @@ export const useMemoryStore = defineStore('memory', () => {
   const activeBacklinks = ref<BacklinkItem[]>([])
 
 
+  async function fetchProjects(scope?: string) {
+    try {
+      const res = await api.getMemoryProjects({ scope: scope || activeScope.value })
+      if (res.ok) {
+        projects.value = res.projects || []
+      }
+    } catch (err) {
+      console.warn('Failed to fetch memory projects:', err)
+    }
+  }
+
   async function fetchMemory() {
     isLoading.value = true
     errorMessage.value = null
@@ -35,13 +48,15 @@ export const useMemoryStore = defineStore('memory', () => {
         query: searchQuery.value,
         tag: filterTag.value,
         kind: filterKind.value,
-        scope: activeScope.value
+        scope: activeScope.value,
+        project: filterProject.value || undefined
       })
       const rawList = res.memories || res.results || []
       entries.value = rawList.map((m: any) => ({
         ...m,
         memory_id: m.memory_id || m.id || '',
         content: m.content || m.preview || '',
+        project: m.project || '',
       }))
     } catch (err: any) {
       errorMessage.value = err?.message || 'Failed to search Memory Vault'
@@ -74,6 +89,7 @@ export const useMemoryStore = defineStore('memory', () => {
           status: res.metadata?.status || 'active',
           compiled_truth: Boolean(res.metadata?.compiled_truth),
           timestamp: res.metadata?.timestamp || '',
+          project: res.metadata?.project || '',
           scope: res.scope || scope
         }
         entry.content = cleanContent
@@ -95,7 +111,7 @@ export const useMemoryStore = defineStore('memory', () => {
     try {
       const res = await api.saveMemory(req)
       if (res.ok) {
-        await fetchMemory()
+        await Promise.all([fetchMemory(), fetchProjects()])
         return true
       }
       errorMessage.value = res.error || 'Failed to save entry'
@@ -118,6 +134,7 @@ export const useMemoryStore = defineStore('memory', () => {
         if (activeEntry.value?.memory_id === memoryId) {
           activeEntry.value = null
         }
+        await fetchProjects()
         return true
       }
       errorMessage.value = res.error || 'Failed to delete entry'
@@ -207,14 +224,17 @@ export const useMemoryStore = defineStore('memory', () => {
     fetchGraph,
     fetchBacklinks,
     entries,
+    projects,
     activeEntry,
     activeScope,
+    filterProject,
     searchQuery,
     filterKind,
     filterTag,
     isLoading,
     isSaving,
     errorMessage,
+    fetchProjects,
     fetchMemory,
     loadEntry,
     saveEntry,

@@ -46,10 +46,48 @@
 
     <!-- Expandable Filter Panel -->
     <div v-if="isOpen" class="border-t border-botex-800 p-4 space-y-3">
+      <!-- Project Selector Chips -->
+      <div v-if="projects && projects.length > 0">
+        <label class="block text-xs font-semibold text-slate-200 uppercase tracking-wider mb-2 font-mono">
+          {{ locale === 'pl' ? 'Projekt (Project)' : 'Project' }}
+        </label>
+        <div class="flex flex-wrap gap-1.5" role="group">
+          <button
+            type="button"
+            :aria-pressed="!project"
+            :class="[
+              'min-h-[36px] px-2.5 py-1 rounded-md text-xs font-mono font-medium transition border',
+              !project
+                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-500/50'
+                : 'bg-botex-950 text-slate-300 border-botex-800 hover:border-slate-700 hover:text-white'
+            ]"
+            @click="$emit('update:project', '')"
+          >
+            {{ locale === 'pl' ? 'Wszystkie projekty' : 'All Projects' }}
+          </button>
+          <button
+            v-for="item in projects"
+            :key="item.project || '_unassigned'"
+            type="button"
+            :aria-pressed="project === (item.project || '_unassigned')"
+            :class="[
+              'min-h-[36px] px-2.5 py-1 rounded-md text-xs font-mono font-medium transition border flex items-center space-x-1.5',
+              project === (item.project || '_unassigned')
+                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-500/50'
+                : 'bg-botex-950 text-slate-300 border-botex-800 hover:border-slate-700 hover:text-white'
+            ]"
+            @click="$emit('update:project', item.project || '_unassigned')"
+          >
+            <span>{{ item.project || (locale === 'pl' ? 'Nieprzypisane' : 'Unassigned') }}</span>
+            <span class="text-[10px] px-1 rounded bg-botex-900 text-slate-400">{{ item.count }}</span>
+          </button>
+        </div>
+      </div>
+
       <!-- Scope Selector Tabs -->
       <div>
         <label class="block text-xs font-semibold text-slate-200 uppercase tracking-wider mb-2 font-mono">
-          {{ locale === 'pl' ? 'Zakres pamięci' : 'Vault Scope' }}
+          {{ locale === 'pl' ? 'Lokalizacja pamięci (Vault Scope)' : 'Vault Scope' }}
         </label>
         <div class="grid grid-cols-3 gap-1 bg-botex-950 p-1 rounded-lg border border-botex-800" role="group">
           <button
@@ -72,7 +110,7 @@
             ]"
             @click="$emit('update:scope', 'local')"
           >
-            {{ locale === 'pl' ? 'Projekt (.botex)' : 'Workspace (.botex)' }}
+            {{ locale === 'pl' ? 'Lokalne (.botex)' : 'Local (.botex)' }}
           </button>
           <button
             type="button"
@@ -154,12 +192,14 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { MemoryScope } from '../../api/types'
+import type { MemoryProjectItem, MemoryScope } from '../../api/types'
 import { useI18n } from '../../i18n'
 import { Filter as FilterIcon, ChevronDown as ChevronDownIcon } from 'lucide-vue-next'
 
 const props = defineProps<{
   scope: MemoryScope
+  project?: string
+  projects?: MemoryProjectItem[]
   query: string
   kind: string
   tag?: string
@@ -168,6 +208,7 @@ const props = defineProps<{
 
 defineEmits<{
   (e: 'update:scope', val: MemoryScope): void
+  (e: 'update:project', val: string): void
   (e: 'update:query', val: string): void
   (e: 'update:kind', val: string): void
   (e: 'update:tag', val: string): void
@@ -191,6 +232,7 @@ function toggleOpen() {
 
 const activeCount = computed(() => {
   let n = 0
+  if (props.project) n++
   if (props.scope && props.scope !== 'all') n++
   if (props.query?.trim()) n++
   if (props.kind) n++
@@ -201,6 +243,9 @@ const activeCount = computed(() => {
 
 const activeChips = computed(() => {
   const chips: string[] = []
+  if (props.project) {
+    chips.push('📁 ' + (props.project === '_unassigned' ? 'unassigned' : props.project))
+  }
   if (props.scope && props.scope !== 'all') {
     chips.push(props.scope === 'local' ? 'local' : 'global')
   }
