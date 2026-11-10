@@ -87,7 +87,8 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "${VPS_HOST}" >> ~/.ssh/known_hosts
 
-          # 2. Upload compiled PWA frontend to /tmp/web-dist
+          # 2. Clean temporary upload path and upload compiled PWA frontend
+          ssh "${VPS_USER}@${VPS_HOST}" "rm -rf /tmp/web-dist"
           scp -r dist "${VPS_USER}@${VPS_HOST}:/tmp/web-dist"
 
           # 3. Execute zero-downtime atomic update and healthcheck on VPS
@@ -115,7 +116,12 @@ jobs:
           if [ -d "/tmp/web-dist" ]; then
               echo "Updating PWA static assets in $DEPLOY_PATH/web/dist..."
               sudo rm -rf "$DEPLOY_PATH/web/dist"
-              sudo mv /tmp/web-dist "$DEPLOY_PATH/web/dist"
+              if [ -d "/tmp/web-dist/dist" ]; then
+                  sudo mv /tmp/web-dist/dist "$DEPLOY_PATH/web/dist"
+                  rm -rf /tmp/web-dist
+              else
+                  sudo mv /tmp/web-dist "$DEPLOY_PATH/web/dist"
+              fi
               sudo chown -R botex:botex "$DEPLOY_PATH/web/dist"
           fi
 

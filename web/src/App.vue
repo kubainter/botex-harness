@@ -108,7 +108,15 @@
           <span :class="wsColorClass">{{ wsStatus }}</span>
         </div>
         <div class="flex items-center justify-between text-xs text-slate-300 font-mono">
-          <span>v1.0.0</span>
+          <button
+            type="button"
+            class="hover:text-sky-300 transition cursor-pointer flex items-center space-x-1 select-none"
+            :title="lang === 'pl' ? 'Wersja PWA (kliknij aby sprawdzić aktualizacje)' : 'PWA Version (click to check for updates)'"
+            @click="checkForAppUpdate"
+          >
+            <span class="font-bold">{{ appVersion }}</span>
+            <span v-if="updateStatusMessage" class="text-[10px] text-amber-300 font-sans">({{ updateStatusMessage }})</span>
+          </button>
           <span v-if="authStore.accessToken" class="text-sky-300">{{ t('app.auth.bearer') }}</span>
           <span v-else class="text-slate-300">{{ t('app.auth.local') }}</span>
         </div>
@@ -344,6 +352,33 @@ const navItems = [
 const backendHost = computed(() => {
   return authStore.backendUrl.replace(/^https?:\/\//, '')
 })
+
+const appVersion = computed(() => {
+  return authStore.healthData?.version ? `v${authStore.healthData.version}` : 'v2.1.0'
+})
+
+const isCheckingUpdate = ref(false)
+const updateStatusMessage = ref('')
+
+async function checkForAppUpdate() {
+  if (isCheckingUpdate.value) return
+  isCheckingUpdate.value = true
+  updateStatusMessage.value = lang.value === 'pl' ? 'Sprawdzam...' : 'Checking...'
+  try {
+    await authStore.checkHealth()
+    if (typeof window !== 'undefined' && window.__checkPwaUpdate) {
+      await window.__checkPwaUpdate()
+    }
+    updateStatusMessage.value = lang.value === 'pl' ? 'Aktualna' : 'Up to date'
+  } catch {
+    updateStatusMessage.value = lang.value === 'pl' ? 'Błąd' : 'Error'
+  } finally {
+    setTimeout(() => {
+      isCheckingUpdate.value = false
+      updateStatusMessage.value = ''
+    }, 2500)
+  }
+}
 
 const wsColorClass = computed(() => {
   switch (wsStatus.value) {
