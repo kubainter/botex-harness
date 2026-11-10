@@ -84,6 +84,7 @@ from botex.memory import (
     delete_memory,
     find_graph_health,
     get_backlinks,
+    list_memory_projects,
     read_memory,
     save_memory,
     search_memory,
@@ -320,6 +321,7 @@ class MemorySaveRequest(BaseModel):
     origin: str = "cloud_api"
     scope: str = "local"
     workspace_dir: str = "."
+    project: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -382,6 +384,13 @@ from contextlib import asynccontextmanager, suppress
 
 
 async def _warmup_caches() -> None:
+    try:
+        from botex.ops.migrate_projects import ensure_projects_migrated
+
+        ws = resolve_workspace("")
+        await asyncio.to_thread(ensure_projects_migrated, ws)
+    except Exception:
+        pass
     try:
         from botex.benchmarks import fetch_openrouter_benchmarks
 
@@ -1568,12 +1577,33 @@ async def decide_approval(action_id: str, body: ApprovalDecisionRequest) -> Dict
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/memory/projects")
+async def get_memory_projects_endpoint(
+    scope: str = Query(default="all"),
+    workspace_dir: str = Query(default="."),
+) -> Dict[str, Any]:
+    """List distinct projects and note counts across the requested memory scopes."""
+    ws = resolve_workspace(workspace_dir)
+    res = await asyncio.to_thread(
+        list_memory_projects,
+        workspace_dir=ws,
+        scope=scope,
+    )
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list memory projects.",
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
 @app.get("/api/memory")
 async def get_memory(
     query: str = Query(default=""),
     tag: str = Query(default=""),
     kind: str = Query(default=""),
     scope: str = Query(default="local"),
+    project: str = Query(default=""),
     workspace_dir: str = Query(default="."),
     memory_id: Optional[str] = Query(default=None),
 ) -> Dict[str, Any]:
@@ -1604,6 +1634,7 @@ async def get_memory(
         tag=tag,
         kind=kind,
         scope=scope,
+        project=project or None,
     )
     if not res.get("ok"):
         logger.warning("Memory search failed.")
@@ -1634,6 +1665,7 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
         memory_id=clean_mid,
         origin=body.origin,
         scope=body.scope,
+        project=body.project,
     )
     if not res.get("ok"):
         logger.warning("Memory save failed.")

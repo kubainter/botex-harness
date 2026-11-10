@@ -341,6 +341,19 @@ def _sanitize_id(memory_id: str) -> str:
     return safe
 
 
+def _normalize_project_slug(project: Optional[str]) -> str:
+    """Normalize a project identifier into a canonical lowercase slug ([a-z0-9_-], max 64 chars)."""
+    if project is None:
+        return ""
+    raw = str(project).strip().lower()
+    if not raw:
+        return ""
+    if raw == "_unassigned":
+        return "_unassigned"
+    slug = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-_")
+    return sanitize_for_storage(slug[:64])
+
+
 def _find_existing_memory_file(mem_dir: Path, mid: str) -> Optional[Path]:
     """Resolve an existing memory Markdown file via directory enumeration to decouple taint."""
     if not mem_dir.is_dir():
@@ -574,6 +587,7 @@ def _get_index_db(mem_dir: Path) -> sqlite3.Connection:
                         status TEXT,
                         compiled_truth INTEGER DEFAULT 0,
                         confidence REAL DEFAULT 1.0,
+                        project TEXT DEFAULT '',
                         mtime REAL
                     );
                     """
@@ -605,7 +619,7 @@ def _get_index_db(mem_dir: Path) -> sqlite3.Connection:
                     CREATE INDEX IF NOT EXISTS idx_edges_target ON memories_edges(target_id);
                     """
                 )
-                # In-place schema migration: older vaults lack the confidence column.
+                # In-place schema migration: older vaults lack confidence or project columns.
                 meta_cols = {
                     r["name"] for r in conn.execute("PRAGMA table_info(memories_meta);").fetchall()
                 }
@@ -613,6 +627,13 @@ def _get_index_db(mem_dir: Path) -> sqlite3.Connection:
                     conn.execute(
                         "ALTER TABLE memories_meta ADD COLUMN confidence REAL DEFAULT 1.0;"
                     )
+                if "project" not in meta_cols:
+                    conn.execute("ALTER TABLE memories_meta ADD COLUMN project TEXT DEFAULT '';")
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memories_project ON memories_meta(project);
+                    """
+                )
                 _SCHEMA_READY.add(db_key)
 
     _THREAD_CONNS.conns[db_key] = conn
@@ -735,13 +756,16 @@ def _index_memory_file(
         status = str(meta.get("status") or "active").lower()
         compiled = 1 if meta.get("compiled_truth") else 0
         confidence = _coerce_confidence(meta.get("confidence"))
+        project = _normalize_project_slug(meta.get("project"))
+        if project == "_unassigned":
+            project = ""
         mtime = file_p.stat().st_mtime
 
         with conn:
             conn.execute(
                 """
-                INSERT INTO memories_meta (id, title, kind, tags, links, timestamp, status, compiled_truth, confidence, mtime)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memories_meta (id, title, kind, tags, links, timestamp, status, compiled_truth, confidence, project, mtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     kind=excluded.kind,
@@ -751,9 +775,22 @@ def _index_memory_file(
                     status=excluded.status,
                     compiled_truth=excluded.compiled_truth,
                     confidence=excluded.confidence,
+                    project=excluded.project,
                     mtime=excluded.mtime;
                 """,
-                (mid, title, kind, tags_str, links_str, ts, status, compiled, confidence, mtime),
+                (
+                    mid,
+                    title,
+                    kind,
+                    tags_str,
+                    links_str,
+                    ts,
+                    status,
+                    compiled,
+                    confidence,
+                    project,
+                    mtime,
+                ),
             )
             conn.execute("DELETE FROM memories_fts WHERE id = ?;", (mid,))
             conn.execute(
@@ -833,6 +870,7 @@ def save_memory(
     links: Optional[List[str]] = None,
     timeline: Optional[List[str]] = None,
     confidence: float = 1.0,
+    project: Optional[str] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """
@@ -892,6 +930,20 @@ def save_memory(
         existing_file = _find_existing_memory_file(mem_dir, mid)
         file_path = existing_file if existing_file is not None else (mem_dir / f"{mid}.md")
 
+        # Preserve existing project on resave when caller does not specify project
+        if project is None and existing_file is not None:
+            try:
+                old_meta, _ = _parse_frontmatter(
+                    existing_file.read_text(encoding="utf-8", errors="replace")
+                )
+                norm_project = _normalize_project_slug(old_meta.get("project"))
+            except Exception:
+                norm_project = ""
+        else:
+            norm_project = _normalize_project_slug(project)
+        if norm_project == "_unassigned":
+            norm_project = ""
+
         # Extract wikilinks and implicit references to existing notes
         clean_links = [str(l).strip() for l in (links or []) if str(l).strip()]
         for wl in extract_wikilinks(masked_content):
@@ -918,6 +970,7 @@ def save_memory(
             "status": norm_status,
             "compiled_truth": bool(compiled_truth),
             "confidence": conf_val,
+            "project": norm_project,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "tags": clean_tags,
             "links": clean_links,
@@ -956,6 +1009,7 @@ def save_memory(
             "status": norm_status,
             "compiled_truth": bool(compiled_truth),
             "confidence": conf_val,
+            "project": norm_project,
             "scope": norm_scope,
         }
     except SecurityError as se:
@@ -980,6 +1034,7 @@ def search_memory(
     since: Optional[str] = None,
     until: Optional[str] = None,
     min_confidence: Optional[float] = None,
+    project: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Search memories by keyword query, tag, or kind across local, global, or all scopes.
@@ -1043,12 +1098,23 @@ def search_memory(
         q_lower = query.strip().lower() if query else ""
         tag_lower = tag.strip().lower() if tag else ""
         kind_lower = kind.strip().lower() if kind else ""
+        norm_project = _normalize_project_slug(project) if project else ""
+        target_project: Optional[str] = None
+        if norm_project == "_unassigned":
+            target_project = ""
+        elif norm_project:
+            target_project = norm_project
 
         results = []
         seen_ids = set()
 
-        # Chronological / confidence pre-filter resolved through the SQLite index.
-        filters_active = since_dt is not None or until_dt is not None or min_conf_val is not None
+        # Chronological / confidence / project pre-filter resolved through the SQLite index.
+        filters_active = (
+            since_dt is not None
+            or until_dt is not None
+            or min_conf_val is not None
+            or target_project is not None
+        )
         allowed_by_dir: Dict[Path, Optional[set]] = {}
         if filters_active:
             since_str = since_dt.isoformat() if since_dt else None
@@ -1065,7 +1131,8 @@ def search_memory(
                                 SELECT id FROM memories_meta
                                 WHERE (? IS NULL OR (timestamp <> '' AND timestamp >= ?))
                                   AND (? IS NULL OR (timestamp <> '' AND timestamp <= ?))
-                                  AND (? IS NULL OR confidence >= ?);
+                                  AND (? IS NULL OR confidence >= ?)
+                                  AND (? IS NULL OR project = ?);
                                 """,
                                 (
                                     since_str,
@@ -1074,6 +1141,8 @@ def search_memory(
                                     until_str,
                                     min_conf_val,
                                     min_conf_val,
+                                    target_project,
+                                    target_project,
                                 ),
                             ).fetchall()
                             ids_set = {r["id"] for r in rows}
@@ -1162,6 +1231,9 @@ def search_memory(
                     entry_status = str(meta.get("status") or "active").lower()
                     entry_compiled = bool(meta.get("compiled_truth"))
                     entry_conf = _coerce_confidence(meta.get("confidence"))
+                    entry_project = _normalize_project_slug(meta.get("project"))
+                    if entry_project == "_unassigned":
+                        entry_project = ""
 
                     # Filter by kind
                     if kind_lower and entry_kind != kind_lower:
@@ -1172,6 +1244,10 @@ def search_memory(
                         tags_lower = [str(t).lower() for t in entry_tags]
                         if tag_lower not in tags_lower:
                             continue
+
+                    # Filter by project
+                    if target_project is not None and entry_project != target_project:
+                        continue
 
                     # Chronological / confidence gate (SQL pre-filter with
                     # frontmatter fallback when the index is unavailable)
@@ -1231,6 +1307,7 @@ def search_memory(
                             "status": entry_status,
                             "compiled_truth": entry_compiled,
                             "confidence": entry_conf,
+                            "project": entry_project,
                             "activated": entry_id in activation_candidates,
                             "timestamp": entry_ts,
                             "preview": preview,
@@ -1409,6 +1486,7 @@ def list_memories(
     tag: Optional[str] = None,
     kind: Optional[str] = None,
     namespace: Optional[str] = None,
+    project: Optional[str] = None,
 ) -> Dict[str, Any]:
     """List memory entries for the given workspace and scope."""
     return search_memory(
@@ -1418,7 +1496,83 @@ def list_memories(
         kind=kind,
         scope=scope,
         namespace=namespace,
+        project=project,
     )
+
+
+def list_memory_projects(
+    workspace_dir: str = ".",
+    scope: str = "all",
+    namespace: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Aggregate distinct projects and their note counts across requested scopes with ID deduplication."""
+    try:
+        norm_scope = _VALID_SCOPES_MAP.get(str(scope).strip().lower(), "all")
+        if namespace == "_global":
+            norm_scope = "global"
+
+        search_dirs = _resolve_scope_dirs(workspace_dir, norm_scope)
+        seen_ids: set[str] = set()
+        counts: Dict[str, int] = {}
+
+        for mem_dir, _ in search_dirs:
+            if not mem_dir.exists() or not mem_dir.is_dir():
+                continue
+            indexed_ok = False
+            try:
+                sync_memory_index(mem_dir)
+                conn = _get_index_db(mem_dir)
+                try:
+                    rows = conn.execute("SELECT id, project FROM memories_meta;").fetchall()
+                    for r in rows:
+                        mid = str(r["id"] or "")
+                        if not mid or mid in seen_ids:
+                            continue
+                        seen_ids.add(mid)
+                        proj = _normalize_project_slug(r["project"])
+                        if proj == "_unassigned":
+                            proj = ""
+                        counts[proj] = counts.get(proj, 0) + 1
+                    indexed_ok = True
+                finally:
+                    conn.close()
+            except Exception:
+                indexed_ok = False
+
+            if not indexed_ok:
+                for file_p in mem_dir.glob("*.md"):
+                    if not file_p.is_file() or file_p.name.startswith("_"):
+                        continue
+                    try:
+                        raw_text = file_p.read_text(encoding="utf-8", errors="replace")
+                        meta, _ = _parse_frontmatter(raw_text)
+                        mid = str(meta.get("id") or file_p.stem)
+                        if not mid or mid in seen_ids:
+                            continue
+                        seen_ids.add(mid)
+                        proj = _normalize_project_slug(meta.get("project"))
+                        if proj == "_unassigned":
+                            proj = ""
+                        counts[proj] = counts.get(proj, 0) + 1
+                    except Exception:
+                        continue
+
+        # Sort projects by count descending, with empty/unassigned last
+        sorted_items = sorted(
+            counts.items(),
+            key=lambda kv: (1 if kv[0] == "" else 0, -kv[1], kv[0]),
+        )
+        projects_list = [{"project": k, "count": v} for k, v in sorted_items]
+        return {
+            "ok": True,
+            "projects": projects_list,
+            "total": sum(counts.values()),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Failed to list memory projects: {coerce_text(mask_secrets(str(exc)))}",
+        }
 
 
 def purge_ephemeral_memories(
@@ -1842,6 +1996,7 @@ def reflect_memory(
     scope: str = "all",
     namespace: Optional[str] = None,
     limit: int = 20,
+    project: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Hindsight-style reflection over the Memory Vault.
@@ -1860,6 +2015,7 @@ def reflect_memory(
         scope: 'local', 'global', or 'all' (default 'all').
         namespace: Optional namespace alias ('_global' forces global scope).
         limit: Maximum number of entries included in the digest (default 20).
+        project: Optional project slug filter.
     """
     try:
         conf_threshold = _coerce_confidence(min_confidence, default=0.5)
@@ -1871,6 +2027,7 @@ def reflect_memory(
             scope=scope,
             namespace=namespace,
             min_confidence=conf_threshold,
+            project=project,
         )
         if not res.get("ok"):
             return res
@@ -1991,6 +2148,7 @@ def gather_recall_context(
     scope: str = "all",
     top_k: int = RECALL_DEFAULT_TOP_K,
     token_budget: int = RECALL_DEFAULT_TOKEN_BUDGET,
+    project: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Collect the context for a single-shot recall: top-K search hits plus their
@@ -2017,6 +2175,7 @@ def gather_recall_context(
             query=str(query or ""),
             tag=str(topic).strip() if topic else None,
             scope=norm_scope,
+            project=project,
         )
         if not res.get("ok"):
             return res
