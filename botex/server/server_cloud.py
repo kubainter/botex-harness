@@ -627,6 +627,9 @@ def _verify_access_token(candidate_token: Optional[str]) -> bool:
     expected_hash = os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip().strip('"').strip("'")
     if expected_hash:
         target_hash = expected_hash.lower()
+        # Direct match if candidate is already the hash itself (e.g. client configured with sha256:...)
+        if hmac.compare_digest(candidate_token.strip().lower(), target_hash):
+            return True
         if target_hash.startswith("sha256:"):
             if hmac.compare_digest(prefixed_hash, target_hash):
                 return True
@@ -637,6 +640,9 @@ def _verify_access_token(candidate_token: Optional[str]) -> bool:
     expected_token = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip().strip('"').strip("'")
     if expected_token:
         target_token = expected_token.lower()
+        # Direct match if candidate is already the hash itself
+        if hmac.compare_digest(candidate_token.strip().lower(), target_token):
+            return True
         if target_token.startswith("sha256:"):
             if hmac.compare_digest(prefixed_hash, target_token):
                 return True
