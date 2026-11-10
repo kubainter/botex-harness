@@ -50,6 +50,9 @@ export const useChatStore = defineStore('chat', () => {
   )
   const catalogModels = ref<CatalogModel[]>([])
   const isLoadingModels = ref<boolean>(false)
+  // True when /api/models was served from an expired provider-metadata cache
+  // (both the idle warmup and the lazy refresh failed — egress degradation).
+  const catalogStale = ref<boolean>(false)
   const workspaceDir = ref<string>('.')
   const pendingTaskDraft = ref<string>('')
   const errorMessage = ref<string | null>(null)
@@ -90,8 +93,10 @@ export const useChatStore = defineStore('chat', () => {
 
   async function fetchCatalogModels(forceRefresh: boolean = false) {
     isLoadingModels.value = true
+    const meta = { stale: false, fetchedAt: 0, ageSeconds: 0 }
     try {
-      const list = await api.getModels(undefined, forceRefresh)
+      const list = await api.getModels(undefined, forceRefresh, meta)
+      catalogStale.value = meta.stale
       if (Array.isArray(list) && list.length > 0) {
         catalogModels.value = list
         if (!selectedModel.value || !list.some((m) => m.id === selectedModel.value)) {
@@ -116,6 +121,7 @@ export const useChatStore = defineStore('chat', () => {
       }
     } catch {
       catalogModels.value = []
+      catalogStale.value = false
     } finally {
       isLoadingModels.value = false
     }
@@ -436,6 +442,7 @@ export const useChatStore = defineStore('chat', () => {
     selectedProvider,
     catalogModels,
     isLoadingModels,
+    catalogStale,
     activeModelMeta,
     workspaceDir,
     pendingTaskDraft,

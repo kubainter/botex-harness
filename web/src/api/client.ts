@@ -78,7 +78,10 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(
+  endpoint: string,
+  options: RequestInit & { onResponse?: (res: Response) => void } = {}
+): Promise<T> {
   const baseUrl = getStoredBackendUrl()
   const token = getStoredAccessToken()
   const url = `${baseUrl}${endpoint.startsWith('/') ? endpoint : '/' + endpoint}`
@@ -91,10 +94,12 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers.set('Authorization', `Bearer ${token}`)
   }
 
+  const { onResponse, ...fetchOptions } = options
   const response = await fetch(url, {
-    ...options,
+    ...fetchOptions,
     headers
   })
+  onResponse?.(response)
 
   if (!response.ok) {
     let errorDetail = response.statusText
@@ -152,14 +157,27 @@ export const api = {
     return request<RateLimitsMap>('/api/rate_limits')
   },
 
-  // 2b. Consolidated Model Catalog
-  async getModels(provider?: string, forceRefresh: boolean = false): Promise<CatalogModel[]> {
+  // 2b. Consolidated Model Catalog (freshness metadata surfaced via response headers)
+  async getModels(
+    provider?: string,
+    forceRefresh: boolean = false,
+    meta?: { stale: boolean; fetchedAt: number; ageSeconds: number }
+  ): Promise<CatalogModel[]> {
     const params = new URLSearchParams()
     if (provider) params.set('provider', provider)
     if (forceRefresh) params.set('force_refresh', 'true')
     const qs = params.toString()
     const data = await request<CatalogModel[] | { models: CatalogModel[] }>(
-      `/api/models${qs ? '?' + qs : ''}`
+      `/api/models${qs ? '?' + qs : ''}`,
+      meta
+        ? {
+            onResponse: (res) => {
+              meta.stale = (res.headers.get('X-Catalog-Stale') || 'false') === 'true'
+              meta.fetchedAt = Number(res.headers.get('X-Catalog-Fetched-At') || '0')
+              meta.ageSeconds = Number(res.headers.get('X-Catalog-Age-Seconds') || '0')
+            }
+          }
+        : {}
     )
     return Array.isArray(data) ? data : (data.models || [])
   },
