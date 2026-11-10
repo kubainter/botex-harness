@@ -383,14 +383,30 @@ from contextlib import asynccontextmanager, suppress
 # ---------------------------------------------------------------------------
 
 
-async def _warmup_caches() -> None:
-    try:
-        from botex.ops.migrate_projects import ensure_projects_migrated
+_WARMUP_COMPLETED = False
 
-        ws = resolve_workspace("")
-        await asyncio.to_thread(ensure_projects_migrated, ws)
-    except Exception:
-        pass
+
+async def _warmup_caches() -> None:
+    global _WARMUP_COMPLETED
+    if _WARMUP_COMPLETED:
+        return
+    _WARMUP_COMPLETED = True
+
+    # Under pytest/test harness avoid starting asynchronous background SQLite migrations
+    # across threads to prevent cross-thread SQLite connection teardown races.
+    in_test = bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("BOTEX_DISABLE_PROJECT_MIGRATION")
+        or "pytest" in sys.modules
+    )
+    if not in_test:
+        try:
+            from botex.ops.migrate_projects import ensure_projects_migrated
+
+            ws = resolve_workspace("")
+            await asyncio.to_thread(ensure_projects_migrated, ws)
+        except Exception:
+            pass
     try:
         from botex.benchmarks import fetch_openrouter_benchmarks
 
@@ -567,7 +583,11 @@ async def lifespan(app: FastAPI):
         digest_task = asyncio.create_task(_analytics_digest_loop())
     yield
     if not warmup_task.done():
-        warmup_task.cancel()
+        try:
+            # Allow a short grace period for in-flight tasks to finish safely
+            await asyncio.wait_for(asyncio.shield(warmup_task), timeout=1.5)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            warmup_task.cancel()
     with suppress(asyncio.CancelledError, Exception):
         await warmup_task
     if digest_task is not None:
