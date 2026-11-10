@@ -784,11 +784,14 @@ class CloudAuthMiddleware:
 def _mcp_transport_security() -> TransportSecuritySettings:
     """DNS-rebinding guard for the MCP mount.
 
-    Without BOTEX_ACCESS_TOKEN (Zero Friction Local) network locality is the only barrier, so
+    Without BOTEX_ACCESS_TOKEN or BOTEX_ACCESS_TOKEN_HASH (Zero Friction Local) network locality is the only barrier, so
     Host/Origin are validated against loopback names. With a token set, Bearer auth is the
     barrier and public hostnames (VPS / reverse proxy) must keep working.
     """
-    if os.environ.get("BOTEX_ACCESS_TOKEN", "").strip():
+    if (
+        os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
+        or os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip()
+    ):
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
