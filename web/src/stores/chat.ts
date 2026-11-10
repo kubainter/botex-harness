@@ -52,6 +52,8 @@ export const useChatStore = defineStore('chat', () => {
   const isLoadingModels = ref<boolean>(false)
   // True when /api/models was served from an expired provider-metadata cache
   // (both the idle warmup and the lazy refresh failed — egress degradation).
+  // TODO(PWA): render a stale badge in the model selector and auto-refresh the
+  // catalog on a 400 model-not-found error — state is wired, UI pending.
   const catalogStale = ref<boolean>(false)
   const workspaceDir = ref<string>('.')
   const pendingTaskDraft = ref<string>('')

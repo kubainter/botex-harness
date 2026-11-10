@@ -119,7 +119,8 @@ def sweep_empty_chat_sessions(workspace_dir: str = ".") -> int:
         try:
             if not file_path.is_file():
                 continue
-            if now - file_path.stat().st_mtime < _SWEEP_MIN_AGE_S:
+            mtime_seen = file_path.stat().st_mtime
+            if now - mtime_seen < _SWEEP_MIN_AGE_S:
                 continue
             data = json.loads(file_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -129,6 +130,10 @@ def sweep_empty_chat_sessions(workspace_dir: str = ".") -> int:
         if data.get("messages") != []:
             continue
         try:
+            # Re-stat immediately before unlink: a concurrent server write
+            # (fresh mtime) means the session is alive — skip, never race it.
+            if file_path.stat().st_mtime != mtime_seen:
+                continue
             file_path.unlink()
             removed += 1
         except OSError:

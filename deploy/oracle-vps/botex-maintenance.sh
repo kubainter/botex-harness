@@ -67,14 +67,17 @@ EOF
     log "Warming provider metadata caches and sweeping ghost chat sessions..."
     "$PYTHON_BIN" - <<'EOF'
 import json
+import os
 import sys
+from pathlib import Path
 
 try:
     from botex.ops.maintenance import sweep_empty_chat_sessions, warm_provider_metadata
 
-    warm = warm_provider_metadata()
+    workspace = str(Path(os.environ.get("BOTEX_WORKSPACE", ".")).resolve())
+    warm = warm_provider_metadata(workspace_dir=workspace)
     print(f"Provider metadata warmup: {json.dumps(warm, default=str)}")
-    removed = sweep_empty_chat_sessions()
+    removed = sweep_empty_chat_sessions(workspace_dir=workspace)
     print(f"Ghost chat-session sweep: removed {removed} empty session file(s)")
 except Exception as exc:
     print(f"Metadata warmup notice: {exc}", file=sys.stderr)

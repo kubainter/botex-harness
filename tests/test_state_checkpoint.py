@@ -314,3 +314,101 @@ def test_snapshot_manager_step_indexed_snapshots(tmp_path: Path):
     assert existing_file.read_text(encoding="utf-8") == "x = 1\n"
     assert not future_file.exists()
     mgr.end_task("t1")
+
+
+# ==============================================================================
+# Integration Tests: Explicit Model Binding & Free/Quota Fallback Filter
+# (cost-safety remediation follow-up, arena_chat403_20261110 / provider binding)
+# ==============================================================================
+
+
+@pytest.mark.anyio
+async def test_run_botex_task_explicit_model_disables_fallbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An explicit model binds strictly to its provider — never rotate cross-provider."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-or-key")
+    monkeypatch.setenv("OPENROUTER_API_FREE_KEY", "test-or-free-key")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-nv-key")
+    cfg = copy.deepcopy(load_config())
+    cfg["provider_fallbacks"] = {"openrouter-free": ["nvidia", "openrouter"]}
+
+    mock_client = MockClient(
+        [_make_response("STATUS: UNSUPPORTED\nProvider cannot perform this task")]
+    )
+
+    def fake_resolve_candidates(model, profile, provider):
+        return ["explicit-model-x"]
+
+    with (
+        patch("botex.engine.load_config", return_value=cfg),
+        patch.object(engine, "resolve_model_candidates", side_effect=fake_resolve_candidates),
+        patch.object(engine, "build_async_client", return_value=mock_client),
+        patch.object(engine, "check_model_price", return_value=(True, "")),
+        patch.object(engine, "check_model_tools", return_value=(True, "")),
+        patch.object(engine, "check_budget_limit", return_value=(False, 0.0)),
+        patch.object(engine, "log_run", return_value={"cost_usd": 0.0}),
+        patch.object(engine, "print_run_summary", return_value=None),
+    ):
+        result = await engine.run_botex_task(
+            task="Explicit model must not rotate providers",
+            workspace_dir=str(tmp_path),
+            model="explicit-model-x",
+            provider="openrouter-free",
+            mode="readonly",
+        )
+
+        assert result["status"] != "DONE"
+        assert len(result["attempts"]) == 1
+        assert result["attempts"][0]["model"] == "explicit-model-x"
+        assert result["attempts"][0]["provider"] == "openrouter-free"
+        assert all(a["provider"] != "openrouter" for a in result["attempts"])
+
+
+@pytest.mark.anyio
+async def test_run_botex_task_free_quota_fallbacks_exclude_paid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Free/quota providers never silently spill over into paid openrouter fallbacks."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-or-key")
+    monkeypatch.setenv("OPENROUTER_API_FREE_KEY", "test-or-free-key")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-nv-key")
+    cfg = copy.deepcopy(load_config())
+    cfg["provider_fallbacks"] = {"openrouter-free": ["nvidia", "openrouter"]}
+
+    mock_client = MockClient(
+        [
+            _make_response("STATUS: UNSUPPORTED\nfree primary failed"),
+            _make_response("STATUS: UNSUPPORTED\nnvidia fallback failed"),
+        ]
+    )
+
+    def fake_resolve_candidates(model, profile, provider):
+        if provider == "openrouter-free":
+            return ["free-primary"]
+        elif provider == "nvidia":
+            return ["nvidia-fallback"]
+        return ["default-model"]
+
+    with (
+        patch("botex.engine.load_config", return_value=cfg),
+        patch.object(engine, "resolve_model_candidates", side_effect=fake_resolve_candidates),
+        patch.object(engine, "build_async_client", return_value=mock_client),
+        patch.object(engine, "check_model_price", return_value=(True, "")),
+        patch.object(engine, "check_model_tools", return_value=(True, "")),
+        patch.object(engine, "check_budget_limit", return_value=(False, 0.0)),
+        patch.object(engine, "log_run", return_value={"cost_usd": 0.0}),
+        patch.object(engine, "print_run_summary", return_value=None),
+    ):
+        result = await engine.run_botex_task(
+            task="Free provider must not fall back to paid openrouter",
+            workspace_dir=str(tmp_path),
+            model="",
+            provider="openrouter-free",
+            mode="readonly",
+        )
+
+        assert result["status"] != "DONE"
+        attempt_providers = [a["provider"] for a in result["attempts"]]
+        assert attempt_providers == ["openrouter-free", "nvidia"]
+        assert "openrouter" not in attempt_providers
