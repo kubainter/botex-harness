@@ -37,7 +37,7 @@ try:
         build_async_client,
         sanitize_provider_error,
     )
-    from botex.providers.retry import call_with_backoff
+    from botex.providers.retry import call_with_backoff, status_code_of
     from botex.skills.skills import install_skill_async, list_skills
     from botex.tools.file_tools import (
         get_file_outline,
@@ -89,7 +89,7 @@ except (ImportError, ValueError):
         build_async_client,
         sanitize_provider_error,
     )
-    from retry import call_with_backoff
+    from retry import call_with_backoff, status_code_of
     from security import (
         SecurityError,
         check_model_zdr,
@@ -120,6 +120,51 @@ _VALID_ROLES_MAP: dict[str, str] = {
     "assistant": "assistant",
     "tool": "tool",
 }
+
+
+def _provider_error_payload(
+    session: Any,
+    provider_name: str,
+    model: str,
+    exc: Exception,
+    phase: str = "request",
+) -> Dict[str, Any]:
+    """Log a sanitized provider failure server-side and build the client error event.
+
+    The sanitized text carries the provider's error body (secrets masked) —
+    without this log line the provider-side cause of an incident is
+    unrecoverable from server artifacts alone.
+    """
+    sanitized = sanitize_provider_error(exc)
+    status = status_code_of(exc)
+    _log.warning(
+        "chat provider error: session=%s provider=%s model=%s status=%s phase=%s error=%s",
+        session.session_id,
+        provider_name,
+        model,
+        status if status is not None else "n/a",
+        phase,
+        sanitized[:512],
+    )
+    if status == 403:
+        error_class = "policy_rejection"
+        message = (
+            "Provider rejected the request (403 - policy/moderation/permissions, "
+            f"not rate-limit). Not retrying. Detail: {sanitized}"
+        )
+    elif status == 401:
+        error_class = "policy_rejection"
+        message = f"Provider authentication failed (401 - check the API key). Detail: {sanitized}"
+    else:
+        error_class = "provider_error"
+        message = f"API Error: {sanitized}"
+    return {
+        "type": "error",
+        "session_id": session.session_id,
+        "error": message,
+        "error_class": error_class,
+    }
+
 
 DEFAULT_CHAT_SYSTEM_PROMPT = (
     "You are BoteX — an intelligent, versatile AI assistant and Vault Administrator in Chat Mode.\n"
@@ -1351,24 +1396,26 @@ async def stream_chat_turn(
                 except Exception as retry_exc:
                     if iteration == 1:
                         _rollback_user_message()
-                    sanitized = sanitize_provider_error(retry_exc)
                     await _release_client()
-                    yield {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "error": f"API Error: {sanitized}",
-                    }
+                    yield _provider_error_payload(
+                        session,
+                        active_provider_name,
+                        effective_model,
+                        retry_exc,
+                        phase="tool_retry",
+                    )
                     return
             else:
                 if iteration == 1:
                     _rollback_user_message()
-                sanitized = sanitize_provider_error(exc)
                 await _release_client()
-                yield {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "error": f"API Error: {sanitized}",
-                }
+                yield _provider_error_payload(
+                    session,
+                    active_provider_name,
+                    effective_model,
+                    exc,
+                    phase="request",
+                )
                 return
 
         # 4. Stream response chunks
@@ -1547,13 +1594,14 @@ async def stream_chat_turn(
         except Exception as exc:
             if iteration == 1:
                 _rollback_user_message()
-            sanitized = sanitize_provider_error(exc)
             await _release_client()
-            yield {
-                "type": "error",
-                "session_id": session.session_id,
-                "error": f"Streaming Error: {sanitized}",
-            }
+            yield _provider_error_payload(
+                session,
+                active_provider_name,
+                effective_model,
+                exc,
+                phase="stream",
+            )
             return
         finally:
             # Deterministically release the HTTP stream — an unclosed
