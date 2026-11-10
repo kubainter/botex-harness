@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Tuple
 BLOCKED_FILE_PATTERNS = {
     ".env",
     ".env.*",
+    ".env*",
     "*.env",
     "*.pem",
     "*.key",
@@ -33,6 +34,8 @@ BLOCKED_FILE_PATTERNS = {
     "id_*",
     "*.secret",
     "*.secrets",
+    ".secrets*",
+    "secrets.*",
     "*.private",
     "credentials.json",
     "service-account*.json",
@@ -96,10 +99,10 @@ _SECRET_PATTERNS = [
     ),
     # Bearer tokens (case-insensitive for HTTP authorization headers and error traces)
     re.compile(r"(?i)bearer\s+[a-zA-Z0-9\-_\.]{20,}"),
-    # Provider-prefixed tokens (GitHub, GitLab, Slack, Stripe, GCP, npm, PyPI, NVIDIA)
+    # Provider-prefixed tokens (GitHub, GitLab, Slack, Stripe, GCP, npm, PyPI, NVIDIA, BoteX)
     re.compile(
         r"\b(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[bapors]-|"
-        r"sk_live_|sk_test_|rk_live_|AIza|npm_|pypi-|nvapi-)[A-Za-z0-9_\-]{10,}"
+        r"sk_live_|sk_test_|rk_live_|AIza|npm_|pypi-|nvapi-|btx_live_|btx_sec_|botex_)[A-Za-z0-9_\-]{10,}"
     ),
     # Base64-ish long strings often used as secrets — pure-hex tokens are
     # left alone so hashes/digests in file content survive masking

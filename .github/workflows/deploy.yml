@@ -1,0 +1,160 @@
+name: Production Deploy to Oracle Cloud VPS
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test_and_build:
+    name: Test & Build (Evidence Gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python Dependencies & Linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio ruff
+
+      - name: Lint Verification (Ruff)
+        run: ruff check .
+
+      - name: Run Core Test Suite
+        env:
+          BOTEX_DISABLE_DOTENV: "1"
+          PYTHONPATH: "."
+        run: python -m pytest tests/test_skills_parity.py tests/test_config_safety.py -v
+
+      - name: Set up Node.js for PWA Build
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Web PWA Frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload Web Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          retention-days: 1
+
+  deploy_vps:
+    name: Deploy & Healthcheck on Oracle VPS
+    needs: test_and_build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Web Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: dist/
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Deploy to VPS with Automated Rollback
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST || '51.170.191.96' }}
+          VPS_USER: ${{ secrets.VPS_USER || 'ubuntu' }}
+          DEPLOY_PATH: /opt/botex
+        run: |
+          # 1. Add VPS host key to known_hosts to prevent MITM attacks
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${VPS_HOST}" >> ~/.ssh/known_hosts
+
+          # 2. Upload compiled PWA frontend to /tmp/web-dist
+          scp -r dist "${VPS_USER}@${VPS_HOST}:/tmp/web-dist"
+
+          # 3. Execute zero-downtime atomic update and healthcheck on VPS
+          ssh "${VPS_USER}@${VPS_HOST}" "bash -s" << 'EOF'
+          set -e
+          DEPLOY_PATH="/opt/botex"
+          cd "$DEPLOY_PATH"
+
+          # Record previous commit SHA for rollback gate
+          PREV_SHA=$(git rev-parse HEAD)
+          echo "Current deployment commit: $PREV_SHA"
+
+          # Pull latest main without touching .env
+          echo "Pulling latest changes from origin/main..."
+          sudo -u botex git fetch origin main
+          sudo -u botex git reset --hard origin/main
+
+          # Install new dependencies if requirements.txt changed
+          if ! git diff --quiet "$PREV_SHA" HEAD -- requirements.txt; then
+              echo "requirements.txt modified - updating virtual environment dependencies..."
+              sudo -u botex "$DEPLOY_PATH/.venv/bin/pip" install -r requirements.txt
+          fi
+
+          # Update PWA static assets
+          if [ -d "/tmp/web-dist" ]; then
+              echo "Updating PWA static assets in $DEPLOY_PATH/web/dist..."
+              sudo rm -rf "$DEPLOY_PATH/web/dist"
+              sudo mv /tmp/web-dist "$DEPLOY_PATH/web/dist"
+              sudo chown -R botex:botex "$DEPLOY_PATH/web/dist"
+          fi
+
+          # Synchronize deploy service scripts & reload systemd if modified
+          if ! git diff --quiet "$PREV_SHA" HEAD -- deploy/oracle-vps/; then
+              echo "Deployment units modified - refreshing systemd units..."
+              sudo cp "$DEPLOY_PATH/deploy/oracle-vps/botex-cloud.service" /etc/systemd/system/
+              sudo cp "$DEPLOY_PATH/deploy/oracle-vps/bielik.service" /etc/systemd/system/
+              sudo install -m 0755 "$DEPLOY_PATH/deploy/oracle-vps/botex-maintenance.sh" /usr/local/sbin/
+              sudo install -m 0755 "$DEPLOY_PATH/deploy/oracle-vps/botex-curator.sh" /usr/local/sbin/
+              sudo systemctl daemon-reload
+          fi
+
+          # Restart BoteX Cloud Gateway
+          echo "Restarting botex-cloud.service..."
+          sudo systemctl restart botex-cloud
+
+          # 4. Evidence Healthcheck Gate (Retry up to 30s)
+          echo "Verifying healthcheck endpoint (http://127.0.0.1:8000/api/health)..."
+          HEALTHY=false
+          for i in $(seq 1 10); do
+              sleep 3
+              RESPONSE=$(curl -s http://127.0.0.1:8000/api/health || echo "")
+              if [[ "$RESPONSE" == *"healthy"* ]]; then
+                  HEALTHY=true
+                  echo "Healthcheck passed on attempt $i! Gateway is HEALTHY."
+                  break
+              fi
+              echo "Attempt $i failed, retrying..."
+          done
+
+          # Automatic Rollback if healthcheck fails
+          if [ "$HEALTHY" = false ]; then
+              echo "CRITICAL: Healthcheck failed! Initiating automated rollback to $PREV_SHA..."
+              sudo -u botex git reset --hard "$PREV_SHA"
+              sudo systemctl restart botex-cloud
+              echo "Rollback completed. Exiting with failure."
+              exit 1
+          fi
+
+          echo "Deployment successfully verified."
+          EOF
