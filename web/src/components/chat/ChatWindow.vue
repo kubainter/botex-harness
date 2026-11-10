@@ -131,6 +131,17 @@
           <span class="hidden md:inline">{{ t('chat.save_memory.button') }}</span>
         </button>
 
+        <!-- Vision Triage (dHash) Button -->
+        <button
+          type="button"
+          :title="locale === 'pl' ? 'Wizja (dHash)' : 'Vision Triage'"
+          class="min-h-[44px] lg:min-h-[36px] px-2 sm:px-2.5 py-1.5 bg-botex-950 hover:bg-botex-800 border border-botex-700 rounded-lg text-xs text-slate-200 hover:text-cyan-300 transition flex items-center space-x-1 shrink-0"
+          @click="showVisionModal = true"
+        >
+          <EyeIcon class="w-3.5 h-3.5 text-cyan-400" />
+          <span class="hidden md:inline">{{ locale === 'pl' ? 'Sprawdź obraz' : 'Inspect image' }}</span>
+        </button>
+
         <button
           v-if="messages.length > 0"
           type="button"
@@ -171,7 +182,7 @@
 
           <!-- Actionable Starter Prompts -->
           <div class="space-y-2">
-            <span class="block text-xs font-mono uppercase tracking-wider text-slate-300">
+            <span class="block text-xs font-medium text-slate-300">
               Quick Workspace Actions
             </span>
             <div class="grid grid-cols-1 xl:grid-cols-2 gap-2 text-left">
@@ -285,6 +296,13 @@
       @close="showSaveMemoryModal = false"
       @save="handleSaveToMemory"
     />
+
+    <!-- Vision Triage (dHash) Modal -->
+    <VisionTriageModal
+      :is-open="showVisionModal"
+      @close="showVisionModal = false"
+      @insert-diagnosis="handleInsertVisionDiagnosis"
+    />
   </div>
 </template>
 
@@ -298,6 +316,7 @@ import MessageBubble from './MessageBubble.vue'
 import ModelSelectorModal from './ModelSelectorModal.vue'
 import ChatHistoryDrawer from './ChatHistoryDrawer.vue'
 import SaveToMemoryModal from './SaveToMemoryModal.vue'
+import VisionTriageModal from './VisionTriageModal.vue'
 import {
   Terminal as TerminalIcon,
   Cpu as CpuIcon,
@@ -307,6 +326,7 @@ import {
   ChevronDown as ChevronDownIcon,
   History as HistoryIcon,
   BookmarkPlus as BookmarkPlusIcon,
+  Eye as EyeIcon,
   Square as SquareIcon
 } from 'lucide-vue-next'
 
@@ -336,6 +356,7 @@ const isCoarsePointer = typeof window !== 'undefined' && window.matchMedia('(poi
 const showModelModal = ref(false)
 const showHistoryDrawer = ref(false)
 const showSaveMemoryModal = ref(false)
+const showVisionModal = ref(false)
 const saveModalRef = ref<InstanceType<typeof SaveToMemoryModal> | null>(null)
 const memoryInitialTitle = ref('')
 const memoryInitialContent = ref('')
@@ -481,6 +502,11 @@ async function handleSaveToMemory(payload: {
     })
     saveModalRef.value?.setSubmitting(false)
   }
+}
+
+function handleInsertVisionDiagnosis(diagnosisText: string) {
+  inputText.value = inputText.value ? `${inputText.value}\n${diagnosisText}` : diagnosisText
+  showVisionModal.value = false
 }
 
 function handleGlobalKeydown(e: KeyboardEvent) {

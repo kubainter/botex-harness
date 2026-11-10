@@ -13,6 +13,26 @@
       </div>
 
       <div class="flex items-center gap-2 flex-wrap">
+        <!-- Provider Segmented Control -->
+        <div class="flex items-center bg-botex-950 p-0.5 rounded-lg border border-botex-800 space-x-1">
+          <button
+            v-for="prov in supportedProviders"
+            :key="prov.id"
+            type="button"
+            :aria-pressed="walletStore.activeProvider === prov.id"
+            :class="[
+              'min-h-[44px] lg:min-h-[32px] px-3 py-1 rounded text-xs font-medium transition',
+              walletStore.activeProvider === prov.id
+                ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30'
+                : 'text-slate-300 hover:text-white'
+            ]"
+            @click="walletStore.setProvider(prov.id)"
+          >
+            {{ t(prov.labelKey) || prov.defaultLabel }}
+          </button>
+        </div>
+
+        <!-- View Tabs -->
         <div class="flex items-center bg-botex-950 p-0.5 rounded-lg border border-botex-800 space-x-1">
           <button
             v-for="tab in tabs"
@@ -20,7 +40,7 @@
             type="button"
             :aria-pressed="activeTab === tab.value"
             :class="[
-              'min-h-[44px] lg:min-h-[36px] min-w-[44px] px-3 py-1 rounded text-xs font-medium transition',
+              'min-h-[44px] lg:min-h-[32px] min-w-[44px] px-3 py-1 rounded text-xs font-medium transition',
               activeTab === tab.value
                 ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30'
                 : 'text-slate-300 hover:text-white'
@@ -33,7 +53,7 @@
         <button
           v-if="activeTab === 'budget'"
           type="button"
-          class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
+          class="min-h-[44px] lg:min-h-[32px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
           @click="walletStore.fetchWallet(true)"
         >
           <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': walletStore.isLoading }" />
@@ -45,8 +65,27 @@
     <StatsPanel v-if="activeTab === 'stats'" />
 
     <template v-else>
-    <!-- Wallet Balance Cards -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <!-- Quota Windows Grid (rendered when provider reports quota windows) -->
+    <div v-if="walletInfo?.quota_windows && walletInfo.quota_windows.length > 0" class="space-y-3">
+      <div class="flex items-center justify-between text-xs text-slate-300 px-1 border-b border-botex-800 pb-2">
+        <span class="font-semibold uppercase tracking-wider font-mono">
+          {{ t('wallet.quota.title') }}
+        </span>
+        <span class="text-slate-400 font-mono">
+          {{ walletInfo.label || walletStore.activeProvider }}
+        </span>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <QuotaWindowCard
+          v-for="(win, idx) in walletInfo.quota_windows"
+          :key="idx"
+          :window="win"
+        />
+      </div>
+    </div>
+
+    <!-- Wallet Balance Cards (for USD accounts) -->
+    <div v-if="showFinancialCards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       <!-- Balance USD -->
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
@@ -63,7 +102,7 @@
           <Badge :variant="walletInfo?.is_free_tier ? 'warning' : 'success'">
             {{ walletInfo?.is_free_tier ? 'Free Tier' : 'Paid Quota' }}
           </Badge>
-          <span class="text-xs text-slate-300 font-mono">{{ walletInfo?.label || 'OpenRouter' }}</span>
+          <span class="text-xs text-slate-300 font-mono">{{ walletInfo?.label || walletStore.activeProvider }}</span>
         </div>
       </div>
 
@@ -117,6 +156,20 @@
           {{ locale === 'pl' ? 'Dostępne środki przed blokadą' : 'Available before hard cap' }}
         </p>
       </div>
+    </div>
+
+    <!-- Unsupported / Direct API Notice -->
+    <div
+      v-else-if="walletInfo && !walletInfo.supported && (!walletInfo.quota_windows || walletInfo.quota_windows.length === 0)"
+      class="rounded-xl border border-botex-800 bg-botex-900/60 p-4 shadow-sm text-xs text-slate-300 space-y-1.5"
+    >
+      <div class="font-semibold text-slate-200 text-sm font-mono flex items-center justify-between">
+        <span>{{ walletInfo.label || walletStore.activeProvider }}</span>
+        <Badge variant="info">{{ walletInfo.is_free_tier ? 'Free Tier' : 'Direct API' }}</Badge>
+      </div>
+      <p class="text-slate-400">
+        {{ walletInfo.error || (locale === 'pl' ? 'Dostawca nie udostępnia zewnętrznego API salda kredytowego.' : 'Provider does not expose an external credits/balance API.') }}
+      </p>
     </div>
 
     <!-- API error notice -->
@@ -330,6 +383,7 @@ import { useI18n } from '../i18n'
 import type { AnalyticsResponse } from '../api/types'
 import Badge from '../components/common/Badge.vue'
 import StatsPanel from '../components/stats/StatsPanel.vue'
+import QuotaWindowCard from '../components/wallet/QuotaWindowCard.vue'
 import {
   Wallet as WalletIcon,
   RefreshCw as RefreshCwIcon,
@@ -343,6 +397,21 @@ const walletStore = useWalletStore()
 const analyticsStore = useAnalyticsStore()
 const { walletInfo, rateLimits, recommendedModels } = storeToRefs(walletStore)
 const { locale, t } = useI18n()
+
+const supportedProviders = [
+  { id: 'openrouter', labelKey: 'wallet.provider.openrouter', defaultLabel: 'OpenRouter (USD)' },
+  { id: 'nvidia', labelKey: 'wallet.provider.nvidia', defaultLabel: 'NVIDIA NIM' },
+  { id: 'google', labelKey: 'wallet.provider.google', defaultLabel: 'Google AI Studio' },
+  { id: 'ollama', labelKey: 'wallet.provider.ollama', defaultLabel: 'Ollama' }
+]
+
+const showFinancialCards = computed(() => {
+  if (!walletInfo.value) return true
+  if (walletInfo.value.units === 'usd') return true
+  if (walletInfo.value.balance_usd !== null && walletInfo.value.balance_usd !== undefined) return true
+  if (walletInfo.value.supported && (!walletInfo.value.quota_windows || walletInfo.value.quota_windows.length === 0)) return true
+  return false
+})
 
 const selectedRole = ref<'all' | 'planner' | 'coder' | 'chat' | 'reviewer'>('all')
 

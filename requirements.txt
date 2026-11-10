@@ -1,5 +1,5 @@
 # BoteX core dependencies
-openai>=1.40
+openai>=3.0
 python-dotenv>=1.0
 mcp>=2.0
 typing_extensions>=4.0
@@ -7,6 +7,11 @@ fastapi>=0.100
 uvicorn>=0.20
 websockets>=12.0
 sse-starlette>=2.0
+# httpx2<2.16 leaks response-stream async generators on streamed
+# chat completions ("generator didn't stop after athrow()" at shutdown)
+httpx2>=2.16.0
+# Multiline/bracketed-paste input for interactive CLI prompts
+prompt_toolkit>=3.0
 
 # Optional — prettier CLI output for --stats / run summaries
 # rich>=13.0

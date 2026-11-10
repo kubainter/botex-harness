@@ -4,15 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Wersja wydania (np. v1.0.0)'
+        description: 'Release version (e.g. v2.1.0)'
         required: true
         type: string
+
+permissions:
+  contents: read
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
+      id-token: write
 
     steps:
     - uses: actions/checkout@v4
@@ -20,18 +25,61 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: "3.10"
+        python-version: "3.11"
+        cache: 'pip'
+
+    - name: Version parity check
+      run: |
+        INPUT_VER="${{ github.event.inputs.version }}"
+        CLEAN="${INPUT_VER#v}"
+        PYPROJECT_VER=$(grep -Po '(?m)^version = "\K[^"]+' pyproject.toml)
+        PKG_VER=$(grep -Po '__version__ = "\K[^"]+' botex/__init__.py)
+        echo "input=${CLEAN} pyproject=${PYPROJECT_VER} package=${PKG_VER}"
+        if [ "${CLEAN}" != "${PYPROJECT_VER}" ] || [ "${PYPROJECT_VER}" != "${PKG_VER}" ]; then
+          echo "::error::Version mismatch: input '${CLEAN}' vs pyproject '${PYPROJECT_VER}' vs botex.__version__ '${PKG_VER}'"
+          exit 1
+        fi
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio ruff
+
+    - name: Lint with ruff
+      run: ruff check .
+
+    - name: Run tests with pytest
+      run: PYTHONPATH=. python -m pytest tests/ -q
+
+    - name: Build web assets
+      working-directory: web
+      if: hashFiles('web/package.json') != ''
+      run: |
+        npm ci
+        npm run build
 
     - name: Create release zip archive
       run: |
-        # Kopiujemy niezbędne pliki do tymczasowego folderu, by spakować na czysto
         mkdir -p botex-release
-        cp -r botex docs skills tests botex.cmd botex.sh server.py pyproject.toml requirements.txt README.md ROADMAP.md AGENTS.md LICENSE NOTICE glama.json botex.config.json botex-release/
-
-        # Spakowanie
+        # Product artifact only: no tests/ (packaging hygiene — the suite
+        # has already gated this build two steps above).
+        cp -r botex docs skills botex.cmd botex.sh server.py pyproject.toml requirements.txt README.md ROADMAP.md AGENTS.md LICENSE NOTICE glama.json botex-release/
+        # Sanitized default config — never ship a maintainer-specific
+        # botex.config.json (local paths, machine-specific settings).
+        cp botex.config.example.json botex-release/botex.config.json
+        if [ -d web/dist ]; then
+          mkdir -p botex-release/web
+          cp -r web/dist botex-release/web/
+        fi
         cd botex-release
         zip -r ../botex-${{ github.event.inputs.version }}.zip .
         cd ..
+
+    - name: Attest release artifact provenance
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-path: botex-${{ github.event.inputs.version }}.zip
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
