@@ -159,3 +159,4 @@ External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge)
     1.  Public contract layer: `skills/<skill_name>/SKILL.md` (read by external orchestrators like Antigravity, Devin, Codex).
     2.  Kernel execution layer: `botex/recipes/<recipe_name>.md` (injected directly into BoteX model prompts).
 *   **Mandatory Synchronization:** Whenever engineering checklists, linting requirements, or runtime targets are updated, both layers must be updated in tandem. Parity is enforced by automated tests in `tests/test_skills_parity.py`.
+*   **Dependencies Parity:** `requirements.txt` (the sole install source for CI and the VPS deploy) and `pyproject.toml` `[project.dependencies]` (packaging source of truth) must list identical core dependencies with identical specifiers. Drift is enforced by `tests/test_deps_parity.py`.
