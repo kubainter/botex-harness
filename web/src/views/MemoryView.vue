@@ -126,8 +126,9 @@
 
     <!-- Filter Component -->
     <MemoryFilter
-
       v-model:scope="activeScope"
+      v-model:project="filterProject"
+      :projects="projects"
       v-model:query="searchQuery"
       v-model:kind="filterKind"
       v-model:tag="filterTag"
@@ -198,6 +199,7 @@
           @delete="handleDeleteCard(entry)"
           @select-link="loadOtherNode"
           @select-tag="(t) => { filterTag = t }"
+          @select-project="(p) => { filterProject = p }"
         />
       </div>
     </div>
@@ -335,7 +337,7 @@
 
           <div>
             <label class="block font-medium text-slate-200 mb-1">
-              {{ locale === 'pl' ? 'Zakres zapisu' : 'Storage Scope' }}
+              {{ locale === 'pl' ? 'Lokalizacja zapisu' : 'Storage Scope' }}
             </label>
             <select
               v-model="newEntry.scope"
@@ -347,16 +349,34 @@
           </div>
         </div>
 
-        <div>
-          <label class="block font-medium text-slate-200 mb-1">
-            {{ locale === 'pl' ? 'Tagi (oddzielone przecinkiem)' : 'Tags (comma separated)' }}
-          </label>
-          <input
-            v-model="rawTags"
-            type="text"
-            placeholder="api, architecture, security"
-            class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100 font-mono"
-          />
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block font-medium text-slate-200 mb-1">
+              {{ locale === 'pl' ? 'Projekt (slug)' : 'Project (slug)' }}
+            </label>
+            <input
+              v-model="newEntry.project"
+              type="text"
+              list="botex-project-suggestions"
+              placeholder="botex, witcher3, ue4ss..."
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100 font-mono"
+            />
+            <datalist id="botex-project-suggestions">
+              <option v-for="p in projects.filter((i) => i.project)" :key="p.project" :value="p.project" />
+            </datalist>
+          </div>
+
+          <div>
+            <label class="block font-medium text-slate-200 mb-1">
+              {{ locale === 'pl' ? 'Tagi (oddzielone przecinkiem)' : 'Tags (comma separated)' }}
+            </label>
+            <input
+              v-model="rawTags"
+              type="text"
+              placeholder="api, architecture, security"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100 font-mono"
+            />
+          </div>
         </div>
 
         <div>
@@ -415,7 +435,9 @@ import {
 const memoryStore = useMemoryStore()
 const {
   entries,
+  projects,
   activeScope,
+  filterProject,
   searchQuery,
   filterKind,
   filterTag,
@@ -487,12 +509,14 @@ const filteredGraphEdges = computed(() => {
 })
 
 onMounted(() => {
+  memoryStore.fetchProjects()
   memoryStore.fetchMemory()
   memoryStore.fetchCuratorStatus()
 })
 
 
-watch([activeScope, filterKind, filterTag, hideReceipts], () => {
+watch([activeScope, filterProject, filterKind, filterTag, hideReceipts], () => {
+  memoryStore.fetchProjects()
   if (viewMode.value === 'graph') {
     memoryStore.fetchGraph()
   } else {
@@ -506,6 +530,7 @@ function switchToGraph() {
 }
 
 function refreshCurrentView() {
+  memoryStore.fetchProjects()
   if (viewMode.value === 'graph') {
     memoryStore.fetchGraph()
   } else {
@@ -585,12 +610,14 @@ async function loadOtherNode(nodeId: string) {
 }
 
 function openCreateModal() {
+  const defaultProject = filterProject.value && filterProject.value !== '_unassigned' ? filterProject.value : 'botex'
   newEntry.value = {
     title: '',
     content: '',
     kind: 'context',
     tags: [],
     scope: 'local',
+    project: defaultProject,
     workspace_dir: '.',
     memory_id: undefined
   }
@@ -600,11 +627,15 @@ function openCreateModal() {
 
 function handleEditSelectedNode() {
   if (!selectedNode.value) return
+  const existingProj = memoryStore.activeEntry?.memory_id === selectedNode.value.id
+    ? (memoryStore.activeEntry?.project || '')
+    : ''
   newEntry.value = {
     memory_id: selectedNode.value.id,
     title: selectedNode.value.title,
     kind: selectedNode.value.kind || 'context',
     scope: selectedNode.value.scope === 'global' ? 'global' : 'local',
+    project: existingProj,
     content: nodeContent.value,
     tags: [...(selectedNode.value.tags || [])],
     workspace_dir: '.'

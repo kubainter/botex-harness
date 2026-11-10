@@ -12,6 +12,7 @@ import type {
   PendingAction,
   ApprovalDecisionRequest,
   MemoryEntry,
+  MemoryProjectItem,
   MemorySaveRequest,
   ChatChunk,
   CatalogModel,
@@ -235,11 +236,19 @@ export const api = {
   },
 
   // 5. Memory Vault
+  async getMemoryProjects(params?: { scope?: string; workspace_dir?: string }): Promise<{ ok: boolean; projects: MemoryProjectItem[]; total: number }> {
+    const q = new URLSearchParams()
+    if (params?.scope) q.set('scope', params.scope)
+    if (params?.workspace_dir) q.set('workspace_dir', params.workspace_dir)
+    return request<{ ok: boolean; projects: MemoryProjectItem[]; total: number }>(`/api/memory/projects?${q.toString()}`)
+  },
+
   async getMemory(params: {
     query?: string
     tag?: string
     kind?: string
     scope?: string
+    project?: string
     workspace_dir?: string
     memory_id?: string
   }): Promise<{ ok: boolean; results?: MemoryEntry[]; memories?: MemoryEntry[]; entry?: MemoryEntry; total?: number; count?: number; error?: string }> {
@@ -248,6 +257,7 @@ export const api = {
     if (params.tag) q.set('tag', params.tag)
     if (params.kind) q.set('kind', params.kind)
     if (params.scope) q.set('scope', params.scope)
+    if (params.project) q.set('project', params.project)
     if (params.workspace_dir) q.set('workspace_dir', params.workspace_dir)
     if (params.memory_id) q.set('memory_id', params.memory_id)
 

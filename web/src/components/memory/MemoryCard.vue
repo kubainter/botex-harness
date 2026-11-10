@@ -11,6 +11,15 @@
           >
             ⭐ Compiled
           </span>
+          <button
+            v-if="entry.project"
+            type="button"
+            class="text-xs px-1.5 py-0.5 rounded font-mono font-semibold bg-emerald-950/70 text-emerald-300 border border-emerald-700/60 hover:border-emerald-500 transition cursor-pointer"
+            :title="locale === 'pl' ? 'Filtruj po tym projekcie' : 'Filter by this project'"
+            @click="emit('select-project', entry.project)"
+          >
+            📁 {{ entry.project }}
+          </button>
           <span
             :class="[
               'text-xs px-1.5 py-0.5 rounded uppercase font-mono font-bold tracking-wider border',
@@ -125,6 +134,7 @@ const emit = defineEmits<{
   (e: 'delete'): void
   (e: 'select-link', id: string): void
   (e: 'select-tag', tag: string): void
+  (e: 'select-project', project: string): void
 }>()
 
 const { locale } = useI18n()
