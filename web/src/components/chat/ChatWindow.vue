@@ -84,7 +84,7 @@
               FREE
             </span>
             <span
-              v-else
+              v-else-if="selectedModel && selectedProviderLabel"
               class="hidden md:inline-block px-1.5 py-px rounded text-xs font-mono text-slate-300 bg-botex-900 border border-botex-700 shrink-0"
             >
               {{ selectedProviderLabel }}
@@ -364,20 +364,24 @@ const scrollContainer = ref<HTMLElement | null>(null)
 
 const currentModelDisplayName = computed(() => {
   if (activeModelMeta.value?.name) return activeModelMeta.value.name
-  return selectedModel.value
+  if (selectedModel.value) return selectedModel.value
+  return t('models.select_model')
 })
 
 const isCurrentModelFree = computed(() => {
+  if (!selectedModel.value) return false
   if (activeModelMeta.value) return activeModelMeta.value.is_free
   return selectedModel.value.toLowerCase().includes(':free') || selectedProvider.value === 'openrouter-free'
 })
 
 const selectedProviderLabel = computed(() => {
+  if (!selectedModel.value) return ''
   if (selectedProvider.value === 'openrouter-free') return 'OR Free'
   if (selectedProvider.value === 'nvidia') return 'NIM'
   if (selectedProvider.value === 'google') return 'AI Studio'
   if (selectedProvider.value === 'ollama') return 'Ollama'
-  return 'OpenRouter'
+  if (selectedProvider.value === 'openrouter') return 'OpenRouter'
+  return selectedProvider.value || ''
 })
 
 const quickPrompts = [

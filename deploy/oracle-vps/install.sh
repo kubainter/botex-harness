@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # BoteX - One-Click Production Deployment Script for Oracle Cloud Always Free
-# Shape: VM.Standard.A1.Flex (4 OCPU Ampere ARM64, 24 GiB RAM, Ubuntu 22.04/24.04)
+# Shape: VM.Standard.A1.Flex (3 OCPU Ampere ARM64, 18 GiB RAM, Ubuntu 22.04/24.04)
 # ==============================================================================
 
 set -euo pipefail
@@ -64,8 +64,16 @@ fi
 # 5. Virtual environment & dependencies
 log_info "Setting up Python virtual environment..."
 cd "$INSTALL_DIR"
+PYTHON_BIN=$(command -v python3.12 || command -v python3.11 || command -v python3)
+if [ -d ".venv" ]; then
+    VENV_PY_VER=$(.venv/bin/python3 -c "import sys; print(sys.version_info[:2] >= (3, 11))" 2>/dev/null || echo "False")
+    if [ "$VENV_PY_VER" != "True" ]; then
+        log_info "Recreating virtual environment with $PYTHON_BIN (requires Python >= 3.11)..."
+        rm -rf .venv
+    fi
+fi
 if [ ! -d ".venv" ]; then
-    sudo -u botex python3 -m venv .venv
+    sudo -u botex "$PYTHON_BIN" -m venv .venv
 fi
 
 log_info "Installing Python dependencies..."
@@ -96,24 +104,24 @@ else
     log_info "Existing .env found at $INSTALL_DIR/.env - preserving."
 fi
 
-# 7. Optional Bielik 11B local inference engine (Flagship Q8_0 Quantization)
+# 7. Optional Bielik 11B local inference engine (Quantization Q4_K_M for 18 GiB RAM box)
 if [ "$INSTALL_BIELIK" = true ]; then
-    log_info "Installing llama.cpp ARM NEON engine and downloading Bielik-11B-v3.0 Q8_0..."
+    log_info "Installing llama.cpp ARM NEON engine and downloading Bielik-11B-v3.0 Q4_K_M..."
     if [ ! -d "/opt/llama.cpp" ]; then
         git clone https://github.com/ggml-org/llama.cpp /opt/llama.cpp
         cd /opt/llama.cpp
         cmake -B build
-        cmake --build build --config Release -j4
+        cmake --build build --config Release -j"$(nproc)"
         chown -R botex:botex /opt/llama.cpp
         log_ok "llama.cpp compiled successfully."
     fi
 
-    MODEL_FILE="$BIELIK_DIR/models/bielik-11b-v3.0-instruct.Q8_0.gguf"
+    MODEL_FILE="$BIELIK_DIR/models/bielik-11b-v3.0-instruct.Q4_K_M.gguf"
     if [ ! -f "$MODEL_FILE" ]; then
-        log_info "Downloading Bielik-11B-v3.0 Q8_0 GGUF (~11.05 GiB - Studio 8-bit precision)..."
+        log_info "Downloading Bielik-11B-v3.0 Q4_K_M GGUF (~6.26 GiB - Optimized for 18 GiB RAM)..."
         sudo -u botex curl -fL -o "$MODEL_FILE" \
-            "https://huggingface.co/speakleash/Bielik-11B-v3.0-Instruct-GGUF/resolve/main/Bielik-11B-v3.0-Instruct.Q8_0.gguf"
-        log_ok "Bielik 11B v3.0 Q8_0 model downloaded successfully."
+            "https://huggingface.co/speakleash/Bielik-11B-v3.0-Instruct-GGUF/resolve/main/Bielik-11B-v3.0-Instruct.Q4_K_M.gguf"
+        log_ok "Bielik 11B v3.0 Q4_K_M model downloaded successfully."
     fi
 fi
 
@@ -164,8 +172,7 @@ else
 fi
 echo "=============================================================================="
 printf "🌐 PWA Web Interface & REST API: http://YOUR_VPS_PUBLIC_IP:8000\n"
-printf "🔑 Access Token (from .env):      "
-grep "BOTEX_ACCESS_TOKEN=" "$INSTALL_DIR/.env" | cut -d'=' -f2-
+printf "🔑 Access Auth Mode:              Configured in .env (Token / SHA-256 Hash)\n"
 printf "🕸️ Knowledge Graph & PKM Vault:   %s/.botex/memory\n" "$INSTALL_DIR"
 printf "⚙️ Service Status:                systemctl status botex-cloud\n"
 printf "🧹 Background Maintenance:        systemctl status botex-maintenance.timer\n"

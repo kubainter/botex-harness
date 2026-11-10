@@ -12,140 +12,8 @@ function generateId(): string {
   return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-const FALLBACK_CATALOG_MODELS: CatalogModel[] = [
-  {
-    id: 'bielik-direct:latest',
-    name: 'Bielik Direct (Lokalny 11B)',
-    provider: 'ollama',
-    is_free: true,
-    context_length: 32768,
-    pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M',
-    name: 'Bielik 11B v3.0 Instruct (Ollama)',
-    provider: 'ollama',
-    is_free: true,
-    context_length: 32768,
-    pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'liquid/lfm-2.5-2.6b:free',
-    name: 'Liquid LFM 2.5:free',
-    provider: 'openrouter-free',
-    is_free: true,
-    context_length: 32768,
-    pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
-    supports_tools: true,
-    is_zdr_compliant: false
-  },
-  {
-    id: 'nvidia/nemotron-3-ultra-550b-a55b:free',
-    name: 'Nemotron 3 Ultra 550B:free',
-    provider: 'openrouter-free',
-    is_free: true,
-    context_length: 131072,
-    pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
-    supports_tools: true,
-    is_zdr_compliant: false
-  },
-  {
-    id: 'google/gemma-4-31b-it:free',
-    name: 'Gemma 4 31B IT:free',
-    provider: 'openrouter-free',
-    is_free: true,
-    context_length: 131072,
-    pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
-    supports_tools: true,
-    is_zdr_compliant: false
-  },
-  {
-    id: 'meta-llama/llama-3.1-8b-instruct',
-    name: 'Llama 3.1 8B Instruct',
-    provider: 'openrouter',
-    is_free: false,
-    context_length: 131072,
-    pricing: { prompt_per_m: 0.05, completion_per_m: 0.08 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'google/gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash',
-    provider: 'openrouter',
-    is_free: false,
-    context_length: 1048576,
-    pricing: { prompt_per_m: 0.30, completion_per_m: 2.50 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'qwen/qwen3-coder',
-    name: 'Qwen 3 Coder',
-    provider: 'openrouter',
-    is_free: false,
-    context_length: 131072,
-    pricing: { prompt_per_m: 0.30, completion_per_m: 1.00 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'deepseek/deepseek-r1',
-    name: 'DeepSeek R1',
-    provider: 'openrouter',
-    is_free: false,
-    context_length: 131072,
-    pricing: { prompt_per_m: 0.70, completion_per_m: 2.50 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'anthropic/claude-3.7-sonnet',
-    name: 'Claude 3.7 Sonnet',
-    provider: 'openrouter',
-    is_free: false,
-    context_length: 200000,
-    pricing: { prompt_per_m: 3.00, completion_per_m: 15.00 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'meta/llama-3.3-70b-instruct',
-    name: 'Llama 3.3 70B Instruct (NIM)',
-    provider: 'nvidia',
-    is_free: false,
-    context_length: 131072,
-    pricing: { prompt_per_m: 0.0, completion_per_m: 0.0 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash (AI Studio)',
-    provider: 'google',
-    is_free: false,
-    context_length: 1048576,
-    pricing: { prompt_per_m: 0.30, completion_per_m: 2.50 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  },
-  {
-    id: 'gemini-2.5-pro',
-    name: 'Gemini 2.5 Pro (AI Studio)',
-    provider: 'google',
-    is_free: false,
-    context_length: 1048576,
-    pricing: { prompt_per_m: 1.25, completion_per_m: 10.0 },
-    supports_tools: true,
-    is_zdr_compliant: true
-  }
-]
-
 function inferProviderFromSlug(slug: string): string {
+  if (!slug) return ''
   const s = slug.toLowerCase()
   if (s.includes('bielik') || s.startsWith('ollama:') || s.includes('speakleash')) {
     return 'ollama'
@@ -172,12 +40,12 @@ export const useChatStore = defineStore('chat', () => {
   const activeTransport = ref<'ws' | 'sse' | null>(null)
   const activeMode = ref<'chat' | 'agent'>('chat')
   const selectedModel = ref<string>(
-    localStorage.getItem('botex_selected_model') || 'liquid/lfm-2.5-2.6b:free'
+    localStorage.getItem('botex_selected_model') || ''
   )
   const selectedProvider = ref<string>(
     localStorage.getItem('botex_selected_provider') || inferProviderFromSlug(selectedModel.value)
   )
-  const catalogModels = ref<CatalogModel[]>(FALLBACK_CATALOG_MODELS)
+  const catalogModels = ref<CatalogModel[]>([])
   const isLoadingModels = ref<boolean>(false)
   const workspaceDir = ref<string>('.')
   const pendingTaskDraft = ref<string>('')
@@ -222,20 +90,23 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const list = await api.getModels(undefined, forceRefresh)
       if (Array.isArray(list) && list.length > 0) {
-        const hasOllama = list.some((m) => m.provider === 'ollama')
-        if (!hasOllama) {
-          const fallbackOllama = FALLBACK_CATALOG_MODELS.filter((m) => m.provider === 'ollama')
-          catalogModels.value = [...fallbackOllama, ...list]
+        catalogModels.value = list
+        if (!selectedModel.value || !list.some((m) => m.id === selectedModel.value)) {
+          selectedModel.value = list[0].id
+          selectedProvider.value = list[0].provider
+          localStorage.setItem('botex_selected_model', selectedModel.value)
+          localStorage.setItem('botex_selected_provider', selectedProvider.value)
         } else {
-          catalogModels.value = list
+          const match = catalogModels.value.find((m) => m.id === selectedModel.value)
+          if (match && !localStorage.getItem('botex_selected_provider')) {
+            selectedProvider.value = match.provider
+          }
         }
-        const match = catalogModels.value.find((m) => m.id === selectedModel.value)
-        if (match && !localStorage.getItem('botex_selected_provider')) {
-          selectedProvider.value = match.provider
-        }
+      } else {
+        catalogModels.value = []
       }
     } catch {
-      // Retain fallback catalog when offline
+      catalogModels.value = []
     } finally {
       isLoadingModels.value = false
     }

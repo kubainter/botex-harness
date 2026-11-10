@@ -931,9 +931,7 @@ def allowed_workspaces() -> list[str]:
         if not text:
             continue
         try:
-            roots.append(
-                os.path.realpath(os.path.abspath(Path(text).expanduser()))
-            )
+            roots.append(os.path.realpath(os.path.abspath(Path(text).expanduser())))
         except (OSError, ValueError):
             continue
     return roots
@@ -957,9 +955,7 @@ def _enforce_workspace_containment(real_path: str) -> None:
             return
     # Path detail is for SERVER LOGS ONLY — HTTP/MCP boundaries must return
     # a generic message (absolute-path disclosure to remote callers).
-    raise WorkspaceOutOfBounds(
-        f"workspace_dir {real_path!r} is outside cloud.allowed_workspaces"
-    )
+    raise WorkspaceOutOfBounds(f"workspace_dir {real_path!r} is outside cloud.allowed_workspaces")
 
 
 def resolve_workspace(value: str = "") -> str:
