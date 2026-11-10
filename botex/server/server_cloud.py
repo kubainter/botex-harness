@@ -585,13 +585,12 @@ app = FastAPI(
 @app.exception_handler(WorkspaceOutOfBounds)
 async def _workspace_out_of_bounds_handler(
     request: Request,  # noqa: ARG001 - FastAPI handler signature
-    exc: WorkspaceOutOfBounds,
+    exc: WorkspaceOutOfBounds,  # noqa: ARG001 - FastAPI handler signature
 ) -> JSONResponse:
     """Any route resolving an out-of-allowlist workspace_dir -> 403."""
-    # Full path goes to server logs only; remote callers get a generic
-    # message (no absolute-path disclosure).
+    # Rejected path is request-tainted: static log text only (CodeQL).
     logging.getLogger(__name__).warning(
-        "workspace containment: %s", mask_secrets(str(exc))
+        "workspace containment: rejected out-of-allowlist workspace_dir"
     )
     return JSONResponse(
         status_code=403,
