@@ -27,59 +27,8 @@ export const useWalletStore = defineStore('wallet', () => {
     return bal !== null && bal !== undefined && bal < 1.0
   })
 
-  // Curated model roster based on BoteX benchmark recommendations
-  const recommendedModels = ref<RecommendedModel[]>([
-    {
-      id: 'openrouter/pareto-code',
-      name: 'OpenRouter Pareto Code',
-      provider: 'OpenRouter Meta-Router',
-      role: 'coder',
-      description: 'Dynamic Pareto-optimal coding router balancing SWE-bench accuracy, latency, and cost.',
-      context_length: 200000,
-      input_cost_per_m: 1.50,
-      output_cost_per_m: 6.00
-    },
-    {
-      id: 'google/gemini-2.5-flash',
-      name: 'Gemini 2.5 Flash',
-      provider: 'Google / OpenRouter',
-      role: 'chat',
-      description: 'Low-latency 1M context model for repository-wide analysis and quick diffs.',
-      context_length: 1048576,
-      input_cost_per_m: 0.075,
-      output_cost_per_m: 0.30
-    },
-    {
-      id: 'qwen/qwen3-coder',
-      name: 'Qwen 3 Coder',
-      provider: 'Qwen / OpenRouter',
-      role: 'coder',
-      description: 'Primary autonomous coding model with high multi-file patch accuracy.',
-      context_length: 131072,
-      input_cost_per_m: 0.20,
-      output_cost_per_m: 0.60
-    },
-    {
-      id: 'deepseek/deepseek-r1',
-      name: 'DeepSeek R1',
-      provider: 'DeepSeek / OpenRouter',
-      role: 'planner',
-      description: 'Chain-of-thought reasoning model for system design, debugging, and TDD.',
-      context_length: 65536,
-      input_cost_per_m: 0.55,
-      output_cost_per_m: 2.19
-    },
-    {
-      id: 'anthropic/claude-sonnet-4',
-      name: 'Claude Sonnet 4',
-      provider: 'Anthropic / OpenRouter',
-      role: 'reviewer',
-      description: 'Flagship code review, static analysis fixes, and architectural security auditing.',
-      context_length: 200000,
-      input_cost_per_m: 3.00,
-      output_cost_per_m: 15.00
-    }
-  ])
+  // Curated model roster based on BoteX benchmark recommendations (empty by default, loaded from backend)
+  const recommendedModels = ref<RecommendedModel[]>([])
 
   async function fetchWallet(forceRefresh: boolean = false, provider?: string) {
     const targetProv = provider || activeProvider.value

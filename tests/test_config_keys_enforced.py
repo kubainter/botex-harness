@@ -36,7 +36,6 @@ def test_guarded_config_keys_have_consumers():
             source = path.read_text(encoding="utf-8")
             if key not in source:
                 missing.append(f"{key} not consumed in {path.relative_to(REPO)}")
-    assert not missing, (
-        "Dead config key detected (advertised but unconsumed): "
-        + "; ".join(missing)
+    assert not missing, "Dead config key detected (advertised but unconsumed): " + "; ".join(
+        missing
     )

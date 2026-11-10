@@ -146,14 +146,17 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
 
     // Model Selector Modal
     'models.title': 'Select Execution Model',
-    'models.subtitle': 'Search live catalog across OpenRouter, Free Tier, NVIDIA NIM, Ollama, and Google AI Studio',
-    'models.search.placeholder': 'Filter by model name, slug, or provider (e.g. liquid, r1, qwen, free)...',
-    'models.filter.all': 'Wszystkie (All)',
+    'models.subtitle': 'Available execution models for the active session',
+    'models.search.placeholder': 'Filter by model name or slug...',
+    'models.filter.all': 'All Models',
     'models.filter.free': '100% Free Tier',
     'models.filter.cheap': 'Ultra-Cheap / Fast',
     'models.filter.reasoning': 'Reasoning / Planners',
     'models.filter.coding': 'Coding / Agents',
     'models.empty': 'No models match the current filter.',
+    'models.auth_required': 'Authentication Required',
+    'models.auth_required_desc': 'Configure a valid access token in Settings to view and select models.',
+    'models.select_model': 'Select model',
     'models.select_hint': 'Arrow keys to navigate · Enter to select · Esc to close',
 
     // Tasks View (dotted + camelCase aliases)
@@ -385,14 +388,17 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
 
     // Model Selector Modal
     'models.title': 'Wybierz model wykonawczy',
-    'models.subtitle': 'Przeszukaj katalog modeli OpenRouter, darmowego pakietu Free, NVIDIA NIM, Ollama i Google AI Studio',
-    'models.search.placeholder': 'Szukaj po nazwie, slugu lub dostawcy (np. liquid, r1, qwen, free)...',
+    'models.subtitle': 'Dostępne modele wykonawcze dla aktywnej sesji',
+    'models.search.placeholder': 'Szukaj po nazwie lub identyfikatorze...',
     'models.filter.all': 'Wszystkie',
     'models.filter.free': '100% Free Tier',
     'models.filter.cheap': 'Ultra-Cheap / Fast',
     'models.filter.reasoning': 'Reasoning / Planners',
     'models.filter.coding': 'Coding / Agents',
     'models.empty': 'Żaden model nie pasuje do wybranych filtrów.',
+    'models.auth_required': 'Wymagana autoryzacja',
+    'models.auth_required_desc': 'Wprowadź poprawny token dostępowy w Ustawieniach, aby załadować listę modeli.',
+    'models.select_model': 'Wybierz model',
     'models.select_hint': 'Strzałki: nawigacja · Enter: wybór · Esc: zamknij',
 
     // Tasks View
