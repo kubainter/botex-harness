@@ -60,13 +60,13 @@ jobs:
         env:
           BOTEX_DISABLE_DOTENV: "1"
           PYTHONPATH: "."
-        # Ratchet: 73 is the measured baseline on main (74.86%); raise to 75
-        # after feat/memory-project-partitioning merges (~79%), target 85.
+        # Ratchet: 75 after the partitioning merge (clean-main baseline was
+        # 78.52% at 73); target is 85 via closing delegation/analytics gaps.
         run: >
           python -m pytest tests/
           --cov=botex
           --cov-report=term-missing:skip-covered
-          --cov-fail-under=73
+          --cov-fail-under=75
           -q
 
   web:
