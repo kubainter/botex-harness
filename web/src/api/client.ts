@@ -24,7 +24,12 @@ import type {
   SkillDetail,
   SkillInstallRequest,
   CuratorStatus,
-  CuratorRunRequest
+  CuratorRunRequest,
+  PluginsCatalogResponse,
+  PluginResolveRequest,
+  PluginResolveResponse,
+  VisionInspectRequest,
+  VisionInspectResponse
 } from './types'
 
 
@@ -469,7 +474,32 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body)
     })
+  },
+
+  // 11. Creator Mode Dynamic Plugins & Vision Triage
+  async getPlugins(workspaceDir: string = '.'): Promise<PluginsCatalogResponse> {
+    const q = new URLSearchParams()
+    if (workspaceDir && workspaceDir !== '.') q.set('workspace_dir', workspaceDir)
+    const qs = q.toString()
+    return request<PluginsCatalogResponse>(`/api/plugins${qs ? '?' + qs : ''}`)
+  },
+
+  async resolvePlugin(body: PluginResolveRequest): Promise<PluginResolveResponse> {
+    return request<PluginResolveResponse>('/api/plugins/resolve', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    })
+  },
+
+  async inspectVision(body: VisionInspectRequest): Promise<VisionInspectResponse> {
+    return request<VisionInspectResponse>('/api/vision/inspect', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    })
   }
 }
+
+export const apiClient = api
+
 
 

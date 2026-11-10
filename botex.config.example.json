@@ -1,0 +1,244 @@
+{
+  "providers": {
+    "openrouter": {
+      "api_key_env": "OPENROUTER_API_KEY",
+      "extra_body": {
+        "reasoning": {
+          "max_tokens": 9000
+        }
+      },
+      "models": {
+        "review": "z-ai/glm-4.6",
+        "fast": "openai/gpt-4o-mini"
+      },
+      "model_fallbacks": {
+        "default": [
+          "z-ai/glm-4.6",
+          "qwen/qwen3-coder",
+          "deepseek/deepseek-v3.2"
+        ],
+        "auto-beta": [
+          "z-ai/glm-4.6",
+          "qwen/qwen3-coder",
+          "deepseek/deepseek-v3.2"
+        ],
+        "coding": [
+          "z-ai/glm-4.6",
+          "qwen/qwen3-coder",
+          "deepseek/deepseek-v3.2"
+        ],
+        "review": [
+          "moonshotai/kimi-k2",
+          "deepseek/deepseek-v3.2",
+          "qwen/qwen3-coder"
+        ],
+        "fast": [
+          "qwen/qwen3-coder",
+          "deepseek/deepseek-v3.2",
+          "z-ai/glm-4.6"
+        ]
+      }
+    },
+    "nvidia": {
+      "api_key_env": "NVIDIA_API_KEY",
+      "models": {
+        "default": "nvidia/nemotron-3-ultra-550b-a55b",
+        "coding": "poolside/laguna-xs-2.1",
+        "fast": "nvidia/nemotron-3.5-lightning-30b-a3b"
+      }
+    },
+    "openrouter-free": {
+      "api_key_env": "OPENROUTER_API_FREE_KEY",
+      "extra_body": {
+        "reasoning": {
+          "max_tokens": 4000
+        }
+      },
+      "models": {
+        "fast": "nvidia/nemotron-3.5-lightning:free"
+      },
+      "model_fallbacks": {
+        "default": [
+          "nvidia/nemotron-3.5-lightning:free",
+          "nvidia/nemotron-3.5-super-vl:free"
+        ],
+        "coding": [
+          "nvidia/nemotron-3.5-super-vl:free",
+          "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+        ],
+        "fast": [
+          "nvidia/nemotron-3.5-super-vl:free",
+          "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+        ]
+      }
+    },
+    "google": {
+      "api_key_env": "GEMINI_API_KEY",
+      "capabilities": {
+        "gemini-3-flash-preview": {
+          "supports_tools": true,
+          "context_length": 1048576
+        }
+      },
+      "models": {
+        "coding": "gemini-2.5-flash"
+      },
+      "model_fallbacks": {
+        "coding": [
+          "gemini-3-flash-preview",
+          "gemini-2.5-pro"
+        ]
+      }
+    },
+    "ollama": {
+      "api_key_env": "OLLAMA_API_KEY",
+      "zdr": {
+        "enabled": false
+      },
+      "models": {
+        "default": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
+        "coding": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
+        "fast": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M"
+      }
+    }
+  },
+  "engine": {
+    "max_turns": 45,
+    "request_timeout_s": 3600,
+    "max_concurrent_tasks": 4,
+    "max_queued_tasks": 12,
+    "max_duration_s": 2200,
+    "temperature": 0.7,
+    "budget_limit_usd": 2.5,
+    "approval_policy": "high_risk"
+  },
+  "exec": {
+    "deny_args": [
+      "python -c",
+      "python3 -c",
+      "py -c",
+      "node -e",
+      "npm exec",
+      "npx",
+      "pip install",
+      "pip uninstall",
+      "git push",
+      "git commit",
+      "git clean",
+      "git reset",
+      "git checkout",
+      "git restore",
+      "git rm",
+      "git config",
+      "git rebase",
+      "git merge",
+      "git pull",
+      "git fetch",
+      "git clone",
+      "git apply",
+      "git stash",
+      "git tag",
+      "git branch -d",
+      "git branch -D",
+      "sudo",
+      "rm",
+      "del",
+      "format",
+      "shutdown",
+      "reboot",
+      "curl",
+      "wget",
+      "iex",
+      "invoke-expression"
+    ]
+  },
+  "app": {
+    "referer": "https://github.com/kubainter/botex-harness"
+  },
+  "analytics": {
+    "digest_enabled": false,
+    "digest_provider": "",
+    "digest_model": ""
+  },
+  "pricing": {
+    "max_input_per_mtok": 2,
+    "max_output_per_mtok": 4
+  },
+  "rate_limits": {
+    "openrouter-free": {
+      "rpm": 20,
+      "tpm": 100000,
+      "burst_multiplier": 1.2,
+      "cooldown_s": 60
+    },
+    "nvidia": {
+      "rpm": 40,
+      "tpm": 150000,
+      "burst_multiplier": 1.5,
+      "cooldown_s": 30
+    },
+    "google": {
+      "rpm": 15,
+      "tpm": 1000000,
+      "burst_multiplier": 1,
+      "cooldown_s": 60
+    },
+    "openrouter": {
+      "rpm": 200,
+      "tpm": 2000000,
+      "burst_multiplier": 2,
+      "cooldown_s": 10
+    },
+    "recall_rpm": 30
+  },
+  "provider_fallbacks": {
+    "openrouter-free": [
+      "nvidia",
+      "google",
+      "openrouter"
+    ],
+    "nvidia": [
+      "openrouter-free",
+      "google",
+      "openrouter"
+    ],
+    "google": [
+      "nvidia",
+      "openrouter"
+    ]
+  },
+  "paths": {
+    "swarm_memory_dir": ""
+  },
+  "memory": {
+    "recall": {
+      "ollama": {
+        "model": "qwen2.5:3b",
+        "enabled": true,
+        "timeout_s": 12
+      },
+      "nvidia": {
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "enabled": true,
+        "timeout_s": 12
+      },
+      "gemini": {
+        "model": "gemini-2.5-flash",
+        "enabled": true,
+        "timeout_s": 10
+      },
+      "openrouter_free": {
+        "model": "nvidia/nemotron-3.5-lightning:free",
+        "enabled": true,
+        "timeout_s": 10
+      },
+      "hedge_s": 4,
+      "cache_ttl_s": 300,
+      "queue_wait_s": 3,
+      "num_ctx_guard_tokens": 4000
+    }
+  },
+  "cloud": {
+    "allowed_workspaces": []
+  }
+}

@@ -11,9 +11,9 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Jakub Grzesiak" }]
 keywords = ["mcp", "agent", "code-editing", "openrouter", "subagent"]
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
-    "openai>=1.40",
+    "openai>=3.0",
     "python-dotenv>=1.0",
     "mcp>=2.0",
     "typing_extensions>=4.0",
@@ -21,16 +21,22 @@ dependencies = [
     "uvicorn>=0.20",
     "websockets>=12.0",
     "sse-starlette>=2.0",
+    # httpx2<2.16 leaks response-stream async generators on SSE/chat
+    # completions ("generator didn't stop after athrow()" at shutdown).
+    "httpx2>=2.16.0",
+    # Multiline/bracketed-paste input for interactive CLI prompts.
+    "prompt_toolkit>=3.0",
 ]
 
 [project.optional-dependencies]
 cli = ["rich>=13.0"]
 dev = ["ruff>=0.1.0", "pytest>=7.0", "opentelemetry-sdk>=1.20"]
 otel = ["opentelemetry-sdk>=1.20", "opentelemetry-exporter-otlp-proto-http>=1.20"]
+perf = ["uvloop>=0.19; sys_platform != 'win32'"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 exclude = [
     "typing_extensions.py",
     ".snapshots",
@@ -52,5 +58,16 @@ botex = "server:main"
 
 [tool.setuptools]
 py-modules = ["server"]
-packages = ["botex", "ops", "ops.curator"]
+packages = [
+    "botex",
+    "botex.core",
+    "botex.memory",
+    "botex.providers",
+    "botex.providers.adapters",
+    "botex.server",
+    "botex.skills",
+    "botex.tools",
+    "botex.ops",
+    "botex.ops.curator",
+]
 

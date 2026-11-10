@@ -957,3 +957,86 @@ def test_get_model_capabilities_strips_models_prefix():
         "supports_tools": True,
         "context_length": 1048576,
     }
+
+
+def test_openrouter_extra_body_injects_max_price_from_pricing_config():
+    """Verify OpenRouterProvider propagates pricing.max_*_per_mtok to provider.max_price."""
+    prov = OpenRouterProvider("openrouter", config={"zdr": {"enabled": True}})
+    eb = prov.get_extra_body(
+        model="openrouter/auto",
+        pricing_cfg={"enabled": True, "max_input_per_mtok": 1.5, "max_output_per_mtok": 3.0},
+    )
+    assert eb["provider"]["max_price"] == {"prompt": 1.5, "completion": 3.0}
+
+    # When pricing is disabled, max_price is omitted
+    eb_disabled = prov.get_extra_body(
+        model="openrouter/auto",
+        pricing_cfg={"enabled": False, "max_input_per_mtok": 1.5, "max_output_per_mtok": 3.0},
+    )
+    assert "max_price" not in eb_disabled["provider"]
+
+    # Free tier provider or :free model omits max_price so zero-cost endpoints aren't misfiltered
+    prov_free = OpenRouterProvider("openrouter-free", config={"zdr": {"enabled": False}})
+    eb_free_prov = prov_free.get_extra_body(
+        model="nvidia/nemotron-3-ultra-550b-a55b:free",
+        pricing_cfg={"enabled": True, "max_input_per_mtok": 2.0, "max_output_per_mtok": 4.0},
+    )
+    assert "max_price" not in eb_free_prov["provider"]
+
+    eb_free_slug = prov.get_extra_body(
+        model="qwen/qwen3.8-27b:free",
+        pricing_cfg={"enabled": True, "max_input_per_mtok": 2.0, "max_output_per_mtok": 4.0},
+    )
+    assert "max_price" not in eb_free_slug["provider"]
+
+    # Explicit user override in extra_body.provider.max_price is preserved
+    prov_custom = OpenRouterProvider(
+        "openrouter",
+        config={"extra_body": {"provider": {"max_price": {"prompt": 0.5, "completion": 1.0}}}},
+    )
+    eb_custom = prov_custom.get_extra_body(
+        model="openrouter/auto",
+        pricing_cfg={"enabled": True, "max_input_per_mtok": 5.0, "max_output_per_mtok": 5.0},
+    )
+    assert eb_custom["provider"]["max_price"] == {"prompt": 0.5, "completion": 1.0}
+
+    # When allow_expensive_model is True on provider config, max_price is bypassed
+    prov_expensive = OpenRouterProvider(
+        "openrouter",
+        config={"zdr": {"enabled": True}, "allow_expensive_model": True},
+    )
+    eb_expensive = prov_expensive.get_extra_body(
+        model="openai/gpt-6.1-sol",
+        pricing_cfg={"enabled": True, "max_input_per_mtok": 1.5, "max_output_per_mtok": 3.0},
+    )
+    assert "max_price" not in eb_expensive["provider"]
+
+
+def test_credits_info_dataclass_fields_and_sanitization():
+    """Verify CreditsInfo defaults to units='usd', quota_windows=(), and scrubs secrets."""
+    from botex.providers.providers import CreditsInfo
+
+    # 1. Defaults
+    info_default = CreditsInfo(supported=True, provider="test_prov")
+    assert info_default.units == "usd"
+    assert info_default.quota_windows == ()
+
+    # 2. Custom values and secret scrubbing
+    secret_key = "sk-proj-1234567890abcdef1234567890"
+    windows = (
+        {
+            "label": "Window",
+            "unit": "hours",
+            "api_key": secret_key,
+        },
+    )
+    info_custom = CreditsInfo(
+        supported=True,
+        provider="test_prov",
+        units="quota",
+        quota_windows=windows,
+    )
+    assert info_custom.units == "quota"
+    assert len(info_custom.quota_windows) == 1
+    assert info_custom.quota_windows[0]["api_key"] == "[REDACTED]"
+    assert info_custom.quota_windows[0]["unit"] == "hours"

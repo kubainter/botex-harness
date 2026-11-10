@@ -16,7 +16,7 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `engine.py` - Autonomous execution loop, 5-gate in-payload failovers, in-flight state checkpointing, provider fallbacks, context management, deterministic task receipts, and rollback triggers.
     *   `state.py` - In-flight execution checkpoints (`InFlightTaskState`), plan/finding carryover across model/provider fallbacks.
     *   `rate_limiter.py` - Token-bucket rate limiting (RPM/TPM) and cooldown tracking for free and cloud providers.
-    *   `curator.py` - Periodic Memory Vault synthesis and telemetry digests with optional Telegram alerts.
+    *   `curator.py` / `ops/curator/` - Autonomous Memory Vault synthesis, telemetry digests, and multi-tier LLM recall synthesis (`recall_curator.py`).
     *   `delegation.py` - Delegation bridge to external specialized agents (e.g. Devin).
     *   `events.py` - Engine and lifecycle event taxonomy (`EventKind`).
     *   `contracts.py` - Task completion contract verification, strict JSON Schema (`TASK_COMPLETION_JSON_SCHEMA`), and status taxonomy.
@@ -38,7 +38,7 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `benchmarks.py` - Authenticated live model recommendations (`recommend_models`) and tier-aware (`high` / `standard` / `budget`) rankings.
     *   `context_guard.py` - Context compaction and verification output pruning.
     *   `net_tools.py` - SSRF-safe network fetching tools (`read_url`, `fetch_url`).
-    *   `memory.py` - Persistent two-tier Memory Vault (local `.botex/memory/` and global `~/.botex/memory/`) with wikilink graph and scratchpad offload.
+    *   `memory.py` - Persistent two-tier Memory Vault (local `.botex/memory/` and global `~/.botex/memory/`) with wikilink graph, 1-hop recall context gathering, and scratchpad offload.
     *   `embeddings.py` - Local embedding helpers supporting memory/graph features.
     *   `obsidian.py` - Obsidian PKM vault export, per-kind graph colors, and `_GRAPH_INDEX.md` generation.
     *   `meta_harness.py` - Task taxonomy classification, patch probing, and meta-lesson extraction/recommendation (self-improvement layer).
@@ -49,7 +49,7 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `ui.py` - ANSI styling helpers with plain-text fallback.
     *   `recipes/` - Bundled persona prompts (`planner`, `reviewer`, `tdd`, `build-resolver`, `security-reviewer`, `security-taint-hardener`, `code-explorer`, `architecture-adr`, `ui-craftsman`).
 *   **`web/`** - Vue 3 + Vite + Pinia + Tailwind CSS PWA frontend for the Cloud Gateway.
-*   **`tests/`** - Test suite (38 files, 615 collected tests: `test_botex.py`, `test_rate_limiter.py`, `test_state_checkpoint.py`, `test_curator.py`, `test_delegation.py`, `test_events.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_stage_4_8.py`, `test_retry.py`, `test_skills_parity.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_context_guard.py`, `test_analytics.py`, `test_embeddings.py`, `test_meta_harness.py`, `test_obsidian_graph.py`, `test_obsidian_edge_cases.py`, `test_nvidia_streaming.py`, `test_credits_stress.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_integration.py`, `test_circuit_breaker.py`, `test_tracing.py`, `test_task_size_routing.py`, `test_structured_contracts_v1.py`, `test_caller_skill_contract.py`, `test_config_safety.py`, and live integration tests in `test_live_e2e.py`).
+*   **`tests/`** - Test suite (40 files, 650 collected tests: 	est_context_inclusion.py, 	est_memory_hindsight_features.py, `test_botex.py`, `test_rate_limiter.py`, `test_state_checkpoint.py`, `test_curator.py`, `test_delegation.py`, `test_events.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_stage_4_8.py`, `test_retry.py`, `test_skills_parity.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_context_guard.py`, `test_analytics.py`, `test_embeddings.py`, `test_meta_harness.py`, `test_obsidian_graph.py`, `test_obsidian_edge_cases.py`, `test_nvidia_streaming.py`, `test_credits_stress.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_integration.py`, `test_circuit_breaker.py`, `test_tracing.py`, `test_task_size_routing.py`, `test_structured_contracts_v1.py`, `test_caller_skill_contract.py`, `test_config_safety.py`, and live integration tests in `test_live_e2e.py`).
 *   **`docs/`** - Documentation (`TUTORIAL.md`).
 *   **`skills/`** - Skill definitions: caller-side contract (`skills/botex/SKILL.md`) plus server-side packs (`architecture-planner`, `build-resolver`, `code-review`, `security-audit`, `tdd-verification`) managed by `botex/skills.py`.
 
@@ -92,6 +92,7 @@ Under no circumstances should you modify the following locations:
 ### 3.2. Repository Conventions
 *   **Commits:** Try to keep commit messages concise, factual, and in English. The title should not exceed 50 characters, and if a longer description is needed, add it after a blank line.
 *   **Pull Requests:** Avoid exposing details of potential vulnerabilities (CRITICAL) in public PR descriptions, in accordance with the Zero Data Retention / leak-free rule. Remember that security-related fixes should be shorter than 50 lines of code.
+*   **Comment & Docstring Hygiene (Zero-Bloat):** When writing logic, do NOT generate bloatware commentary — no per-line narration restating what the code already says, no boilerplate docstrings on trivial helpers. Comments and docstrings are reserved for non-obvious *why* (security boundaries, invariants, deliberate trade-offs); self-explanatory code ships uncommented. Do not strip existing docstrings/comments while editing adjacent code.
 
 ## 4. Autonomy Criteria
 
@@ -134,6 +135,13 @@ External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge)
 
 ### 6.3. Heavy Command Output Sandboxing (`context_mode__ctx_execute` / `context_mode__ctx_batch_execute`)
 - When running full pytest suites, CodeQL traces, or coverage matrices that produce extensive logs, execute or filter them through `context-mode` via Toolport to prevent raw byte flooding into the context window.
+
+### 6.4. Memory Vault & Zero-Bloat Knowledge Recall (`recall_memory`)
+- When querying project context, architectural decisions, or prior lessons from BoteX Memory Vault, ALWAYS use `recall_memory(query="...")` first via direct MCP.
+- `recall_memory` performs automatic 1-hop graph expansion (wikilinks + backlinks) and server-side curator synthesis (hedged 4-tier cascade: local qwen2.5:3b → NVIDIA → Gemini → OR-free), returning concise facts and cited sources in 1 turn without token-stuffing agent history.
+- **ALWAYS pass `workspace_dir="C:\Users\kubai\.ai\harness"`** when querying swarm knowledge — the swarm vault lives in the harness repo, and the default workspace resolves elsewhere (verified trap: `recall_status=ZERO_NODES_FOUND` usually means wrong vault, not a dead model). Every response now carries `recall_status`, `tier_attempts`, `workspace_searched` — read them before assuming a miss.
+- Swarm knowledge is also reachable via `scope="swarm"` (third read-only root, configured in `paths.swarm_memory_dir`); `scope="all"` includes it when configured.
+- Use `read_memory(memory_id="...")` only when exact raw note contents must be inspected for surgical editing. Avoid multi-turn `search_memory` hunting loops; if you must use `search_memory`, pass the same `workspace_dir`.
 
 
 

@@ -5,9 +5,21 @@ export interface HealthStatus {
   timestamp?: string
 }
 
+export interface QuotaWindow {
+  limit: number
+  current_usage: number
+  percentage: number
+  next_reset_time?: number | string | null
+  unit?: number | string
+  number?: number
+  name?: string
+}
+
 export interface WalletInfo {
   supported: boolean
   provider: string
+  units?: 'usd' | 'quota' | string
+  quota_windows?: QuotaWindow[]
   balance_usd: number | null
   usage_usd: number | null
   spend_usd?: number | null
@@ -23,6 +35,8 @@ export interface WalletInfo {
 export interface KeyStatusInfo {
   supported: boolean
   provider: string
+  units?: 'usd' | 'quota' | string
+  quota_windows?: QuotaWindow[]
   limit: number | null
   limit_remaining: number | null
   spend_usd: number | null
@@ -464,4 +478,69 @@ export interface CuratorRunRequest {
   notify_telegram?: boolean
 }
 
+// ---------------------------------------------------------------------------
+// Creator Mode Dynamic Plugins & Vision Triage Types
+// ---------------------------------------------------------------------------
 
+export interface PluginDefinition {
+  name: string
+  description: string
+  parameters_schema: Record<string, any>
+  example_usage: {
+    input?: any
+    output?: any
+    [key: string]: any
+  }
+  reusability: 'ephemeral' | 'reusable' | string
+  requires_net: boolean
+  scope: 'ephemeral' | 'staging' | 'local' | 'global' | string
+  script_path: string
+  sha256: string
+}
+
+export interface PluginsCatalogResponse {
+  ok: boolean
+  plugins: {
+    local: PluginDefinition[]
+    global: PluginDefinition[]
+    staging: PluginDefinition[]
+  }
+  index_markdown: {
+    local: string
+    global: string
+  }
+}
+
+export interface PluginResolveRequest {
+  name: string
+  action: 'local' | 'global' | 'discard'
+  workspace_dir?: string
+}
+
+export interface PluginResolveResponse {
+  ok: boolean
+  status: string
+  scope?: string
+  name: string
+  index_updated?: boolean
+}
+
+export interface VisionInspectRequest {
+  image_base64: string
+  prompt_hint?: string
+  reference_hash?: number | null
+  task_id?: string | null
+  workspace_dir?: string
+}
+
+export interface VisionInspectResponse {
+  ok: boolean
+  status: 'NO_VISUAL_DIFF' | 'DEFECT_DETECTED' | 'CLEAN' | string
+  skipped_llm: boolean
+  dhash: number
+  hamming_distance: number
+  provider?: string | null
+  model?: string | null
+  finding: string
+  observation_json: string
+}

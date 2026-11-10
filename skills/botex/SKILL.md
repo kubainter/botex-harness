@@ -2,14 +2,14 @@
 name: botex
 description: Contract-driven delegation guide for the BoteX agent-agnostic execution harness. Covers caller vs worker tool layers, execution modes (readonly, edit, destructive, full), start_task and run_subagent parameters, status and result contracts, approval policies, workspace confinement, and two-tier Memory Vault flows.
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
 ---
 
 # BoteX Caller Skill
 
 BoteX is an agent-agnostic execution harness and MCP server designed for autonomous, headless code execution and context management. It runs a self-contained, contract-driven tool loop (inspect outline -> read range -> apply patch / create file -> in-memory syntax check -> snapshot rollback / verify command) over a strictly bounded workspace.
 
-MCP tools: `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `find_graph_health`, `get_backlinks`, `get_outline`, `get_stats`, `get_task_status`, `init_obsidian_vault`, `patch_memory_section`, `read_memory`, `read_scratchpad`, `recommend_models`, `run_subagent`, `save_memory`, `search_memory`, `start_task`.
+MCP tools: `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `find_graph_health`, `get_backlinks`, `get_outline`, `get_stats`, `get_task_status`, `init_obsidian_vault`, `patch_memory_section`, `read_memory`, `read_scratchpad`, `recall_memory`, `recommend_models`, `reflect_memory`, `run_subagent`, `save_memory`, `search_memory`, `start_task`.
 
 ## 1. Purpose & Audience
 
@@ -105,7 +105,7 @@ Is the task purely informational or advisory (no workspace mutations)?
 
 To prevent architectural confusion, callers MUST clearly differentiate between **caller-facing** MCP tools and **internal worker** tools.
 
-### Caller-Facing MCP Tools (18 Tools)
+### Caller-Facing MCP Tools (19 Tools)
 
 These tools are exposed directly by `server.py` to the orchestrating agent over the MCP connection:
 
@@ -122,6 +122,8 @@ These tools are exposed directly by `server.py` to the orchestrating agent over 
 - `delete_memory(memory_id, workspace_dir="", scope="local")`: Permanently deletes a specific memory note from local or global storage.
 - `get_backlinks(memory_id, workspace_dir="", scope="local")`: Discovers all memory notes linking to the target note via `[[wikilinks]]`.
 - `find_graph_health(workspace_dir="", scope="local")`: Scans the memory knowledge graph for broken links, orphan notes, and circular dependencies.
+- `recall_memory(query, workspace_dir="", topic=None, scope="all")`: One-shot natural language memory recall. Expands search hits via 1-hop graph traversal (wikilinks + backlinks) and synthesizes facts with cited sources via a server-side curator cascade (`local-ollama` -> `nvidia` -> `gemini` -> `openrouter-free` -> `deterministic`), cutting context bloat by up to 98%.
+- `reflect_memory(query, workspace_dir="", topic=None, min_confidence=0.5, scope="all")`: Synthesizes matching facts, decisions, beliefs, and heuristics into an ordered reasoning digest grouped by kind and ranked by confidence.
 - `init_obsidian_vault(workspace_dir="", scope="local", override_existing=false, export_index=true)`: Initializes `.obsidian/` graph visualization settings and exports `_GRAPH_INDEX.md`.
 - `read_scratchpad(memory_id, workspace_dir="")`: Reads offloaded, verbose terminal logs or subagent outputs stored under `.botex/scratchpad/<memory_id>.log`.
 
@@ -401,8 +403,10 @@ BoteX provides a persistent, two-tier Memory Vault with wikilink graph support:
 Callers SHOULD follow this standard sequence when retrieving and storing knowledge:
 
 ```
-Step 1: search_memory(query="...", scope="all")
-        └── Discover existing notes, ADRs, or prior lessons.
+Step 1 (Preferred): recall_memory(query="...", scope="all")
+        └── One-shot synthesized facts and cited sources directly from the graph (zero bloat).
+    Alternative: search_memory(query="...", scope="all")
+        └── Discover raw candidate notes, ADRs, or prior lessons.
 Step 2: read_memory(memory_id="...", scope="local")
         └── Inspect full note content, frontmatter, and [[wikilinks]].
 Step 3: Update or Create:

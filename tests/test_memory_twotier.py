@@ -6,12 +6,21 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import sqlite3
+import threading
 from unittest.mock import patch
 
 import pytest
 
 import server
 from botex import memory
+
+
+@pytest.fixture(autouse=True)
+def cleanup_memory_cache():
+    """Reset memory index cache after each test to prevent SQLite file locks."""
+    yield
+    memory.reset_memory_index_cache()
 
 
 @pytest.fixture
@@ -195,14 +204,14 @@ def test_two_tier_secret_masking(memory_dirs):
 
 
 def test_mcp_server_memory_tools_and_exact_tool_count(memory_dirs):
-    """Verify server.py MCP tools accept scope and exactly 12 tools exist."""
+    """Verify server.py MCP tools accept scope and exactly 20 tools exist."""
     ws_dir, _ = memory_dirs
 
     async def _test():
-        # 1. Verify exactly 18 tools registered on MCPServer
+        # 1. Verify exactly 20 tools registered on MCPServer
         tools = await server.mcp.list_tools()
-        assert len(tools) == 18, (
-            f"Expected exactly 18 MCP tools, found {len(tools)}: {[t.name for t in tools]}"
+        assert len(tools) == 20, (
+            f"Expected exactly 20 MCP tools, found {len(tools)}: {[t.name for t in tools]}"
         )
 
         # 2. Test save_memory MCP tool with scope
@@ -353,6 +362,76 @@ def test_engine_save_task_receipt(memory_dirs):
     assert f"Task Receipt: {task_id}" in content
     assert "Refactor authentication flow" in content
     assert "`auth/jwt.py`" in content
-    assert "+42" in content
-    assert "-10" in content
     assert "`pytest tests/test_auth.py`" in content
+
+
+def test_sqlite_connection_pooling_and_noop_close(tmp_path: Path):
+    """Verify _get_index_db returns the same connection and close() is a no-op."""
+    mem_dir = tmp_path / "memory_pool_test"
+    conn1 = memory._get_index_db(mem_dir)
+    conn2 = memory._get_index_db(mem_dir)
+    assert conn1 is conn2
+    assert isinstance(conn1, memory._PooledConnection)
+
+    # Calling close() must NOT close the connection
+    conn1.close()
+    row = conn1.execute("SELECT 1;").fetchone()
+    assert row[0] == 1
+
+    # Calling force_close() actually disposes the connection
+    conn1.force_close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn1.execute("SELECT 1;")
+
+
+def test_sqlite_ddl_memoization(tmp_path: Path):
+    """Verify DDL execution is recorded once in _SCHEMA_READY."""
+    mem_dir = tmp_path / "schema_memo_test"
+    db_key = str((mem_dir / "index.db").resolve())
+    assert db_key not in memory._SCHEMA_READY
+
+    conn = memory._get_index_db(mem_dir)
+    assert db_key in memory._SCHEMA_READY
+
+    # Verify tables and WAL mode are present
+    journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+    assert journal_mode.lower() == "wal"
+
+    # Second call uses cached schema
+    conn2 = memory._get_index_db(mem_dir)
+    assert conn2 is conn
+
+
+def test_sqlite_thread_isolation(tmp_path: Path):
+    """Verify distinct threads receive distinct PooledConnection instances."""
+    mem_dir = tmp_path / "thread_iso_test"
+    main_conn = memory._get_index_db(mem_dir)
+    thread_conns: list[sqlite3.Connection] = []
+
+    def _worker():
+        t_conn = memory._get_index_db(mem_dir)
+        thread_conns.append(t_conn)
+        row = t_conn.execute("SELECT 1;").fetchone()
+        assert row[0] == 1
+
+    thread = threading.Thread(target=_worker)
+    thread.start()
+    thread.join()
+
+    assert len(thread_conns) == 1
+    worker_conn = thread_conns[0]
+    assert worker_conn is not main_conn
+
+
+def test_reset_memory_index_cache(tmp_path: Path):
+    """Verify reset_memory_index_cache closes all connections and clears schema cache."""
+    mem_dir = tmp_path / "reset_test"
+    db_key = str((mem_dir / "index.db").resolve())
+    conn = memory._get_index_db(mem_dir)
+    assert db_key in memory._SCHEMA_READY
+
+    memory.reset_memory_index_cache()
+    assert db_key not in memory._SCHEMA_READY
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1;")

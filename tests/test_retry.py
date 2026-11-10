@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
-import httpx
+import httpx2 as httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from botex.contracts import FALLBACKABLE_KINDS, classify_api_error, should_fallback

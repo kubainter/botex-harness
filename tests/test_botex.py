@@ -1488,7 +1488,7 @@ def test_provider_adapter():
     assert classify_api_error(_status_err(429)) == "provider_rate_limited"
     assert classify_api_error(_status_err(500)) == "provider_unavailable"
     assert classify_api_error(Exception("weird")) == "provider_error"
-    import httpx
+    import httpx2 as httpx
     from openai import APITimeoutError, APIConnectionError
 
     _req = httpx.Request("GET", "https://example.invalid")
@@ -2717,7 +2717,10 @@ def test_recipes_and_rationalization_heuristics():
             fake = FakeClient([resp("STATUS: DONE\nplan completed")])
             res = run(fake, task="plan architecture", recipe="planner")
             assert res["status"] == "DONE" and res["ok"] is True
-            sys_msg = fake.calls[0]["messages"][0]["content"][0]["text"]
+            # Policy-gated cache transform (prompt_cache): non-capable models
+            # get plain-string system content (collapsed parts, no cache flag).
+            sys_content = fake.calls[0]["messages"][0]["content"]
+            sys_msg = sys_content[0]["text"] if isinstance(sys_content, list) else sys_content
             assert "ACTIVE RECIPE / PERSONA (planner)" in sys_msg
             assert "Planner" in sys_msg
 
@@ -2850,11 +2853,13 @@ def test_mcp_tool_surface():
         "save_memory",
         "search_memory",
         "read_memory",
+        "recall_memory",
         "delete_memory",
         "read_scratchpad",
         "get_backlinks",
         "patch_memory_section",
         "find_graph_health",
+        "reflect_memory",
         "init_obsidian_vault",
         "get_stats",
         "check_health",
@@ -3019,6 +3024,254 @@ def test_try_local_command():
         assert _try_local_command("py") == True
 
         assert _try_local_command("unknown") == False
+
+
+def test_try_local_command_repl_behaviors():
+    """Test REPL local-command behaviors in _try_local_command.
+
+    Covers: chat, memory, workspace forwarding, bare 'run', 'cloud',
+    '--help' handling, unbalanced quotes, bogus commands, and workspace value.
+    """
+    from unittest.mock import patch, MagicMock
+    from server import _try_local_command
+
+    # Test 1: chat "co słychać?" -> _cli_chat receives ['co słychać?'] (shlex strips quotes)
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config") as mock_config,
+        patch("server._cli_memory") as mock_memory,
+        patch("server._cli_models") as mock_models,
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_wallet") as mock_wallet,
+        patch("builtins.print"),
+    ):
+        result = _try_local_command('chat "co słychać?"')
+        assert result == True
+        mock_chat.assert_called_with(["co słychać?"])
+
+    # Test 2: chat "multi word prompt" --provider ollama -> argv order preserved
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_memory"),
+        patch("server._cli_models"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command('chat "multi word prompt" --provider ollama')
+        assert result == True
+        mock_chat.assert_called_with(["multi word prompt", "--provider", "ollama"])
+
+    # Test 3: memory search "foo bar" -> _cli_memory receives ['search', 'foo', 'bar']
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_chat"),
+        patch("server._cli_models"),
+        patch("server._cli_memory") as mock_memory,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command('memory search "foo bar"')
+        assert result == True
+        mock_memory.assert_called_with(["search", "foo bar"])
+
+    # Test 4: Workspace forwarding
+    # _try_local_command('chat "hi"', workspace='/ws') -> _cli_chat gets ['-w', '/ws', 'hi']
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_memory"),
+        patch("server._cli_models"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command('chat "hi"', workspace="/ws")
+        assert result == True
+        mock_chat.assert_called_with(["-w", "/ws", "hi"])
+
+    # _try_local_command('memory list', workspace='/ws') -> _cli_memory gets ['list', '-w', '/ws']
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_chat"),
+        patch("server._cli_models"),
+        patch("server._cli_memory") as mock_memory,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command("memory list", workspace="/ws")
+        assert result == True
+        mock_memory.assert_called_with(["list", "-w", "/ws"])
+
+    # explicit '-w'/'--workspace' already in args -> NO injection, order preserved
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_memory"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_models"),
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command('chat "hi" -w /explicit', workspace="/ws")
+        assert result == True
+        mock_chat.assert_called_with(["hi", "-w", "/explicit"])
+
+        mock_chat.reset_mock()
+        result = _try_local_command('chat "hi" --workspace=/explicit', workspace="/ws")
+        assert result == True
+        mock_chat.assert_called_with(["hi", "--workspace=/explicit"])
+
+    # empty workspace -> no '-w' added
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_memory"),
+        patch("server._cli_models"),
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command('chat "hi"', workspace="")
+        assert result == True
+        call_args = mock_chat.call_args
+        argv = call_args[0][0] if call_args else []
+        assert "-w" not in argv, f"Expected no '-w' for empty workspace, got {argv}"
+
+    # Test 5: Bare 'run' -> returns True and prints usage hint, no subcommand dispatched
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_memory"),
+        patch("server._cli_models"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command("run")
+        assert result == True
+        mock_chat.assert_not_called()
+
+    # Test 6: 'cloud' -> returns True and prints warning, nothing dispatched to model
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_memory"),
+        patch("server._cli_models"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command("cloud")
+        assert result == True
+        mock_chat.assert_not_called()
+
+    # Test 7: 'chat --help' -> returns True and SystemExit from argparse is swallowed
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_memory"),
+        patch("server._cli_models"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        # Mock _cli_chat to raise SystemExit (simulating argparse --help)
+        mock_chat.side_effect = SystemExit()
+        result = _try_local_command("chat --help")
+        assert result == True
+        mock_chat.assert_called_with(["--help"])
+
+    # Test 8: 'chat "unclosed' (unbalanced quote) -> still returns True with fallback argv
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_memory"),
+        patch("server._cli_models"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command('chat "unclosed')
+        assert result == True
+        # shlex fails on unbalanced quote -> plain split keeps the quote char
+        mock_chat.assert_called_with(['"unclosed'])
+
+    # Test 9: 'bogus-cmd' -> returns False (falls through to model task)
+    result = _try_local_command("bogus-cmd")
+    assert result == False
+
+    # Test 10: unquoted prompt with empty workspace -> argv unchanged
+    with (
+        patch("server.check_health", return_value={"status": "ok"}),
+        patch("server.cli_stats"),
+        patch("server.cli_history"),
+        patch("server.snapshot_manager"),
+        patch("server._cli_config"),
+        patch("server._cli_memory"),
+        patch("server._cli_models"),
+        patch("server._cli_chat") as mock_chat,
+        patch("server._cli_wallet"),
+        patch("builtins.print"),
+    ):
+        result = _try_local_command("chat hello", workspace="")
+        assert result == True
+        mock_chat.assert_called_with(["hello"])
+
+
+def test_repl_workspace_forwarded():
+    """_repl must pass the resolved workspace to _try_local_command."""
+    from unittest.mock import patch
+    from server import _repl
+
+    with (
+        patch("builtins.input") as mock_input,
+        patch("server._resolve_workspace_abs", return_value=("/resolved/ws", "test")),
+        patch("server._try_local_command", return_value=True) as mock_try_local,
+        patch("server.run_botex_task"),
+        patch("server._print_repl_help"),
+        patch("server._warn_if_harness"),
+        patch("builtins.print"),
+    ):
+        mock_input.side_effect = ["health", "quit"]
+        _repl([])
+        mock_try_local.assert_called_once_with("health", workspace="/resolved/ws")
 
 
 def test_normalize_cli_style():
@@ -3261,7 +3514,7 @@ def test_cli_models():
 
 
 def test_repl():
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import ANY, patch, MagicMock
     from server import _repl
 
     with (
@@ -3298,10 +3551,10 @@ def test_repl():
 
         _repl([])
 
-        mock_try_local.assert_any_call("health")
-        mock_try_local.assert_any_call("do task")
-        mock_try_local.assert_any_call("interrupt")
-        mock_try_local.assert_any_call("exception")
+        mock_try_local.assert_any_call("health", workspace=ANY)
+        mock_try_local.assert_any_call("do task", workspace=ANY)
+        mock_try_local.assert_any_call("interrupt", workspace=ANY)
+        mock_try_local.assert_any_call("exception", workspace=ANY)
 
 
 def test_main():
@@ -4109,3 +4362,81 @@ if __name__ == "__main__":
     test_owasp_unbounded_consumption_stagnation()
     test_owasp_output_validation_syntax_gates()
     print("\n[SUCCESS] ALL BOTEX ENGINE TESTS PASSED!")
+
+
+from unittest.mock import patch
+import pytest
+
+
+@pytest.mark.anyio
+async def test_allow_expensive_model_gate_behavior():
+    """Verify engine rejects over-cap model unless allow_expensive_model=True."""
+    import tempfile
+    from botex import engine
+    from botex.pricing import DEFAULT_TTL_H
+
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        with patch("botex.engine.check_model_price") as mock_price:
+            mock_price.return_value = (
+                False,
+                "[PRICE BLOCK] Model 'expensive/model' exceeds pricing guardrail",
+            )
+
+            # 1. Without allow_expensive_model -> PRICE_EXCEEDED
+            res_denied = await engine.run_botex_task(
+                task="Test expensive gate",
+                workspace_dir=tmp_dir,
+                model="expensive/model",
+                provider="openrouter",
+                allow_expensive_model=False,
+            )
+            assert res_denied["ok"] is False
+            assert res_denied["status"] == "PRICE_EXCEEDED"
+            assert "PRICE BLOCK" in res_denied["message"]
+            # Check that real pricing returns the instruction
+            from botex.pricing import check_model_price
+
+            _, real_msg = check_model_price(
+                "expensive/model",
+                {
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "pricing_overrides": {"expensive/model": {"input": 1.0, "output": 1.0}},
+                },
+                {
+                    "enabled": True,
+                    "max_input_per_mtok": 0.01,
+                },
+            )
+            assert "allow_expensive_model=True" in real_msg
+
+        # 2. With allow_expensive_model=True -> price gate passes (authorized by operator)
+        with patch("botex.engine.check_model_price") as mock_price:
+            mock_price.return_value = (
+                False,
+                "[PRICE BLOCK] Model 'expensive/model' exceeds pricing guardrail",
+            )
+            # We mock _run_botex_task_once_impl to avoid actual network call
+            with patch("botex.engine._run_botex_task_once_impl") as mock_run:
+                mock_run.return_value = {
+                    "ok": True,
+                    "status": "DONE",
+                    "task_id": "test_exp",
+                    "files_touched": [],
+                    "cost_usd": 0.05,
+                }
+                res_allowed = await engine.run_botex_task(
+                    task="Test expensive gate authorized",
+                    workspace_dir=tmp_dir,
+                    model="expensive/model",
+                    provider="openrouter",
+                    allow_expensive_model=True,
+                )
+                assert res_allowed["ok"] is True
+                assert res_allowed["status"] == "DONE"
+                # Ensure the attempt was called with allow_expensive_model=True
+                assert mock_run.call_args.kwargs["allow_expensive_model"] is True
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)

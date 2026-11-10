@@ -219,7 +219,7 @@ async def test_call_with_backoff_auth_and_timeout_not_counted():
     assert cb._consecutive_failures.get("testprov", 0) == 0
     assert cb.get_state("testprov") == ProviderCircuitBreaker.CLOSED
 
-    import httpx
+    import httpx2 as httpx
     from openai import APITimeoutError
 
     async def timeout_fail():
@@ -241,7 +241,7 @@ async def test_call_with_backoff_auth_and_timeout_not_counted():
 @pytest.mark.anyio
 async def test_call_with_backoff_server_side_failures_counted():
     from openai import APIConnectionError
-    import httpx
+    import httpx2 as httpx
 
     cb = ProviderCircuitBreaker(failure_threshold=3, recovery_timeout_s=60.0)
 

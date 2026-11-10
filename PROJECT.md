@@ -1,6 +1,20 @@
 # Project: BoteX Harness - Provider Architecture & Dynamic Catalog Refactor
 
 ## Architecture
+
+- **Context Inclusion & Swarm Subsystem (`botex/context_inclusion.py`, `botex/state.py`)**:
+  - `OutputNormalizer`: Deterministic parsing of multi-agent swarm payloads (Devin, ZCode, BoteX) and path normalization to POSIX.
+  - `DeterministicSignalGate`: Zero-LLM test output collapsing, traceback isolation, AST diff pruning, and observation deduplication.
+  - `ContextKnapsack`: Budget-bounded token packager with automatic scratchpad overflow.
+  - `CanonicalAgentTurn`: Turn-based state schema tracking mutated files, memory keys, and blocking reasons across handoffs.
+
+- **Cognitive Memory Evolution (`botex/memory.py`, `server.py`)**:
+  - Belief & Heuristic kinds with floating-point `confidence` (0.0 to 1.0) and frontmatter synchronization.
+  - Temporal range queries (`since`, `until`) and confidence thresholding (`min_confidence`).
+  - Spreading activation across wikilink graph blended with FTS5 lexical search via Reciprocal Rank Fusion (RRF).
+  - MCP Tool `reflect_memory`: In-memory reflection and synthesis of architectural knowledge.
+  - Recall modernization (arena-recall-20261107): per-token OR FTS matching with a coverage admission gate (≥2 distinct tokens, single-token queries exempt from the stop-list rule only), third read-only search root `paths.swarm_memory_dir` (scope `swarm`), and a hedged 4-tier curator cascade (`memory.recall` config section, local qwen2.5:3b first, NVIDIA hedges after `hedge_s`) with `recall_status`/`tier_attempts`/`workspace_searched` in every response.
+
 - **Provider Subsystem (`botex/providers.py` or `botex/providers/`)**:
   - `BaseProvider`: Abstract base class defining provider interface (`resolve_api_key`, `get_client`, `normalize_response`, `sanitize_error`, `fetch_catalog`, `get_credits`).
   - Specialized adapters:
@@ -45,7 +59,10 @@
 | 14 | Configuration Schema Extensions | `botex.config.json` support for catalog caching, denylist patterns, and wallet configuration | M4 | R2, R4 |
 | 15 | Engine & CLI/MCP Integration | Seamless execution in `botex/engine.py` and exposure in CLI commands / MCP tools | M4 | R4 |
 | 16 | Comprehensive Mocked Unit Tests | Offline unit test suite covering providers, catalog, denylist, and wallet | M5 | Acceptance Criteria |
-| 17 | Zero-Regression & Lint Verification | 100% pass on all existing tests (`test_botex.py`, `test_context_guard.py`), ruff check & format clean | M5 | Acceptance Criteria |
+| 17 | Zero-Regression & Lint Verification | 100% pass on all existing tests (`test_botex.py`, `test_context_guard.py`), ruff check & format
+| 18 | OR + Coverage Retrieval | Per-token OR FTS matching with coverage admission gate (≥2 distinct tokens, stop-word list) replacing implicit-AND; fixes zero-recall on partial keyword overlap | M2 | arena-recall |
+| 19 | Hedged Recall Cascade | 4-tier curator cascade (qwen2.5:3b local → NVIDIA → Gemini → OR-free) with `hedge_s` parallel hedging, answer cache, negative-tier TTL, and `recall_status`/`tier_attempts` observability | M2 | arena-recall |
+| 20 | Swarm Memory Scope | Third read-only search root (`paths.swarm_memory_dir`, scope `swarm`) making swarm knowledge reachable from any workspace without implicit cross-project writes | M2 | arena-recall | clean | M5 | Acceptance Criteria |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
