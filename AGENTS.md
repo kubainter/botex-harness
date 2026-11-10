@@ -92,6 +92,7 @@ Under no circumstances should you modify the following locations:
 ### 3.2. Repository Conventions
 *   **Commits:** Try to keep commit messages concise, factual, and in English. The title should not exceed 50 characters, and if a longer description is needed, add it after a blank line.
 *   **Pull Requests:** Avoid exposing details of potential vulnerabilities (CRITICAL) in public PR descriptions, in accordance with the Zero Data Retention / leak-free rule. Remember that security-related fixes should be shorter than 50 lines of code.
+*   **Comment & Docstring Hygiene (Zero-Bloat):** When writing logic, do NOT generate bloatware commentary — no per-line narration restating what the code already says, no boilerplate docstrings on trivial helpers. Comments and docstrings are reserved for non-obvious *why* (security boundaries, invariants, deliberate trade-offs); self-explanatory code ships uncommented. Do not strip existing docstrings/comments while editing adjacent code.
 
 ## 4. Autonomy Criteria
 
