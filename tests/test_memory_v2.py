@@ -7,6 +7,14 @@ from unittest.mock import patch
 import pytest
 
 from botex import memory
+from botex.ops.migrate_projects import SENTINEL_FILENAME, main, migrate_memory_dir
+
+
+@pytest.fixture(autouse=True)
+def cleanup_memory_cache():
+    """Reset memory index cache after each test to prevent SQLite file locks."""
+    yield
+    memory.reset_memory_index_cache()
 
 
 @pytest.fixture
@@ -16,7 +24,10 @@ def memory_dirs(tmp_path: Path):
     global_dir = tmp_path / "global_memory"
     global_dir.mkdir()
 
-    with patch("botex.memory.get_global_memory_dir", return_value=global_dir):
+    with (
+        patch("botex.memory.get_global_memory_dir", return_value=global_dir),
+        patch("botex.memory.get_swarm_memory_dir", return_value=None),
+    ):
         yield ws_dir, global_dir
 
 
@@ -134,3 +145,268 @@ def test_implicit_linker_and_multi_token_search(memory_dirs):
     assert s_res["ok"] is True
     assert s_res["count"] >= 1
     assert any(m["id"] == "mem_base_arch01" for m in s_res["memories"])
+
+
+# ---------------------------------------------------------------------------
+# Project Partitioning (Memory Vault v2)
+# ---------------------------------------------------------------------------
+
+
+def test_save_and_read_project_metadata(memory_dirs):
+    """save_memory(project=...) normalizes to a slug and round-trips via read_memory."""
+    ws_dir, _ = memory_dirs
+    res = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Recall Pipeline Decision",
+        content="Tiered recall synthesis for the harness.",
+        kind="decision",
+        project="Botex Harness",
+    )
+    assert res["ok"] is True
+    assert res["project"] == "botex-harness"
+
+    read_res = memory.read_memory(workspace_dir=str(ws_dir), memory_id=res["id"])
+    assert read_res["ok"] is True
+    assert read_res["metadata"]["project"] == "botex-harness"
+
+
+def test_resave_without_project_preserves_frontmatter(memory_dirs):
+    """Resaving a note without project= must preserve the stored project slug."""
+    ws_dir, _ = memory_dirs
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_proj_keep",
+        title="Partitioned Note",
+        content="Initial body.",
+        project="Botex Harness",
+    )
+
+    res = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_proj_keep",
+        title="Partitioned Note v2",
+        content="Updated body.",
+    )
+    assert res["ok"] is True
+    assert res["project"] == "botex-harness"
+
+    meta = memory.read_memory(workspace_dir=str(ws_dir), memory_id="mem_proj_keep")["metadata"]
+    assert meta["project"] == "botex-harness"
+
+    # An explicit project override still wins on resave.
+    res2 = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_proj_keep",
+        title="Partitioned Note v3",
+        content="Reassigned body.",
+        project="media-gen",
+    )
+    assert res2["project"] == "media-gen"
+
+
+def test_search_memory_project_filters(memory_dirs):
+    """project= filters hits; project='_unassigned' selects notes with no project."""
+    ws_dir, _ = memory_dirs
+    m1 = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Alpha Note",
+        content="alpha body",
+        project="botex-harness",
+    )
+    m2 = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Beta Note",
+        content="beta body",
+        project="media-gen",
+    )
+    m3 = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Gamma Note",
+        content="gamma body",
+    )
+
+    res = memory.search_memory(workspace_dir=str(ws_dir), query="", project="botex-harness")
+    assert res["ok"] is True
+    ids = {m["id"] for m in res["memories"]}
+    assert ids == {m1["id"]}
+    assert res["memories"][0]["project"] == "botex-harness"
+
+    res_un = memory.search_memory(workspace_dir=str(ws_dir), query="", project="_unassigned")
+    assert res_un["ok"] is True
+    ids_un = {m["id"] for m in res_un["memories"]}
+    assert ids_un == {m3["id"]}
+    assert res_un["memories"][0]["project"] == ""
+
+    # Project filter normalization is case-insensitive slug matching.
+    res_norm = memory.search_memory(workspace_dir=str(ws_dir), query="", project="Media-Gen")
+    assert {m["id"] for m in res_norm["memories"]} == {m2["id"]}
+
+    # Project filter composes with a keyword query.
+    res_q = memory.search_memory(workspace_dir=str(ws_dir), query="alpha", project="botex-harness")
+    assert {m["id"] for m in res_q["memories"]} == {m1["id"]}
+
+
+def test_list_memory_projects_aggregation(memory_dirs):
+    """Aggregates distinct projects with counts across local+global, deduplicating IDs."""
+    ws_dir, _ = memory_dirs
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_a1",
+        title="A1",
+        content="x",
+        project="botex-harness",
+    )
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_a2",
+        title="A2",
+        content="x",
+        project="Botex Harness",
+    )
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_b1",
+        title="B1",
+        content="x",
+        project="media-gen",
+    )
+    memory.save_memory(workspace_dir=str(ws_dir), memory_id="mem_u1", title="U1", content="x")
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_g1",
+        title="G1",
+        content="x",
+        project="media-gen",
+        scope="global",
+    )
+    # Same ID in both scopes is counted once (the local copy wins the shadow).
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_dup",
+        title="DUP",
+        content="x",
+        project="botex-harness",
+    )
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        memory_id="mem_dup",
+        title="DUP",
+        content="x",
+        project="swarm-skills",
+        scope="global",
+    )
+
+    res = memory.list_memory_projects(workspace_dir=str(ws_dir), scope="all")
+    assert res["ok"] is True
+    counts = {p["project"]: p["count"] for p in res["projects"]}
+    assert counts["botex-harness"] == 3
+    assert counts["media-gen"] == 2
+    assert counts[""] == 1
+    assert "swarm-skills" not in counts
+    assert res["total"] == 6
+    # The unassigned bucket sorts last.
+    assert res["projects"][-1]["project"] == ""
+
+    res_local = memory.list_memory_projects(workspace_dir=str(ws_dir), scope="local")
+    counts_local = {p["project"]: p["count"] for p in res_local["projects"]}
+    assert counts_local == {"botex-harness": 3, "media-gen": 1, "": 1}
+
+
+# ---------------------------------------------------------------------------
+# ops/migrate_projects.py — vault backfill migration
+# ---------------------------------------------------------------------------
+
+
+def _write_legacy_note(
+    mem_dir: Path, stem: str, frontmatter: str, body: str = "Body text."
+) -> Path:
+    note = mem_dir / f"{stem}.md"
+    note.write_text(f"---\n{frontmatter}\n---\n\n{body}\n", encoding="utf-8")
+    return note
+
+
+def _note_project(note: Path) -> str:
+    meta, _ = memory._parse_frontmatter(note.read_text(encoding="utf-8"))
+    return str(meta.get("project") or "")
+
+
+def test_migrate_memory_dir_backfill_and_sentinel(tmp_path):
+    """Backfills project frontmatter, writes sentinel, and short-circuits on rerun."""
+    mem_dir = tmp_path / "vault"
+    mem_dir.mkdir()
+    _write_legacy_note(
+        mem_dir,
+        "mem_legacy",
+        "id: mem_legacy\ntitle: BoteX Curator Status\nkind: context\ntags:\n  - botex\n  - curator",
+        "Curator health telemetry for the harness.",
+    )
+    _write_legacy_note(
+        mem_dir,
+        "mem_tagged",
+        "id: mem_tagged\ntitle: Custom App Note\ntags: [project:custom-app]",
+    )
+    _write_legacy_note(
+        mem_dir,
+        "mem_set",
+        "id: mem_set\ntitle: Media Note\nproject: media-gen",
+    )
+    plain = mem_dir / "mem_plain.md"
+    plain.write_text("No frontmatter at all.\n", encoding="utf-8")
+
+    res = migrate_memory_dir(mem_dir)
+    assert res["ok"] is True
+    assert res["skipped"] is False
+    assert res["updated"] == 2
+    assert (mem_dir / SENTINEL_FILENAME).exists()
+
+    assert _note_project(mem_dir / "mem_legacy.md") == "botex"
+    assert _note_project(mem_dir / "mem_tagged.md") == "custom-app"
+    assert _note_project(mem_dir / "mem_set.md") == "media-gen"
+    assert "project:" not in plain.read_text(encoding="utf-8")
+
+    res2 = migrate_memory_dir(mem_dir)
+    assert res2["ok"] is True
+    assert res2["skipped"] is True
+    assert res2["updated"] == 0
+
+
+def test_migrate_memory_dir_dry_run(tmp_path):
+    """dry_run classifies notes without writing files or the sentinel."""
+    mem_dir = tmp_path / "vault"
+    mem_dir.mkdir()
+    note = _write_legacy_note(
+        mem_dir,
+        "mem_dry",
+        "id: mem_dry\ntitle: Witcher3 Scene\ntags: [tw3se]",
+        "w2scene composition notes.",
+    )
+    before = note.read_text(encoding="utf-8")
+
+    res = migrate_memory_dir(mem_dir, dry_run=True)
+    assert res["ok"] is True
+    assert res["skipped"] is False
+    assert res["updated"] == 1
+    assert res["projects"].get("witcher3") == 1
+    assert note.read_text(encoding="utf-8") == before
+    assert not (mem_dir / SENTINEL_FILENAME).exists()
+
+
+def test_migrate_projects_cli_dry_run(tmp_path, capsys):
+    """CLI entry point resolves workspace scope dirs and honours --dry-run."""
+    ws = tmp_path / "ws"
+    mem_dir = ws / ".botex" / "memory"
+    mem_dir.mkdir(parents=True)
+    _write_legacy_note(
+        mem_dir,
+        "mem_cli",
+        "id: mem_cli\ntitle: Prompt Improver Pipeline",
+        "prompt-improver rollout.",
+    )
+
+    rc = main(["--workspace", str(ws), "--dry-run"])
+    assert rc == 0
+    assert not (mem_dir / SENTINEL_FILENAME).exists()
+    assert _note_project(mem_dir / "mem_cli.md") == ""
+    out = capsys.readouterr().out
+    assert "[local]" in out
+    assert "updated=1" in out
