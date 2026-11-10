@@ -84,6 +84,7 @@ from botex.memory import (
     delete_memory,
     find_graph_health,
     get_backlinks,
+    list_memory_projects,
     read_memory,
     save_memory,
     search_memory,
@@ -320,6 +321,7 @@ class MemorySaveRequest(BaseModel):
     origin: str = "cloud_api"
     scope: str = "local"
     workspace_dir: str = "."
+    project: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -381,7 +383,30 @@ from contextlib import asynccontextmanager, suppress
 # ---------------------------------------------------------------------------
 
 
+_WARMUP_COMPLETED = False
+
+
 async def _warmup_caches() -> None:
+    global _WARMUP_COMPLETED
+    if _WARMUP_COMPLETED:
+        return
+    _WARMUP_COMPLETED = True
+
+    # Under pytest/test harness avoid starting asynchronous background SQLite migrations
+    # across threads to prevent cross-thread SQLite connection teardown races.
+    in_test = bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("BOTEX_DISABLE_PROJECT_MIGRATION")
+        or "pytest" in sys.modules
+    )
+    if not in_test:
+        try:
+            from botex.ops.migrate_projects import ensure_projects_migrated
+
+            ws = resolve_workspace("")
+            await asyncio.to_thread(ensure_projects_migrated, ws)
+        except Exception:
+            pass
     try:
         from botex.benchmarks import fetch_openrouter_benchmarks
 
@@ -552,11 +577,19 @@ async def _analytics_digest_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Non-blocking background warmup
-    asyncio.create_task(_warmup_caches())
+    warmup_task = asyncio.create_task(_warmup_caches())
     digest_task: Optional[asyncio.Task] = None
     if analytics_setting("digest_enabled"):
         digest_task = asyncio.create_task(_analytics_digest_loop())
     yield
+    if not warmup_task.done():
+        try:
+            # Allow a short grace period for in-flight tasks to finish safely
+            await asyncio.wait_for(asyncio.shield(warmup_task), timeout=1.5)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            warmup_task.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await warmup_task
     if digest_task is not None:
         digest_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -784,11 +817,14 @@ class CloudAuthMiddleware:
 def _mcp_transport_security() -> TransportSecuritySettings:
     """DNS-rebinding guard for the MCP mount.
 
-    Without BOTEX_ACCESS_TOKEN (Zero Friction Local) network locality is the only barrier, so
+    Without BOTEX_ACCESS_TOKEN or BOTEX_ACCESS_TOKEN_HASH (Zero Friction Local) network locality is the only barrier, so
     Host/Origin are validated against loopback names. With a token set, Bearer auth is the
     barrier and public hostnames (VPS / reverse proxy) must keep working.
     """
-    if os.environ.get("BOTEX_ACCESS_TOKEN", "").strip():
+    if (
+        os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
+        or os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip()
+    ):
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -1565,12 +1601,33 @@ async def decide_approval(action_id: str, body: ApprovalDecisionRequest) -> Dict
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/memory/projects")
+async def get_memory_projects_endpoint(
+    scope: str = Query(default="all"),
+    workspace_dir: str = Query(default="."),
+) -> Dict[str, Any]:
+    """List distinct projects and note counts across the requested memory scopes."""
+    ws = resolve_workspace(workspace_dir)
+    res = await asyncio.to_thread(
+        list_memory_projects,
+        workspace_dir=ws,
+        scope=scope,
+    )
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list memory projects.",
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
 @app.get("/api/memory")
 async def get_memory(
     query: str = Query(default=""),
     tag: str = Query(default=""),
     kind: str = Query(default=""),
     scope: str = Query(default="local"),
+    project: str = Query(default=""),
     workspace_dir: str = Query(default="."),
     memory_id: Optional[str] = Query(default=None),
 ) -> Dict[str, Any]:
@@ -1601,6 +1658,7 @@ async def get_memory(
         tag=tag,
         kind=kind,
         scope=scope,
+        project=project or None,
     )
     if not res.get("ok"):
         logger.warning("Memory search failed.")
@@ -1631,6 +1689,7 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
         memory_id=clean_mid,
         origin=body.origin,
         scope=body.scope,
+        project=body.project,
     )
     if not res.get("ok"):
         logger.warning("Memory save failed.")
