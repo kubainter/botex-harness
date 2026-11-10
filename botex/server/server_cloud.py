@@ -615,21 +615,37 @@ def _verify_access_token(candidate_token: Optional[str]) -> bool:
     """
     Verify candidate bearer token against configured token or SHA-256 hash.
     Constant-time comparison via hmac.compare_digest.
+    Supports BOTEX_ACCESS_TOKEN_HASH as well as sha256:... hashes placed in BOTEX_ACCESS_TOKEN.
     """
     if not candidate_token:
         return False
     candidate_bytes = candidate_token.encode("utf-8")
+    raw_hash = hashlib.sha256(candidate_bytes).hexdigest().lower()
+    prefixed_hash = f"sha256:{raw_hash}"
 
-    expected_hash = os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip()
+    # 1. Direct check against configured hash in BOTEX_ACCESS_TOKEN_HASH
+    expected_hash = os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip().strip('"').strip("'")
     if expected_hash:
-        raw_hash = hashlib.sha256(candidate_bytes).hexdigest()
-        if expected_hash.lower().startswith("sha256:"):
-            return hmac.compare_digest(f"sha256:{raw_hash}".lower(), expected_hash.lower())
-        return hmac.compare_digest(raw_hash.lower(), expected_hash.lower())
+        target_hash = expected_hash.lower()
+        if target_hash.startswith("sha256:"):
+            if hmac.compare_digest(prefixed_hash, target_hash):
+                return True
+        elif hmac.compare_digest(raw_hash, target_hash):
+            return True
 
-    expected_token = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
+    # 2. Check BOTEX_ACCESS_TOKEN (auto-detects if sha256:... hash was placed here)
+    expected_token = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip().strip('"').strip("'")
     if expected_token:
-        return hmac.compare_digest(candidate_bytes, expected_token.encode("utf-8"))
+        target_token = expected_token.lower()
+        if target_token.startswith("sha256:"):
+            if hmac.compare_digest(prefixed_hash, target_token):
+                return True
+        elif len(target_token) == 64 and all(c in "0123456789abcdef" for c in target_token):
+            if hmac.compare_digest(raw_hash, target_token):
+                return True
+        # Plain token comparison
+        if hmac.compare_digest(candidate_bytes, expected_token.encode("utf-8")):
+            return True
 
     return False
 
