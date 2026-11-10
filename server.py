@@ -569,6 +569,22 @@ async def start_task(
         rollback_verified, attempts[], cost_usd, ...).
     """
     _cleanup_tasks()
+    if (
+        model
+        and model.strip()
+        and not (provider and provider.strip())
+        and not os.environ.get("BOTEX_PROVIDER", "").strip()
+    ):
+        avail_provs = ", ".join((load_config().get("providers") or {}).keys())
+        return {
+            "ok": False,
+            "status": "CONFIG_ERROR",
+            "failure_kind": "security_or_policy_block",
+            "message": (
+                f"Explicit 'provider' is required when 'model' ('{model.strip()}') is specified. "
+                f"Specify one of: {avail_provs}."
+            ),
+        }
     max_queued = int(load_config().get("engine", {}).get("max_queued_tasks", 32))
     active_count = sum(entry.get("status") in {"QUEUED", "RUNNING"} for entry in _TASKS.values())
     if active_count >= max_queued:
@@ -814,6 +830,32 @@ async def run_subagent(
         attempts[], cost_usd, ...). `ok` is true only when status == DONE —
         i.e. the task contract was verified, not merely claimed by the model.
     """
+    if (
+        model
+        and model.strip()
+        and not (provider and provider.strip())
+        and not os.environ.get("BOTEX_PROVIDER", "").strip()
+    ):
+        avail_provs = ", ".join((load_config().get("providers") or {}).keys())
+        err_res = {
+            "ok": False,
+            "status": "CONFIG_ERROR",
+            "failure_kind": "security_or_policy_block",
+            "message": (
+                f"Explicit 'provider' is required when 'model' ('{model.strip()}') is specified. "
+                f"Specify one of: {avail_provs}."
+            ),
+            "files_touched": [],
+            "exec_ran": False,
+            "steps": 0,
+            "attempts": [],
+            "duration_s": 0.0,
+            "cost_usd": 0.0,
+        }
+        return CallToolResult(
+            content=[TextContent(type="text", text=_format_result_text(err_res))],
+            structured_content=err_res,
+        )
     res = await run_botex_task(
         task=task,
         files=files,

@@ -21,13 +21,16 @@ function inferProviderFromSlug(slug: string): string {
   if (s.includes(':free') || s.includes('openrouter/free')) {
     return 'openrouter-free'
   }
-  if (s.startsWith('nvidia/') || s.startsWith('meta/llama-3.3-70b-instruct')) {
+  if (s.startsWith('nvidia/') || s.startsWith('meta/') || s.startsWith('poolside/')) {
     return 'nvidia'
   }
   // Bare "gemini-*" slugs (no vendor prefix) are served by the Google AI
   // Studio endpoint; "google/..." prefixed ones stay on OpenRouter.
   if (s.startsWith('gemini-') || s.startsWith('models/gemini-')) {
     return 'google'
+  }
+  if (!s.includes('/')) {
+    return 'ollama'
   }
   return 'openrouter'
 }
@@ -97,9 +100,15 @@ export const useChatStore = defineStore('chat', () => {
           localStorage.setItem('botex_selected_model', selectedModel.value)
           localStorage.setItem('botex_selected_provider', selectedProvider.value)
         } else {
-          const match = catalogModels.value.find((m) => m.id === selectedModel.value)
-          if (match && !localStorage.getItem('botex_selected_provider')) {
-            selectedProvider.value = match.provider
+          const exactMatch = catalogModels.value.find(
+            (m) => m.id === selectedModel.value && m.provider === selectedProvider.value
+          )
+          if (!exactMatch) {
+            const idMatch = catalogModels.value.find((m) => m.id === selectedModel.value)
+            if (idMatch) {
+              selectedProvider.value = idMatch.provider
+              localStorage.setItem('botex_selected_provider', selectedProvider.value)
+            }
           }
         }
       } else {

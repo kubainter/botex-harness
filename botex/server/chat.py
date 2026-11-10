@@ -593,6 +593,13 @@ class ChatSession:
                     call_id = prev_tcs[0].get("id") if prev_tcs else f"call_{uuid.uuid4().hex[:8]}"
                     msg["tool_call_id"] = call_id
                 sanitized.append(msg)
+            elif role == "user":
+                if sanitized and sanitized[-1].get("role") == "user":
+                    prev_content = sanitized[-1].get("content") or ""
+                    curr_content = msg.get("content") or ""
+                    sanitized[-1]["content"] = f"{prev_content}\n\n{curr_content}".strip()
+                    continue
+                sanitized.append(msg)
             else:
                 sanitized.append(msg)
 
@@ -644,7 +651,25 @@ class ChatSession:
 
     def save_to_disk(self) -> None:
         """Persist session JSON to configured chat sessions directory."""
-        if not self.workspace_dir or not self.messages:
+        if not self.workspace_dir:
+            return
+        if not self.messages:
+            try:
+                safe_id = sanitize_identifier(self.session_id)
+                if safe_id:
+                    sessions_dir = get_chat_sessions_dir(self.workspace_dir)
+                    file_path = next(
+                        (
+                            f
+                            for f in sessions_dir.iterdir()
+                            if f.is_file() and f.name == f"{safe_id}.json"
+                        ),
+                        None,
+                    )
+                    if file_path is not None and file_path.is_file():
+                        file_path.unlink()
+            except Exception:
+                pass
             return
         try:
             safe_id = sanitize_identifier(self.session_id)
@@ -1131,19 +1156,29 @@ async def stream_chat_turn(
             and session.messages[-1].content == user_input
         ):
             session.messages.pop()
+            session.save_to_disk()
 
     client_owned = client is None
     if client is None:
         requested_provider = session.provider
-        if (
-            (not requested_provider or requested_provider == "openrouter")
-            and session.model
-            and (":free" in session.model.lower() or "openrouter/free" in session.model.lower())
-        ):
-            requested_provider = "openrouter-free"
+        if session.model:
+            model_lower = session.model.lower()
+            if (not requested_provider or requested_provider == "openrouter") and (
+                ":free" in model_lower or "openrouter/free" in model_lower
+            ):
+                requested_provider = "openrouter-free"
+            elif (
+                "/" not in session.model
+                and not model_lower.startswith("gemini-")
+                and (
+                    not requested_provider
+                    or requested_provider in ("openrouter", "openrouter-free")
+                )
+            ):
+                requested_provider = "ollama"
         active_provider_name, active_provider_cfg = resolve_provider(requested_provider)
-        effective_model = session.model or resolve_model(
-            "", profile=session.profile or "fast", provider=active_provider_name
+        effective_model = resolve_model(
+            session.model, profile=session.profile or "fast", provider=active_provider_name
         )
         if active_provider_name == "openrouter-free" or (
             effective_model
