@@ -1067,14 +1067,15 @@ async def _recall_memory_impl(
     if limited is not None:
         return limited
     try:
-        ctx = _gather_recall_context(workspace_dir=workspace_dir, query=query, topic=topic, scope=scope)
-    except WorkspaceOutOfBounds as exc:
-        # Generic detail for the agent-facing envelope; the absolute path
-        # stays in the server log only (cross-review: path disclosure).
+        ctx = _gather_recall_context(
+            workspace_dir=workspace_dir, query=query, topic=topic, scope=scope
+        )
+    except WorkspaceOutOfBounds:
+        # Rejected path is request-tainted: static log text only (CodeQL).
         import logging
 
         logging.getLogger(__name__).warning(
-            "workspace containment: %s", mask_secrets(str(exc))
+            "workspace containment: rejected out-of-allowlist workspace_dir"
         )
         return {
             "ok": False,
@@ -1095,7 +1096,7 @@ async def _recall_memory_impl(
             import logging
 
             logging.getLogger(__name__).info(
-                "recall_memory LLM cascade unavailable: %s", mask_secrets(str(exc))
+                "recall_memory LLM cascade unavailable: %s", type(exc).__name__
             )
             result = None
         if isinstance(result, dict):
