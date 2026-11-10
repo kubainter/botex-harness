@@ -2281,8 +2281,15 @@ if os.path.isdir(_web_dist_dir):
     class NoCacheStaticFiles(StaticFiles):
         async def get_response(self, path: str, scope) -> Response:
             resp = await super().get_response(path, scope)
-            # Force re-validation of entrypoints and service worker to prevent stale PWA cache
-            if path.endswith(".html") or path.endswith("sw.js") or not path or path == ".":
+            # Force re-validation of entrypoints, manifest and service worker to prevent stale PWA cache
+            if (
+                path.endswith(".html")
+                or path.endswith("sw.js")
+                or path.endswith(".webmanifest")
+                or path.endswith("manifest.json")
+                or not path
+                or path == "."
+            ):
                 resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
                 resp.headers["Pragma"] = "no-cache"
                 resp.headers["Expires"] = "0"

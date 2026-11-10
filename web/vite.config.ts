@@ -22,6 +22,9 @@ export default defineConfig({
         categories: ['developer', 'utilities', 'productivity'],
         orientation: 'any',
         start_url: '/',
+        scope: '/',
+        // @ts-ignore
+        version: '2.1.0',
         icons: [
           {
             src: '/icon-192.png',
