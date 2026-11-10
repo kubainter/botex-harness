@@ -561,11 +561,15 @@ async def _analytics_digest_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Non-blocking background warmup
-    asyncio.create_task(_warmup_caches())
+    warmup_task = asyncio.create_task(_warmup_caches())
     digest_task: Optional[asyncio.Task] = None
     if analytics_setting("digest_enabled"):
         digest_task = asyncio.create_task(_analytics_digest_loop())
     yield
+    if not warmup_task.done():
+        warmup_task.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await warmup_task
     if digest_task is not None:
         digest_task.cancel()
         with suppress(asyncio.CancelledError):
