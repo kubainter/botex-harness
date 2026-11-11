@@ -48,7 +48,9 @@ jobs:
         pip install pytest ruff
 
     - name: Lint with ruff
-      run: ruff check .
+      run: |
+        ruff check .
+        ruff format --check .
 
     - name: Run tests with pytest
       env:
