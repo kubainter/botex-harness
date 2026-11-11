@@ -131,3 +131,81 @@ def test_cli_maintenance_repair(tmp_path, monkeypatch, capsys):
     server._cli_maintenance(["repair", "-w", str(tmp_path)])
     out = json.loads(capsys.readouterr().out)
     assert out["repair_frontmatter_ids"]["repaired"] == 2
+
+
+# -- analytics ledger: append-only jsonl + rotation --------------------------
+
+
+def _analytics_paths():
+    from botex.server.config import analytics_file
+
+    base = analytics_file()
+    return base, base.with_suffix(".jsonl"), base.parent / "analytics-archive"
+
+
+def _record(task_id: str, ts: str):
+    return {
+        "task_id": task_id,
+        "timestamp": ts,
+        "model": "openrouter-free/x:free",
+        "status": "DONE",
+        "cost_usd": 0.0,
+    }
+
+
+def test_log_run_migrates_legacy_json_to_jsonl():
+    from botex.providers import analytics
+
+    base, jsonl, _ = _analytics_paths()
+    base.parent.mkdir(parents=True, exist_ok=True)
+    base.write_text(json.dumps([_record("old-1", "2026-01-01T00:00:00")]), "utf-8")
+
+    entry = analytics.log_run(
+        task_id="new-1",
+        model="openrouter-free/x:free",
+        duration_s=1.0,
+        steps=1,
+        prompt_tokens=0,
+        completion_tokens=0,
+        cached_tokens=0,
+        files_touched=[],
+        lines_added=0,
+        lines_removed=0,
+    )
+    assert entry["task_id"] == "new-1"
+    assert not base.exists()  # legacy folded away
+    ids = {r["task_id"] for r in analytics.load_analytics()}
+    assert ids == {"old-1", "new-1"}
+
+
+def test_rotate_archives_old_rows_and_keeps_recent():
+    from botex.ops import maintenance
+    from botex.providers import analytics
+
+    base, jsonl, archive = _analytics_paths()
+    base.parent.mkdir(parents=True, exist_ok=True)
+    base.write_text(json.dumps([_record("ancient", "2020-01-15T12:00:00")]), "utf-8")
+    recent_ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    jsonl.write_text(json.dumps(_record("recent", recent_ts)) + "\n", "utf-8")
+
+    res = maintenance.rotate_analytics_ledger()
+    assert res["migrated"] == 1
+    assert res["archived"] == 1
+    assert res["kept"] == 1
+
+    gz = archive / "2020-01.jsonl.gz"
+    assert gz.exists()
+    live_ids = {r["task_id"] for r in analytics._read_jsonl(jsonl)}
+    assert live_ids == {"recent"}
+    # merged view still contains archived row (stats horizon preserved)
+    all_ids = {r["task_id"] for r in analytics.load_analytics()}
+    assert all_ids == {"ancient", "recent"}
+
+
+def test_save_analytics_replaces_live_segment():
+    from botex.providers import analytics
+
+    analytics.save_analytics([_record("a", "2026-01-01T00:00:00")])
+    analytics.save_analytics([_record("b", "2026-01-02T00:00:00")])
+    ids = {r["task_id"] for r in analytics.load_analytics()}
+    assert ids == {"b"}
