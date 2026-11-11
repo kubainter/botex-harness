@@ -313,6 +313,21 @@ def repair_frontmatter_ids(workspace_dir: str = ".") -> Dict[str, int]:
 _LEDGER_KEEP_DAYS = 90
 
 
+def _dedup_append(target: list, seen: set, incoming: list) -> None:
+    """Append incoming records, deduplicating only rows with both task_id and timestamp."""
+    for r in incoming:
+        if not isinstance(r, dict):
+            continue
+        tid = r.get("task_id")
+        ts = r.get("timestamp")
+        if tid and ts:
+            k = (tid, ts)
+            if k in seen:
+                continue
+            seen.add(k)
+        target.append(r)
+
+
 def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
     """Move ledger rows older than the retention window into per-month
     ``analytics-archive/YYYY-MM.jsonl.gz`` rollups.
@@ -339,41 +354,76 @@ def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=_LEDGER_KEEP_DAYS)
 
     rows: list = []
+    seen_keys: set = set()
     legacy_rows: list = []
     if legacy.exists() and legacy != live:
         try:
             data = json.loads(legacy.read_text(encoding="utf-8"))
             if isinstance(data, list):
                 legacy_rows = [r for r in data if isinstance(r, dict)]
-                rows.extend(legacy_rows)
+                _dedup_append(rows, seen_keys, legacy_rows)
                 results["migrated"] = len(legacy_rows)
         except (OSError, ValueError) as exc:
             logger.warning("analytics rotation: legacy migrate failed: %s", type(exc).__name__)
-    # Staging rename shrinks the append race: writers opening the live path
-    # after the rename create a fresh file whose tail we merge below.
+
     staged = live.with_suffix(live.suffix + ".rotating")
+    staged2 = live.with_suffix(live.suffix + ".rotating2")
     staged_ok = False
     try:
+        # Fold in any orphan .rotating segments left by a prior crash before staging live.
+        for orphan in (staged, staged2):
+            if orphan.exists():
+                orphan_recs = _read_jsonl(orphan, strict=True)
+                if orphan.stat().st_size > 0 and not orphan_recs:
+                    logger.warning(
+                        "analytics rotation: non-empty orphan %s yielded 0 rows", orphan.name
+                    )
+                    return results
+                _dedup_append(rows, seen_keys, orphan_recs)
+                staged_ok = True
         if live.exists():
             os.replace(live, staged)
             staged_ok = True
-        rows.extend(_read_jsonl(staged if staged_ok else live))
+            staged_recs = _read_jsonl(staged, strict=True)
+            if staged.exists() and staged.stat().st_size > 0 and not staged_recs:
+                os.replace(staged, live)
+                logger.warning("analytics rotation: staged read returned empty on non-empty ledger")
+                return results
+            _dedup_append(rows, seen_keys, staged_recs)
     except OSError as exc:
         logger.warning("analytics rotation: live stage failed: %s", type(exc).__name__)
-        return results
-    tail = _read_jsonl(live)
-    seen_tail = {(r.get("task_id"), r.get("timestamp")) for r in rows}
-    for r in tail:
-        k = (r.get("task_id"), r.get("timestamp"))
-        if k not in seen_tail:
-            rows.append(r)
-            seen_tail.add(k)
-    if not rows:
-        if staged_ok:
+        if staged_ok and staged.exists() and not live.exists():
             try:
                 os.replace(staged, live)
             except OSError:
                 pass
+        return results
+
+    try:
+        tail = _read_jsonl(live, strict=True)
+        _dedup_append(rows, seen_keys, tail)
+    except OSError as exc:
+        logger.warning("analytics rotation: tail read failed: %s", type(exc).__name__)
+        if staged_ok:
+            try:
+                _rewrite_ledger(live, rows)
+                if staged.exists():
+                    staged.unlink()
+            except OSError:
+                pass
+        return results
+
+    if not rows:
+        if staged_ok:
+            for s in (staged, staged2):
+                if s.exists():
+                    try:
+                        if not live.exists():
+                            os.replace(s, live)
+                        else:
+                            s.unlink()
+                    except OSError:
+                        pass
         return results
 
     def _month_of(rec: Dict[str, Any]) -> str:
@@ -390,6 +440,7 @@ def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
             return None
 
     keep: list = []
+    seen_keep: set = set()
     by_month: Dict[str, list] = {}
     for rec in rows:
         ts = _ts_of(rec)
@@ -398,7 +449,7 @@ def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
         if ts is not None and ts < cutoff:
             by_month.setdefault(_month_of(rec), []).append(rec)
         else:
-            keep.append(rec)
+            _dedup_append(keep, seen_keep, [rec])
 
     archive = _ledger_archive_dir()
     try:
@@ -412,32 +463,42 @@ def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
                 results["archived"] += len(recs)
     except (OSError, ValueError) as exc:
         logger.warning("analytics rotation: archive write failed: %s", type(exc).__name__)
-        # Roll back the staged segment so no row is lost, keep legacy intact.
         if staged_ok:
             try:
                 _rewrite_ledger(live, rows)
-                staged.unlink()
+                for s in (staged, staged2):
+                    if s.exists():
+                        s.unlink()
             except OSError:
                 pass
         return results
 
+    # Stage+merge any appends that arrived while gzip archives were being written
     try:
+        if live.exists():
+            os.replace(live, staged2)
+            late_tail = _read_jsonl(staged2, strict=True)
+            _dedup_append(keep, seen_keep, late_tail)
+            _dedup_append(rows, seen_keys, late_tail)
         _rewrite_ledger(live, keep)
     except OSError as exc:
         logger.warning("analytics rotation: live rewrite failed: %s", type(exc).__name__)
         if staged_ok:
             try:
                 _rewrite_ledger(live, rows)
+                for s in (staged, staged2):
+                    if s.exists():
+                        s.unlink()
             except OSError:
                 pass
         return results
 
-    # Ledger is safe — only now remove consumed sources.
-    if staged_ok:
-        try:
-            staged.unlink()
-        except OSError:
-            pass
+    for s in (staged, staged2):
+        if s.exists():
+            try:
+                s.unlink()
+            except OSError:
+                pass
     if legacy_rows:
         try:
             legacy.unlink()
@@ -457,6 +518,19 @@ def _rewrite_ledger(live: Path, rows: list) -> None:
 
 
 _APPLY_LINK_MIN_RATIO = 0.9
+
+
+def _replace_outside_fences(text: str, old: str, new: str) -> str:
+    """Replace literal ``old`` with ``new`` only outside fenced code blocks."""
+    parts = re.split(r"(```[\s\S]*?```)", text)
+    for idx in range(0, len(parts), 2):
+        parts[idx] = parts[idx].replace(old, new)
+    return "".join(parts)
+
+
+def _contains_outside_fences(text: str, needle: str) -> bool:
+    parts = re.split(r"(```[\s\S]*?```)", text)
+    return any(needle in parts[idx] for idx in range(0, len(parts), 2))
 
 
 def repair_dead_links(workspace_dir: str = ".", apply: bool = False) -> Dict[str, Any]:
@@ -525,22 +599,21 @@ def repair_dead_links(workspace_dir: str = ".", apply: bool = False) -> Dict[str
         if difflib.SequenceMatcher(None, dead, suggested).ratio() < _APPLY_LINK_MIN_RATIO:
             results["skipped"] += 1
             continue
-        # The link lives in whatever file actually contains it — a bare-stem
-        # match across vaults can point at a same-named note in another
-        # scope (cross-vault collision). Only rewrite files that provably
-        # contain the dead link.
-        candidates = files_by_id.get(src_id) or []
-        try:
-            candidates = [f for f in candidates if f"[[{dead}]]" in f.read_text(encoding="utf-8")]
-        except OSError:
-            candidates = []
+        raw_candidates = files_by_id.get(src_id) or []
+        candidates: list = []
+        for cand_f in raw_candidates:
+            try:
+                if _contains_outside_fences(cand_f.read_text(encoding="utf-8"), f"[[{dead}]]"):
+                    candidates.append(cand_f)
+            except OSError:
+                continue
         if not candidates:
             results["skipped"] += 1
             continue
         for src_file in candidates:
             try:
                 text = src_file.read_text(encoding="utf-8")
-                new_text = text.replace(f"[[{dead}]]", f"[[{suggested}]]")
+                new_text = _replace_outside_fences(text, f"[[{dead}]]", f"[[{suggested}]]")
                 if new_text == text:
                     results["skipped"] += 1
                     continue
