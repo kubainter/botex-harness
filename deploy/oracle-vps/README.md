@@ -11,7 +11,7 @@ To automatically install, configure and launch BoteX with all services on a clea
 # From repository root directory on the VPS:
 sudo bash deploy/oracle-vps/install.sh
 
-# Or to also compile llama.cpp and download Bielik-11B-v3.0 Q4_K_M (~6.26 GiB):
+# Or to also compile llama.cpp and download Bielik-11B-v3.1 Q4_K_M (~6.26 GiB):
 sudo bash deploy/oracle-vps/install.sh --with-bielik
 ```
 
@@ -25,7 +25,7 @@ The script will automatically configure dependencies, Python venv, user permissi
 |---|---|---|
 | `install.sh` | CLI runner | One-click automated production installer |
 | `botex-cloud.service` | `/etc/systemd/system/` | Uvicorn `botex.server_cloud:app`, 1 worker, `0.0.0.0:8000`, pinned to OCPU 0 |
-| `bielik.service` | `/etc/systemd/system/` | `llama-server` for Bielik-11B-v3.0 Q4_K_M, `127.0.0.1:8080`, `-c 8192`, OCPUs 1-2 at idle priority |
+| `bielik.service` | `/etc/systemd/system/` | `llama-server` for Bielik-11B-v3.1 Q4_K_M, `127.0.0.1:8080`, `-c 8192`, OCPUs 1-2 at idle priority |
 | `botex-maintenance.service` | `/etc/systemd/system/` | `oneshot` background maintenance: SQLite WAL checkpoints, Obsidian graph indexing, log cleanup |
 | `botex-maintenance.timer` | `/etc/systemd/system/` | Periodic trigger: runs 5 min after boot, then every 30 minutes |
 | `botex-maintenance.sh` | `/usr/local/sbin/` (chmod 755) | Maintenance runner: index synchronization, WAL truncation, graph audit |
@@ -75,9 +75,9 @@ sudo cmake -B build
 sudo cmake --build build --config Release -j4        # ARM NEON auto-detected
 sudo chown -R botex:botex /opt/llama.cpp
 
-# Bielik-11B-v3.0-Instruct GGUF, quantization Q4_K_M (~6.26 GiB, optimized for 18 GiB RAM):
-sudo -u botex curl -fL -o /opt/bielik/models/bielik-11b-v3.0-instruct.Q4_K_M.gguf \
-  https://huggingface.co/speakleash/Bielik-11B-v3.0-Instruct-GGUF/resolve/main/Bielik-11B-v3.0-Instruct.Q4_K_M.gguf
+# Bielik-11B-v3.1-Instruct GGUF, quantization Q4_K_M (~6.26 GiB, optimized for 18 GiB RAM):
+sudo -u botex curl -fL -o /opt/bielik/models/Bielik-11B-v3.1-instruct.Q4_K_M.gguf \
+  https://huggingface.co/speakleash/Bielik-11B-v3.1-Instruct-GGUF/resolve/main/Bielik-11B-v3.1-Instruct.Q4_K_M.gguf
 ```
 
 If the GGUF filename differs, fix `BIELIK_MODEL` in `bielik.service`
