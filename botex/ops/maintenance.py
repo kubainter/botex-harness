@@ -20,11 +20,13 @@ touch the user-facing path.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -306,3 +308,103 @@ def repair_frontmatter_ids(workspace_dir: str = ".") -> Dict[str, int]:
                 )
 
     return results
+
+
+_LEDGER_KEEP_DAYS = 90
+
+
+def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
+    """Move ledger rows older than the retention window into per-month
+    ``analytics-archive/YYYY-MM.jsonl.gz`` rollups.
+
+    Live ``.agent_analytics.jsonl`` stays small for fast ``load_analytics``;
+    archived rows remain fully readable (load_analytics merges all sources),
+    so ``botex stats`` keeps its historical horizon. Legacy ``.json`` data
+    is folded into the live segment first.
+    """
+    results: Dict[str, int] = {"archived": 0, "kept": 0, "migrated": 0}
+    try:
+        from botex.providers.analytics import (
+            _cfg_analytics_file,
+            _ledger_archive_dir,
+            _ledger_jsonl,
+            _read_jsonl,
+        )
+    except Exception as exc:
+        logger.warning("analytics rotation: imports failed: %s", type(exc).__name__)
+        return results
+
+    live = _ledger_jsonl()
+    legacy = _cfg_analytics_file()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_LEDGER_KEEP_DAYS)
+
+    rows: list = []
+    if legacy.exists() and legacy != live:
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                rows.extend(r for r in data if isinstance(r, dict))
+                results["migrated"] = len(rows)
+                legacy.unlink()
+        except (OSError, ValueError) as exc:
+            logger.warning("analytics rotation: legacy migrate failed: %s", type(exc).__name__)
+    rows.extend(_read_jsonl(live))
+    if not rows:
+        return results
+
+    def _month_of(rec: Dict[str, Any]) -> str:
+        try:
+            return str(rec.get("timestamp") or "")[:7] or "unknown"
+        except Exception:
+            return "unknown"
+
+    def _ts_of(rec: Dict[str, Any]):
+        try:
+            ts = str(rec.get("timestamp") or "")
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    keep: list = []
+    by_month: Dict[str, list] = {}
+    for rec in rows:
+        ts = _ts_of(rec)
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts is not None and ts < cutoff:
+            by_month.setdefault(_month_of(rec), []).append(rec)
+        else:
+            keep.append(rec)
+
+    if not by_month:
+        results["kept"] = len(keep)
+        # Still rewrite live if legacy rows were folded in.
+        if results["migrated"] or not live.exists():
+            _rewrite_ledger(live, keep)
+        return results
+
+    archive = _ledger_archive_dir()
+    try:
+        archive.mkdir(parents=True, exist_ok=True)
+        for month, recs in by_month.items():
+            gz_path = archive / f"{month}.jsonl.gz"
+            with gzip.open(gz_path, "at", encoding="utf-8") as fh:
+                for rec in recs:
+                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            results["archived"] += len(recs)
+    except (OSError, ValueError) as exc:
+        logger.warning("analytics rotation: archive write failed: %s", type(exc).__name__)
+        return results
+
+    _rewrite_ledger(live, keep)
+    results["kept"] = len(keep)
+    return results
+
+
+def _rewrite_ledger(live: Path, rows: list) -> None:
+    tmp = live.with_suffix(live.suffix + ".tmp")
+    tmp.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+        encoding="utf-8",
+    )
+    os.replace(tmp, live)

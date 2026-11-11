@@ -2418,7 +2418,7 @@ def _cli_maintenance(argv: list[str]) -> None:
         "job",
         nargs="?",
         default="all",
-        choices=["all", "warm", "sweep", "repair"],
+        choices=["all", "warm", "sweep", "repair", "rotate"],
         help="Job to run (default: all)",
     )
     parser.add_argument("--workspace", "-w", default=".", help="Workspace dir (default: cwd)")
@@ -2431,6 +2431,8 @@ def _cli_maintenance(argv: list[str]) -> None:
         results["sweep_empty_chat_sessions"] = maintenance.sweep_empty_chat_sessions(args.workspace)
     if args.job in ("all", "repair"):
         results["repair_frontmatter_ids"] = maintenance.repair_frontmatter_ids(args.workspace)
+    if args.job in ("all", "rotate"):
+        results["rotate_analytics_ledger"] = maintenance.rotate_analytics_ledger(args.workspace)
     print(json.dumps(results, indent=2, default=str))
 
 

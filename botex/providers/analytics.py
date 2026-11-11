@@ -7,10 +7,13 @@ Tracks token consumption, estimated USD costs, lines modified, and enforces dail
 Provides rich CLI reporting and snapshot storage inspection.
 """
 
+import gzip
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -163,25 +166,113 @@ def _cache_savings_usd(
     return read_savings - write_premium
 
 
-def load_analytics() -> List[Dict[str, Any]]:
-    """Load all run records from .agent_analytics.json."""
-    target_file = _cfg_analytics_file()
-    if not target_file.exists():
-        return []
+def _ledger_jsonl() -> Path:
+    """Append-only live ledger segment (.agent_analytics.jsonl)."""
+    return _cfg_analytics_file().with_suffix(".jsonl")
+
+
+def _ledger_archive_dir() -> Path:
+    """Compressed monthly rollups rotated out of the live segment."""
+    return _cfg_analytics_file().parent / "analytics-archive"
+
+
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     try:
-        data = json.loads(target_file.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return data
-    except Exception:
-        pass
-    return []
+        if path.suffix == ".gz":
+            fh = gzip.open(path, "rt", encoding="utf-8")
+        else:
+            fh = path.open("r", encoding="utf-8")
+        with fh:
+            out = []
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    out.append(rec)
+            return out
+    except OSError:
+        return []
+
+
+def load_analytics() -> List[Dict[str, Any]]:
+    """Load all run records: monthly archives + legacy .json + live .jsonl.
+
+    Sources are merged oldest-first and deduplicated on (task_id,
+    timestamp) so legacy records migrated into .jsonl are not counted
+    twice.
+    """
+    records: List[Dict[str, Any]] = []
+    archive = _ledger_archive_dir()
+    if archive.is_dir():
+        for gz in sorted(archive.glob("*.jsonl.gz")):
+            records.extend(_read_jsonl(gz))
+
+    target_file = _cfg_analytics_file()
+    if target_file.exists():
+        try:
+            data = json.loads(target_file.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                records.extend(r for r in data if isinstance(r, dict))
+        except Exception:
+            pass
+    records.extend(_read_jsonl(_ledger_jsonl()))
+
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for r in records:
+        key = (r.get("task_id"), r.get("timestamp"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
 
 
 def save_analytics(records: List[Dict[str, Any]]):
-    """Persist records to .agent_analytics.json."""
-    target_file = _cfg_analytics_file()
+    """Full-replace the live .jsonl segment (test/migration helper)."""
+    target_file = _ledger_jsonl()
     target_file.parent.mkdir(parents=True, exist_ok=True)
-    target_file.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = target_file.with_suffix(target_file.suffix + ".tmp")
+    tmp.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records),
+        encoding="utf-8",
+    )
+    os.replace(tmp, target_file)
+    legacy = _cfg_analytics_file()
+    if legacy.exists() and legacy != target_file:
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+
+
+def _append_ledger(entry: Dict[str, Any]) -> None:
+    """O(1) append of one run record to the live .jsonl segment.
+
+    One-shot migration: a legacy .agent_analytics.json is folded into
+    .jsonl on first append and removed, so the read-modify-write of the
+    whole history per run is eliminated.
+    """
+    target = _ledger_jsonl()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    legacy = _cfg_analytics_file()
+    if legacy.exists() and legacy != target:
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                with target.open("a", encoding="utf-8") as fh:
+                    for r in data:
+                        fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            legacy.unlink()
+        except (OSError, ValueError):
+            pass
+    with target.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def log_run(
@@ -253,9 +344,7 @@ def log_run(
     if generation_time_ms is not None:
         entry["generation_time_ms"] = round(float(generation_time_ms), 2)
 
-    records = load_analytics()
-    records.append(entry)
-    save_analytics(records)
+    _append_ledger(entry)
     return entry
 
 
