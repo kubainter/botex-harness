@@ -471,19 +471,21 @@ def test_openrouter_credits_mocked():
         }
     ).encode("utf-8")
 
-    def mock_urlopen(req: Any, timeout: float = 10.0) -> Any:
-        url = req.full_url if hasattr(req, "full_url") else str(req)
+    def fake_client_get(url: str, headers: Any = None, timeout: Any = None) -> Any:
         resp_mock = MagicMock()
+        resp_mock.status_code = 200
         if "auth/key" in url:
-            resp_mock.read.return_value = key_resp
+            resp_mock.json.return_value = json.loads(key_resp)
         elif "credits" in url:
-            resp_mock.read.return_value = cred_resp
+            resp_mock.json.return_value = json.loads(cred_resp)
         else:
-            resp_mock.read.return_value = b"{}"
-        resp_mock.__enter__.return_value = resp_mock
+            resp_mock.json.return_value = {}
         return resp_mock
 
-    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+    fake_client = MagicMock()
+    fake_client.get.side_effect = fake_client_get
+
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake_client):
         info = provider.get_credits(api_key="sk-or-test-credits-key")
         assert info.supported is True
         assert info.provider == "openrouter"
@@ -514,10 +516,12 @@ def test_fetch_catalog_mocked():
     }
 
     mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps(catalog_data).encode("utf-8")
-    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = catalog_data
+    fake_client = MagicMock()
+    fake_client.get.return_value = mock_resp
 
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake_client):
         models = provider.fetch_catalog(api_key="test-key")
         assert len(models) == 2
         assert models[0]["id"] == "model-1"
@@ -853,15 +857,17 @@ def test_google_fetch_catalog_mocked():
         ]
     }
     mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps(catalog_data).encode("utf-8")
-    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = catalog_data
+    fake_client = MagicMock()
+    fake_client.get.return_value = mock_resp
 
-    with patch("urllib.request.urlopen", return_value=mock_resp) as mocked:
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake_client):
         models = provider.fetch_catalog(api_key="gai-test")
         assert [m["id"] for m in models] == ["gemini-2.5-flash", "gemini-2.5-pro"]
-        req = mocked.call_args[0][0]
-        assert req.full_url.endswith("/v1beta/openai/models")
-        assert req.get_header("Authorization") == "Bearer gai-test"
+        call = fake_client.get.call_args
+        assert call.args[0].endswith("/v1beta/openai/models")
+        assert call.kwargs["headers"]["Authorization"] == "Bearer gai-test"
 
 
 def test_normalize_tool_call_arguments_dict_coerced_to_string():
@@ -1040,3 +1046,24 @@ def test_credits_info_dataclass_fields_and_sanitization():
     assert len(info_custom.quota_windows) == 1
     assert info_custom.quota_windows[0]["api_key"] == "[REDACTED]"
     assert info_custom.quota_windows[0]["unit"] == "hours"
+
+
+def test_pricing_fetch_catalog_non_json_returns_empty():
+    """A 200 response with non-JSON body degrades to empty catalog instead of raising."""
+    from botex.providers.pricing import _fetch_catalog
+
+    class _HtmlResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("not json")
+
+    class _HtmlClient:
+        def get(self, url, headers=None, timeout=None):
+            return _HtmlResp()
+
+    with patch("botex.providers.http_pool.get_sync_client", return_value=_HtmlClient()):
+        assert _fetch_catalog("https://example.test/api/v1") == {}

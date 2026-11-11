@@ -54,7 +54,9 @@ export interface ProviderRateLimitInfo {
   tpm: number
   burst_multiplier: number
   requests_available: number | null
+  requests_capacity: number | null
   tokens_available: number | null
+  tokens_capacity: number | null
   cooldown_s: number
   wait_s: number
 }
@@ -251,6 +253,8 @@ export interface ChatChunk {
   result?: string
   action?: PendingAction
   error?: string
+  error_class?: string
+  code?: string
   finish_reason?: string
   usage?: Record<string, any>
   timestamp?: number
@@ -307,6 +311,7 @@ export interface GraphNode {
   compiled_truth: boolean
   timestamp: string
   scope: string
+  project?: string
   in_degree: number
   out_degree: number
 }

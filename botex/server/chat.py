@@ -140,6 +140,20 @@ _PROVIDER_ERROR_CODE_ALLOWLIST = frozenset(
     }
 )
 
+# OpenRouter's 404 body carries no structured "code" — only a message like
+# "No endpoints found for <slug>". Substring patterns map those to the same
+# static literals (still no user text echoed to logs). More specific patterns
+# come first — "moderation" alone would false-positive on dead-model messages
+# mentioning moderation stacks.
+_PROVIDER_MESSAGE_PATTERNS: tuple = (
+    ("no endpoints", "model_not_found"),
+    ("not a valid model", "model_not_found"),
+    ("moderation_block", "moderation_blocked"),
+    ("content_policy", "moderation_blocked"),
+    ("content_filter", "moderation_blocked"),
+    ("input was flagged", "moderation_blocked"),
+)
+
 
 def _classify_provider_error_code(exc: BaseException) -> str:
     """Match the provider's structured error body against the allowlist.
@@ -162,6 +176,12 @@ def _classify_provider_error_code(exc: BaseException) -> str:
     for cand in candidates:
         if isinstance(cand, str) and cand.strip().lower() in _PROVIDER_ERROR_CODE_ALLOWLIST:
             return cand.strip().lower()
+    for cand in candidates:
+        if isinstance(cand, str):
+            lowered = cand.lower()
+            for pattern, code in _PROVIDER_MESSAGE_PATTERNS:
+                if pattern in lowered:
+                    return code
     return "unclassified_provider_error"
 
 
@@ -181,6 +201,7 @@ def _provider_error_payload(
     """
     sanitized = sanitize_provider_error(exc)
     status = status_code_of(exc)
+    code = _classify_provider_error_code(exc)
     if status == 403:
         error_class = "policy_rejection"
         message = (
@@ -202,13 +223,14 @@ def _provider_error_payload(
         status if status is not None else "n/a",
         phase,
         error_class,
-        _classify_provider_error_code(exc),
+        code,
     )
     return {
         "type": "error",
         "session_id": session.session_id,
         "error": message,
         "error_class": error_class,
+        "code": code,
     }
 
 
@@ -1240,14 +1262,10 @@ async def stream_chat_turn(
     effective_model = session.model
     effective_allow_non_zdr = allow_non_zdr
 
-    def _rollback_user_message() -> None:
-        if (
-            session.messages
-            and session.messages[-1].role == "user"
-            and session.messages[-1].content == user_input
-        ):
-            session.messages.pop()
-            session.save_to_disk()
+    # Failed turns deliberately STAY in history: chat tools are read-only and
+    # a provider failure mutates nothing, so rolling the user message back
+    # erased conversational context exactly when the user was switching models
+    # to preserve it. Consecutive user turns are merged in get_history().
 
     client_owned = client is None
     if client is None:
@@ -1282,7 +1300,6 @@ async def stream_chat_turn(
             effective_model, active_provider_cfg, allow_non_zdr=effective_allow_non_zdr
         )
         if not zdr_ok:
-            _rollback_user_message()
             yield {
                 "type": "error",
                 "session_id": session.session_id,
@@ -1300,7 +1317,6 @@ async def stream_chat_turn(
             provider_name=active_provider_name,
         )
         if not price_ok:
-            _rollback_user_message()
             yield {
                 "type": "error",
                 "session_id": session.session_id,
@@ -1313,7 +1329,6 @@ async def stream_chat_turn(
                 active_provider_name, active_provider_cfg, api_key=api_key or None
             )
         except Exception as exc:
-            _rollback_user_message()
             yield _provider_error_payload(
                 session,
                 active_provider_name,
@@ -1442,8 +1457,6 @@ async def stream_chat_turn(
                         active_provider_cfg,
                     )
                 except Exception as retry_exc:
-                    if iteration == 1:
-                        _rollback_user_message()
                     await _release_client()
                     yield _provider_error_payload(
                         session,
@@ -1454,8 +1467,6 @@ async def stream_chat_turn(
                     )
                     return
             else:
-                if iteration == 1:
-                    _rollback_user_message()
                 await _release_client()
                 yield _provider_error_payload(
                     session,
@@ -1640,8 +1651,6 @@ async def stream_chat_turn(
                                     else None,
                                 }
         except Exception as exc:
-            if iteration == 1:
-                _rollback_user_message()
             await _release_client()
             yield _provider_error_payload(
                 session,

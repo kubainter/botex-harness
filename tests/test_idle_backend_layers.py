@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """Idle backend layer tests: /mcp/sse guard, catalog freshness headers,
-provider-metadata warmup, and ghost chat-session sweep.
+provider-metadata warmup, ghost chat-session sweep, and frontmatter ID repair.
 
 These cover the curator/idle take-over work: request-time network work and
 filesystem debris move to deterministic background layers whose failures
@@ -263,3 +263,126 @@ def test_sweep_missing_dir_is_noop(tmp_path: Any, monkeypatch: Any) -> None:
 
     monkeypatch.setattr(server_config, "get_chat_sessions_dir", lambda ws: str(tmp_path / "nope"))
     assert maint.sweep_empty_chat_sessions(workspace_dir=".") == 0
+
+
+# ---------------------------------------------------------------------------
+# P3c: memory frontmatter ID repair & canonical stem identity
+# ---------------------------------------------------------------------------
+
+
+def test_repair_frontmatter_ids_fixes_redacted_id(tmp_path: Any, monkeypatch: Any) -> None:
+    from botex import memory as mem_mod
+    import botex.ops.maintenance as maint
+
+    ws = tmp_path / "ws"
+    mem_dir = ws / ".botex" / "memory"
+    mem_dir.mkdir(parents=True)
+    monkeypatch.setattr(mem_mod, "get_global_memory_dir", lambda: tmp_path / "global_empty")
+    monkeypatch.setattr(mem_mod, "get_swarm_memory_dir", lambda: None)
+
+    note_path = mem_dir / "test_note.md"
+    body_content = "This is a decision note.\nLine 2 of note body.\n"
+    initial_text = f"---\nid: [REDACTED]\nschema: ecc.memory.v2\ntitle: Test Decision\nkind: decision\n---\n{body_content}"
+    note_path.write_text(initial_text, encoding="utf-8")
+
+    res = maint.repair_frontmatter_ids(workspace_dir=str(ws))
+    assert res == {"scanned": 1, "repaired": 1, "skipped": 0}
+
+    repaired_text = note_path.read_text(encoding="utf-8")
+    meta, body = mem_mod._parse_frontmatter(repaired_text)
+    assert meta.get("id") == "test_note"
+    assert meta.get("title") == "Test Decision"
+    assert meta.get("schema") == "ecc.memory.v2"
+    assert meta.get("kind") == "decision"
+    assert body == body_content
+
+    conn = mem_mod._get_index_db(mem_dir)
+    try:
+        row = conn.execute(
+            "SELECT id, title, mtime FROM memories_meta WHERE id = 'test_note';"
+        ).fetchone()
+        assert row is not None
+        assert row["id"] == "test_note"
+        assert row["title"] == "Test Decision"
+        assert abs(float(row["mtime"]) - note_path.stat().st_mtime) < 0.001
+    finally:
+        conn.close()
+
+
+def test_repair_frontmatter_ids_skips_invalid_stem(tmp_path: Any, monkeypatch: Any) -> None:
+    from botex import memory as mem_mod
+    import botex.ops.maintenance as maint
+
+    ws = tmp_path / "ws"
+    mem_dir = ws / ".botex" / "memory"
+    mem_dir.mkdir(parents=True)
+    monkeypatch.setattr(mem_mod, "get_global_memory_dir", lambda: tmp_path / "global_empty")
+    monkeypatch.setattr(mem_mod, "get_swarm_memory_dir", lambda: None)
+
+    bad_stem_file = mem_dir / "invalid stem note.md"
+    content = "---\nid: old_id\ntitle: Invalid Stem Note\n---\nUntouched content.\n"
+    bad_stem_file.write_text(content, encoding="utf-8")
+
+    res = maint.repair_frontmatter_ids(workspace_dir=str(ws))
+    assert res == {"scanned": 1, "repaired": 0, "skipped": 1}
+    assert bad_stem_file.read_text(encoding="utf-8") == content
+
+
+def test_repair_frontmatter_ids_leaves_valid_untouched(tmp_path: Any, monkeypatch: Any) -> None:
+    from botex import memory as mem_mod
+    import botex.ops.maintenance as maint
+
+    ws = tmp_path / "ws"
+    mem_dir = ws / ".botex" / "memory"
+    mem_dir.mkdir(parents=True)
+    monkeypatch.setattr(mem_mod, "get_global_memory_dir", lambda: tmp_path / "global_empty")
+    monkeypatch.setattr(mem_mod, "get_swarm_memory_dir", lambda: None)
+
+    valid_file = mem_dir / "valid_note.md"
+    content = (
+        "---\nid: valid_note\nschema: ecc.memory.v2\ntitle: Valid Note\n---\nValid note body.\n"
+    )
+    valid_file.write_text(content, encoding="utf-8")
+    orig_mtime = valid_file.stat().st_mtime
+
+    res = maint.repair_frontmatter_ids(workspace_dir=str(ws))
+    assert res == {"scanned": 1, "repaired": 0, "skipped": 0}
+    assert valid_file.read_text(encoding="utf-8") == content
+    assert valid_file.stat().st_mtime == orig_mtime
+
+
+def test_search_memory_canonical_stem_regression_153_152(tmp_path: Any, monkeypatch: Any) -> None:
+    from botex import memory as mem_mod
+
+    ws = tmp_path / "ws"
+    mem_dir = ws / ".botex" / "memory"
+    mem_dir.mkdir(parents=True)
+    monkeypatch.setattr(mem_mod, "get_global_memory_dir", lambda: tmp_path / "global_empty")
+    monkeypatch.setattr(mem_mod, "get_swarm_memory_dir", lambda: None)
+
+    file_p = mem_dir / "botex_prompt_cache_deployed.md"
+    file_p.write_text(
+        """---
+id: [REDACTED]
+schema: ecc.memory.v2
+title: BoteX prompt-cache optimization
+kind: decision
+confidence: 1.0
+timestamp: "2026-11-07T12:02:29.337440+00:00"
+---
+Prompt cache deployed with 123 tests green.
+""",
+        encoding="utf-8",
+    )
+    mem_mod.sync_memory_index(mem_dir)
+
+    search_res = mem_mod.search_memory(
+        workspace_dir=str(ws),
+        scope="local",
+        since="2026-11-01T00:00:00Z",
+    )
+    assert search_res["ok"] is True
+    assert search_res["count"] == 1
+    found = search_res["memories"][0]
+    assert found["id"] == "botex_prompt_cache_deployed"
+    assert found["title"] == "BoteX prompt-cache optimization"

@@ -346,6 +346,7 @@
       :is-loading="chatStore.isLoadingModels"
       :selected-model="newTask.model || chatStore.selectedModel"
       :selected-provider="newTask.provider || chatStore.selectedProvider"
+      :catalog-stale="chatStore.catalogStale"
       @close="showModelSelector = false"
       @select="onSelectTaskModel"
       @refresh="chatStore.fetchCatalogModels(true)"
