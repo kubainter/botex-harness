@@ -121,6 +121,49 @@ _VALID_ROLES_MAP: dict[str, str] = {
     "tool": "tool",
 }
 
+# Static allowlist of provider error codes we can safely emit to logs. The
+# raw exception text NEVER reaches a log sink (CWE-532: exception bodies may
+# carry credential material, and mask_secrets is not a CodeQL sanitizer —
+# AGENTS.md §5.1); instead the structured body is matched against these
+# module constants and only the matched literal is logged.
+_PROVIDER_ERROR_CODE_ALLOWLIST = frozenset(
+    {
+        "moderation_blocked",
+        "guardrail_triggered",
+        "data_policy_violation",
+        "insufficient_credits",
+        "insufficient_quota",
+        "rate_limit_exceeded",
+        "context_length_exceeded",
+        "model_not_found",
+        "no_allowed_providers",
+    }
+)
+
+
+def _classify_provider_error_code(exc: BaseException) -> str:
+    """Match the provider's structured error body against the allowlist.
+
+    Returns a statically declared literal — never the mutated user/provider
+    string — so the taint flow is severed at the root (CodeQL CWE-532).
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, (dict, list)):
+        try:
+            body = json.loads(str(body or ""))
+        except (TypeError, ValueError):
+            return "unclassified_provider_error"
+    candidates: list = []
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            candidates += [err.get("code"), err.get("message")]
+        candidates += [body.get("code"), body.get("message")]
+    for cand in candidates:
+        if isinstance(cand, str) and cand.strip().lower() in _PROVIDER_ERROR_CODE_ALLOWLIST:
+            return cand.strip().lower()
+    return "unclassified_provider_error"
+
 
 def _provider_error_payload(
     session: Any,
@@ -130,23 +173,14 @@ def _provider_error_payload(
     phase: str = "request",
     message_prefix: str = "API Error: ",
 ) -> Dict[str, Any]:
-    """Log a sanitized provider failure server-side and build the client error event.
+    """Build the client error event and log a taint-safe diagnostic line.
 
-    The sanitized text carries the provider's error body (secrets masked) —
-    without this log line the provider-side cause of an incident is
-    unrecoverable from server artifacts alone.
+    The log carries only metadata, the status code, and a static error-code
+    literal; the sanitized provider body (secrets masked) travels solely in
+    the client event payload, which is not a log sink.
     """
     sanitized = sanitize_provider_error(exc)
     status = status_code_of(exc)
-    _log.warning(
-        "chat provider error: session=%s provider=%s model=%s status=%s phase=%s error=%s",
-        session.session_id,
-        provider_name,
-        model,
-        status if status is not None else "n/a",
-        phase,
-        sanitized[:512],
-    )
     if status == 403:
         error_class = "policy_rejection"
         message = (
@@ -159,6 +193,17 @@ def _provider_error_payload(
     else:
         error_class = "provider_error"
         message = f"{message_prefix}{sanitized}"
+    _log.warning(
+        "chat provider error: session=%s provider=%s model=%s status=%s phase=%s "
+        "error_class=%s code=%s",
+        session.session_id,
+        provider_name,
+        model,
+        status if status is not None else "n/a",
+        phase,
+        error_class,
+        _classify_provider_error_code(exc),
+    )
     return {
         "type": "error",
         "session_id": session.session_id,

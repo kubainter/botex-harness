@@ -57,7 +57,7 @@ def warm_provider_metadata(workspace_dir: str = ".") -> Dict[str, Any]:
     try:
         cfg = _load_config()
     except Exception as exc:
-        logger.warning("provider metadata warmup: config load failed: %s", exc)
+        logger.warning("provider metadata warmup: config load failed: %s", type(exc).__name__)
         return results
 
     providers_cfg = cfg.get("providers") or {}
@@ -72,7 +72,9 @@ def warm_provider_metadata(workspace_dir: str = ".") -> Dict[str, Any]:
             models = ModelCatalog(provider_name=name, provider_cfg=prov_cfg).load()
             results[f"catalog:{name}"] = len(models or {})
         except Exception as exc:
-            logger.warning("provider metadata warmup: catalog %s failed: %s", name, exc)
+            logger.warning(
+                "provider metadata warmup: catalog %s failed: %s", name, type(exc).__name__
+            )
 
         try:
             from botex.providers.pricing import load_catalog as load_pricing_catalog
@@ -80,7 +82,9 @@ def warm_provider_metadata(workspace_dir: str = ".") -> Dict[str, Any]:
             pricing = load_pricing_catalog(base_url, api_key=_provider_api_key(prov_cfg))
             results[f"pricing:{name}"] = sum(len(c) for c in (pricing or {}).values())
         except Exception as exc:
-            logger.warning("provider metadata warmup: pricing %s failed: %s", name, exc)
+            logger.warning(
+                "provider metadata warmup: pricing %s failed: %s", name, type(exc).__name__
+            )
 
     try:
         from botex.providers.benchmarks import fetch_openrouter_benchmarks
@@ -91,7 +95,7 @@ def warm_provider_metadata(workspace_dir: str = ".") -> Dict[str, Any]:
         else:
             results["benchmarks"] = bool(data)
     except Exception as exc:
-        logger.warning("provider metadata warmup: benchmarks failed: %s", exc)
+        logger.warning("provider metadata warmup: benchmarks failed: %s", type(exc).__name__)
 
     return results
 
@@ -108,7 +112,7 @@ def sweep_empty_chat_sessions(workspace_dir: str = ".") -> int:
 
         sessions_dir = Path(get_chat_sessions_dir(workspace_dir))
     except Exception as exc:
-        logger.warning("ghost session sweep: sessions dir resolve failed: %s", exc)
+        logger.warning("ghost session sweep: sessions dir resolve failed: %s", type(exc).__name__)
         return 0
     if not sessions_dir.is_dir():
         return 0
