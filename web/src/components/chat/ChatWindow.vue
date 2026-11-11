@@ -185,8 +185,9 @@
             </button>
           </div>
 
-          <!-- Actionable Starter Prompts -->
-          <div class="space-y-2">
+          <!-- Actionable Starter Prompts (gated: prompt strings reference internal
+               file paths — hide from unauthenticated viewers) -->
+          <div v-if="accessToken" class="space-y-2">
             <span class="block text-xs font-medium text-slate-300">
               Quick Workspace Actions
             </span>
@@ -316,6 +317,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
+import { useAuthStore } from '../../stores/auth'
 import { useI18n } from '../../i18n'
 import type { CatalogModel, ChatSessionSummary } from '../../api/types'
 import MessageBubble from './MessageBubble.vue'
@@ -342,6 +344,8 @@ const emit = defineEmits<{
 }>()
 
 const chatStore = useChatStore()
+const authStore = useAuthStore()
+const { accessToken } = storeToRefs(authStore)
 const { locale, t } = useI18n()
 const {
   sessionId,
