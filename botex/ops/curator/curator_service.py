@@ -408,7 +408,12 @@ class CuratorService:
         try:
             from openai import AsyncOpenAI
 
-            client = AsyncOpenAI(base_url=local_url, api_key="not-needed", timeout=15.0)
+            client = AsyncOpenAI(base_url=local_url, api_key="not-needed", timeout=45.0)
+            extra_body = (
+                {"chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}}
+                if ("bielik" in self.local_model.lower() or ":8080" in local_url)
+                else None
+            )
 
             resp = await client.chat.completions.create(
                 model=self.local_model,
@@ -418,6 +423,7 @@ class CuratorService:
                 ],
                 temperature=0.2,
                 max_tokens=2048,
+                extra_body=extra_body,
             )
             content = resp.choices[0].message.content
             return content

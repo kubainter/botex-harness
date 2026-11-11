@@ -542,3 +542,57 @@ async def test_curator_harvest_inactive_chat_sessions(tmp_path, monkeypatch):
     # Second run skips already harvested session with unchanged updated_at
     harvested_again = await service.harvest_inactive_chat_sessions()
     assert harvested_again == []
+
+
+def test_local_llm_inference_passes_decision_mode_for_bielik(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import types
+    from botex.ops.curator import curator_service as cs
+
+    captured = {}
+
+    class DummySocket:
+        def settimeout(self, t):
+            pass
+
+        def connect(self, addr):
+            pass
+
+        def close(self):
+            pass
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            msg = types.SimpleNamespace(content='{"summary": "ok"}')
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+    class DummyClient:
+        def __init__(self, **kwargs):
+            captured["client_timeout"] = kwargs.get("timeout")
+            self.chat = types.SimpleNamespace(completions=DummyCompletions())
+
+    import socket as real_socket
+
+    monkeypatch.setattr(
+        cs,
+        "socket",
+        types.SimpleNamespace(
+            AF_INET=real_socket.AF_INET,
+            SOCK_STREAM=real_socket.SOCK_STREAM,
+            socket=lambda *a, **kw: DummySocket(),
+        ),
+    )
+    import openai
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", DummyClient)
+
+    service = CuratorService(workspace_dir=str(tmp_path), local_model="bielik:latest")
+    out = asyncio.run(service._try_local_llm_inference("test prompt"))
+    assert out == '{"summary": "ok"}'
+    assert captured["client_timeout"] == 45.0
+    assert captured["extra_body"] == {
+        "chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}
+    }
