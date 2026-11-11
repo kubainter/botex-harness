@@ -251,6 +251,7 @@ export interface ChatChunk {
   result?: string
   action?: PendingAction
   error?: string
+  error_class?: string
   finish_reason?: string
   usage?: Record<string, any>
   timestamp?: number

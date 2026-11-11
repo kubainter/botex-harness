@@ -23,7 +23,6 @@ import json
 import os
 import sys
 import time
-import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
 from botex.analytics import is_free_model
@@ -35,13 +34,20 @@ _HTTP_TIMEOUT = 10
 
 
 def _fetch_catalog(base_url: str, api_key: str = "") -> Dict[str, Dict[str, Any]]:
-    """Fetch {base_url}/models — prices (USD/1Mtok) + tool-call capability."""
+    """Fetch {base_url}/models — prices (USD/1Mtok) + tool-call capability.
+
+    Uses the shared httpx2 pool (same transport as completions) — urllib's
+    resolver breaks on IPv6-only hosts and left the pricing cache stale.
+    """
     url = base_url.rstrip("/") + "/models"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    headers = {"Accept": "application/json"}
     if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
-    with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
+        headers["Authorization"] = f"Bearer {api_key}"
+    from botex.providers.http_pool import get_sync_client
+
+    resp = get_sync_client().get(url, headers=headers, timeout=_HTTP_TIMEOUT)
+    resp.raise_for_status()
+    payload = resp.json() or {}
 
     catalog: Dict[str, Dict[str, Any]] = {}
     for m in payload.get("data", []):
