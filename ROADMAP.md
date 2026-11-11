@@ -175,6 +175,20 @@ evicted) once `_TASKS` gains a bound of its own.
 
 ## Later — needs design or an external dependency
 
+### Image generation from CPU-only VPS (API + remote GPU worker)
+`llama-server` / Ollama serve text and vision-input models only, and running
+local diffusion on a 3-OCPU ARM VPS without a GPU is impractical (minutes per
+image and RAM contention with the active LLM). Still, the PWA and tool layer
+on the VPS can expose an image-generation feature cleanly by keeping the VPS
+as an orchestrator with two pluggable backends:
+1. **External Image API (daily driver):** BoteX sends prompts to a hosted image
+   provider (Gemini Imagen, Fal, Replicate, OpenRouter) and returns the image
+   in ~3–10s with zero VPS RAM/CPU load.
+2. **Remote GPU worker (tunnel / Tailscale):** BoteX delegates generation over
+   a private tunnel to a local PC running ComfyUI or `stable-diffusion.cpp` on
+   GPU (e.g. uncensored Flux / SDXL / Qwen-Image pipelines), falling back to
+   API or an explicit unavailable error when the home GPU host is offline.
+
 ### Plan / dry-run mode (`mode="plan"`)
 Agent performs full recon and returns proposed changes (patch list / plan)
 without writing; the consumer shows the user, then dispatches `mode="edit"`
