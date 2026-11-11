@@ -37,7 +37,7 @@ try:
         build_async_client,
         sanitize_provider_error,
     )
-    from botex.providers.retry import call_with_backoff
+    from botex.providers.retry import call_with_backoff, status_code_of
     from botex.skills.skills import install_skill_async, list_skills
     from botex.tools.file_tools import (
         get_file_outline,
@@ -89,7 +89,7 @@ except (ImportError, ValueError):
         build_async_client,
         sanitize_provider_error,
     )
-    from retry import call_with_backoff
+    from retry import call_with_backoff, status_code_of
     from security import (
         SecurityError,
         check_model_zdr,
@@ -120,6 +120,97 @@ _VALID_ROLES_MAP: dict[str, str] = {
     "assistant": "assistant",
     "tool": "tool",
 }
+
+# Static allowlist of provider error codes we can safely emit to logs. The
+# raw exception text NEVER reaches a log sink (CWE-532: exception bodies may
+# carry credential material, and mask_secrets is not a CodeQL sanitizer —
+# AGENTS.md §5.1); instead the structured body is matched against these
+# module constants and only the matched literal is logged.
+_PROVIDER_ERROR_CODE_ALLOWLIST = frozenset(
+    {
+        "moderation_blocked",
+        "guardrail_triggered",
+        "data_policy_violation",
+        "insufficient_credits",
+        "insufficient_quota",
+        "rate_limit_exceeded",
+        "context_length_exceeded",
+        "model_not_found",
+        "no_allowed_providers",
+    }
+)
+
+
+def _classify_provider_error_code(exc: BaseException) -> str:
+    """Match the provider's structured error body against the allowlist.
+
+    Returns a statically declared literal — never the mutated user/provider
+    string — so the taint flow is severed at the root (CodeQL CWE-532).
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, (dict, list)):
+        try:
+            body = json.loads(str(body or ""))
+        except (TypeError, ValueError):
+            return "unclassified_provider_error"
+    candidates: list = []
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            candidates += [err.get("code"), err.get("message")]
+        candidates += [body.get("code"), body.get("message")]
+    for cand in candidates:
+        if isinstance(cand, str) and cand.strip().lower() in _PROVIDER_ERROR_CODE_ALLOWLIST:
+            return cand.strip().lower()
+    return "unclassified_provider_error"
+
+
+def _provider_error_payload(
+    session: Any,
+    provider_name: str,
+    model: str,
+    exc: Exception,
+    phase: str = "request",
+    message_prefix: str = "API Error: ",
+) -> Dict[str, Any]:
+    """Build the client error event and log a taint-safe diagnostic line.
+
+    The log carries only metadata, the status code, and a static error-code
+    literal; the sanitized provider body (secrets masked) travels solely in
+    the client event payload, which is not a log sink.
+    """
+    sanitized = sanitize_provider_error(exc)
+    status = status_code_of(exc)
+    if status == 403:
+        error_class = "policy_rejection"
+        message = (
+            "Provider rejected the request (403 - policy/moderation/permissions, "
+            f"not rate-limit). Not retrying. Detail: {sanitized}"
+        )
+    elif status == 401:
+        error_class = "auth_failure"
+        message = f"Provider authentication failed (401 - check the API key). Detail: {sanitized}"
+    else:
+        error_class = "provider_error"
+        message = f"{message_prefix}{sanitized}"
+    _log.warning(
+        "chat provider error: session=%s provider=%s model=%s status=%s phase=%s "
+        "error_class=%s code=%s",
+        session.session_id,
+        provider_name,
+        model,
+        status if status is not None else "n/a",
+        phase,
+        error_class,
+        _classify_provider_error_code(exc),
+    )
+    return {
+        "type": "error",
+        "session_id": session.session_id,
+        "error": message,
+        "error_class": error_class,
+    }
+
 
 DEFAULT_CHAT_SYSTEM_PROMPT = (
     "You are BoteX — an intelligent, versatile AI assistant and Vault Administrator in Chat Mode.\n"
@@ -593,6 +684,13 @@ class ChatSession:
                     call_id = prev_tcs[0].get("id") if prev_tcs else f"call_{uuid.uuid4().hex[:8]}"
                     msg["tool_call_id"] = call_id
                 sanitized.append(msg)
+            elif role == "user":
+                if sanitized and sanitized[-1].get("role") == "user":
+                    prev_content = sanitized[-1].get("content") or ""
+                    curr_content = msg.get("content") or ""
+                    sanitized[-1]["content"] = f"{prev_content}\n\n{curr_content}".strip()
+                    continue
+                sanitized.append(msg)
             else:
                 sanitized.append(msg)
 
@@ -644,7 +742,25 @@ class ChatSession:
 
     def save_to_disk(self) -> None:
         """Persist session JSON to configured chat sessions directory."""
-        if not self.workspace_dir or not self.messages:
+        if not self.workspace_dir:
+            return
+        if not self.messages:
+            try:
+                safe_id = sanitize_identifier(self.session_id)
+                if safe_id:
+                    sessions_dir = get_chat_sessions_dir(self.workspace_dir)
+                    file_path = next(
+                        (
+                            f
+                            for f in sessions_dir.iterdir()
+                            if f.is_file() and f.name == f"{safe_id}.json"
+                        ),
+                        None,
+                    )
+                    if file_path is not None and file_path.is_file():
+                        file_path.unlink()
+            except Exception:
+                pass
             return
         try:
             safe_id = sanitize_identifier(self.session_id)
@@ -1131,19 +1247,29 @@ async def stream_chat_turn(
             and session.messages[-1].content == user_input
         ):
             session.messages.pop()
+            session.save_to_disk()
 
     client_owned = client is None
     if client is None:
         requested_provider = session.provider
-        if (
-            (not requested_provider or requested_provider == "openrouter")
-            and session.model
-            and (":free" in session.model.lower() or "openrouter/free" in session.model.lower())
-        ):
-            requested_provider = "openrouter-free"
+        if session.model:
+            model_lower = session.model.lower()
+            if (not requested_provider or requested_provider == "openrouter") and (
+                ":free" in model_lower or "openrouter/free" in model_lower
+            ):
+                requested_provider = "openrouter-free"
+            elif (
+                "/" not in session.model
+                and not model_lower.startswith("gemini-")
+                and (
+                    not requested_provider
+                    or requested_provider in ("openrouter", "openrouter-free")
+                )
+            ):
+                requested_provider = "ollama"
         active_provider_name, active_provider_cfg = resolve_provider(requested_provider)
-        effective_model = session.model or resolve_model(
-            "", profile=session.profile or "fast", provider=active_provider_name
+        effective_model = resolve_model(
+            session.model, profile=session.profile or "fast", provider=active_provider_name
         )
         if active_provider_name == "openrouter-free" or (
             effective_model
@@ -1188,12 +1314,14 @@ async def stream_chat_turn(
             )
         except Exception as exc:
             _rollback_user_message()
-            sanitized = sanitize_provider_error(exc)
-            yield {
-                "type": "error",
-                "session_id": session.session_id,
-                "error": f"Client Init Error: {sanitized}",
-            }
+            yield _provider_error_payload(
+                session,
+                active_provider_name,
+                effective_model,
+                exc,
+                phase="client_init",
+                message_prefix="Client Init Error: ",
+            )
             return
 
     provider_adapter = ProviderRegistry.get(active_provider_name, active_provider_cfg)
@@ -1316,24 +1444,26 @@ async def stream_chat_turn(
                 except Exception as retry_exc:
                     if iteration == 1:
                         _rollback_user_message()
-                    sanitized = sanitize_provider_error(retry_exc)
                     await _release_client()
-                    yield {
-                        "type": "error",
-                        "session_id": session.session_id,
-                        "error": f"API Error: {sanitized}",
-                    }
+                    yield _provider_error_payload(
+                        session,
+                        active_provider_name,
+                        effective_model,
+                        retry_exc,
+                        phase="tool_retry",
+                    )
                     return
             else:
                 if iteration == 1:
                     _rollback_user_message()
-                sanitized = sanitize_provider_error(exc)
                 await _release_client()
-                yield {
-                    "type": "error",
-                    "session_id": session.session_id,
-                    "error": f"API Error: {sanitized}",
-                }
+                yield _provider_error_payload(
+                    session,
+                    active_provider_name,
+                    effective_model,
+                    exc,
+                    phase="request",
+                )
                 return
 
         # 4. Stream response chunks
@@ -1512,13 +1642,14 @@ async def stream_chat_turn(
         except Exception as exc:
             if iteration == 1:
                 _rollback_user_message()
-            sanitized = sanitize_provider_error(exc)
             await _release_client()
-            yield {
-                "type": "error",
-                "session_id": session.session_id,
-                "error": f"Streaming Error: {sanitized}",
-            }
+            yield _provider_error_payload(
+                session,
+                active_provider_name,
+                effective_model,
+                exc,
+                phase="stream",
+            )
             return
         finally:
             # Deterministically release the HTTP stream — an unclosed

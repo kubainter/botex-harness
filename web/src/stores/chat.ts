@@ -21,13 +21,16 @@ function inferProviderFromSlug(slug: string): string {
   if (s.includes(':free') || s.includes('openrouter/free')) {
     return 'openrouter-free'
   }
-  if (s.startsWith('nvidia/') || s.startsWith('meta/llama-3.3-70b-instruct')) {
+  if (s.startsWith('nvidia/') || s.startsWith('meta/') || s.startsWith('poolside/')) {
     return 'nvidia'
   }
   // Bare "gemini-*" slugs (no vendor prefix) are served by the Google AI
   // Studio endpoint; "google/..." prefixed ones stay on OpenRouter.
   if (s.startsWith('gemini-') || s.startsWith('models/gemini-')) {
     return 'google'
+  }
+  if (!s.includes('/')) {
+    return 'ollama'
   }
   return 'openrouter'
 }
@@ -47,6 +50,11 @@ export const useChatStore = defineStore('chat', () => {
   )
   const catalogModels = ref<CatalogModel[]>([])
   const isLoadingModels = ref<boolean>(false)
+  // True when /api/models was served from an expired provider-metadata cache
+  // (both the idle warmup and the lazy refresh failed — egress degradation).
+  // TODO(PWA): render a stale badge in the model selector and auto-refresh the
+  // catalog on a 400 model-not-found error — state is wired, UI pending.
+  const catalogStale = ref<boolean>(false)
   const workspaceDir = ref<string>('.')
   const pendingTaskDraft = ref<string>('')
   const errorMessage = ref<string | null>(null)
@@ -87,8 +95,10 @@ export const useChatStore = defineStore('chat', () => {
 
   async function fetchCatalogModels(forceRefresh: boolean = false) {
     isLoadingModels.value = true
+    const meta = { stale: false, fetchedAt: 0, ageSeconds: 0 }
     try {
-      const list = await api.getModels(undefined, forceRefresh)
+      const list = await api.getModels(undefined, forceRefresh, meta)
+      catalogStale.value = meta.stale
       if (Array.isArray(list) && list.length > 0) {
         catalogModels.value = list
         if (!selectedModel.value || !list.some((m) => m.id === selectedModel.value)) {
@@ -97,9 +107,15 @@ export const useChatStore = defineStore('chat', () => {
           localStorage.setItem('botex_selected_model', selectedModel.value)
           localStorage.setItem('botex_selected_provider', selectedProvider.value)
         } else {
-          const match = catalogModels.value.find((m) => m.id === selectedModel.value)
-          if (match && !localStorage.getItem('botex_selected_provider')) {
-            selectedProvider.value = match.provider
+          const exactMatch = catalogModels.value.find(
+            (m) => m.id === selectedModel.value && m.provider === selectedProvider.value
+          )
+          if (!exactMatch) {
+            const idMatch = catalogModels.value.find((m) => m.id === selectedModel.value)
+            if (idMatch) {
+              selectedProvider.value = idMatch.provider
+              localStorage.setItem('botex_selected_provider', selectedProvider.value)
+            }
           }
         }
       } else {
@@ -107,6 +123,7 @@ export const useChatStore = defineStore('chat', () => {
       }
     } catch {
       catalogModels.value = []
+      catalogStale.value = false
     } finally {
       isLoadingModels.value = false
     }
@@ -427,6 +444,7 @@ export const useChatStore = defineStore('chat', () => {
     selectedProvider,
     catalogModels,
     isLoadingModels,
+    catalogStale,
     activeModelMeta,
     workspaceDir,
     pendingTaskDraft,

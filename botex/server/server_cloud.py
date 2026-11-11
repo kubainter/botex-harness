@@ -53,6 +53,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -67,7 +68,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 import server as botex_server
 from botex.analytics import aggregate_stats, load_analytics
 from botex.approval import PendingAction, default_approval_manager
-from botex.catalog import get_consolidated_models
+from botex.catalog import (
+    CACHE_FILE_DEFAULT,
+    DEFAULT_TTL_HOURS,
+    get_consolidated_models,
+)
 from botex.chat import default_chat_manager, stream_chat_turn
 from botex.config import (
     WorkspaceOutOfBounds,
@@ -839,11 +844,36 @@ _mcp_subapp = botex_server.mcp.sse_app(
     message_path="/messages",
     transport_security=_mcp_transport_security(),
 )
+
+
+class _MCPSseErrorGuard:
+    """Catch MCP SDK validation errors raised *after* the error response was sent.
+
+    ``connect_sse`` emits its error_response and then raises
+    ``ValueError("Request validation failed")`` (mcp sse.py:145-148). Without
+    this guard the escape surfaces as an unhandled ASGI traceback (500); a
+    naive catch-and-respond would double-send, since the response is already
+    started at raise time — so we only log and stop.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        try:
+            await self.app(scope, receive, send)
+        except ValueError as exc:
+            logger.warning("MCP SSE transport rejected request: %s", exc)
+
+
 _mcp_transport = next(
     (r.app.__self__ for r in _mcp_subapp.routes if hasattr(getattr(r, "app", None), "__self__")),
     None,
 )
-app.mount("/mcp", _mcp_subapp)
+app.mount("/mcp", _MCPSseErrorGuard(_mcp_subapp))
 
 
 # ---------------------------------------------------------------------------
@@ -980,21 +1010,38 @@ async def trigger_analytics_digest(
 
 @app.get("/api/models")
 async def get_models(
+    response: Response,
     provider: Optional[str] = Query(default=None),
     force_refresh: bool = Query(default=False),
 ) -> List[Dict[str, Any]]:
     """Return consolidated model catalog across configured providers (openrouter, openrouter-free, nvidia, ollama, google)."""
     if provider and provider.strip():
-        providers_seq = (provider.strip().lower(),)
+        norm_prov, _ = resolve_provider(provider.strip())
+        providers_seq = (norm_prov.lower(),)
     else:
         providers_seq = ("openrouter", "openrouter-free", "nvidia", "ollama", "google")
     cfg = botex_server.load_config() if force_refresh else _cfg
-    return await asyncio.to_thread(
+    models = await asyncio.to_thread(
         get_consolidated_models,
         providers=providers_seq,
         config=cfg,
         force_refresh=force_refresh,
     )
+    # Freshness signal for the PWA: the persistent provider-metadata cache
+    # (shared by the model catalog and the pricing guardrail) is the truthful
+    # "last successful fetch". Stale means both the idle warmup and the lazy
+    # request-time refresh failed — a real egress degradation.
+    try:
+        fetched_at = CACHE_FILE_DEFAULT.stat().st_mtime if CACHE_FILE_DEFAULT.exists() else 0.0
+    except OSError:
+        fetched_at = 0.0
+    age_s = max(0.0, datetime.now(timezone.utc).timestamp() - fetched_at)
+    response.headers["X-Catalog-Fetched-At"] = str(int(fetched_at))
+    response.headers["X-Catalog-Age-Seconds"] = str(int(age_s))
+    response.headers["X-Catalog-Stale"] = (
+        "true" if fetched_at <= 0.0 or age_s > DEFAULT_TTL_HOURS * 3600.0 else "false"
+    )
+    return models
 
 
 @app.get("/api/recipes")
@@ -1310,6 +1357,29 @@ async def create_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Task prompt exceeds maximum allowed length (65536 characters).",
         )
+    executor = (getattr(req, "executor", "") or "botex").lower()
+    if executor != "devin":
+        has_model = bool(req.model and req.model.strip())
+        has_provider = bool(req.provider and req.provider.strip())
+        env_prov = os.environ.get("BOTEX_PROVIDER", "").strip()
+        if has_model and not has_provider and not env_prov:
+            avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Explicit 'provider' is required when 'model' ('{req.model.strip()}') is specified. "
+                    f"Specify one of: {avail_provs}."
+                ),
+            )
+        if has_provider:
+            resolved_prov, prov_cfg = resolve_provider(req.provider)
+            if not prov_cfg:
+                avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unknown provider '{req.provider}'. Available providers: {avail_provs}.",
+                )
+            req.provider = resolved_prov
     if req.max_turns and req.max_turns > 100:
         req.max_turns = 100
     if req.max_tokens and req.max_tokens > 32768:

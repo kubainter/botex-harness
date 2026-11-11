@@ -294,7 +294,7 @@ def test_chat_turn_convenience_wrapper(tmp_path: Path):
 
 
 def test_chat_turn_error_handling(tmp_path: Path):
-    """Verify chat turn yields error event on client failure without crashing."""
+    """Verify chat turn yields error event on client failure and cleans up disk rollback."""
 
     class FailingCompletions:
         async def create(self, **kwargs: Any) -> Any:
@@ -311,8 +311,25 @@ def test_chat_turn_error_handling(tmp_path: Path):
             events.append(event)
 
         assert any(e.get("type") == "error" for e in events)
+        assert len(session.messages) == 0
+        from botex.chat import get_chat_sessions_dir
+
+        session_file = get_chat_sessions_dir(str(tmp_path)) / f"{session.session_id}.json"
+        assert not session_file.exists()
 
     asyncio.run(_test())
+
+
+def test_chat_history_merges_consecutive_user_messages(tmp_path: Path):
+    """Consecutive user messages from legacy/interrupted sessions are merged cleanly."""
+    session = ChatSession(workspace_dir=str(tmp_path), model="test-model")
+    session.add_user_message("First attempt")
+    session.add_user_message("Second attempt")
+    history = session.get_history()
+    assert len(history) == 1
+    assert history[0]["role"] == "user"
+    assert "First attempt" in history[0]["content"]
+    assert "Second attempt" in history[0]["content"]
 
 
 def test_cli_chat_single_turn_and_help(tmp_path: Path, capsys: pytest.CaptureFixture):

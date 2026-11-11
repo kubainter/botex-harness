@@ -8,6 +8,8 @@
 #   2. Runs SQLite WAL checkpoints (TRUNCATE) and PRAGMA optimize on index.db
 #   3. Rotates scratchpad logs and cleans expired execution artifacts
 #   4. Re-evaluates graph health and link topology
+#   5. Warms provider metadata caches (model catalog, pricing, benchmarks)
+#      and sweeps ghost chat-session files (idle-time, off the request path)
 
 set -euo pipefail
 
@@ -56,6 +58,29 @@ try:
     print(f"Graph audit complete: {health.get('total_nodes', 0)} nodes, is_healthy={health.get('is_healthy', False)}")
 except Exception as exc:
     print(f"Maintenance task notice: {exc}", file=sys.stderr)
+EOF
+
+    # 1b. Idle-time provider metadata warmup + ghost chat-session sweep.
+    # Keeps the request path read-only against warm caches: model catalog,
+    # pricing guardrail, and benchmarks refresh here (TTL-aware) instead of
+    # inside a user's chat turn.
+    log "Warming provider metadata caches and sweeping ghost chat sessions..."
+    "$PYTHON_BIN" - <<'EOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    from botex.ops.maintenance import sweep_empty_chat_sessions, warm_provider_metadata
+
+    workspace = str(Path(os.environ.get("BOTEX_WORKSPACE", ".")).resolve())
+    warm = warm_provider_metadata(workspace_dir=workspace)
+    print(f"Provider metadata warmup: {json.dumps(warm, default=str)}")
+    removed = sweep_empty_chat_sessions(workspace_dir=workspace)
+    print(f"Ghost chat-session sweep: removed {removed} empty session file(s)")
+except Exception as exc:
+    print(f"Metadata warmup notice: {exc}", file=sys.stderr)
 EOF
 fi
 
