@@ -691,3 +691,147 @@ def test_classify_provider_error_code_substring_patterns():
         == "unclassified_provider_error"
     )
     assert _classify_provider_error_code(_Err(None)) == "unclassified_provider_error"
+    assert (
+        _classify_provider_error_code(
+            _Err({"error": {"message": "This endpoint's maximum context length is 65536 tokens."}})
+        )
+        == "context_length_exceeded"
+    )
+
+
+def test_chat_session_prune_tool_results(tmp_path: Path):
+    """Old tool outputs are pruned in the ephemeral payload while session.messages keeps full data."""
+    sess = ChatSession(workspace_dir=str(tmp_path))
+    sess.add_user_message("Turn 1: read file")
+    sess.add_assistant_message(
+        None,
+        tool_calls=[{"id": "c1", "type": "function", "function": {"name": "read_file"}}],
+    )
+    big_file = "\n".join(f"line {i}: some source code content" for i in range(50))
+    sess.add_tool_result("c1", "read_file", big_file)
+    sess.add_assistant_message("Turn 1 answer")
+
+    sess.add_user_message("Turn 2 question")
+    sess.add_assistant_message("Turn 2 answer")
+
+    sess.add_user_message("Turn 3 question")
+    sess.add_assistant_message(
+        None,
+        tool_calls=[{"id": "c3", "type": "function", "function": {"name": "read_file"}}],
+    )
+    recent_file = "\n".join(f"recent line {i}" for i in range(20))
+    sess.add_tool_result("c3", "read_file", recent_file)
+    sess.add_assistant_message("Turn 3 answer")
+
+    pruned_hist = sess.get_history(prune_old_tools=True, keep_recent_tool_turns=2)
+    tool_msgs = [m for m in pruned_hist if m["role"] == "tool"]
+    assert len(tool_msgs) == 2
+    assert "[Tool result pruned: read_file (50 lines" in tool_msgs[0]["content"]
+    assert tool_msgs[1]["content"] == recent_file
+
+    # Full history on session and in to_dict() remains 100% intact
+    raw_hist = sess.get_history()
+    raw_tools = [m for m in raw_hist if m["role"] == "tool"]
+    assert raw_tools[0]["content"] == big_file
+    assert sess.to_dict()["messages"][2]["content"] == big_file
+
+
+def test_chat_session_token_budget_sliding_window(tmp_path: Path):
+    """Token budget trims older messages in the ephemeral wire payload without mutating session."""
+    sess = ChatSession(workspace_dir=str(tmp_path))
+    for i in range(6):
+        sess.add_user_message(f"User turn {i}: " + ("word " * 80))
+        sess.add_assistant_message(f"Assistant turn {i}: " + ("reply " * 70))
+
+    # Each message is ~105 tokens; budget of 300 tokens fits the last 2 messages
+    window = sess.get_history(token_budget=300)
+    assert len(window) == 2
+    assert "User turn 5" in window[0]["content"]
+    assert "Assistant turn 5" in window[1]["content"]
+    assert len(sess.messages) == 12
+
+
+def test_chat_session_preserves_tool_call_pairs(tmp_path: Path):
+    """Token budget window must never split an assistant(tool_calls) and tool(result) pair."""
+    sess = ChatSession(workspace_dir=str(tmp_path))
+    sess.add_user_message("u1 " + ("alpha " * 40))
+    sess.add_assistant_message("a1 " + ("beta " * 40))
+    sess.add_user_message("u2 " + ("gamma " * 40))
+    sess.add_assistant_message(
+        None,
+        tool_calls=[{"id": "call_atomic", "type": "function", "function": {"name": "read_file"}}],
+    )
+    sess.add_tool_result("call_atomic", "read_file", "tool output " + ("delta " * 80))
+    sess.add_assistant_message("a2 " + ("epsilon " * 40))
+    sess.add_user_message("u3 " + ("zeta " * 40))
+
+    # Budget enough for u3 + a2 (~120 tokens), but not enough for the atomic [assistant_tc, tool] block (~130 tokens)
+    window = sess.get_history(token_budget=150)
+    roles = [m["role"] for m in window]
+    assert "tool" not in roles
+    for m in window:
+        assert not m.get("tool_calls")
+    assert roles == ["assistant", "user"]
+
+
+@pytest.mark.anyio
+async def test_chat_stream_turn_poisoned_session_recovery(tmp_path: Path):
+    """If provider returns 400 context_length_exceeded, stream_chat_turn compacts window and retries."""
+    sess = ChatSession(workspace_dir=str(tmp_path), model="qwen/qwen3-coder", provider="openrouter")
+    for i in range(8):
+        sess.add_user_message(f"Historical question {i} " + ("topic " * 60))
+        sess.add_assistant_message(f"Historical answer {i} " + ("detail " * 60))
+
+    sent_payloads: list = []
+
+    class _ContextOverflowError(Exception):
+        status_code = 400
+        body = {
+            "error": {
+                "code": 400,
+                "message": (
+                    "This endpoint's maximum context length is 65536 tokens. "
+                    "However, you requested about 66827 tokens."
+                ),
+            }
+        }
+
+    class _AsyncChunkStream:
+        def __init__(self, chunks):
+            self._chunks = list(chunks)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._chunks:
+                raise StopAsyncIteration
+            return self._chunks.pop(0)
+
+    class _RecoveryClient:
+        class chat:
+            class completions:
+                @staticmethod
+                async def create(**kwargs):
+                    sent_payloads.append(kwargs["messages"])
+                    if len(sent_payloads) == 1:
+                        raise _ContextOverflowError(
+                            "Error code: 400 - This endpoint's maximum context length is 65536 tokens."
+                        )
+                    return _AsyncChunkStream([MockChunk(content="Recovered response!")])
+
+    events = [
+        ev
+        async for ev in stream_chat_turn(
+            sess,
+            "New question after overflow",
+            client=_RecoveryClient(),
+        )
+    ]
+    done_ev = next((e for e in events if e["type"] == "done"), None)
+    assert done_ev is not None
+    assert done_ev["content"] == "Recovered response!"
+    assert len(sent_payloads) == 2
+    assert len(sent_payloads[1]) < len(sent_payloads[0])
+    # Full session history remains completely preserved
+    assert len(sess.messages) == 18
