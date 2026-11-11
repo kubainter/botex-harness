@@ -575,6 +575,12 @@ async def _run_analytics_digest(
     ]
     try:
         client = build_async_client(prov_name, prov_cfg)
+        resolved_url = str(prov_cfg.get("base_url") or "")
+        extra_body = (
+            {"chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}}
+            if ("bielik" in model_id.lower() or ":8080" in resolved_url)
+            else None
+        )
         resp = await asyncio.wait_for(
             client.chat.completions.create(
                 model=model_id,
@@ -582,6 +588,7 @@ async def _run_analytics_digest(
                 max_tokens=int(analytics_setting("digest_max_tokens") or 320),
                 temperature=0.3,
                 stream=False,
+                extra_body=extra_body,
             ),
             timeout=float(analytics_setting("digest_timeout_s") or 180),
         )
