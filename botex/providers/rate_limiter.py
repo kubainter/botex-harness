@@ -27,9 +27,12 @@ window out instead of stampeding the same upstream limit.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 try:
@@ -202,6 +205,7 @@ class ProviderRateLimiter:
         *,
         clock: Optional[Callable[[], float]] = None,
         sleep: Optional[Callable[[float], Any]] = None,
+        state_path: Optional[Path] = None,
     ) -> None:
         self._clock = clock or time.monotonic
         self._sleep = sleep or asyncio.sleep
@@ -209,13 +213,62 @@ class ProviderRateLimiter:
         self._req_buckets: Dict[str, TokenBucket] = {}
         self._tok_buckets: Dict[str, TokenBucket] = {}
         self._cooldown_until: Dict[str, float] = {}
+        self._state_path = state_path
+        self._restore_cooldowns()
 
     @classmethod
     def from_config(cls, cfg: Optional[Dict[str, Any]] = None) -> "ProviderRateLimiter":
         """Build a limiter from a merged config dict (defaults to load_config())."""
         merged = cfg if cfg is not None else load_config()
         section = (merged or {}).get("rate_limits")
-        return cls(section if isinstance(section, dict) else None)
+        return cls(
+            section if isinstance(section, dict) else None,
+            state_path=default_state_path(),
+        )
+
+    # -- cooldown persistence ------------------------------------------------
+    # Cooldowns survive process restarts: a server restart must not stampede
+    # a provider that already sent a 429. Persisted as wall-clock epochs
+    # (clock() is monotonic and meaningless across processes); restored
+    # synchronously at construction so the very first acquire() sees them.
+
+    def _restore_cooldowns(self) -> None:
+        if self._state_path is None:
+            return
+        try:
+            raw = json.loads(Path(self._state_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        entries = raw.get("cooldowns") if isinstance(raw, dict) else None
+        if not isinstance(entries, dict):
+            return
+        now_wall = time.time()
+        for name, until_wall in entries.items():
+            name_n = _norm_name(name)
+            if name_n not in self._limits or not _num(until_wall):
+                continue
+            remaining = float(until_wall) - now_wall
+            if remaining > 0.0:
+                self._cooldown_until[name_n] = self._clock() + remaining
+
+    def _persist_cooldowns(self) -> None:
+        if self._state_path is None:
+            return
+        now_wall = time.time()
+        now_mono = self._clock()
+        entries = {
+            name: round(now_wall + (until - now_mono), 3)
+            for name, until in self._cooldown_until.items()
+            if until > now_mono
+        }
+        path = Path(self._state_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps({"cooldowns": entries}), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
 
     # -- internals -----------------------------------------------------------
 
@@ -320,6 +373,7 @@ class ProviderRateLimiter:
         until = self._clock() + wait
         if until > self._cooldown_until.get(name, 0.0):
             self._cooldown_until[name] = until
+            self._persist_cooldowns()
         return wait
 
     def record_tokens(self, provider: str, tokens: float) -> None:
@@ -357,6 +411,15 @@ class ProviderRateLimiter:
                 "wait_s": round(self.wait_estimate(name), 3),
             }
         return out
+
+
+def default_state_path() -> Path:
+    """Cooldown state file — global because rate limits bind to provider
+    API keys, not workspaces. ``BOTEX_RATE_LIMIT_STATE`` overrides (tests)."""
+    env = os.environ.get("BOTEX_RATE_LIMIT_STATE")
+    if env:
+        return Path(env)
+    return Path.home() / ".botex" / "rate_limits_state.json"
 
 
 _shared_limiter: Optional[ProviderRateLimiter] = None

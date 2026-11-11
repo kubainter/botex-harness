@@ -1,3 +1,7 @@
+---
+id: PROJECT
+---
+
 # Project: BoteX Harness - Provider Architecture & Dynamic Catalog Refactor
 
 ## Architecture

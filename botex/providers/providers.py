@@ -552,7 +552,9 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
 def sanitize_provider_error(exc: BaseException, max_chars: int = 1024) -> str:
     """Masked, length-bounded provider error text safe for result dicts,
     MCP responses and analytics — never contains secrets or raw payloads."""
-    text = mask_secrets(str(exc))
+    from botex.tools.security import coerce_text
+
+    text = coerce_text(mask_secrets(str(exc)))
     if len(text) > max_chars:
         text = text[:max_chars] + "…"
     return text
@@ -893,6 +895,15 @@ class OpenRouterProvider(BaseProvider):
             extra["transforms"] = []
         if "usage" not in extra:
             extra["usage"] = {"include": True}
+        if self.config.get("context_compression", True):
+            plugins = extra.get("plugins")
+            if not isinstance(plugins, list):
+                plugins = []
+                extra["plugins"] = plugins
+            if not any(
+                isinstance(p, dict) and p.get("id") == "context-compression" for p in plugins
+            ):
+                plugins.append({"id": "context-compression", "enabled": True})
         # Only attach reasoning budget when model supports reasoning or when
         # require_parameters is not active (otherwise OpenRouter rejects
         # non-reasoning endpoints with HTTP 404).
@@ -1245,7 +1256,7 @@ class GoogleAIStudioProvider(BaseProvider):
     # ``reasoning`` is the OpenRouter object form; Google takes the
     # top-level ``reasoning_effort`` string and ``google.*`` options.
     _OPENROUTER_ONLY_EXTRA_KEYS = frozenset(
-        {"provider", "models", "transforms", "usage", "reasoning"}
+        {"provider", "models", "transforms", "usage", "reasoning", "plugins"}
     )
 
     def get_default_headers(self) -> Optional[Dict[str, str]]:

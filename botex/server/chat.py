@@ -152,7 +152,13 @@ _PROVIDER_MESSAGE_PATTERNS: tuple = (
     ("content_policy", "moderation_blocked"),
     ("content_filter", "moderation_blocked"),
     ("input was flagged", "moderation_blocked"),
+    ("maximum context length", "context_length_exceeded"),
+    ("context length", "context_length_exceeded"),
+    ("context_length_exceeded", "context_length_exceeded"),
+    ("too many tokens", "context_length_exceeded"),
 )
+
+_PROVIDER_ERROR_CODE_MAP: dict[str, str] = {k: k for k in _PROVIDER_ERROR_CODE_ALLOWLIST}
 
 
 def _classify_provider_error_code(exc: BaseException) -> str:
@@ -166,16 +172,20 @@ def _classify_provider_error_code(exc: BaseException) -> str:
         try:
             body = json.loads(str(body or ""))
         except (TypeError, ValueError):
-            return "unclassified_provider_error"
+            body = None
     candidates: list = []
     if isinstance(body, dict):
         err = body.get("error")
         if isinstance(err, dict):
             candidates += [err.get("code"), err.get("message")]
         candidates += [body.get("code"), body.get("message")]
+    if getattr(exc, "args", None):
+        candidates.extend(a for a in exc.args if isinstance(a, str))
     for cand in candidates:
-        if isinstance(cand, str) and cand.strip().lower() in _PROVIDER_ERROR_CODE_ALLOWLIST:
-            return cand.strip().lower()
+        if isinstance(cand, str):
+            mapped = _PROVIDER_ERROR_CODE_MAP.get(cand.strip().lower())
+            if mapped is not None:
+                return mapped
     for cand in candidates:
         if isinstance(cand, str):
             lowered = cand.lower()
@@ -586,6 +596,68 @@ READ_ONLY_CHAT_TOOLS = [
 ]
 
 
+def _estimate_tokens(text: Optional[str]) -> int:
+    if not text:
+        return 0
+    return max(1, len(str(text)) // 4)
+
+
+def _estimate_message_tokens(msg: Dict[str, Any]) -> int:
+    total = 4 + _estimate_tokens(msg.get("content"))
+    tcs = msg.get("tool_calls")
+    if isinstance(tcs, list):
+        for tc in tcs:
+            if isinstance(tc, dict):
+                fn = tc.get("function") or {}
+                if isinstance(fn, dict):
+                    total += (
+                        _estimate_tokens(fn.get("name")) + _estimate_tokens(fn.get("arguments")) + 4
+                    )
+    return total
+
+
+def _resolve_chat_context_length(
+    model: str,
+    provider_name: str,
+    provider_cfg: Optional[Dict[str, Any]] = None,
+) -> int:
+    cfg = provider_cfg if isinstance(provider_cfg, dict) else {}
+    caps = cfg.get("capabilities")
+    if isinstance(caps, dict) and model:
+        m_caps = caps.get(model) or caps.get(model.removeprefix("models/"))
+        if isinstance(m_caps, dict) and m_caps.get("context_length") is not None:
+            try:
+                val = int(m_caps["context_length"])
+                if val > 0:
+                    return val
+            except (TypeError, ValueError):
+                pass
+    if cfg.get("context_length") is not None:
+        try:
+            val = int(cfg["context_length"])
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    try:
+        from botex.providers.catalog import ModelCatalog
+
+        cat = ModelCatalog(provider=provider_name or "openrouter", provider_cfg=cfg)
+        cached = cat._read_cache_entry()
+        if cached and isinstance(cached.get("models"), dict) and model in cached["models"]:
+            entry = cached["models"][model]
+            raw_ctx = (
+                entry.get("context_length")
+                if isinstance(entry, dict)
+                else getattr(entry, "context_length", 0)
+            )
+            if raw_ctx and int(raw_ctx) > 0:
+                return int(raw_ctx)
+    except Exception:
+        pass
+    return 65536
+
+
 @dataclass
 class ChatMessage:
     """A single chat message in multi-turn conversation with secret masking."""
@@ -684,21 +756,52 @@ class ChatSession:
         self.save_to_disk()
         return msg
 
-    def get_history(self, max_turns: Optional[int] = None) -> List[Dict[str, Any]]:
-        history = [m.to_dict() for m in self.messages]
-        if max_turns is not None and max_turns > 0 and history:
-            sliced = history[-max_turns:]
-        else:
-            sliced = list(history)
+    def prune_tool_history(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        keep_recent_turns: int = 2,
+        min_chars: int = 120,
+    ) -> List[Dict[str, Any]]:
+        """Return a copy of message dicts with tool outputs older than keep_recent_turns folded into stubs.
 
-        # Sanitize tool calls and prevent orphan/malformed tool messages
+        Never mutates ``self.messages`` so full session history remains intact on disk and in UI.
+        """
+        source = (
+            [dict(m) for m in messages]
+            if messages is not None
+            else [m.to_dict() for m in self.messages]
+        )
+        if not source:
+            return []
+        user_indices = [i for i, m in enumerate(source) if m.get("role") == "user"]
+        if keep_recent_turns <= 0:
+            cutoff_idx = len(source)
+        elif len(user_indices) > keep_recent_turns:
+            cutoff_idx = user_indices[-keep_recent_turns]
+        else:
+            cutoff_idx = 0
+
+        for i in range(cutoff_idx):
+            msg = source[i]
+            if msg.get("role") == "tool":
+                content = str(msg.get("content") or "")
+                if len(content) >= min_chars or content.count("\n") >= 3:
+                    line_count = content.count("\n") + 1
+                    tool_name = str(msg.get("name") or "tool")
+                    msg["content"] = (
+                        f"[Tool result pruned: {tool_name} ({line_count} lines, "
+                        f"{len(content)} chars) — preserved in session history]"
+                    )
+        return source
+
+    @staticmethod
+    def _sanitize_message_sequence(sliced: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sanitized: List[Dict[str, Any]] = []
         for msg in sliced:
             role = msg.get("role")
             if role == "tool":
                 prev = sanitized[-1] if sanitized else None
                 if not prev or prev.get("role") != "assistant" or not prev.get("tool_calls"):
-                    # Drop orphan tool message without triggering assistant
                     continue
                 call_id = msg.get("tool_call_id")
                 if not call_id:
@@ -716,7 +819,6 @@ class ChatSession:
             else:
                 sanitized.append(msg)
 
-        # Clean trailing assistant with unresolved tool_calls if any
         while (
             sanitized
             and sanitized[-1].get("role") == "assistant"
@@ -725,6 +827,68 @@ class ChatSession:
             sanitized.pop()
 
         return sanitized
+
+    def get_history(
+        self,
+        max_turns: Optional[int] = None,
+        token_budget: Optional[int] = None,
+        prune_old_tools: bool = False,
+        keep_recent_tool_turns: int = 2,
+    ) -> List[Dict[str, Any]]:
+        history = [m.to_dict() for m in self.messages]
+        if prune_old_tools:
+            history = self.prune_tool_history(history, keep_recent_turns=keep_recent_tool_turns)
+        if max_turns is not None and max_turns > 0 and history:
+            sliced = history[-max_turns:]
+        else:
+            sliced = list(history)
+
+        sanitized = self._sanitize_message_sequence(sliced)
+        if token_budget is None or token_budget <= 0 or not sanitized:
+            return sanitized
+
+        # Group into atomic blocks so assistant(tool_calls) and tool(result) pairs never split
+        blocks: List[List[Dict[str, Any]]] = []
+        idx = 0
+        while idx < len(sanitized):
+            msg = sanitized[idx]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                block = [msg]
+                idx += 1
+                while idx < len(sanitized) and sanitized[idx].get("role") == "tool":
+                    block.append(sanitized[idx])
+                    idx += 1
+                blocks.append(block)
+            else:
+                blocks.append([msg])
+                idx += 1
+
+        block_tokens = [sum(_estimate_message_tokens(m) for m in b) for b in blocks]
+        if sum(block_tokens) <= token_budget:
+            return sanitized
+
+        last_block = [dict(m) for m in blocks[-1]]
+        if block_tokens[-1] > token_budget:
+            per_msg_char_cap = max(256, (token_budget * 4) // max(1, len(last_block)))
+            for m in last_block:
+                c = m.get("content")
+                if isinstance(c, str) and len(c) > per_msg_char_cap:
+                    m["content"] = c[:per_msg_char_cap] + "\n...[truncated to fit context budget]"
+            used_tokens = sum(_estimate_message_tokens(m) for m in last_block)
+        else:
+            used_tokens = block_tokens[-1]
+
+        selected_blocks: List[List[Dict[str, Any]]] = [last_block]
+        for b_idx in range(len(blocks) - 2, -1, -1):
+            if used_tokens + block_tokens[b_idx] <= token_budget:
+                selected_blocks.append(blocks[b_idx])
+                used_tokens += block_tokens[b_idx]
+            else:
+                break
+
+        selected_blocks.reverse()
+        flattened = [m for b in selected_blocks for m in b]
+        return self._sanitize_message_sequence(flattened)
 
     def get_title(self) -> str:
         """Derive a human-readable title from the first user message or fallback."""
@@ -1391,14 +1555,27 @@ async def stream_chat_turn(
     except Exception:  # noqa: BLE001 — optional feature must never break chat
         _cache_policy = None
 
+    _model_ctx_len = _resolve_chat_context_length(
+        effective_model, active_provider_name, active_provider_cfg
+    )
+    _sys_tokens = _estimate_tokens(session.system_prompt) + 16
+    _chat_token_budget = max(2048, _model_ctx_len - max_tokens - _sys_tokens - 2000)
+
     while iteration < max_tool_iterations:
         iteration += 1
 
-        # Build message history for the provider request
+        # Build ephemeral message history within the model's context budget
+        # while keeping the full session.messages intact on disk and in UI.
         request_messages: list[dict[str, Any]] = [
             {"role": "system", "content": session.system_prompt}
         ]
-        request_messages.extend(session.get_history())
+        request_messages.extend(
+            session.get_history(
+                token_budget=_chat_token_budget,
+                prune_old_tools=True,
+                keep_recent_tool_turns=2,
+            )
+        )
 
         accumulated_text = ""
         accumulated_reasoning = ""
@@ -1441,7 +1618,43 @@ async def stream_chat_turn(
             )
         except Exception as exc:
             err_lower = str(exc).lower()
-            if use_tools_this_turn and ("tool" in err_lower or "function" in err_lower):
+            err_code = _classify_provider_error_code(exc)
+            if err_code == "context_length_exceeded" or "maximum context length" in err_lower:
+                _chat_token_budget = max(2048, min(_chat_token_budget // 2, 12000))
+                recovery_messages: list[dict[str, Any]] = [
+                    {"role": "system", "content": session.system_prompt}
+                ]
+                recovery_messages.extend(
+                    session.get_history(
+                        max_turns=6,
+                        token_budget=_chat_token_budget,
+                        prune_old_tools=True,
+                        keep_recent_tool_turns=1,
+                    )
+                )
+                if _cache_helper is not None and _cache_policy is not None:
+                    recovery_messages, _ = _cache_helper.apply_prompt_cache(
+                        recovery_messages, _cache_policy
+                    )
+                create_kwargs["messages"] = recovery_messages
+                create_kwargs["max_tokens"] = min(max_tokens, 2048)
+                try:
+                    response = await call_with_backoff(
+                        provider_adapter,
+                        lambda: client.chat.completions.create(**create_kwargs),
+                        active_provider_cfg,
+                    )
+                except Exception as ctx_retry_exc:
+                    await _release_client()
+                    yield _provider_error_payload(
+                        session,
+                        active_provider_name,
+                        effective_model,
+                        ctx_retry_exc,
+                        phase="context_recovery_retry",
+                    )
+                    return
+            elif use_tools_this_turn and ("tool" in err_lower or "function" in err_lower):
                 tools_supported = False
                 try:
                     response = await call_with_backoff(
