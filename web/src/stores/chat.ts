@@ -257,6 +257,7 @@ export const useChatStore = defineStore('chat', () => {
           appendChunkToLastAssistant(
             `\n\n> ⚠️ Model may be outdated or removed — refresh the model list (server catalog may be stale).`
           )
+          void fetchCatalogModels(true)
         }
       }
       finishStreaming()

@@ -141,6 +141,15 @@
             </template>
           </div>
 
+          <!-- Stale catalog warning -->
+          <div
+            v-if="catalogStale"
+            class="mx-3.5 sm:mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-950/60 border border-amber-500/40 flex items-center gap-2 text-xs text-amber-200"
+          >
+            <AlertTriangleIcon class="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span class="flex-1">{{ t('models.stale') }}</span>
+          </div>
+
           <!-- Skeleton Loader when refreshing empty list -->
           <div v-if="isLoading && models.length === 0" class="p-4 space-y-2.5 overflow-y-auto flex-1">
             <div
@@ -287,7 +296,8 @@ import {
   X as XIcon,
   RefreshCw as RefreshCwIcon,
   Check as CheckIcon,
-  Lock as LockIcon
+  Lock as LockIcon,
+  AlertTriangle as AlertTriangleIcon
 } from 'lucide-vue-next'
 
 export type ModelCategory = 'all' | 'free' | 'cheap' | 'reasoning' | 'coding'
@@ -299,12 +309,14 @@ const props = withDefaults(
     selectedModel: string
     selectedProvider?: string
     isLoading?: boolean
+    catalogStale?: boolean
     allowedProviders?: string[]
     excludeProviders?: string[]
   }>(),
   {
     selectedProvider: '',
     isLoading: false,
+    catalogStale: false,
     allowedProviders: () => [],
     excludeProviders: () => []
   }
