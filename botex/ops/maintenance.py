@@ -408,3 +408,109 @@ def _rewrite_ledger(live: Path, rows: list) -> None:
         encoding="utf-8",
     )
     os.replace(tmp, live)
+
+
+_APPLY_LINK_MIN_RATIO = 0.9
+
+
+def repair_dead_links(workspace_dir: str = ".", apply: bool = False) -> Dict[str, Any]:
+    """Reconcile broken wikilinks across memory vaults.
+
+    Report mode (default): returns deterministic suggestions mapping each
+    dead [[target]] to the nearest living note id — rendered by the
+    curator beacon for human review.
+
+    Apply mode: rewrites only high-confidence links (difflib ratio >=
+    0.9, e.g. redacted ids repaired to stem), atomically per file, then
+    re-indexes. Anything ambiguous stays a suggestion — never guess.
+    """
+    results: Dict[str, Any] = {"broken": 0, "suggested": 0, "applied": 0, "skipped": 0}
+    try:
+        import difflib
+
+        from botex.memory.memory import (
+            _get_index_db,
+            _index_memory_file,
+            _resolve_scope_dirs,
+            find_graph_health,
+        )
+        from botex.ops.curator.curator_service import _compute_dead_link_repairs
+    except Exception as exc:
+        logger.warning("dead-link repair: imports failed: %s", type(exc).__name__)
+        return results
+
+    try:
+        health = find_graph_health(workspace_dir=str(workspace_dir), scope="all")
+    except Exception as exc:
+        logger.warning("dead-link repair: graph health failed: %s", type(exc).__name__)
+        return results
+    broken = health.get("broken_links") or []
+    results["broken"] = len(broken)
+    if not broken:
+        return results
+
+    try:
+        scope_dirs = _resolve_scope_dirs(str(workspace_dir), "all")
+    except Exception:
+        scope_dirs = []
+    all_ids: list = []
+    file_by_id: Dict[str, Path] = {}
+    for mem_dir, _ in scope_dirs:
+        if not mem_dir.is_dir():
+            continue
+        for f in mem_dir.glob("*.md"):
+            if f.is_file() and not f.name.startswith("_"):
+                all_ids.append(f.stem)
+                file_by_id[f.stem] = f
+
+    repairs = _compute_dead_link_repairs(broken, [{"id": i} for i in all_ids])
+    results["suggested"] = len(repairs)
+    if not apply or not repairs:
+        results["suggestions"] = repairs
+        return results
+
+    changed_dirs: set = set()
+    for rep in repairs:
+        src_id, dead, suggested = (
+            rep["source_id"],
+            rep["dead_target"],
+            rep["suggested_target"],
+        )
+        if difflib.SequenceMatcher(None, dead, suggested).ratio() < _APPLY_LINK_MIN_RATIO:
+            results["skipped"] += 1
+            continue
+        src_file = file_by_id.get(src_id)
+        if src_file is None:
+            results["skipped"] += 1
+            continue
+        try:
+            text = src_file.read_text(encoding="utf-8")
+            new_text = text.replace(f"[[{dead}]]", f"[[{suggested}]]")
+            if new_text == text:
+                results["skipped"] += 1
+                continue
+            tmp = src_file.with_name(f"{src_file.name}.{os.getpid()}.tmp")
+            try:
+                tmp.write_text(new_text, encoding="utf-8")
+                os.replace(str(tmp), str(src_file))
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
+            results["applied"] += 1
+            changed_dirs.add(src_file.parent)
+        except Exception as exc:
+            logger.warning("dead-link apply failed: %s", type(exc).__name__)
+            results["skipped"] += 1
+
+    for mem_dir in changed_dirs:
+        try:
+            conn = _get_index_db(mem_dir)
+            try:
+                for f in mem_dir.glob("*.md"):
+                    if f.is_file() and not f.name.startswith("_"):
+                        _index_memory_file(mem_dir, conn, f)
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("dead-link reindex failed: %s", type(exc).__name__)
+    return results

@@ -226,3 +226,72 @@ def test_dead_link_repairs_suggest_nearest_id():
     assert len(repairs) == 1
     assert repairs[0]["suggested_target"] == "botex_prompt_cache_deployed"
     assert repairs[0]["source_id"] == "handoff_a"
+
+
+# -- cross-vault qualified ids + swarm-root guard ----------------------------
+
+
+def test_swarm_dir_repo_root_guard(monkeypatch, tmp_path):
+    from botex.memory import memory
+    from botex.server import config as srv_config
+
+    (tmp_path / "AGENTS.md").write_text("# repo", "utf-8")
+    (tmp_path / "note.md").write_text("x", "utf-8")
+    monkeypatch.setattr(srv_config, "swarm_memory_dir", lambda: str(tmp_path))
+    assert memory.get_swarm_memory_dir() is None
+
+    vault = tmp_path / "real-vault"
+    vault.mkdir()
+    (vault / "n1.md").write_text("x", "utf-8")
+    monkeypatch.setattr(srv_config, "swarm_memory_dir", lambda: str(vault))
+    assert memory.get_swarm_memory_dir() == vault.resolve()
+
+
+def test_search_dedup_is_per_scope(monkeypatch, tmp_path):
+    """Same stem in local and global vaults must both surface (no shadowing)."""
+    from botex.memory import memory
+
+    local = tmp_path / "ws" / ".botex" / "memory"
+    local.mkdir(parents=True)
+    (local / "dup.md").write_text("---\nid: dup\ntitle: local note\n---\nlocal body", "utf-8")
+    glob_dir = tmp_path / "glob" / ".botex" / "memory"
+    glob_dir.mkdir(parents=True)
+    (glob_dir / "dup.md").write_text("---\nid: dup\ntitle: global note\n---\nglobal body", "utf-8")
+    monkeypatch.setattr(memory, "get_global_memory_dir", lambda: glob_dir)
+    res = memory.search_memory(query="", workspace_dir=str(tmp_path / "ws"), scope="all")
+    ids = {(m.get("scope"), m.get("id")) for m in res.get("memories", [])}
+    assert ("local", "dup") in ids
+    assert ("global", "dup") in ids
+
+
+# -- repair_dead_links ---------------------------------------------------------
+
+
+def _note(dir_: Path, stem: str, body: str):
+    dir_.mkdir(parents=True, exist_ok=True)
+    (dir_ / f"{stem}.md").write_text(f"---\nid: {stem}\ntitle: {stem}\n---\n{body}", "utf-8")
+
+
+def test_repair_dead_links_suggest_and_apply(monkeypatch, tmp_path):
+    from botex.ops import maintenance
+
+    ws = tmp_path / "ws"
+    mem = ws / ".botex" / "memory"
+    _note(mem, "botex_prompt_cache_deployed", "real note")
+    _note(mem, "handoff", "see [[botex_prompt_cache_depl0yed]] for details")
+    _note(mem, "other", "see [[totally_missing_xyz]] nowhere")
+    monkeypatch.setenv("BOTEX_GLOBAL_MEMORY_DIR", str(tmp_path / "none"))
+
+    res = maintenance.repair_dead_links(str(ws), apply=False)
+    assert res["broken"] >= 2
+    assert res["suggested"] >= 1
+    assert res["applied"] == 0
+    # body untouched in suggest mode
+    assert "depl0yed" in (mem / "handoff.md").read_text("utf-8")
+
+    res2 = maintenance.repair_dead_links(str(ws), apply=True)
+    assert res2["applied"] >= 1
+    text = (mem / "handoff.md").read_text("utf-8")
+    assert "[[botex_prompt_cache_deployed]]" in text
+    # ambiguous link left as-is
+    assert "[[totally_missing_xyz]]" in (mem / "other.md").read_text("utf-8")

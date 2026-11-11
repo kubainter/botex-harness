@@ -2418,8 +2418,13 @@ def _cli_maintenance(argv: list[str]) -> None:
         "job",
         nargs="?",
         default="all",
-        choices=["all", "warm", "sweep", "repair", "rotate"],
+        choices=["all", "warm", "sweep", "repair", "rotate", "links"],
         help="Job to run (default: all)",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="With 'links': apply high-confidence dead-link repairs (default: suggest only)",
     )
     parser.add_argument("--workspace", "-w", default=".", help="Workspace dir (default: cwd)")
     args = parser.parse_args(argv)
@@ -2433,6 +2438,10 @@ def _cli_maintenance(argv: list[str]) -> None:
         results["repair_frontmatter_ids"] = maintenance.repair_frontmatter_ids(args.workspace)
     if args.job in ("all", "rotate"):
         results["rotate_analytics_ledger"] = maintenance.rotate_analytics_ledger(args.workspace)
+    if args.job in ("all", "links"):
+        results["repair_dead_links"] = maintenance.repair_dead_links(
+            args.workspace, apply=args.apply and args.job == "links"
+        )
     print(json.dumps(results, indent=2, default=str))
 
 
