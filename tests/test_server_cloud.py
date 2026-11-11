@@ -1055,3 +1055,49 @@ def test_memory_projects_endpoint(client, tmp_path, monkeypatch):
     assert resp_local.status_code == 200
     counts_local = {p["project"]: p["count"] for p in resp_local.json()["projects"]}
     assert counts_local == {"botex-harness": 2, "media-gen": 1, "": 1}
+
+
+class _ProbeResp:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+
+class _ProbeClient:
+    """Fake httpx sync client: :8080 alive, :11434 refused."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append(url)
+        if ":8080" in url:
+            return _ProbeResp(200)
+        raise OSError("connection refused")
+
+
+def test_resolve_local_llm_base_url_probe_and_cache():
+    """Loopback providers probe :8080/:11434 /models and cache the winner."""
+    from botex.server_cloud import _LOCAL_LLM_BASE_URL_RESOLVED, _resolve_local_llm_base_url
+
+    _LOCAL_LLM_BASE_URL_RESOLVED.clear()
+    fake = _ProbeClient()
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake):
+        out = _resolve_local_llm_base_url("ollama", {})
+    assert out["base_url"] == "http://127.0.0.1:8080/v1"
+    assert fake.calls == ["http://127.0.0.1:8080/v1/models"]
+
+    # Second resolution is served from cache — no new probe calls.
+    calls_before = len(fake.calls)
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake):
+        cached = _resolve_local_llm_base_url("ollama", {"other": "cfg"})
+    assert cached["base_url"] == "http://127.0.0.1:8080/v1"
+    assert len(fake.calls) == calls_before
+    _LOCAL_LLM_BASE_URL_RESOLVED.clear()
+
+
+def test_resolve_local_llm_base_url_skips_non_loopback():
+    """Remote providers are returned untouched — no probe, no client."""
+    from botex.server_cloud import _resolve_local_llm_base_url
+
+    cfg = {"base_url": "https://openrouter.ai/api/v1"}
+    assert _resolve_local_llm_base_url("openrouter", cfg) is cfg

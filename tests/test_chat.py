@@ -639,3 +639,41 @@ def test_tool_call_id_persistence_and_history_sanitization(tmp_path: Path):
     cleaned_hist = loaded_sess.get_history()
     # The orphan tool message without preceding assistant tool_calls should be dropped
     assert len(cleaned_hist) == 3
+
+
+def test_provider_error_payload_emits_classified_code(tmp_path: Path):
+    """Provider error events carry `code` so clients can react to model_not_found."""
+    from botex.server.chat import _provider_error_payload
+
+    class _FakeError(Exception):
+        status_code = 404
+        body = {"error": {"message": "No endpoints found for acme/dead-model"}}
+
+    session = ChatSession(workspace_dir=str(tmp_path), model="acme/dead-model")
+    payload = _provider_error_payload(session, "openrouter", "acme/dead-model", _FakeError("x"))
+    assert payload["type"] == "error"
+    assert payload["code"] == "model_not_found"
+    assert payload["error_class"] == "provider_error"
+
+
+def test_classify_provider_error_code_substring_patterns():
+    """Substring patterns map unstructured provider messages to static literals."""
+    from botex.server.chat import _classify_provider_error_code
+
+    class _Err(Exception):
+        def __init__(self, body):
+            self.body = body
+
+    assert (
+        _classify_provider_error_code(_Err({"error": {"message": "No endpoints found for x/y"}}))
+        == "model_not_found"
+    )
+    assert (
+        _classify_provider_error_code(_Err({"error": {"message": "foo is not a valid model ID"}}))
+        == "model_not_found"
+    )
+    assert (
+        _classify_provider_error_code(_Err({"error": {"message": "something else"}}))
+        == "unclassified_provider_error"
+    )
+    assert _classify_provider_error_code(_Err(None)) == "unclassified_provider_error"
