@@ -63,7 +63,7 @@ TELEGRAM_SILENT=false
 ### Serwer produkcyjny (VPS Linux)
 1. Połącz się przez SSH z serwerem:
    ```bash
-   ssh ubuntu@adres-ip-serwera
+   ssh <vps-user>@<adres-ip-serwera>
    ```
 2. Otwórz plik środowiskowy:
    ```bash
