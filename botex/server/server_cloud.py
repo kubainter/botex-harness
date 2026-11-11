@@ -618,6 +618,51 @@ async def _run_analytics_digest(
     }
 
 
+_BREAKER_PROBE_URLS = {
+    # Only providers with a public, unauthenticated health endpoint —
+    # a 401 probe would be scored as a failure and re-trip the breaker.
+    "openrouter": "https://openrouter.ai/api/v1/models",
+    "openrouter-free": "https://openrouter.ai/api/v1/models",
+}
+_BREAKER_PROBE_INTERVAL_S = 60.0
+
+
+async def _breaker_probe_tick(breaker: Any) -> None:
+    """One probe round: HALF_OPEN providers get a synthetic health ping so
+    recovery does not wait for the next real request to act as the probe."""
+    from botex.providers.http_pool import get_async_client
+
+    for name, url in _BREAKER_PROBE_URLS.items():
+        if breaker.get_state(name) != breaker.HALF_OPEN:
+            continue
+        try:
+            breaker.can_execute(name)
+        except Exception:
+            continue
+        try:
+            client = get_async_client()
+            resp = await client.get(url, timeout=10.0)
+            if 200 <= resp.status_code < 300:
+                breaker.record_success(name)
+            else:
+                breaker.record_failure(name)
+        except Exception:
+            breaker.release_probe(name)
+
+
+async def _breaker_prober_loop() -> None:
+    from botex.providers.retry import get_circuit_breaker
+
+    breaker = get_circuit_breaker()
+    await asyncio.sleep(_BREAKER_PROBE_INTERVAL_S)
+    while True:
+        try:
+            await _breaker_probe_tick(breaker)
+        except Exception:
+            logger.exception("breaker probe tick failed")
+        await asyncio.sleep(_BREAKER_PROBE_INTERVAL_S)
+
+
 async def _analytics_digest_loop() -> None:
     """Periodic digest writer — runs only when analytics.digest_enabled=true."""
     interval = float(analytics_setting("digest_interval_s") or 3600)
@@ -640,6 +685,7 @@ async def lifespan(app: FastAPI):
     digest_task: Optional[asyncio.Task] = None
     if analytics_setting("digest_enabled"):
         digest_task = asyncio.create_task(_analytics_digest_loop())
+    prober_task = asyncio.create_task(_breaker_prober_loop())
     yield
     if not warmup_task.done():
         try:
@@ -653,6 +699,9 @@ async def lifespan(app: FastAPI):
         digest_task.cancel()
         with suppress(asyncio.CancelledError):
             await digest_task
+    prober_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await prober_task
     try:
         from botex.providers.http_pool import close_http_pool
 

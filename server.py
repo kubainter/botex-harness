@@ -2402,6 +2402,38 @@ def _cli_cloud(argv: list[str]) -> None:
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level, workers=1)
 
 
+def _cli_maintenance(argv: list[str]) -> None:
+    """Run L2 maintenance jobs manually — local parity for the VPS
+    ``botex-maintenance.timer`` (Windows dev has no systemd)."""
+    import argparse
+    import json
+
+    from botex.ops import maintenance
+
+    parser = argparse.ArgumentParser(
+        prog="botex maintenance",
+        description="Run background maintenance jobs (provider warmup, session sweep, id repair).",
+    )
+    parser.add_argument(
+        "job",
+        nargs="?",
+        default="all",
+        choices=["all", "warm", "sweep", "repair"],
+        help="Job to run (default: all)",
+    )
+    parser.add_argument("--workspace", "-w", default=".", help="Workspace dir (default: cwd)")
+    args = parser.parse_args(argv)
+
+    results: dict = {}
+    if args.job in ("all", "warm"):
+        results["warm_provider_metadata"] = maintenance.warm_provider_metadata(args.workspace)
+    if args.job in ("all", "sweep"):
+        results["sweep_empty_chat_sessions"] = maintenance.sweep_empty_chat_sessions(args.workspace)
+    if args.job in ("all", "repair"):
+        results["repair_frontmatter_ids"] = maintenance.repair_frontmatter_ids(args.workspace)
+    print(json.dumps(results, indent=2, default=str))
+
+
 def _repl(argv):
     import argparse
 
@@ -2715,6 +2747,8 @@ def main():
         _cli_memory(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "cloud":
         _cli_cloud(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "maintenance":
+        _cli_maintenance(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] in ("serve", "server", "--serve"):
         # Force MCP stdio server mode even on an interactive terminal
         _start_mcp_server()
