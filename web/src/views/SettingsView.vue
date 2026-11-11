@@ -93,6 +93,15 @@
           >
             {{ t('testConnection') }}
           </Button>
+          <a
+            :href="`${authStore.backendUrl.replace(/\/+$/, '')}/docs`"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="min-h-[44px] lg:min-h-[36px] inline-flex items-center px-3 rounded-lg text-xs font-medium text-cyan-300 hover:text-cyan-200 bg-botex-950 hover:bg-botex-800 border border-botex-700 transition"
+          >
+            <ExternalLinkIcon class="w-3.5 h-3.5 mr-1.5" />
+            {{ locale === 'pl' ? 'Dokumentacja API' : 'API Docs' }}
+          </a>
         </div>
 
         <span v-if="saveMessage" class="text-xs text-emerald-300 animate-fadeIn">
@@ -700,7 +709,8 @@ import {
   Blocks as BlocksIcon,
   RefreshCw as RefreshCwIcon,
   Plus as PlusIcon,
-  Trash2 as Trash2Icon
+  Trash2 as Trash2Icon,
+  ExternalLink as ExternalLinkIcon
 } from 'lucide-vue-next'
 
 const authStore = useAuthStore()

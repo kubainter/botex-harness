@@ -185,8 +185,8 @@
             </button>
           </div>
 
-          <!-- Actionable Starter Prompts (gated: prompt strings reference internal
-               file paths — hide from unauthenticated viewers) -->
+          <!-- Actionable Starter Prompts (gated: internal-surface hints stay
+               behind auth; prompts must never name internal files/routes) -->
           <div v-if="accessToken" class="space-y-2">
             <span class="block text-xs font-medium text-slate-300">
               Quick Workspace Actions
@@ -399,22 +399,22 @@ const quickPrompts = [
   {
     tag: 'ARCHITECTURE',
     shortcut: 'read-only',
-    prompt: 'Inspect botex/server_cloud.py and list all REST and WebSocket routes.'
+    prompt: 'List the main entry points and routes exposed by this backend.'
   },
   {
     tag: 'SECURITY AUDIT',
-    shortcut: 'CodeQL',
-    prompt: 'Check botex/security.py and botex/memory.py for CWE-312 taint barriers.'
+    shortcut: 'review',
+    prompt: 'Review this workspace for untrusted-input handling gaps worth hardening.'
   },
   {
     tag: 'MODEL CATALOG',
     shortcut: 'pricing',
-    prompt: 'Compare free-tier vs paid coding models configured in botex.config.json.'
+    prompt: 'Compare the configured free-tier and paid coding models.'
   },
   {
     tag: 'MEMORY VAULT',
     shortcut: 'context',
-    prompt: 'Search local project memory for recent architecture decisions and handoffs.'
+    prompt: 'Search project memory for recent architecture decisions and handoffs.'
   }
 ]
 
