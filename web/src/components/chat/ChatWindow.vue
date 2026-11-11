@@ -90,6 +90,11 @@
               {{ selectedProviderLabel }}
             </span>
           </div>
+          <span
+            v-if="catalogStale"
+            class="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
+            :title="t('models.stale')"
+          ></span>
           <ChevronDownIcon class="w-3.5 h-3.5 text-slate-300 shrink-0" />
         </button>
 
@@ -266,6 +271,7 @@
       :selected-provider="selectedProvider"
       :exclude-providers="['nvidia']"
       :is-loading="isLoadingModels"
+      :catalog-stale="catalogStale"
       @close="showModelModal = false"
       @select="onSelectModel"
       @refresh="chatStore.fetchCatalogModels(true)"
@@ -346,6 +352,7 @@ const {
   selectedProvider,
   catalogModels,
   isLoadingModels,
+  catalogStale,
   activeModelMeta,
   sessions,
   isLoadingSessions
