@@ -499,3 +499,46 @@ async def test_llm_json_parsing_with_preamble(tmp_path):
         assert tier == "nvidia-nemotron"
         assert analysis["summary"] == "Graf wiedzy wykazuje silną spójność."
         assert analysis["cluster_themes"] == ["telemetry"]
+
+
+@pytest.mark.anyio
+async def test_curator_harvest_inactive_chat_sessions(tmp_path, monkeypatch):
+    """Curator harvests inactive chat sessions (>24h, >=6 messages) once into Memory Vault."""
+    monkeypatch.delenv("BOTEX_CHAT_SESSIONS_DIR", raising=False)
+    ws = tmp_path / "ws_harvest"
+    chat_dir = ws / ".botex" / "chat_sessions"
+    chat_dir.mkdir(parents=True, exist_ok=True)
+
+    old_ts = time.time() - 90000.0
+    sess_payload = {
+        "session_id": "chat_abc12345",
+        "title": "VPS Context Guard Architecture",
+        "updated_at": old_ts,
+        "messages": [
+            {"role": "user", "content": "How should we handle 64k context overflow?"},
+            {"role": "assistant", "content": "Use in-process tool pruning and token budgets."},
+            {"role": "user", "content": "Should we keep full history on disk?"},
+            {
+                "role": "assistant",
+                "content": "Yes, keep 100% on disk and slice only the wire payload.",
+            },
+            {"role": "user", "content": "What about OpenRouter?"},
+            {"role": "assistant", "content": "Enable context-compression plugin as a safety net."},
+        ],
+    }
+    (chat_dir / "chat_abc12345.json").write_text(
+        json.dumps(sess_payload, indent=2), encoding="utf-8"
+    )
+
+    service = CuratorService(workspace_dir=str(ws))
+    harvested = await service.harvest_inactive_chat_sessions()
+    assert len(harvested) == 1
+    assert harvested[0]["memory_id"] == "chat_harvest_chat_abc12345"
+
+    note = read_memory(memory_id="chat_harvest_chat_abc12345", workspace_dir=str(ws), scope="local")
+    assert note.get("ok") is True
+    assert "VPS Context Guard Architecture" in note.get("content", "")
+
+    # Second run skips already harvested session with unchanged updated_at
+    harvested_again = await service.harvest_inactive_chat_sessions()
+    assert harvested_again == []
