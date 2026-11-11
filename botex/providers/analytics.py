@@ -30,7 +30,7 @@ try:
     from botex.server.config import (
         snapshot_dir as _cfg_snapshot_dir,
     )
-    from botex.tools.security import mask_secrets, sanitize_identifier
+    from botex.tools.security import coerce_text, mask_secrets, sanitize_identifier
 except (ImportError, ValueError):
     from config import (
         analytics_file as _cfg_analytics_file,
@@ -45,7 +45,7 @@ except (ImportError, ValueError):
         snapshot_dir as _cfg_snapshot_dir,
     )
     from contracts import STATUS_FAILURE_KIND
-    from security import mask_secrets, sanitize_identifier
+    from security import coerce_text, mask_secrets, sanitize_identifier
 
 ANALYTICS_FILE = _cfg_analytics_file()
 SNAPSHOT_DIR = _cfg_snapshot_dir()
@@ -286,8 +286,9 @@ def _append_ledger(entry: Dict[str, Any]) -> None:
             legacy.unlink()
         except (OSError, ValueError):
             pass
+    line_str = coerce_text(json.dumps(entry, ensure_ascii=False)) + "\n"
     with target.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        fh.write(line_str)
 
 
 def log_run(
@@ -323,7 +324,7 @@ def log_run(
     else:
         cost_usd = round(float(cost_usd), 6)
 
-    masked_summary = mask_secrets(summary or "")
+    masked_summary = coerce_text(mask_secrets(summary or ""))
     stored_summary = masked_summary
     if not analytics_setting("store_full_text"):
         preview_chars = int(analytics_setting("preview_chars") or 160)

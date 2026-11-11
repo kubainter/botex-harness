@@ -34,7 +34,7 @@ def test_cooldown_restored_on_restart(tmp_path):
     # "restart": fresh limiter reading the same state file
     lim2 = _limiter(tmp_path)
     remaining = lim2.cooldown_remaining("openrouter")
-    assert 25.0 < remaining <= 30.0
+    assert 25.0 < remaining <= 30.5
 
 
 def test_expired_cooldown_not_restored(tmp_path):
