@@ -90,6 +90,11 @@
               {{ selectedProviderLabel }}
             </span>
           </div>
+          <span
+            v-if="catalogStale"
+            class="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
+            :title="t('models.stale')"
+          ></span>
           <ChevronDownIcon class="w-3.5 h-3.5 text-slate-300 shrink-0" />
         </button>
 
@@ -180,8 +185,9 @@
             </button>
           </div>
 
-          <!-- Actionable Starter Prompts -->
-          <div class="space-y-2">
+          <!-- Actionable Starter Prompts (gated: internal-surface hints stay
+               behind auth; prompts must never name internal files/routes) -->
+          <div v-if="accessToken" class="space-y-2">
             <span class="block text-xs font-medium text-slate-300">
               Quick Workspace Actions
             </span>
@@ -266,6 +272,7 @@
       :selected-provider="selectedProvider"
       :exclude-providers="['nvidia']"
       :is-loading="isLoadingModels"
+      :catalog-stale="catalogStale"
       @close="showModelModal = false"
       @select="onSelectModel"
       @refresh="chatStore.fetchCatalogModels(true)"
@@ -310,6 +317,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '../../stores/chat'
+import { useAuthStore } from '../../stores/auth'
 import { useI18n } from '../../i18n'
 import type { CatalogModel, ChatSessionSummary } from '../../api/types'
 import MessageBubble from './MessageBubble.vue'
@@ -336,6 +344,8 @@ const emit = defineEmits<{
 }>()
 
 const chatStore = useChatStore()
+const authStore = useAuthStore()
+const { accessToken } = storeToRefs(authStore)
 const { locale, t } = useI18n()
 const {
   sessionId,
@@ -346,6 +356,7 @@ const {
   selectedProvider,
   catalogModels,
   isLoadingModels,
+  catalogStale,
   activeModelMeta,
   sessions,
   isLoadingSessions
@@ -388,22 +399,22 @@ const quickPrompts = [
   {
     tag: 'ARCHITECTURE',
     shortcut: 'read-only',
-    prompt: 'Inspect botex/server_cloud.py and list all REST and WebSocket routes.'
+    prompt: 'List the main entry points and routes exposed by this backend.'
   },
   {
     tag: 'SECURITY AUDIT',
-    shortcut: 'CodeQL',
-    prompt: 'Check botex/security.py and botex/memory.py for CWE-312 taint barriers.'
+    shortcut: 'review',
+    prompt: 'Review this workspace for untrusted-input handling gaps worth hardening.'
   },
   {
     tag: 'MODEL CATALOG',
     shortcut: 'pricing',
-    prompt: 'Compare free-tier vs paid coding models configured in botex.config.json.'
+    prompt: 'Compare the configured free-tier and paid coding models.'
   },
   {
     tag: 'MEMORY VAULT',
     shortcut: 'context',
-    prompt: 'Search local project memory for recent architecture decisions and handoffs.'
+    prompt: 'Search project memory for recent architecture decisions and handoffs.'
   }
 ]
 

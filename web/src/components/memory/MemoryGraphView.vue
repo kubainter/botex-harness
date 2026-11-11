@@ -967,8 +967,9 @@ function render() {
     const dist = Math.sqrt(dx * dx + dy * dy)
     if (!Number.isFinite(dist) || dist < 1) return
 
+    if (activeClusterId.value !== null && (getNodeCluster(src).id !== activeClusterId.value || getNodeCluster(tgt).id !== activeClusterId.value)) return
     const isConnectedToSpotlight = hasActiveSpotlight && (src.id === spotlightRoot?.id || tgt.id === spotlightRoot?.id)
-    const isDimmed = (hasActiveSpotlight && !isConnectedToSpotlight) || (activeClusterId.value !== null && getNodeCluster(src).id !== activeClusterId.value && getNodeCluster(tgt).id !== activeClusterId.value)
+    const isDimmed = hasActiveSpotlight && !isConnectedToSpotlight
 
     ctx.save()
     ctx.globalAlpha = isDimmed ? 0.08 : isConnectedToSpotlight ? 1.0 : 0.65
@@ -1115,8 +1116,8 @@ function render() {
     const baseColor = getNodeColor(n.kind) || cluster.color
     const r = n.radius
 
-    const isClusterFiltered = activeClusterId.value !== null && cluster.id === activeClusterId.value
-    const isDimmed = (hasActiveSpotlight && !isSpotlit) || (activeClusterId.value !== null && !isClusterFiltered)
+    if (activeClusterId.value !== null && cluster.id !== activeClusterId.value) continue
+    const isDimmed = hasActiveSpotlight && !isSpotlit
 
     ctx.save()
     ctx.globalAlpha = isDimmed ? 0.14 : 1.0
@@ -1249,6 +1250,7 @@ function getCanvasPoint(evt: MouseEvent) {
 function hitTestNode(x: number, y: number): SimNode | null {
   for (let i = simNodes.length - 1; i >= 0; i--) {
     const n = simNodes[i]
+    if (activeClusterId.value !== null && getNodeCluster(n).id !== activeClusterId.value) continue
     const dx = n.x - x
     const dy = n.y - y
     if (dx * dx + dy * dy <= (n.radius + 5) * (n.radius + 5)) {

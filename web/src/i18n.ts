@@ -158,6 +158,10 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     'models.auth_required_desc': 'Configure a valid access token in Settings to view and select models.',
     'models.select_model': 'Select model',
     'models.select_hint': 'Arrow keys to navigate · Enter to select · Esc to close',
+    'models.stale': 'Catalog stale — this list may be outdated. Refresh to update.',
+    'models.info_title': 'Model details',
+    'models.info_recommended': 'Recommended for',
+    'models.info_inferred': 'Inferred from model name',
 
     // Tasks View (dotted + camelCase aliases)
     'tasks.title': 'Background Tasks',
@@ -400,6 +404,10 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     'models.auth_required_desc': 'Wprowadź poprawny token dostępowy w Ustawieniach, aby załadować listę modeli.',
     'models.select_model': 'Wybierz model',
     'models.select_hint': 'Strzałki: nawigacja · Enter: wybór · Esc: zamknij',
+    'models.stale': 'Katalog nieaktualny — lista może być przestarzała. Odśwież, aby pobrać nową.',
+    'models.info_title': 'Szczegóły modelu',
+    'models.info_recommended': 'Polecany do',
+    'models.info_inferred': 'Na podstawie nazwy modelu',
 
     // Tasks View
     'tasks.title': 'Zadania w tle',

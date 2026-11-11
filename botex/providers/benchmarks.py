@@ -423,9 +423,11 @@ def get_recommended_models(
         entry_dict = {
             "id": slug,
             "name": m.get("name", slug),
+            "provider": pname or provider,
             "tier": model_tier,
             "context_length": context_length,
             "capabilities": capabilities,
+            "description": str(m.get("description") or "")[:600],
             "pricing": {"prompt_1M": round(pin, 4), "completion_1M": round(pout, 4)},
             "_score": sort_score,
         }

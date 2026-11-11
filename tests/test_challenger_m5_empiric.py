@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import httpx2
 import io
 import json
 import os
@@ -25,7 +26,7 @@ import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -534,16 +535,22 @@ def test_m5_wal_01_openrouter_credits_parsing_and_mocked_query():
         }
     ).encode("utf-8")
 
-    def mock_urlopen(req: Any, *args: Any, **kwargs: Any) -> Any:
-        url = req.full_url if hasattr(req, "full_url") else str(req)
+    def fake_client_get(url: str, headers: Any = None, timeout: Any = None) -> Any:
+        resp = MagicMock()
+        resp.status_code = 200
         if "/auth/key" in url:
-            return FakeUrlopenResponse(key_resp)
-        if "/credits" in url:
-            return FakeUrlopenResponse(credits_resp)
-        raise ValueError(f"Unexpected URL: {url}")
+            resp.json.return_value = json.loads(key_resp)
+        elif "/credits" in url:
+            resp.json.return_value = json.loads(credits_resp)
+        else:
+            raise ValueError(f"Unexpected URL: {url}")
+        return resp
+
+    fake_client = MagicMock()
+    fake_client.get.side_effect = fake_client_get
 
     prov = OpenRouterProvider(name="openrouter")
-    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake_client):
         info = prov.get_credits(api_key="sk-or-test-key")
 
     assert info.supported is True
@@ -781,13 +788,13 @@ def test_m5_cat_03_empirical_vulnerability_baseprovider_swallowing_error_wipes_s
         ttl_hours=0.0001,
     )
 
-    # When network fails, BaseProvider.fetch_catalog propagates URLError
+    # When network fails, BaseProvider.fetch_catalog propagates transport errors
     with patch(
-        "urllib.request.urlopen",
-        side_effect=urllib.error.URLError("DNS resolution failed"),
+        "botex.providers.http_pool.get_sync_client",
+        side_effect=httpx2.ConnectError("DNS resolution failed"),
     ):
         # 1. BaseProvider.fetch_catalog propagates network error instead of swallowing
-        with pytest.raises(urllib.error.URLError):
+        with pytest.raises(httpx2.HTTPError):
             prov.fetch_catalog()
 
         # 2. ModelCatalog.load() catches network failure and preserves stale cache
@@ -870,24 +877,22 @@ def test_m5_cat_05_baseprovider_propagates_httperror_and_timeout_cleanly():
     """Verify BaseProvider.fetch_catalog propagates HTTPError and TimeoutError without swallowing."""
     prov = BaseProvider(name="test_prov", config={"base_url": "https://api.test/v1"})
 
-    # 1. HTTPError 502 Bad Gateway
-    with patch(
-        "urllib.request.urlopen",
-        side_effect=urllib.error.HTTPError(
-            url="https://api.test/v1/models",
-            code=502,
-            msg="Bad Gateway",
-            hdrs={},
-            fp=None,
-        ),
-    ):
-        with pytest.raises(urllib.error.HTTPError) as exc_info:
+    # 1. HTTP 502 Bad Gateway -> raise_for_status raises HTTPStatusError
+    resp_502 = MagicMock()
+    resp_502.status_code = 502
+    resp_502.raise_for_status.side_effect = httpx2.HTTPStatusError(
+        "502 Bad Gateway", request=MagicMock(), response=resp_502
+    )
+    fake_client = MagicMock()
+    fake_client.get.return_value = resp_502
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake_client):
+        with pytest.raises(httpx2.HTTPStatusError) as exc_info:
             prov.fetch_catalog()
-        assert exc_info.value.code == 502
+        assert exc_info.value.response.status_code == 502
 
     # 2. TimeoutError
     with patch(
-        "urllib.request.urlopen",
+        "botex.providers.http_pool.get_sync_client",
         side_effect=TimeoutError("Request timed out after 10s"),
     ):
         with pytest.raises(TimeoutError) as exc_info_to:
@@ -944,19 +949,24 @@ def test_m5_wal_05_wallet_partial_failure_handling():
         }
     ).encode("utf-8")
 
-    def mock_urlopen(req: Any, *args: Any, **kwargs: Any) -> Any:
-        url = req.full_url if hasattr(req, "full_url") else str(req)
+    def fake_client_get(url: str, headers: Any = None, timeout: Any = None) -> Any:
+        resp = MagicMock()
         if "/auth/key" in url:
-            return FakeUrlopenResponse(key_resp)
-        if "/credits" in url:
+            resp.status_code = 200
+            resp.json.return_value = json.loads(key_resp)
+        elif "/credits" in url:
             # Simulate upstream 500 error on /credits endpoint
-            raise urllib.error.HTTPError(
-                url=url, code=500, msg="Internal Server Error", hdrs={}, fp=None
-            )
-        raise ValueError(f"Unexpected URL: {url}")
+            resp.status_code = 500
+            resp.json.return_value = {"error": "Internal Server Error"}
+        else:
+            raise ValueError(f"Unexpected URL: {url}")
+        return resp
+
+    fake_client = MagicMock()
+    fake_client.get.side_effect = fake_client_get
 
     prov = OpenRouterProvider(name="openrouter")
-    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake_client):
         info = prov.get_credits(api_key="sk-test-partial")
 
     # Partial success: key data is parsed, credits error is noted

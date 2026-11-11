@@ -36,6 +36,9 @@ from botex.providers import (
     _sanitize_raw_payload,
 )
 from botex.security import mask_secrets
+import httpx2
+
+from botex.providers import http_pool
 from botex.wallet import (
     WalletService,
     format_credits_summary,
@@ -88,7 +91,7 @@ def clean_registry():
     ProviderRegistry._registry = orig_registry
 
 
-def make_mock_urlopen(
+def make_mock_client(
     key_payload: Optional[Dict[str, Any]] = None,
     credits_payload: Optional[Dict[str, Any]] = None,
     key_error: Optional[Exception] = None,
@@ -96,37 +99,54 @@ def make_mock_urlopen(
     key_raw_bytes: Optional[bytes] = None,
     credits_raw_bytes: Optional[bytes] = None,
 ):
-    """Factory creating a mock urlopen handler for stress testing."""
+    """Factory creating a fake httpx2-style client simulating endpoint responses.
 
-    def mock_urlopen(req: Any, timeout: float = 10.0) -> Any:
-        url = req.full_url if hasattr(req, "full_url") else str(req)
-        if "auth/key" in url:
-            if key_error:
-                raise key_error
-            resp_mock = MagicMock()
-            if key_raw_bytes is not None:
-                content = key_raw_bytes
-            else:
-                content = json.dumps(key_payload if key_payload is not None else {}).encode("utf-8")
-            resp_mock.read.return_value = content
-            resp_mock.__enter__.return_value = resp_mock
-            return resp_mock
-        elif "credits" in url:
-            if credits_error:
-                raise credits_error
-            resp_mock = MagicMock()
-            if credits_raw_bytes is not None:
-                content = credits_raw_bytes
-            else:
-                content = json.dumps(credits_payload if credits_payload is not None else {}).encode(
-                    "utf-8"
+    urllib-style errors are translated to the httpx2 transport taxonomy:
+    HTTPError-like (has .code) becomes an HTTP status response, URLError and
+    socket failures become httpx2.ConnectError (the "network error" bucket).
+    """
+
+    class _Resp:
+        def __init__(self, status_code: int, content: Any) -> None:
+            self.status_code = status_code
+            self._content = content
+
+        def json(self) -> Any:
+            return json.loads(self._content)
+
+    def _translate(err: Exception) -> Any:
+        code = getattr(err, "code", None)  # urllib.error.HTTPError-like
+        if code is not None:
+            return _Resp(int(code), {})
+        if isinstance(err, (urllib.error.URLError, ConnectionError, TimeoutError, OSError)):
+            raise httpx2.ConnectError(str(err))
+        raise err
+
+    class _FakeClient:
+        def get(self, url: str, headers: Any = None, timeout: Any = None) -> Any:
+            if "auth/key" in url:
+                if key_error is not None:
+                    return _translate(key_error)
+                content = (
+                    key_raw_bytes
+                    if key_raw_bytes is not None
+                    else json.dumps(key_payload if key_payload is not None else {}).encode("utf-8")
                 )
-            resp_mock.read.return_value = content
-            resp_mock.__enter__.return_value = resp_mock
-            return resp_mock
-        raise RuntimeError(f"Unexpected unmocked URL in stress test: {url}")
+                return _Resp(200, content)
+            if "credits" in url:
+                if credits_error is not None:
+                    return _translate(credits_error)
+                content = (
+                    credits_raw_bytes
+                    if credits_raw_bytes is not None
+                    else json.dumps(credits_payload if credits_payload is not None else {}).encode(
+                        "utf-8"
+                    )
+                )
+                return _Resp(200, content)
+            raise RuntimeError(f"Unexpected unmocked URL in stress test: {url}")
 
-    return mock_urlopen
+    return _FakeClient()
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +173,8 @@ def test_stress_negative_values():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -191,7 +212,8 @@ def test_stress_infinity_and_nan_values():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -226,7 +248,8 @@ def test_stress_nan_handling():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -258,7 +281,8 @@ def test_stress_extreme_float_magnitudes():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -289,7 +313,8 @@ def test_stress_string_numbers_and_scientific_notation():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -305,7 +330,8 @@ def test_stress_null_and_empty_fields():
     credits_payload = {"data": {}}
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -341,7 +367,8 @@ def test_stress_non_numeric_and_unexpected_types():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -395,8 +422,8 @@ def test_stress_credits_fails_key_succeeds_matrix(http_code: int, expected_error
 
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_error=exc),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_error=exc),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -442,8 +469,8 @@ def test_stress_key_fails_credits_succeeds_matrix(http_code: int, expected_error
 
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(credits_payload=credits_payload, key_error=exc),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(credits_payload=credits_payload, key_error=exc),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -466,8 +493,8 @@ def test_stress_partial_timeout_combinations():
     # Case A: /credits times out, /auth/key succeeds
     key_payload = {"data": {"label": "Key OK", "usage": 1.0, "limit": 10.0}}
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(
             key_payload=key_payload, credits_error=socket.timeout("timed out")
         ),
     ):
@@ -480,8 +507,8 @@ def test_stress_partial_timeout_combinations():
     # Case B: /auth/key times out, /credits succeeds
     credits_payload = {"data": {"total_credits": 75.0, "total_usage": 25.0}}
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(
             credits_payload=credits_payload, key_error=TimeoutError("timed out")
         ),
     ):
@@ -510,8 +537,8 @@ def test_stress_both_endpoints_fail_combinations():
         fp=io.BytesIO(b"unauthorized"),
     )
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_error=exc_401, credits_error=exc_401),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_error=exc_401, credits_error=exc_401),
     ):
         info = provider.get_credits(api_key="sk-or-v1-invalid-key")
     assert info.supported is False
@@ -535,8 +562,8 @@ def test_stress_both_endpoints_fail_combinations():
         fp=io.BytesIO(b"server error"),
     )
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_error=exc_429, credits_error=exc_500),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_error=exc_429, credits_error=exc_500),
     ):
         info_mixed = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
     assert info_mixed.supported is False
@@ -559,8 +586,8 @@ def test_stress_dns_and_connection_errors():
     conn_err = urllib.error.URLError(reason=ConnectionRefusedError(10061, "Connect call failed"))
 
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_error=dns_err, credits_error=conn_err),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_error=dns_err, credits_error=conn_err),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -603,7 +630,8 @@ def test_stress_secret_masking_deep_hostile_payload():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key=secret_key)
 
@@ -627,7 +655,8 @@ def test_stress_secret_masking_deep_hostile_payload():
     service.invalidate("openrouter", secret_key)
     # Check that SHA-256 digest is used in cache keys
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         service.get_credits("openrouter", {}, api_key=secret_key)
     for k in service._cache.keys():
@@ -647,7 +676,8 @@ async def test_stress_async_concurrent_queries():
     credits_payload = {"data": {"total_credits": 500.0, "total_usage": 50.0}}
 
     with patch(
-        "urllib.request.urlopen", side_effect=make_mock_urlopen(key_payload, credits_payload)
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         tasks = [
             service.get_credits_async("openrouter", {}, api_key=f"sk-or-v1-key{i:04d}")
@@ -710,8 +740,8 @@ def test_stress_binary_non_utf8_response():
     raw_gzip = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xcb\x48\xcd\xc9\xc9\x07\x00\x86\xa6\x10\x36\x05\x00\x00\x00"
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_raw_bytes=raw_gzip, credits_raw_bytes=raw_gzip),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_raw_bytes=raw_gzip, credits_raw_bytes=raw_gzip),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 
@@ -738,8 +768,8 @@ def test_stress_base_url_variations():
     credits_payload = {"data": {"total_credits": 100.0, "total_usage": 10.0}}
 
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload, credits_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload, credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
 

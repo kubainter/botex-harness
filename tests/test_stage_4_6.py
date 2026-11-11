@@ -18,7 +18,7 @@ import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -149,24 +149,28 @@ def test_stage_4_6_wallet_service_key_status_and_cloud_endpoint(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key")
     svc = WalletService(cache_ttl_seconds=60.0)
 
-    def _fake_urlopen(req, timeout=10):
-        url = req.full_url
+    def _fake_client_get(url: str, headers: Any = None, timeout: Any = None) -> Any:
+        resp = MagicMock()
+        resp.status_code = 200
         if url.endswith("/auth/key"):
-            return _FakeHttpResponse(
-                {
-                    "data": {
-                        "label": "ci-key",
-                        "usage": 9.5,
-                        "limit": 10.0,
-                        "limit_remaining": 0.5,
-                        "is_free_tier": False,
-                        "limit_reset": "daily",
-                    }
+            resp.json.return_value = {
+                "data": {
+                    "label": "ci-key",
+                    "usage": 9.5,
+                    "limit": 10.0,
+                    "limit_remaining": 0.5,
+                    "is_free_tier": False,
+                    "limit_reset": "daily",
                 }
-            )
-        return _FakeHttpResponse({"data": {"total_credits": 20.0, "total_usage": 19.5}})
+            }
+        else:
+            resp.json.return_value = {"data": {"total_credits": 20.0, "total_usage": 19.5}}
+        return resp
 
-    with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+    fake_client = MagicMock()
+    fake_client.get.side_effect = _fake_client_get
+
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake_client):
         status = svc.get_key_status(
             provider_name="openrouter",
             api_key="sk-or-test-key",
@@ -184,7 +188,7 @@ def test_stage_4_6_wallet_service_key_status_and_cloud_endpoint(monkeypatch):
     client = TestClient(app)
     with (
         patch("botex.server_cloud.default_wallet_service", svc),
-        patch("urllib.request.urlopen", side_effect=_fake_urlopen),
+        patch("botex.providers.http_pool.get_sync_client", return_value=fake_client),
     ):
         r_key = client.get("/api/key/status?provider=openrouter")
         r_wal = client.get("/api/wallet?provider=openrouter")
@@ -250,14 +254,16 @@ def test_stage_4_6_openrouter_extra_body_and_reasoning_filter():
 async def test_stage_4_6_fetch_openrouter_generations_async_with_404_retry():
     calls = {"gen-1": 0, "gen-2": 0}
 
-    def _fake_urlopen(req, timeout=1.5):
-        url = req.full_url
+    def _fake_client_get(url: str, headers: Any = None, timeout: Any = None) -> Any:
         if "gen-1" in url:
             calls["gen-1"] += 1
+            resp = MagicMock()
             if calls["gen-1"] == 1:
-                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-            return _FakeHttpResponse(
-                {
+                resp.status_code = 404
+                resp.json.return_value = {"error": "Not Found"}
+            else:
+                resp.status_code = 200
+                resp.json.return_value = {
                     "data": {
                         "id": "gen-1",
                         "model": "anthropic/claude-sonnet-4",
@@ -271,25 +277,29 @@ async def test_stage_4_6_fetch_openrouter_generations_async_with_404_retry():
                         "cache_discount": 0.001,
                     }
                 }
-            )
+            return resp
         calls["gen-2"] += 1
-        return _FakeHttpResponse(
-            {
-                "data": {
-                    "id": "gen-2",
-                    "model": "anthropic/claude-sonnet-4",
-                    "total_cost": 0.0018,
-                    "latency": 79.5,
-                    "generation_time": 450.0,
-                    "native_tokens_prompt": 600,
-                    "native_tokens_completion": 80,
-                    "native_tokens_cached": 400,
-                    "native_tokens_cache_write": 0,
-                }
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "data": {
+                "id": "gen-2",
+                "model": "anthropic/claude-sonnet-4",
+                "total_cost": 0.0018,
+                "latency": 79.5,
+                "generation_time": 450.0,
+                "native_tokens_prompt": 600,
+                "native_tokens_completion": 80,
+                "native_tokens_cached": 400,
+                "native_tokens_cache_write": 0,
             }
-        )
+        }
+        return resp
 
-    with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+    fake_client = MagicMock()
+    fake_client.get.side_effect = _fake_client_get
+
+    with patch("botex.providers.http_pool.get_sync_client", return_value=fake_client):
         agg = await fetch_openrouter_generations_async(
             generation_ids=["gen-1", "gen-2", "gen-1"],
             provider_name="openrouter",
@@ -321,10 +331,13 @@ def test_stage_4_6_get_generation_stats_error_handling():
     assert st_empty is None
 
     # 404 HTTP error returns None gracefully
-    def _raise_404(req, timeout=5.0):
-        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+    resp_404 = MagicMock()
+    resp_404.status_code = 404
+    resp_404.json.return_value = {"error": "Not Found"}
+    client_404 = MagicMock()
+    client_404.get.return_value = resp_404
 
-    with patch("urllib.request.urlopen", side_effect=_raise_404):
+    with patch("botex.providers.http_pool.get_sync_client", return_value=client_404):
         st_404 = prov.get_generation_stats("gen-404", api_key="sk-test")
     assert st_404 is None
 
@@ -626,24 +639,26 @@ async def test_stage_4_6_edge_cases_and_error_branches(tmp_path: Path):
 
     # OpenRouterProvider.get_generation_stats success & generic exception
     prov = OpenRouterProvider("openrouter", {})
-    with patch(
-        "urllib.request.urlopen",
-        return_value=_FakeHttpResponse(
-            {
-                "data": {
-                    "id": "gen-ok",
-                    "model": "qwen/qwen3-coder",
-                    "total_cost": 0.002,
-                    "latency": 50.0,
-                    "generation_time": 300.0,
-                }
-            }
-        ),
-    ):
+    gen_ok_resp = MagicMock()
+    gen_ok_resp.status_code = 200
+    gen_ok_resp.json.return_value = {
+        "data": {
+            "id": "gen-ok",
+            "model": "qwen/qwen3-coder",
+            "total_cost": 0.002,
+            "latency": 50.0,
+            "generation_time": 300.0,
+        }
+    }
+    gen_client = MagicMock()
+    gen_client.get.return_value = gen_ok_resp
+    with patch("botex.providers.http_pool.get_sync_client", return_value=gen_client):
         st_ok = prov.get_generation_stats("gen-ok", api_key="sk-test")
     assert st_ok is not None and st_ok.total_cost == 0.002
 
-    with patch("urllib.request.urlopen", side_effect=OSError("boom")):
+    err_client = MagicMock()
+    err_client.get.side_effect = OSError("boom")
+    with patch("botex.providers.http_pool.get_sync_client", return_value=err_client):
         assert prov.get_generation_stats("gen-err", api_key="sk-test") is None
 
     # fetch_openrouter_generations_async edge cases
@@ -651,7 +666,7 @@ async def test_stage_4_6_edge_cases_and_error_branches(tmp_path: Path):
     assert await fetch_openrouter_generations_async(["gen-1"], provider_name="nvidia") == {}
     with patch.object(OpenRouterProvider, "resolve_api_key", return_value=""):
         assert await fetch_openrouter_generations_async(["gen-1"], provider_name="openrouter") == {}
-    with patch("urllib.request.urlopen", side_effect=OSError("net down")):
+    with patch("botex.providers.http_pool.get_sync_client", side_effect=OSError("net down")):
         assert (
             await fetch_openrouter_generations_async(
                 ["gen-1"], provider_name="openrouter", api_key="sk-test"

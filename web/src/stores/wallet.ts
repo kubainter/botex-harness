@@ -29,6 +29,49 @@ export const useWalletStore = defineStore('wallet', () => {
 
   // Curated model roster based on BoteX benchmark recommendations (empty by default, loaded from backend)
   const recommendedModels = ref<RecommendedModel[]>([])
+  const recommendedLoaded = ref<Record<string, boolean>>({})
+
+  const ROLE_TASK_MAP: Record<RecommendedModel['role'], string> = {
+    planner: 'architecture',
+    coder: 'coding',
+    chat: 'general',
+    reviewer: 'review'
+  }
+
+  async function fetchRecommended(
+    role: 'all' | RecommendedModel['role'] = 'all',
+    forceRefresh: boolean = false
+  ) {
+    const roles = (role === 'all' ? Object.keys(ROLE_TASK_MAP) : [role]) as RecommendedModel['role'][]
+    const pending = roles.filter((r) => forceRefresh || !recommendedLoaded.value[r])
+    if (!pending.length) return
+    await Promise.all(
+      pending.map(async (r) => {
+        try {
+          const raw = await api.getRecommendedModels(ROLE_TASK_MAP[r], 5, 'auto')
+          const mapped: RecommendedModel[] = raw
+            .filter((m: any) => m && typeof m === 'object' && m.id && !m.error)
+            .map((m: any) => ({
+              id: String(m.id),
+              name: String(m.name || m.id),
+              provider: String(m.provider || ''),
+              role: r,
+              description: String(m.description || ''),
+              context_length: Number(m.context_length || 0),
+              input_cost_per_m: Number((m.pricing as any)?.prompt_1M ?? 0),
+              output_cost_per_m: Number((m.pricing as any)?.completion_1M ?? 0)
+            }))
+          recommendedModels.value = [
+            ...recommendedModels.value.filter((m) => m.role !== r),
+            ...mapped
+          ]
+          recommendedLoaded.value[r] = true
+        } catch {
+          // Transient failure — leave unloaded so a later view can retry
+        }
+      })
+    )
+  }
 
   async function fetchWallet(forceRefresh: boolean = false, provider?: string) {
     const targetProv = provider || activeProvider.value
@@ -92,6 +135,7 @@ export const useWalletStore = defineStore('wallet', () => {
     isLoading,
     errorMessage,
     recommendedModels,
+    fetchRecommended,
     fetchWallet,
     fetchKeyStatus,
     setProvider

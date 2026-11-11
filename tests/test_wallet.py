@@ -33,6 +33,7 @@ from botex.providers import (
     _sanitize_raw_payload,
     sanitize_provider_error,
 )
+from botex.providers import http_pool
 from botex.security import mask_secrets
 from botex.wallet import (
     WalletService,
@@ -95,35 +96,41 @@ def clean_registry():
     ProviderRegistry._registry = orig_registry
 
 
-def make_mock_urlopen(
+def make_mock_client(
     key_payload: Optional[Dict[str, Any]] = None,
     credits_payload: Optional[Dict[str, Any]] = None,
     key_error: Optional[Exception] = None,
     credits_error: Optional[Exception] = None,
 ):
-    """Factory creating a mock urlopen handler simulating endpoint responses."""
+    """Factory creating a fake httpx2-style client simulating endpoint responses."""
 
-    def mock_urlopen(req: Any, timeout: float = 10.0) -> Any:
-        url = req.full_url if hasattr(req, "full_url") else str(req)
-        if "auth/key" in url:
-            if key_error:
-                raise key_error
-            resp_mock = MagicMock()
-            content = json.dumps(key_payload or {}).encode("utf-8")
-            resp_mock.read.return_value = content
-            resp_mock.__enter__.return_value = resp_mock
-            return resp_mock
-        elif "credits" in url:
-            if credits_error:
-                raise credits_error
-            resp_mock = MagicMock()
-            content = json.dumps(credits_payload or {}).encode("utf-8")
-            resp_mock.read.return_value = content
-            resp_mock.__enter__.return_value = resp_mock
-            return resp_mock
-        raise RuntimeError(f"Unexpected unmocked URL in test: {url}")
+    class _Resp:
+        def __init__(self, status_code: int, payload: Dict[str, Any]) -> None:
+            self.status_code = status_code
+            self._payload = payload
 
-    return mock_urlopen
+        def json(self) -> Dict[str, Any]:
+            return self._payload
+
+    def _status_or_raise(err: Exception) -> Any:
+        code = getattr(err, "code", None)  # urllib.error.HTTPError-like
+        if code is not None:
+            return _Resp(int(code), {})
+        raise err
+
+    class _FakeClient:
+        def get(self, url: str, headers: Any = None, timeout: Any = None) -> Any:
+            if "auth/key" in url:
+                if key_error is not None:
+                    return _status_or_raise(key_error)
+                return _Resp(200, key_payload or {})
+            if "credits" in url:
+                if credits_error is not None:
+                    return _status_or_raise(credits_error)
+                return _Resp(200, credits_payload or {})
+            raise RuntimeError(f"Unexpected unmocked URL in test: {url}")
+
+    return _FakeClient()
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +170,8 @@ def test_openrouter_paid_key_usage_and_limit():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_payload=credits_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_payload=credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.supported is True
@@ -188,8 +195,8 @@ def test_openrouter_free_tier_key():
     credits_payload = {"data": {}}
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_payload=credits_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_payload=credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.is_free_tier is True
@@ -216,8 +223,8 @@ def test_openrouter_unlimited_paid_key():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_payload=credits_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_payload=credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.limit_usd is None
@@ -239,8 +246,8 @@ def test_openrouter_over_limit_key_exhaustion():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_payload={"data": {}}),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_payload={"data": {}}),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.limit_usd == 100.00
@@ -270,8 +277,8 @@ def test_openrouter_full_composite_calculation():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_payload=credits_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_payload=credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.balance_usd == 37.75
@@ -293,8 +300,8 @@ def test_openrouter_zero_balance_account_exhaustion():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload={"data": {}}, credits_payload=credits_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload={"data": {}}, credits_payload=credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.balance_usd == 0.0
@@ -317,8 +324,8 @@ def test_openrouter_string_encoded_floats():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_payload=credits_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_payload=credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.balance_usd == 10.00
@@ -330,8 +337,8 @@ def test_openrouter_empty_response_data():
     """TEST-WAL-08: Verify behavior when both endpoints return empty data payloads."""
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload={"data": {}}, credits_payload={"data": {}}),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload={"data": {}}, credits_payload={"data": {}}),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.supported is True
@@ -365,8 +372,8 @@ def test_openrouter_credits_fails_fallback_to_key():
     )
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_error=cred_err),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_error=cred_err),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.supported is True
@@ -396,8 +403,8 @@ def test_openrouter_key_fails_fallback_to_credits():
     }
     provider = OpenRouterProvider("openrouter")
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_error=key_err, credits_payload=credits_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_error=key_err, credits_payload=credits_payload),
     ):
         info = provider.get_credits(api_key="sk-or-v1-testkey1234567890")
         assert info.supported is True
@@ -496,15 +503,16 @@ def test_openrouter_free_tier_key_name_fallback(monkeypatch: pytest.MonkeyPatch)
 
     captured_headers: Dict[str, str] = {}
 
-    def capture_auth_urlopen(req: Any, timeout: float = 10.0) -> Any:
-        nonlocal captured_headers
-        captured_headers["Authorization"] = req.get_header("Authorization")
-        resp = MagicMock()
-        resp.read.return_value = b'{"data": {}}'
-        resp.__enter__.return_value = resp
-        return resp
+    class _CaptureClient:
+        def get(self, url: str, headers: Any = None, timeout: Any = None) -> Any:
+            if headers:
+                captured_headers["Authorization"] = headers.get("Authorization", "")
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"data": {}}
+            return resp
 
-    with patch("urllib.request.urlopen", side_effect=capture_auth_urlopen):
+    with patch("botex.providers.http_pool.get_sync_client", return_value=_CaptureClient()):
         provider.get_credits()
         assert captured_headers.get("Authorization") == "Bearer sk-or-v1-freekey"
 
@@ -516,15 +524,13 @@ def test_openrouter_free_tier_key_name_fallback(monkeypatch: pytest.MonkeyPatch)
 
 def test_openrouter_http_401_unauthorized():
     """TEST-WAL-17: Verify handling of invalid / revoked API key (HTTP 401)."""
-    err = urllib.error.HTTPError(
-        url="",
-        code=401,
-        msg="Unauthorized",
-        hdrs={},
-        fp=io.BytesIO(b'{"error": "Invalid API key"}'),
-    )
     provider = OpenRouterProvider("openrouter")
-    with patch("urllib.request.urlopen", side_effect=err):
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.json.return_value = {"error": "Invalid API key"}
+    client = MagicMock()
+    client.get.return_value = resp
+    with patch("botex.providers.http_pool.get_sync_client", return_value=client):
         info = provider.get_credits(api_key="invalid-key")
         assert info.balance_usd is None
         assert info.error is not None
@@ -533,15 +539,13 @@ def test_openrouter_http_401_unauthorized():
 
 def test_openrouter_http_429_rate_limit():
     """TEST-WAL-18: Verify handling of upstream rate limiting (HTTP 429)."""
-    err = urllib.error.HTTPError(
-        url="",
-        code=429,
-        msg="Rate Limit Exceeded",
-        hdrs={},
-        fp=io.BytesIO(b'{"error": "Too Many Requests"}'),
-    )
     provider = OpenRouterProvider("openrouter")
-    with patch("urllib.request.urlopen", side_effect=err):
+    resp = MagicMock()
+    resp.status_code = 429
+    resp.json.return_value = {"error": "Too Many Requests"}
+    client = MagicMock()
+    client.get.return_value = resp
+    with patch("botex.providers.http_pool.get_sync_client", return_value=client):
         info = provider.get_credits(api_key="valid-key")
         assert info.error is not None
         assert "429" in str(info.error)
@@ -549,15 +553,13 @@ def test_openrouter_http_429_rate_limit():
 
 def test_openrouter_http_500_server_error():
     """TEST-WAL-19: Verify handling of upstream server errors (HTTP 502 Bad Gateway)."""
-    err = urllib.error.HTTPError(
-        url="",
-        code=502,
-        msg="Bad Gateway",
-        hdrs={},
-        fp=io.BytesIO(b"Bad Gateway"),
-    )
     provider = OpenRouterProvider("openrouter")
-    with patch("urllib.request.urlopen", side_effect=err):
+    resp = MagicMock()
+    resp.status_code = 502
+    resp.json.return_value = {"error": "Bad Gateway"}
+    client = MagicMock()
+    client.get.return_value = resp
+    with patch("botex.providers.http_pool.get_sync_client", return_value=client):
         info = provider.get_credits(api_key="valid-key")
         assert info.error is not None
         assert "502" in str(info.error)
@@ -642,8 +644,8 @@ def test_wallet_service_provider_dispatch():
     cred_payload = {"data": {"total_credits": 20.0, "total_usage": 5.0}}
 
     with patch(
-        "urllib.request.urlopen",
-        side_effect=make_mock_urlopen(key_payload=key_payload, credits_payload=cred_payload),
+        "botex.providers.http_pool.get_sync_client",
+        return_value=make_mock_client(key_payload=key_payload, credits_payload=cred_payload),
     ):
         info_or = service.get_credits("openrouter", api_key="sk-test-key")
         assert info_or.supported is True
@@ -670,26 +672,26 @@ def test_wallet_service_unknown_provider():
 def test_wallet_service_ttl_caching_and_force_refresh():
     """TEST-WAL-27: Verify in-memory TTL caching and force_refresh cache bypass."""
     service = WalletService(cache_ttl_seconds=60.0)
-    mock_urlopen = MagicMock()
+    client = MagicMock()
     resp_mock = MagicMock()
-    resp_mock.read.return_value = b'{"data": {"label": "Cached", "usage": 1.0, "limit": 10.0}}'
-    resp_mock.__enter__.return_value = resp_mock
-    mock_urlopen.return_value = resp_mock
+    resp_mock.status_code = 200
+    resp_mock.json.return_value = {"data": {"label": "Cached", "usage": 1.0, "limit": 10.0}}
+    client.get.return_value = resp_mock
 
-    with patch("urllib.request.urlopen", mock_urlopen):
+    with patch("botex.providers.http_pool.get_sync_client", return_value=client):
         # 1st call -> query upstream (2 endpoints: /auth/key and /credits)
         info1 = service.get_credits("openrouter", api_key="sk-test-cache-key")
-        assert mock_urlopen.call_count == 2
+        assert client.get.call_count == 2
         assert info1.supported is True
 
         # 2nd call within TTL -> cache hit (no new network requests)
         info2 = service.get_credits("openrouter", api_key="sk-test-cache-key")
-        assert mock_urlopen.call_count == 2
+        assert client.get.call_count == 2
         assert info2 is info1
 
         # 3rd call with force_refresh=True -> bypasses cache (makes 2 new calls)
         info3 = service.get_credits("openrouter", api_key="sk-test-cache-key", force_refresh=True)
-        assert mock_urlopen.call_count == 4
+        assert client.get.call_count == 4
         assert info3 is not None
 
 

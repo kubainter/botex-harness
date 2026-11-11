@@ -253,6 +253,12 @@ export const useChatStore = defineStore('chat', () => {
       errorMessage.value = chunk.error
       if (isAssistant) {
         appendChunkToLastAssistant(`\n\n**[Error]** ${chunk.error}`)
+        if (chunk.code === 'model_not_found') {
+          appendChunkToLastAssistant(
+            `\n\n> ⚠️ Model may be outdated or removed — refresh the model list (server catalog may be stale).`
+          )
+          void fetchCatalogModels(true)
+        }
       }
       finishStreaming()
     } else if (chunk.delta) {

@@ -214,13 +214,13 @@
             <div class="flex justify-between text-slate-300">
               <span>RPM:</span>
               <span class="text-slate-100 font-semibold">
-                {{ info.requests_available !== null ? Math.round(info.requests_available) : info.rpm }} / {{ info.rpm }}
+                {{ info.requests_available !== null ? Math.round(info.requests_available) : info.rpm }} / {{ Math.round(info.requests_capacity ?? info.rpm) }}
               </span>
             </div>
             <div class="flex justify-between text-slate-300">
               <span>TPM:</span>
               <span class="text-slate-100 font-semibold">
-                {{ info.tokens_available !== null ? (Math.round(info.tokens_available) / 1000).toFixed(0) + 'k' : (info.tpm / 1000).toFixed(0) + 'k' }} / {{ (info.tpm / 1000).toFixed(0) + 'k' }}
+                {{ info.tokens_available !== null ? (Math.round(info.tokens_available) / 1000).toFixed(0) + 'k' : (info.tpm / 1000).toFixed(0) + 'k' }} / {{ ((info.tokens_capacity ?? info.tpm) / 1000).toFixed(0) + 'k' }}
               </span>
             </div>
             <div v-if="info.wait_s > 0" class="text-amber-400 text-xs">
@@ -355,7 +355,7 @@
             <span class="text-xs text-slate-300 font-mono">{{ model.provider }}</span>
           </div>
 
-          <p class="text-xs text-slate-200">{{ model.description }}</p>
+          <p v-if="model.description" class="text-xs text-slate-200 line-clamp-3">{{ model.description }}</p>
 
           <div class="pt-2 border-t border-botex-800 grid grid-cols-3 gap-2 text-center text-xs font-mono">
             <div class="bg-botex-950 p-2 rounded-lg border border-botex-800 min-w-0">
@@ -379,7 +379,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useWalletStore } from '../stores/wallet'
 import { useAnalyticsStore } from '../stores/analytics'
@@ -459,7 +459,12 @@ const ledgerRows = computed(() => {
 
 onMounted(async () => {
   walletStore.fetchWallet()
+  walletStore.fetchRecommended('all')
   ledgerStats.value = await analyticsStore.fetchPeriodStats('all')
+})
+
+watch(selectedRole, (r) => {
+  walletStore.fetchRecommended(r)
 })
 
 function roleBadgeVariant(role: string) {

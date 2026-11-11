@@ -294,7 +294,13 @@ def test_chat_turn_convenience_wrapper(tmp_path: Path):
 
 
 def test_chat_turn_error_handling(tmp_path: Path):
-    """Verify chat turn yields error event on client failure and cleans up disk rollback."""
+    """Verify chat turn yields an error event and KEEPS the failed turn in history.
+
+    Failed turns stay in the session (R1): a provider failure mutates nothing,
+    so erasing the user message destroyed conversational context exactly when
+    the user was switching models to preserve it. Retries are merged in
+    get_history() as consecutive user turns.
+    """
 
     class FailingCompletions:
         async def create(self, **kwargs: Any) -> Any:
@@ -311,11 +317,14 @@ def test_chat_turn_error_handling(tmp_path: Path):
             events.append(event)
 
         assert any(e.get("type") == "error" for e in events)
-        assert len(session.messages) == 0
+        assert any(e.get("error_class") == "provider_error" for e in events)
+        assert len(session.messages) == 1
+        assert session.messages[-1].role == "user"
+        assert session.messages[-1].content == "Will fail"
         from botex.chat import get_chat_sessions_dir
 
         session_file = get_chat_sessions_dir(str(tmp_path)) / f"{session.session_id}.json"
-        assert not session_file.exists()
+        assert session_file.exists()
 
     asyncio.run(_test())
 
@@ -425,8 +434,8 @@ def test_execute_chat_tool_secret_masking(tmp_path: Path):
     asyncio.run(_test())
 
 
-def test_stream_chat_turn_error_rollback_user_message(tmp_path: Path):
-    """Verify that an early failure rolls back the newly added user message."""
+def test_stream_chat_turn_error_keeps_user_message(tmp_path: Path):
+    """Verify that an early failure keeps the user message in history (R1)."""
     session = ChatSession(workspace_dir=str(tmp_path), model="test-model")
     assert len(session.messages) == 0
 
@@ -441,14 +450,23 @@ def test_stream_chat_turn_error_rollback_user_message(tmp_path: Path):
     async def _test():
         events = []
         async for event in stream_chat_turn(
-            session, "Should be rolled back", client=failing_client
+            session, "Should stay in history", client=failing_client
         ):
             events.append(event)
         assert any(e.get("type") == "error" for e in events)
 
     asyncio.run(_test())
-    # The message history should be clean, not containing the unhandled prompt
-    assert len(session.messages) == 0
+    # The failed turn stays — retry/model-switch must preserve context.
+    assert len(session.messages) == 1
+    assert session.messages[-1].content == "Should stay in history"
+
+    # A retry appends a consecutive user turn; get_history merges them.
+    session.add_user_message("retry")
+    history = session.get_history()
+    user_turns = [m for m in history if m["role"] == "user"]
+    assert len(user_turns) == 1
+    assert "Should stay in history" in user_turns[0]["content"]
+    assert "retry" in user_turns[0]["content"]
 
 
 def test_execute_chat_tool_fetch_url():
@@ -621,3 +639,55 @@ def test_tool_call_id_persistence_and_history_sanitization(tmp_path: Path):
     cleaned_hist = loaded_sess.get_history()
     # The orphan tool message without preceding assistant tool_calls should be dropped
     assert len(cleaned_hist) == 3
+
+
+def test_provider_error_payload_emits_classified_code(tmp_path: Path):
+    """Provider error events carry `code` so clients can react to model_not_found."""
+    from botex.server.chat import _provider_error_payload
+
+    class _FakeError(Exception):
+        status_code = 404
+        body = {"error": {"message": "No endpoints found for acme/dead-model"}}
+
+    session = ChatSession(workspace_dir=str(tmp_path), model="acme/dead-model")
+    payload = _provider_error_payload(session, "openrouter", "acme/dead-model", _FakeError("x"))
+    assert payload["type"] == "error"
+    assert payload["code"] == "model_not_found"
+    assert payload["error_class"] == "provider_error"
+
+
+def test_classify_provider_error_code_substring_patterns():
+    """Substring patterns map unstructured provider messages to static literals."""
+    from botex.server.chat import _classify_provider_error_code
+
+    class _Err(Exception):
+        def __init__(self, body):
+            self.body = body
+
+    assert (
+        _classify_provider_error_code(_Err({"error": {"message": "No endpoints found for x/y"}}))
+        == "model_not_found"
+    )
+    assert (
+        _classify_provider_error_code(_Err({"error": {"message": "foo is not a valid model ID"}}))
+        == "model_not_found"
+    )
+    # Bare "moderation" mention must NOT trigger moderation_blocked —
+    # only specific moderation phrases map.
+    assert (
+        _classify_provider_error_code(
+            _Err({"error": {"message": "model 'x-moderation-2' not found"}})
+        )
+        == "unclassified_provider_error"
+    )
+    assert (
+        _classify_provider_error_code(
+            _Err({"error": {"message": "content_filter tripped on input"}})
+        )
+        == "moderation_blocked"
+    )
+    assert (
+        _classify_provider_error_code(_Err({"error": {"message": "something else"}}))
+        == "unclassified_provider_error"
+    )
+    assert _classify_provider_error_code(_Err(None)) == "unclassified_provider_error"

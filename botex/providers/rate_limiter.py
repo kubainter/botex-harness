@@ -342,7 +342,17 @@ class ProviderRateLimiter:
                 "tpm": lim.tpm,
                 "burst_multiplier": lim.burst_multiplier,
                 "requests_available": round(req.available, 3) if req is not None else None,
+                "requests_capacity": round(
+                    req.capacity if req is not None else lim.rpm * lim.burst_multiplier, 3
+                )
+                if lim.rpm > 0.0
+                else None,
                 "tokens_available": round(tok.available, 3) if tok is not None else None,
+                "tokens_capacity": round(
+                    tok.capacity if tok is not None else lim.tpm * lim.burst_multiplier, 3
+                )
+                if lim.tpm > 0.0
+                else None,
                 "cooldown_s": round(self.cooldown_remaining(name), 3),
                 "wait_s": round(self.wait_estimate(name), 3),
             }
