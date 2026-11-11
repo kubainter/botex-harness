@@ -552,7 +552,9 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
 def sanitize_provider_error(exc: BaseException, max_chars: int = 1024) -> str:
     """Masked, length-bounded provider error text safe for result dicts,
     MCP responses and analytics — never contains secrets or raw payloads."""
-    text = mask_secrets(str(exc))
+    from botex.tools.security import coerce_text
+
+    text = coerce_text(mask_secrets(str(exc)))
     if len(text) > max_chars:
         text = text[:max_chars] + "…"
     return text
