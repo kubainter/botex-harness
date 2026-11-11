@@ -339,17 +339,41 @@ def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=_LEDGER_KEEP_DAYS)
 
     rows: list = []
+    legacy_rows: list = []
     if legacy.exists() and legacy != live:
         try:
             data = json.loads(legacy.read_text(encoding="utf-8"))
             if isinstance(data, list):
-                rows.extend(r for r in data if isinstance(r, dict))
-                results["migrated"] = len(rows)
-                legacy.unlink()
+                legacy_rows = [r for r in data if isinstance(r, dict)]
+                rows.extend(legacy_rows)
+                results["migrated"] = len(legacy_rows)
         except (OSError, ValueError) as exc:
             logger.warning("analytics rotation: legacy migrate failed: %s", type(exc).__name__)
-    rows.extend(_read_jsonl(live))
+    # Staging rename shrinks the append race: writers opening the live path
+    # after the rename create a fresh file whose tail we merge below.
+    staged = live.with_suffix(live.suffix + ".rotating")
+    staged_ok = False
+    try:
+        if live.exists():
+            os.replace(live, staged)
+            staged_ok = True
+        rows.extend(_read_jsonl(staged if staged_ok else live))
+    except OSError as exc:
+        logger.warning("analytics rotation: live stage failed: %s", type(exc).__name__)
+        return results
+    tail = _read_jsonl(live)
+    seen_tail = {(r.get("task_id"), r.get("timestamp")) for r in rows}
+    for r in tail:
+        k = (r.get("task_id"), r.get("timestamp"))
+        if k not in seen_tail:
+            rows.append(r)
+            seen_tail.add(k)
     if not rows:
+        if staged_ok:
+            try:
+                os.replace(staged, live)
+            except OSError:
+                pass
         return results
 
     def _month_of(rec: Dict[str, Any]) -> str:
@@ -376,27 +400,49 @@ def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
         else:
             keep.append(rec)
 
-    if not by_month:
-        results["kept"] = len(keep)
-        # Still rewrite live if legacy rows were folded in.
-        if results["migrated"] or not live.exists():
-            _rewrite_ledger(live, keep)
-        return results
-
     archive = _ledger_archive_dir()
     try:
-        archive.mkdir(parents=True, exist_ok=True)
-        for month, recs in by_month.items():
-            gz_path = archive / f"{month}.jsonl.gz"
-            with gzip.open(gz_path, "at", encoding="utf-8") as fh:
-                for rec in recs:
-                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            results["archived"] += len(recs)
+        if by_month:
+            archive.mkdir(parents=True, exist_ok=True)
+            for month, recs in by_month.items():
+                gz_path = archive / f"{month}.jsonl.gz"
+                with gzip.open(gz_path, "at", encoding="utf-8") as fh:
+                    for rec in recs:
+                        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                results["archived"] += len(recs)
     except (OSError, ValueError) as exc:
         logger.warning("analytics rotation: archive write failed: %s", type(exc).__name__)
+        # Roll back the staged segment so no row is lost, keep legacy intact.
+        if staged_ok:
+            try:
+                _rewrite_ledger(live, rows)
+                staged.unlink()
+            except OSError:
+                pass
         return results
 
-    _rewrite_ledger(live, keep)
+    try:
+        _rewrite_ledger(live, keep)
+    except OSError as exc:
+        logger.warning("analytics rotation: live rewrite failed: %s", type(exc).__name__)
+        if staged_ok:
+            try:
+                _rewrite_ledger(live, rows)
+            except OSError:
+                pass
+        return results
+
+    # Ledger is safe — only now remove consumed sources.
+    if staged_ok:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
+    if legacy_rows:
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
     results["kept"] = len(keep)
     return results
 
@@ -454,14 +500,14 @@ def repair_dead_links(workspace_dir: str = ".", apply: bool = False) -> Dict[str
     except Exception:
         scope_dirs = []
     all_ids: list = []
-    file_by_id: Dict[str, Path] = {}
+    files_by_id: Dict[str, list] = {}
     for mem_dir, _ in scope_dirs:
         if not mem_dir.is_dir():
             continue
         for f in mem_dir.glob("*.md"):
             if f.is_file() and not f.name.startswith("_"):
                 all_ids.append(f.stem)
-                file_by_id[f.stem] = f
+                files_by_id.setdefault(f.stem, []).append(f)
 
     repairs = _compute_dead_link_repairs(broken, [{"id": i} for i in all_ids])
     results["suggested"] = len(repairs)
@@ -479,28 +525,37 @@ def repair_dead_links(workspace_dir: str = ".", apply: bool = False) -> Dict[str
         if difflib.SequenceMatcher(None, dead, suggested).ratio() < _APPLY_LINK_MIN_RATIO:
             results["skipped"] += 1
             continue
-        src_file = file_by_id.get(src_id)
-        if src_file is None:
+        # The link lives in whatever file actually contains it — a bare-stem
+        # match across vaults can point at a same-named note in another
+        # scope (cross-vault collision). Only rewrite files that provably
+        # contain the dead link.
+        candidates = files_by_id.get(src_id) or []
+        try:
+            candidates = [f for f in candidates if f"[[{dead}]]" in f.read_text(encoding="utf-8")]
+        except OSError:
+            candidates = []
+        if not candidates:
             results["skipped"] += 1
             continue
-        try:
-            text = src_file.read_text(encoding="utf-8")
-            new_text = text.replace(f"[[{dead}]]", f"[[{suggested}]]")
-            if new_text == text:
-                results["skipped"] += 1
-                continue
-            tmp = src_file.with_name(f"{src_file.name}.{os.getpid()}.tmp")
+        for src_file in candidates:
             try:
-                tmp.write_text(new_text, encoding="utf-8")
-                os.replace(str(tmp), str(src_file))
-            finally:
-                if tmp.exists():
-                    tmp.unlink()
-            results["applied"] += 1
-            changed_dirs.add(src_file.parent)
-        except Exception as exc:
-            logger.warning("dead-link apply failed: %s", type(exc).__name__)
-            results["skipped"] += 1
+                text = src_file.read_text(encoding="utf-8")
+                new_text = text.replace(f"[[{dead}]]", f"[[{suggested}]]")
+                if new_text == text:
+                    results["skipped"] += 1
+                    continue
+                tmp = src_file.with_name(f"{src_file.name}.{os.getpid()}.tmp")
+                try:
+                    tmp.write_text(new_text, encoding="utf-8")
+                    os.replace(str(tmp), str(src_file))
+                finally:
+                    if tmp.exists():
+                        tmp.unlink()
+                results["applied"] += 1
+                changed_dirs.add(src_file.parent)
+            except Exception as exc:
+                logger.warning("dead-link apply failed: %s", type(exc).__name__)
+                results["skipped"] += 1
 
     for mem_dir in changed_dirs:
         try:
