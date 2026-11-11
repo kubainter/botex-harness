@@ -13,6 +13,7 @@ jobs:
   pip-audit:
     name: pip-audit (requirements.txt)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +31,7 @@ jobs:
   npm-audit:
     name: npm audit (web/)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
