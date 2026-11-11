@@ -937,10 +937,16 @@ def env_file() -> Optional[Path]:
 def swarm_memory_dir() -> str:
     """Configured swarm vault dir for the third READ-ONLY search root.
 
-    Empty/blank means OFF — memory scope "swarm"/"all" simply skips it
-    (no implicit cross-workspace reads; arena-recall S.3)."""
+    Relative paths (such as the committed default ``.botex/memory``) are
+    resolved against ``PROJECT_ROOT`` so both local workstations and remote
+    VPS deployments locate the harness swarm vault portably. Empty/blank
+    means OFF — memory scope "swarm"/"all" simply skips it."""
     value = load_config().get("paths", {}).get("swarm_memory_dir") or ""
-    return str(value).strip()
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    expanded = Path(raw).expanduser()
+    return str(expanded if expanded.is_absolute() else (PROJECT_ROOT / expanded).resolve())
 
 
 def get_recall_config() -> Dict[str, Any]:

@@ -123,6 +123,17 @@
           >
             {{ locale === 'pl' ? 'Globalne (~/.botex)' : 'Global (~/.botex)' }}
           </button>
+          <button
+            type="button"
+            class="px-2.5 py-1 text-xs rounded-md transition-colors"
+            :aria-pressed="scope === 'swarm'"
+            :class="
+              scope === 'swarm' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
+            "
+            @click="$emit('update:scope', 'swarm')"
+          >
+            {{ locale === 'pl' ? 'Rój (swarm)' : 'Swarm' }}
+          </button>
         </div>
       </div>
 
@@ -253,7 +264,7 @@ const activeChips = computed(() => {
     chips.push('📁 ' + (props.project === '_unassigned' ? 'unassigned' : props.project))
   }
   if (props.scope && props.scope !== 'all') {
-    chips.push(props.scope === 'local' ? 'local' : 'global')
+    chips.push(props.scope === 'local' ? 'local' : props.scope === 'swarm' ? 'swarm' : 'global')
   }
   if (props.kind) chips.push(props.kind)
   if (props.tag?.trim()) chips.push('#' + props.tag.trim())

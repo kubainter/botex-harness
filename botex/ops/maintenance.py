@@ -20,11 +20,13 @@ touch the user-facing path.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -305,4 +307,338 @@ def repair_frontmatter_ids(workspace_dir: str = ".") -> Dict[str, int]:
                     type(exc).__name__,
                 )
 
+    return results
+
+
+_LEDGER_KEEP_DAYS = 90
+
+
+def _dedup_append(target: list, seen: set, incoming: list) -> None:
+    """Append incoming records, deduplicating only rows with both task_id and timestamp."""
+    for r in incoming:
+        if not isinstance(r, dict):
+            continue
+        tid = r.get("task_id")
+        ts = r.get("timestamp")
+        if tid and ts:
+            k = (tid, ts)
+            if k in seen:
+                continue
+            seen.add(k)
+        target.append(r)
+
+
+def rotate_analytics_ledger(workspace_dir: str = ".") -> Dict[str, int]:
+    """Move ledger rows older than the retention window into per-month
+    ``analytics-archive/YYYY-MM.jsonl.gz`` rollups.
+
+    Live ``.agent_analytics.jsonl`` stays small for fast ``load_analytics``;
+    archived rows remain fully readable (load_analytics merges all sources),
+    so ``botex stats`` keeps its historical horizon. Legacy ``.json`` data
+    is folded into the live segment first.
+    """
+    results: Dict[str, int] = {"archived": 0, "kept": 0, "migrated": 0}
+    try:
+        from botex.providers.analytics import (
+            _cfg_analytics_file,
+            _ledger_archive_dir,
+            _ledger_jsonl,
+            _read_jsonl,
+        )
+    except Exception as exc:
+        logger.warning("analytics rotation: imports failed: %s", type(exc).__name__)
+        return results
+
+    live = _ledger_jsonl()
+    legacy = _cfg_analytics_file()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_LEDGER_KEEP_DAYS)
+
+    rows: list = []
+    seen_keys: set = set()
+    legacy_rows: list = []
+    if legacy.exists() and legacy != live:
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                legacy_rows = [r for r in data if isinstance(r, dict)]
+                _dedup_append(rows, seen_keys, legacy_rows)
+                results["migrated"] = len(legacy_rows)
+        except (OSError, ValueError) as exc:
+            logger.warning("analytics rotation: legacy migrate failed: %s", type(exc).__name__)
+
+    staged = live.with_suffix(live.suffix + ".rotating")
+    staged2 = live.with_suffix(live.suffix + ".rotating2")
+    staged_ok = False
+    try:
+        # Fold in any orphan .rotating segments left by a prior crash before staging live.
+        for orphan in (staged, staged2):
+            if orphan.exists():
+                orphan_recs = _read_jsonl(orphan, strict=True)
+                if orphan.stat().st_size > 0 and not orphan_recs:
+                    logger.warning(
+                        "analytics rotation: non-empty orphan %s yielded 0 rows", orphan.name
+                    )
+                    return results
+                _dedup_append(rows, seen_keys, orphan_recs)
+                staged_ok = True
+        if live.exists():
+            os.replace(live, staged)
+            staged_ok = True
+            staged_recs = _read_jsonl(staged, strict=True)
+            if staged.exists() and staged.stat().st_size > 0 and not staged_recs:
+                os.replace(staged, live)
+                logger.warning("analytics rotation: staged read returned empty on non-empty ledger")
+                return results
+            _dedup_append(rows, seen_keys, staged_recs)
+    except OSError as exc:
+        logger.warning("analytics rotation: live stage failed: %s", type(exc).__name__)
+        if staged_ok and staged.exists() and not live.exists():
+            try:
+                os.replace(staged, live)
+            except OSError:
+                pass
+        return results
+
+    try:
+        tail = _read_jsonl(live, strict=True)
+        _dedup_append(rows, seen_keys, tail)
+    except OSError as exc:
+        logger.warning("analytics rotation: tail read failed: %s", type(exc).__name__)
+        if staged_ok:
+            try:
+                _rewrite_ledger(live, rows)
+                if staged.exists():
+                    staged.unlink()
+            except OSError:
+                pass
+        return results
+
+    if not rows:
+        if staged_ok:
+            for s in (staged, staged2):
+                if s.exists():
+                    try:
+                        if not live.exists():
+                            os.replace(s, live)
+                        else:
+                            s.unlink()
+                    except OSError:
+                        pass
+        return results
+
+    def _month_of(rec: Dict[str, Any]) -> str:
+        try:
+            return str(rec.get("timestamp") or "")[:7] or "unknown"
+        except Exception:
+            return "unknown"
+
+    def _ts_of(rec: Dict[str, Any]):
+        try:
+            ts = str(rec.get("timestamp") or "")
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    keep: list = []
+    seen_keep: set = set()
+    by_month: Dict[str, list] = {}
+    for rec in rows:
+        ts = _ts_of(rec)
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts is not None and ts < cutoff:
+            by_month.setdefault(_month_of(rec), []).append(rec)
+        else:
+            _dedup_append(keep, seen_keep, [rec])
+
+    archive = _ledger_archive_dir()
+    try:
+        if by_month:
+            archive.mkdir(parents=True, exist_ok=True)
+            for month, recs in by_month.items():
+                gz_path = archive / f"{month}.jsonl.gz"
+                with gzip.open(gz_path, "at", encoding="utf-8") as fh:
+                    for rec in recs:
+                        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                results["archived"] += len(recs)
+    except (OSError, ValueError) as exc:
+        logger.warning("analytics rotation: archive write failed: %s", type(exc).__name__)
+        if staged_ok:
+            try:
+                _rewrite_ledger(live, rows)
+                for s in (staged, staged2):
+                    if s.exists():
+                        s.unlink()
+            except OSError:
+                pass
+        return results
+
+    # Stage+merge any appends that arrived while gzip archives were being written
+    try:
+        if live.exists():
+            os.replace(live, staged2)
+            late_tail = _read_jsonl(staged2, strict=True)
+            _dedup_append(keep, seen_keep, late_tail)
+            _dedup_append(rows, seen_keys, late_tail)
+        _rewrite_ledger(live, keep)
+    except OSError as exc:
+        logger.warning("analytics rotation: live rewrite failed: %s", type(exc).__name__)
+        if staged_ok:
+            try:
+                _rewrite_ledger(live, rows)
+                for s in (staged, staged2):
+                    if s.exists():
+                        s.unlink()
+            except OSError:
+                pass
+        return results
+
+    for s in (staged, staged2):
+        if s.exists():
+            try:
+                s.unlink()
+            except OSError:
+                pass
+    if legacy_rows:
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+    results["kept"] = len(keep)
+    return results
+
+
+def _rewrite_ledger(live: Path, rows: list) -> None:
+    tmp = live.with_suffix(live.suffix + ".tmp")
+    tmp.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+        encoding="utf-8",
+    )
+    os.replace(tmp, live)
+
+
+_APPLY_LINK_MIN_RATIO = 0.9
+
+
+def _replace_outside_fences(text: str, old: str, new: str) -> str:
+    """Replace literal ``old`` with ``new`` only outside fenced code blocks."""
+    parts = re.split(r"(```[\s\S]*?```)", text)
+    for idx in range(0, len(parts), 2):
+        parts[idx] = parts[idx].replace(old, new)
+    return "".join(parts)
+
+
+def _contains_outside_fences(text: str, needle: str) -> bool:
+    parts = re.split(r"(```[\s\S]*?```)", text)
+    return any(needle in parts[idx] for idx in range(0, len(parts), 2))
+
+
+def repair_dead_links(workspace_dir: str = ".", apply: bool = False) -> Dict[str, Any]:
+    """Reconcile broken wikilinks across memory vaults.
+
+    Report mode (default): returns deterministic suggestions mapping each
+    dead [[target]] to the nearest living note id — rendered by the
+    curator beacon for human review.
+
+    Apply mode: rewrites only high-confidence links (difflib ratio >=
+    0.9, e.g. redacted ids repaired to stem), atomically per file, then
+    re-indexes. Anything ambiguous stays a suggestion — never guess.
+    """
+    results: Dict[str, Any] = {"broken": 0, "suggested": 0, "applied": 0, "skipped": 0}
+    try:
+        import difflib
+
+        from botex.memory.memory import (
+            _get_index_db,
+            _index_memory_file,
+            _resolve_scope_dirs,
+            find_graph_health,
+        )
+        from botex.ops.curator.curator_service import _compute_dead_link_repairs
+    except Exception as exc:
+        logger.warning("dead-link repair: imports failed: %s", type(exc).__name__)
+        return results
+
+    try:
+        health = find_graph_health(workspace_dir=str(workspace_dir), scope="all")
+    except Exception as exc:
+        logger.warning("dead-link repair: graph health failed: %s", type(exc).__name__)
+        return results
+    broken = health.get("broken_links") or []
+    results["broken"] = len(broken)
+    if not broken:
+        return results
+
+    try:
+        scope_dirs = _resolve_scope_dirs(str(workspace_dir), "all")
+    except Exception:
+        scope_dirs = []
+    all_ids: list = []
+    files_by_id: Dict[str, list] = {}
+    for mem_dir, _ in scope_dirs:
+        if not mem_dir.is_dir():
+            continue
+        for f in mem_dir.glob("*.md"):
+            if f.is_file() and not f.name.startswith("_"):
+                all_ids.append(f.stem)
+                files_by_id.setdefault(f.stem, []).append(f)
+
+    repairs = _compute_dead_link_repairs(broken, [{"id": i} for i in all_ids])
+    results["suggested"] = len(repairs)
+    if not apply or not repairs:
+        results["suggestions"] = repairs
+        return results
+
+    changed_dirs: set = set()
+    for rep in repairs:
+        src_id, dead, suggested = (
+            rep["source_id"],
+            rep["dead_target"],
+            rep["suggested_target"],
+        )
+        if difflib.SequenceMatcher(None, dead, suggested).ratio() < _APPLY_LINK_MIN_RATIO:
+            results["skipped"] += 1
+            continue
+        raw_candidates = files_by_id.get(src_id) or []
+        candidates: list = []
+        for cand_f in raw_candidates:
+            try:
+                if _contains_outside_fences(cand_f.read_text(encoding="utf-8"), f"[[{dead}]]"):
+                    candidates.append(cand_f)
+            except OSError:
+                continue
+        if not candidates:
+            results["skipped"] += 1
+            continue
+        for src_file in candidates:
+            try:
+                text = src_file.read_text(encoding="utf-8")
+                new_text = _replace_outside_fences(text, f"[[{dead}]]", f"[[{suggested}]]")
+                if new_text == text:
+                    results["skipped"] += 1
+                    continue
+                tmp = src_file.with_name(f"{src_file.name}.{os.getpid()}.tmp")
+                try:
+                    tmp.write_text(new_text, encoding="utf-8")
+                    os.replace(str(tmp), str(src_file))
+                finally:
+                    if tmp.exists():
+                        tmp.unlink()
+                results["applied"] += 1
+                changed_dirs.add(src_file.parent)
+            except Exception as exc:
+                logger.warning("dead-link apply failed: %s", type(exc).__name__)
+                results["skipped"] += 1
+
+    for mem_dir in changed_dirs:
+        try:
+            conn = _get_index_db(mem_dir)
+            try:
+                for f in mem_dir.glob("*.md"):
+                    if f.is_file() and not f.name.startswith("_"):
+                        _index_memory_file(mem_dir, conn, f)
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("dead-link reindex failed: %s", type(exc).__name__)
     return results

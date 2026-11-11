@@ -74,6 +74,15 @@ def isolate_botex_test_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BOTEX_GLOBAL_MEMORY_DIR", str(global_memory_dir))
     monkeypatch.delenv("BOTEX_ACCESS_TOKEN", raising=False)
 
+    # Keep the swarm read-only root out of tests: committed config points it
+    # at the real dev vault, which would leak developer notes into results.
+    try:
+        import botex.server.config as _srv_cfg
+
+        monkeypatch.setattr(_srv_cfg, "swarm_memory_dir", lambda: "")
+    except Exception:
+        pass
+
     try:
         import botex.config as _cfg_mod
 

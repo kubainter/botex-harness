@@ -234,6 +234,42 @@ def _compute_deterministic_recommendations(
     }
 
 
+def _compute_dead_link_repairs(
+    broken_links: List[Dict[str, Any]],
+    all_nodes: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Deterministic dead-link reconciliation: for each broken [[target]]
+    suggest the nearest existing note id (suggest-only, never mutates).
+
+    A broken target often survives under a corrected id — renamed stems,
+    redacted ids repaired to stem (repair_frontmatter_ids), or kind
+    prefixes. difflib keeps this conservative: only close matches surface.
+    """
+    import difflib
+
+    existing = [str(n.get("id") or "") for n in all_nodes if n.get("id")]
+    if not existing:
+        return []
+    broken_targets = {str(b.get("target") or "") for b in broken_links}
+    repairs: List[Dict[str, str]] = []
+    for target in sorted(t for t in broken_targets if t):
+        matches = difflib.get_close_matches(target, existing, n=1, cutoff=0.75)
+        if not matches:
+            continue
+        srcs = sorted(
+            str(b.get("source") or "") for b in broken_links if str(b.get("target") or "") == target
+        )
+        for src in srcs:
+            repairs.append(
+                {
+                    "source_id": src,
+                    "dead_target": target,
+                    "suggested_target": matches[0],
+                }
+            )
+    return repairs
+
+
 class CuratorService:
     """Autonomous Knowledge Graph Curator engine."""
 
@@ -516,6 +552,16 @@ class CuratorService:
                 lines.append(f"- ... i jeszcze {len(broken) - 20} innych martwych odnośników")
             lines.append("")
 
+        repairs = analysis.get("dead_link_repairs") or []
+        if repairs:
+            lines.append("### Sugerowane Naprawy Martwych Odnośników (do review)")
+            for rep in repairs[:20]:
+                lines.append(
+                    f"- [[{rep.get('source_id')}]]: `{rep.get('dead_target')}` ➔ "
+                    f"`[[{rep.get('suggested_target')}]]`"
+                )
+            lines.append("")
+
         lines.extend(
             [
                 "## Gwarancje Integralności (Invariants)",
@@ -525,6 +571,119 @@ class CuratorService:
         )
 
         return "\n".join(lines)
+
+    async def harvest_inactive_chat_sessions(
+        self,
+        inactive_threshold_seconds: float = 86400.0,
+        min_messages: int = 6,
+    ) -> List[Dict[str, Any]]:
+        """Harvest key decisions and context from inactive chat sessions into Memory Vault."""
+        from botex.tools.security import mask_secrets, sanitize_identifier
+
+        sessions_dir = self.ws_path / ".botex" / "chat_sessions"
+        env_dir = os.environ.get("BOTEX_CHAT_SESSIONS_DIR", "").strip()
+        if env_dir:
+            sessions_dir = Path(os.path.expanduser(env_dir)).resolve()
+        if not sessions_dir.is_dir():
+            return []
+
+        ledger_file = self.curator_dir / "harvested_chats.json"
+        ledger: Dict[str, float] = {}
+        if ledger_file.is_file():
+            try:
+                loaded = json.loads(ledger_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    ledger = {str(k): float(v) for k, v in loaded.items() if v is not None}
+            except Exception:
+                ledger = {}
+
+        now = time.time()
+        harvested: List[Dict[str, Any]] = []
+
+        for file_path in sorted(sessions_dir.glob("chat_*.json")):
+            if not file_path.is_file():
+                continue
+            try:
+                raw = json.loads(file_path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    continue
+                raw_sid = str(raw.get("session_id") or file_path.stem)
+                safe_sid = sanitize_identifier(raw_sid)
+                if not safe_sid:
+                    continue
+                messages = raw.get("messages")
+                if not isinstance(messages, list) or len(messages) < min_messages:
+                    continue
+                updated_at = float(raw.get("updated_at") or file_path.stat().st_mtime)
+                if (now - updated_at) < inactive_threshold_seconds:
+                    continue
+                if updated_at <= float(ledger.get(safe_sid, 0.0)):
+                    continue
+
+                title = mask_secrets(str(raw.get("title") or f"Chat {safe_sid}"))[:80]
+                user_points: List[str] = []
+                assistant_points: List[str] = []
+                for m in messages:
+                    if not isinstance(m, dict):
+                        continue
+                    role = m.get("role")
+                    c = mask_secrets(str(m.get("content") or "").strip())
+                    if not c:
+                        continue
+                    if role == "user" and len(user_points) < 5:
+                        user_points.append(c[:300])
+                    elif role == "assistant" and not m.get("tool_calls"):
+                        assistant_points.append(c[:500])
+
+                if not user_points and not assistant_points:
+                    continue
+
+                digest_lines = [
+                    f"# Destylacja Sesji Czatu: {title}",
+                    "",
+                    f"- **Session ID:** `{safe_sid}`",
+                    f"- **Liczba wiadomości:** {len(messages)}",
+                    "",
+                    "## Kluczowe Zagadnienia Użytkownika",
+                ]
+                for up in user_points[:5]:
+                    digest_lines.append(f"- {up}")
+                digest_lines.append("")
+                digest_lines.append("## Wnioski i Ustalenia Asystenta")
+                for ap in assistant_points[-3:]:
+                    digest_lines.append(f"- {ap}")
+
+                note_id = f"chat_harvest_{safe_sid}"
+                save_res = memory.save_memory(
+                    workspace_dir=str(self.ws_path),
+                    memory_id=note_id,
+                    title=f"Chat Harvest: {title}",
+                    content="\n".join(digest_lines),
+                    kind="decision",
+                    tags=["chat-harvest", "chat"],
+                    origin="curator",
+                    scope="local",
+                    status="active",
+                )
+                ledger[safe_sid] = updated_at
+                harvested.append(
+                    {
+                        "session_id": safe_sid,
+                        "memory_id": note_id,
+                        "file_path": save_res.get("file_path", ""),
+                    }
+                )
+            except Exception as exc:
+                logger.debug("Chat session harvest skipped for %s: %s", file_path.name, exc)
+
+        if harvested:
+            try:
+                ledger_file.write_text(
+                    json.dumps(ledger, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            except Exception:
+                pass
+        return harvested
 
     async def run(
         self,
@@ -587,6 +746,8 @@ class CuratorService:
             mem_dir = self.ws_path / ".botex" / "memory"
             mem_dir.mkdir(parents=True, exist_ok=True)
 
+            await self.harvest_inactive_chat_sessions()
+
             # 3. Deterministic Maintenance: Index synchronization & SQLite WAL optimize
             memory.sync_memory_index(mem_dir)
             conn = memory._get_index_db(mem_dir)
@@ -632,6 +793,15 @@ class CuratorService:
                 recent_nodes=recent_nodes,
                 orphan_nodes=orphans,
             )
+
+            # 6b. Dead-link reconciliation (deterministic, suggest-only):
+            # map each broken [[target]] to the nearest living note id.
+            try:
+                analysis["dead_link_repairs"] = _compute_dead_link_repairs(
+                    broken, recent_nodes or orphans
+                )
+            except Exception as exc:
+                logger.debug("dead-link reconciliation notice: %s", exc)
 
             duration = time.time() - start_time
 

@@ -1067,3 +1067,27 @@ def test_pricing_fetch_catalog_non_json_returns_empty():
 
     with patch("botex.providers.http_pool.get_sync_client", return_value=_HtmlClient()):
         assert _fetch_catalog("https://example.test/api/v1") == {}
+
+
+def test_openrouter_extra_body_includes_context_compression():
+    """OpenRouterProvider attaches the context-compression plugin safety net unless disabled."""
+    prov_default = OpenRouterProvider("openrouter", config={})
+    eb = prov_default.get_extra_body()
+    assert isinstance(eb.get("plugins"), list)
+    assert {"id": "context-compression", "enabled": True} in eb["plugins"]
+
+    prov_disabled = OpenRouterProvider("openrouter", config={"context_compression": False})
+    eb_disabled = prov_disabled.get_extra_body()
+    assert "plugins" not in eb_disabled
+
+
+def test_nvidia_extra_body_excludes_context_compression():
+    """Non-OpenRouter providers never emit OpenRouter's context-compression plugin."""
+    nv_prov = NvidiaProvider("nvidia", config={})
+    assert "plugins" not in nv_prov.get_extra_body()
+
+    g_prov = GoogleAIStudioProvider(
+        "google",
+        config={"extra_body": {"plugins": [{"id": "context-compression"}]}},
+    )
+    assert "plugins" not in g_prov.get_extra_body()

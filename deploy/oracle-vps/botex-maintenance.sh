@@ -74,6 +74,7 @@ from pathlib import Path
 try:
     from botex.ops.maintenance import (
         repair_frontmatter_ids,
+        rotate_analytics_ledger,
         sweep_empty_chat_sessions,
         warm_provider_metadata,
     )
@@ -85,6 +86,8 @@ try:
     print(f"Provider metadata warmup: {json.dumps(warm, default=str)}")
     removed = sweep_empty_chat_sessions(workspace_dir=workspace)
     print(f"Ghost chat-session sweep: removed {removed} empty session file(s)")
+    rotation = rotate_analytics_ledger(workspace_dir=workspace)
+    print(f"Analytics ledger rotation: {json.dumps(rotation, default=str)}")
 except Exception as exc:
     print(f"Metadata warmup notice: {exc}", file=sys.stderr)
 EOF

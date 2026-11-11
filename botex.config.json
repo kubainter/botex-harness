@@ -2,6 +2,7 @@
   "providers": {
     "openrouter": {
       "api_key_env": "OPENROUTER_API_KEY",
+      "context_compression": true,
       "extra_body": {
         "reasoning": {
           "max_tokens": 9000
@@ -49,6 +50,7 @@
     },
     "openrouter-free": {
       "api_key_env": "OPENROUTER_API_FREE_KEY",
+      "context_compression": true,
       "extra_body": {
         "reasoning": {
           "max_tokens": 4000
@@ -206,7 +208,7 @@
     ]
   },
   "paths": {
-    "swarm_memory_dir": "C:\\Users\\kubai\\.ai\\harness"
+    "swarm_memory_dir": ".botex/memory"
   },
   "memory": {
     "recall": {

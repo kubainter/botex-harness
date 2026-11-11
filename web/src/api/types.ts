@@ -191,7 +191,7 @@ export interface ApprovalDecisionRequest {
 }
 
 export type MemoryKind = 'context' | 'decision' | 'handoff' | 'bug' | 'architecture' | string
-export type MemoryScope = 'local' | 'global' | 'all'
+export type MemoryScope = 'local' | 'global' | 'swarm' | 'all'
 
 export interface MemoryProjectItem {
   project: string

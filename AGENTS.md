@@ -1,3 +1,7 @@
+---
+id: AGENTS
+---
+
 # BoteX - Operational Instructions for AI Agents
 
 This document serves as a guide and rulebook for AI agents working on the **BoteX** repository.
