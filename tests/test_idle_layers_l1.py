@@ -209,3 +209,20 @@ def test_save_analytics_replaces_live_segment():
     analytics.save_analytics([_record("b", "2026-01-02T00:00:00")])
     ids = {r["task_id"] for r in analytics.load_analytics()}
     assert ids == {"b"}
+
+
+# -- curator dead-link reconciliation -----------------------------------------
+
+
+def test_dead_link_repairs_suggest_nearest_id():
+    from botex.ops.curator.curator_service import _compute_dead_link_repairs
+
+    nodes = [{"id": "botex_prompt_cache_deployed"}, {"id": "arena_recap"}]
+    broken = [
+        {"source": "handoff_a", "target": "botex_prompt_cache_depl0yed"},
+        {"source": "handoff_b", "target": "totally_unknown_note_xyz"},
+    ]
+    repairs = _compute_dead_link_repairs(broken, nodes)
+    assert len(repairs) == 1
+    assert repairs[0]["suggested_target"] == "botex_prompt_cache_deployed"
+    assert repairs[0]["source_id"] == "handoff_a"

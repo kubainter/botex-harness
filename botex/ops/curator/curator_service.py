@@ -234,6 +234,42 @@ def _compute_deterministic_recommendations(
     }
 
 
+def _compute_dead_link_repairs(
+    broken_links: List[Dict[str, Any]],
+    all_nodes: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Deterministic dead-link reconciliation: for each broken [[target]]
+    suggest the nearest existing note id (suggest-only, never mutates).
+
+    A broken target often survives under a corrected id — renamed stems,
+    redacted ids repaired to stem (repair_frontmatter_ids), or kind
+    prefixes. difflib keeps this conservative: only close matches surface.
+    """
+    import difflib
+
+    existing = [str(n.get("id") or "") for n in all_nodes if n.get("id")]
+    if not existing:
+        return []
+    broken_targets = {str(b.get("target") or "") for b in broken_links}
+    repairs: List[Dict[str, str]] = []
+    for target in sorted(t for t in broken_targets if t):
+        matches = difflib.get_close_matches(target, existing, n=1, cutoff=0.75)
+        if not matches:
+            continue
+        srcs = sorted(
+            str(b.get("source") or "") for b in broken_links if str(b.get("target") or "") == target
+        )
+        for src in srcs:
+            repairs.append(
+                {
+                    "source_id": src,
+                    "dead_target": target,
+                    "suggested_target": matches[0],
+                }
+            )
+    return repairs
+
+
 class CuratorService:
     """Autonomous Knowledge Graph Curator engine."""
 
@@ -516,6 +552,16 @@ class CuratorService:
                 lines.append(f"- ... i jeszcze {len(broken) - 20} innych martwych odnośników")
             lines.append("")
 
+        repairs = analysis.get("dead_link_repairs") or []
+        if repairs:
+            lines.append("### Sugerowane Naprawy Martwych Odnośników (do review)")
+            for rep in repairs[:20]:
+                lines.append(
+                    f"- [[{rep.get('source_id')}]]: `{rep.get('dead_target')}` ➔ "
+                    f"`[[{rep.get('suggested_target')}]]`"
+                )
+            lines.append("")
+
         lines.extend(
             [
                 "## Gwarancje Integralności (Invariants)",
@@ -632,6 +678,15 @@ class CuratorService:
                 recent_nodes=recent_nodes,
                 orphan_nodes=orphans,
             )
+
+            # 6b. Dead-link reconciliation (deterministic, suggest-only):
+            # map each broken [[target]] to the nearest living note id.
+            try:
+                analysis["dead_link_repairs"] = _compute_dead_link_repairs(
+                    broken, recent_nodes or orphans
+                )
+            except Exception as exc:
+                logger.debug("dead-link reconciliation notice: %s", exc)
 
             duration = time.time() - start_time
 
