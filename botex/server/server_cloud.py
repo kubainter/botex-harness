@@ -576,14 +576,19 @@ async def _run_analytics_digest(
     try:
         client = build_async_client(prov_name, prov_cfg)
         resolved_url = str(prov_cfg.get("base_url") or "")
+        effective_model = (
+            "bielik:latest"
+            if (":8080" in resolved_url and model_id == "bielik-direct:latest")
+            else model_id
+        )
         extra_body = (
             {"chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}}
-            if ("bielik" in model_id.lower() or ":8080" in resolved_url)
+            if "bielik" in effective_model.lower()
             else None
         )
         resp = await asyncio.wait_for(
             client.chat.completions.create(
-                model=model_id,
+                model=effective_model,
                 messages=messages,
                 max_tokens=int(analytics_setting("digest_max_tokens") or 320),
                 temperature=0.3,

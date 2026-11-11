@@ -1,9 +1,9 @@
-# Bielik-11B-v3.1-Instruct (Q4_K_M, ~6.26 GiB) served by llama.cpp.
+# BoteX Local LLM Router (Bielik-11B-v3.1 + passive on-demand models via llama.cpp).
 # Background one-shot LLM: chat auto-titler, Memory Vault compaction,
 # intent classification, privacy pre-flight, Oracle Reclamation Shield.
 # Install: /etc/systemd/system/bielik.service
 [Unit]
-Description=Bielik-11B-v3.1 (Q4_K_M) llama.cpp inference server
+Description=BoteX Local LLM Router (llama.cpp, max 1 model in RAM)
 Documentation=https://github.com/speakleash/Bielik-11B-v3.1-Instruct
 After=network-online.target
 Wants=network-online.target
@@ -13,14 +13,14 @@ Type=simple
 User=botex
 Group=botex
 
-# Adjust paths to your build and model file (see README.md).
+# Adjust paths to your build and models directory (see README.md).
 Environment=BIELIK_BIN=/opt/llama.cpp/build/bin/llama-server
-Environment=BIELIK_MODEL=/opt/bielik/models/Bielik-11B-v3.1-instruct.Q4_K_M.gguf
+Environment=BIELIK_MODELS_DIR=/opt/bielik/models
 
-# -c 8192: 8k context for Memory Vault compaction & local Polish chat.
-# Loopback only: consumed by BoteX on the same host, never exposed publicly.
-# --load-mode mmap+mlock keeps the model resident (backed by LimitMEMLOCK=infinity).
-ExecStart=/opt/llama.cpp/build/bin/llama-server --model /opt/bielik/models/Bielik-11B-v3.1-instruct.Q4_K_M.gguf --host 127.0.0.1 --port 8080 -c 8192 --threads 2 --load-mode mmap+mlock
+# Router mode: serves all GGUFs in /opt/bielik/models with --models-max 1 so
+# switching between Bielik and Qwen happens passively on request without OOM.
+# --load-mode mmap lets the kernel page cache retain pages across swaps.
+ExecStart=/opt/llama.cpp/build/bin/llama-server --models-dir /opt/bielik/models --models-preset /opt/botex/deploy/oracle-vps/models-preset.ini --models-max 1 --models-autoload --host 127.0.0.1 --port 8080 -c 8192 --threads 2 --load-mode mmap
 
 Restart=on-failure
 RestartSec=10
