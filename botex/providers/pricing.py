@@ -47,7 +47,10 @@ def _fetch_catalog(base_url: str, api_key: str = "") -> Dict[str, Dict[str, Any]
 
     resp = get_sync_client().get(url, headers=headers, timeout=_HTTP_TIMEOUT)
     resp.raise_for_status()
-    payload = resp.json() or {}
+    try:
+        payload = resp.json() or {}
+    except ValueError:
+        return {}
 
     catalog: Dict[str, Dict[str, Any]] = {}
     for m in payload.get("data", []):

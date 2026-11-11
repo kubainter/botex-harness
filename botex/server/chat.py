@@ -142,11 +142,16 @@ _PROVIDER_ERROR_CODE_ALLOWLIST = frozenset(
 
 # OpenRouter's 404 body carries no structured "code" — only a message like
 # "No endpoints found for <slug>". Substring patterns map those to the same
-# static literals (still no user text echoed to logs).
+# static literals (still no user text echoed to logs). More specific patterns
+# come first — "moderation" alone would false-positive on dead-model messages
+# mentioning moderation stacks.
 _PROVIDER_MESSAGE_PATTERNS: tuple = (
     ("no endpoints", "model_not_found"),
     ("not a valid model", "model_not_found"),
-    ("moderation", "moderation_blocked"),
+    ("moderation_block", "moderation_blocked"),
+    ("content_policy", "moderation_blocked"),
+    ("content_filter", "moderation_blocked"),
+    ("input was flagged", "moderation_blocked"),
 )
 
 

@@ -1101,3 +1101,19 @@ def test_resolve_local_llm_base_url_skips_non_loopback():
 
     cfg = {"base_url": "https://openrouter.ai/api/v1"}
     assert _resolve_local_llm_base_url("openrouter", cfg) is cfg
+
+
+def test_resolve_local_llm_base_url_probe_failure_degrades():
+    """When no candidate responds, config passes through unchanged (degrade, not crash)."""
+    from botex.server_cloud import _LOCAL_LLM_BASE_URL_RESOLVED, _resolve_local_llm_base_url
+
+    class _DeadClient:
+        def get(self, url, headers=None, timeout=None):
+            raise OSError("connection refused")
+
+    _LOCAL_LLM_BASE_URL_RESOLVED.clear()
+    cfg = {"base_url": "http://127.0.0.1:9999/v1"}
+    with patch("botex.providers.http_pool.get_sync_client", return_value=_DeadClient()):
+        out = _resolve_local_llm_base_url("ollama", cfg)
+    assert out is cfg
+    _LOCAL_LLM_BASE_URL_RESOLVED.clear()

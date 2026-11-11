@@ -1046,3 +1046,24 @@ def test_credits_info_dataclass_fields_and_sanitization():
     assert len(info_custom.quota_windows) == 1
     assert info_custom.quota_windows[0]["api_key"] == "[REDACTED]"
     assert info_custom.quota_windows[0]["unit"] == "hours"
+
+
+def test_pricing_fetch_catalog_non_json_returns_empty():
+    """A 200 response with non-JSON body degrades to empty catalog instead of raising."""
+    from botex.providers.pricing import _fetch_catalog
+
+    class _HtmlResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("not json")
+
+    class _HtmlClient:
+        def get(self, url, headers=None, timeout=None):
+            return _HtmlResp()
+
+    with patch("botex.providers.http_pool.get_sync_client", return_value=_HtmlClient()):
+        assert _fetch_catalog("https://example.test/api/v1") == {}

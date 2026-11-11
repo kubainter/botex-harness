@@ -672,6 +672,20 @@ def test_classify_provider_error_code_substring_patterns():
         _classify_provider_error_code(_Err({"error": {"message": "foo is not a valid model ID"}}))
         == "model_not_found"
     )
+    # Bare "moderation" mention must NOT trigger moderation_blocked —
+    # only specific moderation phrases map.
+    assert (
+        _classify_provider_error_code(
+            _Err({"error": {"message": "model 'x-moderation-2' not found"}})
+        )
+        == "unclassified_provider_error"
+    )
+    assert (
+        _classify_provider_error_code(
+            _Err({"error": {"message": "content_filter tripped on input"}})
+        )
+        == "moderation_blocked"
+    )
     assert (
         _classify_provider_error_code(_Err({"error": {"message": "something else"}}))
         == "unclassified_provider_error"
