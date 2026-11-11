@@ -106,7 +106,7 @@ fi
 
 # 7. Optional Bielik 11B local inference engine (Quantization Q4_K_M for 18 GiB RAM box)
 if [ "$INSTALL_BIELIK" = true ]; then
-    log_info "Installing llama.cpp ARM NEON engine and downloading Bielik-11B-v3.0 Q4_K_M..."
+    log_info "Installing llama.cpp ARM NEON engine and downloading Bielik-11B-v3.1 Q4_K_M..."
     if [ ! -d "/opt/llama.cpp" ]; then
         git clone https://github.com/ggml-org/llama.cpp /opt/llama.cpp
         cd /opt/llama.cpp
@@ -116,12 +116,12 @@ if [ "$INSTALL_BIELIK" = true ]; then
         log_ok "llama.cpp compiled successfully."
     fi
 
-    MODEL_FILE="$BIELIK_DIR/models/bielik-11b-v3.0-instruct.Q4_K_M.gguf"
+    MODEL_FILE="$BIELIK_DIR/models/Bielik-11B-v3.1-instruct.Q4_K_M.gguf"
     if [ ! -f "$MODEL_FILE" ]; then
-        log_info "Downloading Bielik-11B-v3.0 Q4_K_M GGUF (~6.26 GiB - Optimized for 18 GiB RAM)..."
+        log_info "Downloading Bielik-11B-v3.1 Q4_K_M GGUF (~6.26 GiB - Optimized for 18 GiB RAM)..."
         sudo -u botex curl -fL -o "$MODEL_FILE" \
-            "https://huggingface.co/speakleash/Bielik-11B-v3.0-Instruct-GGUF/resolve/main/Bielik-11B-v3.0-Instruct.Q4_K_M.gguf"
-        log_ok "Bielik 11B v3.0 Q4_K_M model downloaded successfully."
+            "https://huggingface.co/speakleash/Bielik-11B-v3.1-Instruct-GGUF/resolve/main/Bielik-11B-v3.1-Instruct.Q4_K_M.gguf"
+        log_ok "Bielik 11B v3.1 Q4_K_M model downloaded successfully."
     fi
 fi
 
