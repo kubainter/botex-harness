@@ -478,7 +478,7 @@ _LOCAL_LLM_BASE_URL_CANDIDATES = (
     "http://127.0.0.1:8080/v1",
     "http://127.0.0.1:11434/v1",
 )
-_LOCAL_LLM_BASE_URL_RESOLVED: Dict[str, str] = {}
+_LOCAL_LLM_BASE_URL_RESOLVED: Dict[Any, str] = {}
 
 
 def _resolve_local_llm_base_url(prov_name: str, prov_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -491,7 +491,8 @@ def _resolve_local_llm_base_url(prov_name: str, prov_cfg: Dict[str, Any]) -> Dic
     )
     if not is_loopback:
         return prov_cfg
-    cached = _LOCAL_LLM_BASE_URL_RESOLVED.get(prov_name)
+    cache_key = (prov_name, configured)
+    cached = _LOCAL_LLM_BASE_URL_RESOLVED.get(cache_key)
     if cached:
         out = dict(prov_cfg)
         out["base_url"] = cached
@@ -502,11 +503,12 @@ def _resolve_local_llm_base_url(prov_name: str, prov_cfg: Dict[str, Any]) -> Dic
     client = get_sync_client()
     candidates = [configured] if configured else []
     candidates += [c for c in _LOCAL_LLM_BASE_URL_CANDIDATES if c.rstrip("/") != configured]
+    candidates = list(dict.fromkeys(candidates))
     for candidate in candidates:
         try:
             resp = client.get(candidate.rstrip("/") + "/models", timeout=4.0)
             if resp.status_code < 400:
-                _LOCAL_LLM_BASE_URL_RESOLVED[prov_name] = candidate
+                _LOCAL_LLM_BASE_URL_RESOLVED[cache_key] = candidate
                 logger.info("Local LLM endpoint for '%s' resolved to %s", prov_name, candidate)
                 out = dict(prov_cfg)
                 out["base_url"] = candidate
