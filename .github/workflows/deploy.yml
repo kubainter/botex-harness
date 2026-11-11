@@ -75,6 +75,7 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
         run: |
           missing=0
           for var in VPS_HOST VPS_USER VPS_SSH_KEY; do
@@ -83,6 +84,10 @@ jobs:
               missing=1
             fi
           done
+          if [ -n "${VPS_PORT:-}" ] && ! [[ "${VPS_PORT}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Optional GitHub secret 'VPS_PORT' must be numeric."
+            missing=1
+          fi
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
@@ -107,17 +112,18 @@ jobs:
         run: |
           set -euo pipefail
           SSH_PORT="${VPS_PORT:-22}"
-          SSH_OPTS=(-p "${SSH_PORT}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
-          SCP_OPTS=(-P "${SSH_PORT}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+          SSH_OPTS=(-p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+          SCP_OPTS=(-P "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 
           # 1. Add VPS host key to known_hosts to prevent MITM attacks
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          ssh-keyscan -p "${SSH_PORT}" -T 10 -H "${VPS_HOST}" >> ~/.ssh/known_hosts
-          if [ ! -s ~/.ssh/known_hosts ]; then
+          KNOWN_HOST_KEY=$(ssh-keyscan -p "${SSH_PORT}" -T 10 -H "${VPS_HOST}")
+          if [ -z "${KNOWN_HOST_KEY}" ]; then
             echo "::error::ssh-keyscan failed to retrieve host key."
             exit 1
           fi
+          printf '%s\n' "${KNOWN_HOST_KEY}" >> ~/.ssh/known_hosts
 
           # 2. Clean temporary upload path and upload compiled PWA frontend
           ssh "${SSH_OPTS[@]}" "${VPS_USER}@${VPS_HOST}" "rm -rf /tmp/web-dist"
