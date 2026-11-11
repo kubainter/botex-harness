@@ -94,6 +94,10 @@ Under no circumstances should you modify the following locations:
 *   **Pull Requests:** Avoid exposing details of potential vulnerabilities (CRITICAL) in public PR descriptions, in accordance with the Zero Data Retention / leak-free rule. Remember that security-related fixes should be shorter than 50 lines of code.
 *   **Comment & Docstring Hygiene (Zero-Bloat):** When writing logic, do NOT generate bloatware commentary — no per-line narration restating what the code already says, no boilerplate docstrings on trivial helpers. Comments and docstrings are reserved for non-obvious *why* (security boundaries, invariants, deliberate trade-offs); self-explanatory code ships uncommented. Do not strip existing docstrings/comments while editing adjacent code.
 
+### 3.3. Deployment Flow & Internal-Surface Hygiene (HARD RULES)
+*   **Single change path:** All BoteX logic changes flow exclusively through `local changes → PR → merge to main → deploy to VPS`. Never patch files or data directly on the VPS; never bypass the PR gate with a "quick" direct fix — including memory-vault data repairs, which must ship as code (e.g. maintenance jobs) through the normal pipeline.
+*   **No internal surface in client code:** Files under `web/src/**` ship to browsers unauthenticated users can reach. They must NEVER embed internal file paths, module/class names, route names, or config keys of the backend (e.g. `botex/server_cloud.py`, `botex.config.json`). UI copy, starter prompts, placeholders and docs links stay generic; anything needing internals belongs behind authenticated API responses.
+
 ## 4. Autonomy Criteria
 
 1.  **Act conservatively and autonomously:** In case of minor uncertainty when solving engineering problems, choose the most logical, conservative solution that aligns with existing patterns. However, **if you are not 100% sure about the solution (acting as a safety fuse), you must halt work and ask the user** how they want to proceed to ensure it is fixed properly.
