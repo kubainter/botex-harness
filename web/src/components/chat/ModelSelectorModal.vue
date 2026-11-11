@@ -204,15 +204,15 @@
               </button>
             </div>
 
-            <button
+            <div
               v-for="(item, idx) in visibleModels"
               :key="`${item.provider}:${item.id}`"
               :ref="(el) => setItemRef(el, idx)"
-              type="button"
               role="option"
+              tabindex="-1"
               :aria-selected="isSelected(item)"
               :class="[
-                'w-full text-left px-4 py-3 transition flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 focus:outline-none',
+                'relative w-full text-left px-4 py-3 transition flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 focus:outline-none cursor-pointer',
                 idx === highlightedIndex
                   ? 'bg-botex-800/90 border-l-2 border-l-sky-400'
                   : isSelected(item)
@@ -271,8 +271,82 @@
                 >
                   {{ formatContextWindow(item.context_length) }}
                 </span>
+
+                <!-- Model Info Trigger -->
+                <button
+                  type="button"
+                  :class="[
+                    'p-1 rounded transition shrink-0',
+                    infoOpenKey === modelKey(item)
+                      ? 'text-cyan-300 bg-cyan-500/15'
+                      : 'text-slate-400 hover:text-cyan-300 hover:bg-botex-800'
+                  ]"
+                  :aria-label="t('models.info_title')"
+                  @click.stop.prevent="toggleInfo(item, $event)"
+                >
+                  <InfoIcon class="w-3.5 h-3.5" />
+                </button>
               </div>
-            </button>
+
+              <!-- Model Info Popover -->
+              <div
+                v-if="infoOpenKey === modelKey(item)"
+                :class="[
+                  'absolute right-3 z-30 w-72 max-w-[calc(100vw-3rem)] rounded-xl border border-botex-700 bg-botex-950/95 backdrop-blur-md shadow-2xl p-3 space-y-2.5 text-left cursor-default',
+                  idx >= visibleModels.length - 2 ? 'bottom-full mb-1' : 'top-full mt-1'
+                ]"
+                @click.stop
+                @mouseenter.stop
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs font-semibold text-slate-100 truncate">{{ item.name }}</span>
+                  <span class="text-[10px] font-mono text-slate-400 shrink-0">{{ formatProviderLabel(item.provider) }}</span>
+                </div>
+                <div class="flex flex-wrap gap-1">
+                  <span
+                    v-for="mod in inferModality(item)"
+                    :key="mod"
+                    :title="t('models.info_inferred')"
+                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-violet-500/15 text-violet-300 border border-violet-500/30 uppercase"
+                  >~{{ mod }}</span>
+                  <span
+                    v-if="item.supports_tools"
+                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-sky-500/15 text-sky-300 border border-sky-500/30"
+                  >TOOLS</span>
+                  <span
+                    v-if="isReasoningModel(item)"
+                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                  >REASONING</span>
+                  <span
+                    v-if="item.is_zdr_compliant"
+                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                  >ZDR</span>
+                  <span
+                    v-if="item.is_free"
+                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                  >FREE</span>
+                </div>
+                <div v-if="recommendedFor(item).length" class="text-[11px] text-slate-300">
+                  <span class="text-slate-500">{{ t('models.info_recommended') }}:</span>
+                  {{ recommendedFor(item).join(', ') }}
+                </div>
+                <div class="grid grid-cols-3 gap-1.5 text-center text-[10px] font-mono">
+                  <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
+                    <div class="text-slate-500 uppercase">Ctx</div>
+                    <div class="text-slate-200 font-semibold">{{ formatContextWindow(item.context_length) }}</div>
+                  </div>
+                  <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
+                    <div class="text-slate-500 uppercase">In/1M</div>
+                    <div class="text-slate-200 font-semibold">{{ item.is_free ? '$0' : '$' + (item.pricing?.prompt_per_m ?? 0).toFixed(2) }}</div>
+                  </div>
+                  <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
+                    <div class="text-slate-500 uppercase">Out/1M</div>
+                    <div class="text-slate-200 font-semibold">{{ item.is_free ? '$0' : '$' + (item.pricing?.completion_per_m ?? 0).toFixed(2) }}</div>
+                  </div>
+                </div>
+                <div class="text-[10px] font-mono text-slate-500 break-all">{{ item.id }}</div>
+              </div>
+            </div>
           </div>
 
           <!-- Footer Keyboard Hint -->
@@ -297,6 +371,7 @@ import {
   RefreshCw as RefreshCwIcon,
   Check as CheckIcon,
   Lock as LockIcon,
+  Info as InfoIcon,
   AlertTriangle as AlertTriangleIcon
 } from 'lucide-vue-next'
 
@@ -414,49 +489,86 @@ function matchesCategory(m: CatalogModel, cat: ModelCategory): boolean {
   }
 }
 
+const infoOpenKey = ref<string | null>(null)
+const modelKey = (m: CatalogModel) => `${m.provider}:${m.id}`
+
+function toggleInfo(item: CatalogModel, ev: Event) {
+  ev.stopPropagation()
+  const k = modelKey(item)
+  infoOpenKey.value = infoOpenKey.value === k ? null : k
+}
+
+function inferModality(m: CatalogModel): string[] {
+  const s = `${m.id} ${m.name}`.toLowerCase()
+  const mods = new Set<string>()
+  if (/vision|-vl\b|llava|minicpm-v|pixtral|gemini|claude|gpt-4o|gpt-5|o3|o4/.test(s)) mods.add('vision')
+  if (/embed|bge-|e5-|gte-/.test(s)) mods.add('embedding')
+  if (/image|flux|dall-e|stable-diffusion|sdxl|imagen|banana/.test(s)) mods.add('image')
+  if (/whisper|tts|audio|bark|melo|seamless/.test(s)) mods.add('audio')
+  if (/video|veo|sora|kling|hunyuan-video/.test(s)) mods.add('video')
+  if (!mods.size) mods.add('text')
+  return [...mods]
+}
+
+function recommendedFor(m: CatalogModel): string[] {
+  return (['coding', 'reasoning', 'cheap', 'free'] as ModelCategory[]).filter((c) =>
+    matchesCategory(m, c)
+  )
+}
+
 function normalizeSearchText(str: string): string {
   return str.toLowerCase().replace(/[-_/:()]/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
+const providerFilteredModels = computed(() =>
+  activeProvider.value === 'all'
+    ? availableModels.value
+    : availableModels.value.filter((m) => m.provider === activeProvider.value)
+)
+
+const categoryFilteredModels = computed(() =>
+  availableModels.value.filter((m) => matchesCategory(m, activeCategory.value))
+)
+
 const providerTabs = computed(() => {
-  const all = availableModels.value
-  const providers = Array.from(new Set(all.map((m) => m.provider))).filter(Boolean)
+  const base = categoryFilteredModels.value
+  const providers = Array.from(new Set(base.map((m) => m.provider))).filter(Boolean)
   const tabs = [
-    { id: 'all', label: 'Wszyscy Dostawcy', count: all.length }
+    { id: 'all', label: 'Wszyscy Dostawcy', count: base.length }
   ]
   for (const p of providers) {
     tabs.push({
       id: p,
       label: formatProviderLabel(p),
-      count: all.filter((m) => m.provider === p).length
+      count: base.filter((m) => m.provider === p).length
     })
   }
   return tabs
 })
 
 const categoryTabs = computed(() => {
-  const all = availableModels.value
+  const base = providerFilteredModels.value
   return [
-    { id: 'all' as ModelCategory, label: 'Wszystkie (All)', count: all.length },
+    { id: 'all' as ModelCategory, label: 'Wszystkie (All)', count: base.length },
     {
       id: 'free' as ModelCategory,
       label: '100% Free Tier',
-      count: all.filter((m) => matchesCategory(m, 'free')).length
+      count: base.filter((m) => matchesCategory(m, 'free')).length
     },
     {
       id: 'cheap' as ModelCategory,
       label: 'Ultra-Cheap / Fast',
-      count: all.filter((m) => matchesCategory(m, 'cheap')).length
+      count: base.filter((m) => matchesCategory(m, 'cheap')).length
     },
     {
       id: 'reasoning' as ModelCategory,
       label: 'Reasoning / Planners',
-      count: all.filter((m) => matchesCategory(m, 'reasoning')).length
+      count: base.filter((m) => matchesCategory(m, 'reasoning')).length
     },
     {
       id: 'coding' as ModelCategory,
       label: 'Coding / Agents',
-      count: all.filter((m) => matchesCategory(m, 'coding')).length
+      count: base.filter((m) => matchesCategory(m, 'coding')).length
     }
   ]
 })
@@ -466,8 +578,7 @@ const filteredModels = computed<CatalogModel[]>(() => {
   const qNorm = normalizeSearchText(qRaw)
   const qTokens = qNorm ? qNorm.split(' ') : []
 
-  return availableModels.value.filter((m) => {
-    if (activeProvider.value !== 'all' && m.provider !== activeProvider.value) return false
+  return providerFilteredModels.value.filter((m) => {
     if (!matchesCategory(m, activeCategory.value)) return false
     if (!qRaw) return true
 
@@ -489,6 +600,7 @@ watch(
   async (open) => {
     if (open) {
       highlightedIndex.value = 0
+      infoOpenKey.value = null
       await nextTick()
       searchInputRef.value?.focus()
     }

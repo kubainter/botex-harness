@@ -131,6 +131,7 @@
       :projects="projects"
       v-model:query="searchQuery"
       v-model:kind="filterKind"
+      :kind-counts="kindCounts"
       v-model:tag="filterTag"
       v-model:hide-receipts="hideReceipts"
       @search="refreshCurrentView"
@@ -493,14 +494,29 @@ const visibleEntries = computed(() => {
 const filteredGraphNodes = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
   const kind = filterKind.value
+  const proj = filterProject.value
   const tag = filterTag.value.trim().toLowerCase().replace(/^#/, '')
   return graphNodes.value.filter((n) => {
     if (hideReceipts.value && isTaskReceipt(n.tags, n.id)) return false
     if (kind && n.kind !== kind) return false
+    if (proj) {
+      const nodeProj = proj === '_unassigned' ? '' : proj
+      if ((n.project || '') !== nodeProj) return false
+    }
     if (tag && !(n.tags || []).some((t) => t.toLowerCase() === tag)) return false
     if (q && !`${n.title} ${n.id} ${(n.tags || []).join(' ')}`.toLowerCase().includes(q)) return false
     return true
   })
+})
+
+const kindCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {}
+  const source = viewMode.value === 'graph' ? graphNodes.value : entries.value
+  for (const n of source) {
+    const k = n.kind || 'context'
+    counts[k] = (counts[k] || 0) + 1
+  }
+  return counts
 })
 
 const filteredGraphEdges = computed(() => {

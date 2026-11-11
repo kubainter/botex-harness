@@ -1930,7 +1930,7 @@ def _fetch_memory_graph_sync(ws: Path, scope: str) -> Dict[str, Any]:
         conn = _get_index_db(mem_dir)
         try:
             m_rows = conn.execute(
-                "SELECT id, title, kind, tags, status, compiled_truth, timestamp FROM memories_meta;"
+                "SELECT id, title, kind, tags, status, compiled_truth, timestamp, project FROM memories_meta;"
             ).fetchall()
             for r in m_rows:
                 mid = r["id"]
@@ -1944,6 +1944,7 @@ def _fetch_memory_graph_sync(ws: Path, scope: str) -> Dict[str, Any]:
                         "status": r["status"] or "active",
                         "compiled_truth": bool(r["compiled_truth"]),
                         "timestamp": r["timestamp"] or "",
+                        "project": r["project"] or "",
                         "scope": sc,
                         "in_degree": 0,
                         "out_degree": 0,

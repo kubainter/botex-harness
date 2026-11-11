@@ -166,10 +166,10 @@
             @change="$emit('update:kind', ($event.target as HTMLSelectElement).value)"
           >
             <option value="">{{ locale === 'pl' ? 'Wszystkie typy' : 'All Types' }}</option>
-            <option value="context">Context</option>
-            <option value="decision">Architectural Decision</option>
-            <option value="lesson">Meta Lesson</option>
-            <option value="handoff">Handoff</option>
+            <option value="context">Context{{ kindSuffix('context') }}</option>
+            <option value="decision">Architectural Decision{{ kindSuffix('decision') }}</option>
+            <option value="lesson">Meta Lesson{{ kindSuffix('lesson') }}</option>
+            <option value="handoff">Handoff{{ kindSuffix('handoff') }}</option>
           </select>
         </div>
       </div>
@@ -202,6 +202,7 @@ const props = defineProps<{
   projects?: MemoryProjectItem[]
   query: string
   kind: string
+  kindCounts?: Record<string, number>
   tag?: string
   hideReceipts?: boolean
 }>()
@@ -217,6 +218,11 @@ defineEmits<{
 }>()
 
 const { locale } = useI18n()
+
+function kindSuffix(k: string): string {
+  const n = props.kindCounts?.[k]
+  return n ? ` (${n})` : ''
+}
 
 const STORAGE_KEY = 'botex_memory_filters_open'
 const isOpen = ref<boolean>(

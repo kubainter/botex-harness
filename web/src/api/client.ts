@@ -182,6 +182,23 @@ export const api = {
     return Array.isArray(data) ? data : (data.models || [])
   },
 
+  // 2c. Benchmark-driven model recommendations per task type
+  async getRecommendedModels(
+    taskType: string = 'coding',
+    limit: number = 5,
+    tier: string = 'auto'
+  ): Promise<Record<string, unknown>[]> {
+    const params = new URLSearchParams({
+      task_type: taskType,
+      limit: String(limit),
+      tier
+    })
+    const data = await request<Record<string, unknown>[] | { models: Record<string, unknown>[] }>(
+      `/api/models/recommended?${params.toString()}`
+    )
+    return Array.isArray(data) ? data : (data.models || [])
+  },
+
   // 3. Task Management
   async createTask(req: TaskCreateRequest): Promise<{ task_id: string; status: string }> {
     return request<{ task_id: string; status: string }>('/api/tasks', {
