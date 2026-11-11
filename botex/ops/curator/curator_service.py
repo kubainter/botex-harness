@@ -408,15 +408,24 @@ class CuratorService:
         try:
             from openai import AsyncOpenAI
 
+            from botex.providers.providers import resolve_model_for_openai_client
+
             client = AsyncOpenAI(base_url=local_url, api_key="not-needed", timeout=45.0)
-            extra_body = (
-                {"chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}}
-                if ("bielik" in self.local_model.lower() or ":8080" in local_url)
-                else None
-            )
+            model_id = await resolve_model_for_openai_client(client, self.local_model)
+            model_low = model_id.lower()
+            if "qwen" in model_low:
+                extra_body: Optional[Dict[str, Any]] = {
+                    "chat_template_kwargs": {"enable_thinking": False}
+                }
+            elif "bielik" in model_low or ":8080" in local_url:
+                extra_body = {
+                    "chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}
+                }
+            else:
+                extra_body = None
 
             resp = await client.chat.completions.create(
-                model=self.local_model,
+                model=model_id,
                 messages=[
                     {"role": "system", "content": CURATOR_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
