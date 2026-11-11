@@ -1220,7 +1220,7 @@ def search_memory(
                 try:
                     raw_text = file_p.read_text(encoding="utf-8", errors="replace")
                     meta, body = _parse_frontmatter(raw_text)
-                    entry_id = meta.get("id") or file_p.stem
+                    entry_id = file_p.stem
                     if entry_id in seen_ids:
                         continue
                     entry_title = meta.get("title") or entry_id

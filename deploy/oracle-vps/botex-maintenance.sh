@@ -8,8 +8,8 @@
 #   2. Runs SQLite WAL checkpoints (TRUNCATE) and PRAGMA optimize on index.db
 #   3. Rotates scratchpad logs and cleans expired execution artifacts
 #   4. Re-evaluates graph health and link topology
-#   5. Warms provider metadata caches (model catalog, pricing, benchmarks)
-#      and sweeps ghost chat-session files (idle-time, off the request path)
+#   5. Warms provider metadata caches (model catalog, pricing, benchmarks),
+#      sweeps ghost chat-session files, and repairs non-canonical frontmatter IDs
 
 set -euo pipefail
 
@@ -60,11 +60,11 @@ except Exception as exc:
     print(f"Maintenance task notice: {exc}", file=sys.stderr)
 EOF
 
-    # 1b. Idle-time provider metadata warmup + ghost chat-session sweep.
+    # 1b. Idle-time provider metadata warmup + ghost chat-session sweep + frontmatter ID repair.
     # Keeps the request path read-only against warm caches: model catalog,
     # pricing guardrail, and benchmarks refresh here (TTL-aware) instead of
     # inside a user's chat turn.
-    log "Warming provider metadata caches and sweeping ghost chat sessions..."
+    log "Warming provider metadata caches, sweeping ghost chat sessions, and repairing frontmatter IDs..."
     "$PYTHON_BIN" - <<'EOF'
 import json
 import os
@@ -72,9 +72,15 @@ import sys
 from pathlib import Path
 
 try:
-    from botex.ops.maintenance import sweep_empty_chat_sessions, warm_provider_metadata
+    from botex.ops.maintenance import (
+        repair_frontmatter_ids,
+        sweep_empty_chat_sessions,
+        warm_provider_metadata,
+    )
 
     workspace = str(Path(os.environ.get("BOTEX_WORKSPACE", ".")).resolve())
+    repaired = repair_frontmatter_ids(workspace_dir=workspace)
+    print(f"Frontmatter ID repair: {json.dumps(repaired, default=str)}")
     warm = warm_provider_metadata(workspace_dir=workspace)
     print(f"Provider metadata warmup: {json.dumps(warm, default=str)}")
     removed = sweep_empty_chat_sessions(workspace_dir=workspace)
