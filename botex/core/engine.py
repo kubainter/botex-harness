@@ -1141,10 +1141,12 @@ async def run_botex_task(
     _resolved_kw: Dict[str, Any] = {}
     if routed_tier:
         _resolved_kw["routed_tier"] = routed_tier
+    _zdr_pname, _zdr_pcfg = resolve_provider(provider)
+    zdr_on = zdr_enforced(_zdr_pcfg, bool(allow_non_zdr))
     _emit(
         progress_cb,
         EventKind.PROVIDER_RESOLVED,
-        provider=provider or "default",
+        provider=_zdr_pname if provider else "default",
         profile=resolved_profile,
         candidates=list(candidates),
         **_resolved_kw,
@@ -1153,10 +1155,6 @@ async def run_botex_task(
     # the next candidate gets the same step budget, so repeating that retry
     # just re-burns the whole read budget on the same starvation pattern.
     exhaustion_retries = 0
-    # Resolved once for the whole chain — the flag/provider pair is fixed
-    # for the run, so every attempt record reports the same privacy state.
-    _zdr_pname, _zdr_pcfg = resolve_provider(provider)
-    zdr_on = zdr_enforced(_zdr_pcfg, bool(allow_non_zdr))
     try:
         max_task_duration_s = int(engine_setting("max_task_duration_s") or 0)
     except (TypeError, ValueError):
@@ -1176,12 +1174,18 @@ async def run_botex_task(
     cfg = load_config()
     provider_fallbacks_map = cfg.get("provider_fallbacks", {})
     fallback_providers: List[str] = []
-    if isinstance(provider_fallbacks_map, dict):
+    # Explicit model binds strictly to its resolved provider — never jump
+    # across providers to run a different provider's default profile model.
+    if not (model and str(model).strip()) and isinstance(provider_fallbacks_map, dict):
         configured_fb = provider_fallbacks_map.get(_zdr_pname) or []
         if isinstance(configured_fb, list):
             fallback_providers = [str(p) for p in configured_fb if p and p != _zdr_pname]
         elif isinstance(configured_fb, str) and configured_fb != _zdr_pname:
             fallback_providers = [configured_fb]
+        # Free/quota providers never silently spill over into paid openrouter.
+        _free_quota_providers = {"openrouter-free", "nvidia", "google", "ollama"}
+        if _zdr_pname in _free_quota_providers:
+            fallback_providers = [p for p in fallback_providers if p in _free_quota_providers]
 
     candidate_list: List[str] = list(candidates)
     candidate_idx = 0

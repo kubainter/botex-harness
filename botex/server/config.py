@@ -716,19 +716,101 @@ def set_local_config(dotted_key: str, value: Any) -> None:
     load_config(reload=True)
 
 
+_PROVIDER_ALIASES: Dict[str, str] = {
+    "nvidia": "nvidia",
+    "nvmi": "nvidia",
+    "nim": "nvidia",
+    "nvidia-nim": "nvidia",
+    "nvidia_nim": "nvidia",
+    "nv": "nvidia",
+    "openrouter-free": "openrouter-free",
+    "openrouter_free": "openrouter-free",
+    "openrouter:free": "openrouter-free",
+    "or-free": "openrouter-free",
+    "or_free": "openrouter-free",
+    "or:free": "openrouter-free",
+    "free-openrouter": "openrouter-free",
+    "free_openrouter": "openrouter-free",
+    "openrouter": "openrouter",
+    "open-router": "openrouter",
+    "open_router": "openrouter",
+    "or": "openrouter",
+    "openrouter-paid": "openrouter",
+    "openrouter_paid": "openrouter",
+    "google": "google",
+    "gemini": "google",
+    "google-ai": "google",
+    "google_ai": "google",
+    "googleai": "google",
+    "aistudio": "google",
+    "ai-studio": "google",
+    "google-aistudio": "google",
+    "ollama": "ollama",
+    "local": "ollama",
+    "ollama-local": "ollama",
+    "ollama_local": "ollama",
+    "bielik": "ollama",
+    "bielik-local": "ollama",
+}
+
+
+def normalize_provider_name(name: str = "", providers: Optional[Dict[str, Any]] = None) -> str:
+    """Normalize a provider identifier or common alias (e.g. 'nvmi' -> 'nvidia').
+
+    Returns a static canonical string literal for known provider aliases to
+    sever taint flow and prevent typos from falling back to paid endpoints.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return ""
+    clean = raw.lower()
+    if providers is None:
+        providers = load_config().get("providers", {})
+    if clean in providers:
+        for pk in providers.keys():
+            if pk.lower() == clean:
+                return pk
+    mapped = _PROVIDER_ALIASES.get(clean)
+    if mapped and (not providers or mapped in providers):
+        return mapped
+    if providers:
+        for pk in providers.keys():
+            if pk.lower() == clean:
+                return pk
+    return mapped or raw
+
+
+def _normalize_model_for_provider(model: str, provider_name: str, explicit_provider: bool) -> str:
+    """Align an explicit model slug with its explicitly selected provider."""
+    if not model or not explicit_provider:
+        return model
+    m = model.strip()
+    if provider_name == "openrouter-free":
+        if "/" in m and not m.lower().endswith(":free") and m.lower() != "openrouter/free":
+            return f"{m}:free"
+    elif provider_name == "nvidia":
+        if m.lower().endswith(":free"):
+            m = m[:-5]
+        if m.startswith("meta-llama/"):
+            m = "meta/" + m[len("meta-llama/") :]
+    return m
+
+
 def resolve_provider(name: str = "") -> tuple[str, Dict[str, Any]]:
     """
-    Resolve the active provider. Explicit ``name`` wins; otherwise the
-    ``BOTEX_PROVIDER`` env var; otherwise the first provider flagged
-    ``"default": true``; otherwise ``openrouter`` when present, else the
-    first configured provider. Returns ``(name, cfg)``; ``cfg`` is empty
+    Resolve the active provider. Explicit ``name`` (including common aliases
+    such as ``nvmi`` -> ``nvidia`` or ``or-free`` -> ``openrouter-free``) wins;
+    otherwise the ``BOTEX_PROVIDER`` env var; otherwise the first provider
+    flagged ``"default": true``; otherwise ``openrouter`` when present, else
+    the first configured provider. Returns ``(name, cfg)``; ``cfg`` is empty
     when a named provider does not exist.
     """
     providers = load_config().get("providers", {})
     if not name:
         name = os.environ.get("BOTEX_PROVIDER", "") or ""
     if name:
-        return name, providers.get(name, {})
+        canon = normalize_provider_name(name, providers)
+        return canon, providers.get(canon, {})
     for pname, pcfg in providers.items():
         if pcfg.get("default"):
             return pname, pcfg
@@ -746,14 +828,14 @@ def resolve_model(model: str = "", profile: str = "", provider: str = "") -> str
     ``providers[<provider>].models[<profile>]`` >
     ``providers[<provider>].models.default`` > legacy top-level ``models``.
     """
+    _pname, pcfg = resolve_provider(provider)
     if model:
-        return model
+        return _normalize_model_for_provider(model, _pname, bool(provider and provider.strip()))
     if not profile:
         profile = load_config().get("engine", {}).get("default_profile") or "default"
     env_override = os.environ.get(f"BOTEX_{profile.upper().replace('-', '_')}_MODEL")
     if env_override:
         return env_override
-    _pname, pcfg = resolve_provider(provider)
     models = pcfg.get("models", {}) if pcfg else {}
     resolved = models.get(profile) or models.get("default")
     if resolved:
@@ -785,7 +867,10 @@ def resolve_model_candidates(
     _pname, pcfg = resolve_provider(provider)
 
     if model:
-        raw_candidates = [model]
+        norm_model = _normalize_model_for_provider(
+            model, _pname, bool(provider and provider.strip())
+        )
+        raw_candidates = [norm_model]
     else:
         primary = resolve_model("", profile, provider)
         configured = (pcfg.get("model_fallbacks", {}) if pcfg else {}).get(profile, [])

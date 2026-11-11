@@ -251,6 +251,7 @@ def test_tasks_lifecycle(client):
         "task": "Perform a unit test verification",
         "mode": "readonly",
         "model": "openrouter/auto",
+        "provider": "openrouter",
     }
     with patch(
         "botex.server_cloud.run_botex_task",
@@ -275,6 +276,42 @@ def test_tasks_lifecycle(client):
         task_entry = get_resp.json()
         assert task_entry["task_id"] == task_id
         assert task_entry["status"] in ("QUEUED", "RUNNING", "DONE")
+
+
+def test_task_requires_provider_when_model_specified(client, monkeypatch):
+    """Explicit model without provider must be rejected with 400 Bad Request."""
+    monkeypatch.delenv("BOTEX_PROVIDER", raising=False)
+    resp = client.post(
+        "/api/tasks",
+        json={
+            "task": "Check provider requirement",
+            "mode": "readonly",
+            "model": "meta-llama/llama-3.3-70b-instruct",
+        },
+    )
+    assert resp.status_code == 400
+    assert "Explicit 'provider' is required" in resp.json()["detail"]
+
+
+def test_task_provider_alias_resolution(client):
+    """Provider aliases like 'nvmi' or 'or-free' resolve cleanly to canonical provider."""
+    with patch(
+        "botex.server_cloud.run_botex_task",
+        new=AsyncMock(return_value={"ok": True, "status": "DONE"}),
+    ):
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "task": "Test provider alias",
+                "mode": "readonly",
+                "model": "meta/llama-3.3-70b-instruct",
+                "provider": "nvmi",
+            },
+        )
+        assert resp.status_code == 202
+        task_id = resp.json()["task_id"]
+        detail = client.get(f"/api/tasks/{task_id}").json()
+        assert detail["request"]["provider"] == "nvidia"
 
 
 def test_task_not_found(client):

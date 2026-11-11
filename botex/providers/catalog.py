@@ -11,6 +11,7 @@ and TTL-backed caching with graceful stale fallback.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -535,7 +536,12 @@ class ModelCatalog:
 
         try:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            # Atomic replace: the cache file is shared between the live server
+            # (request-time refresh) and the idle maintenance job — a torn or
+            # interleaved write would wipe the other writers' provider entries.
+            tmp_path = self.cache_file.with_name(f"{self.cache_file.name}.{os.getpid()}.tmp")
+            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(str(tmp_path), str(self.cache_file))
         except Exception as exc:
             err_msg = f"[BoteX] Failed to write catalog cache: {type(exc).__name__}\n"
             sys.stderr.write(err_msg)
