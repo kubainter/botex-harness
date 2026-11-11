@@ -11,7 +11,7 @@ set -euo pipefail
 BASE_URL="${1:-http://127.0.0.1:8080}"
 RUNS="${2:-5}"
 
-BASE_URL="$BASE_URL" RUNS="$RUNS" python3 - <<'EOF'
+BASE_URL="$BASE_URL" RUNS="$RUNS" python3 -u - <<'EOF'
 import json
 import os
 import statistics
