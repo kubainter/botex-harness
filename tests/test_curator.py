@@ -596,3 +596,64 @@ def test_local_llm_inference_passes_decision_mode_for_bielik(
     assert captured["extra_body"] == {
         "chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}
     }
+
+
+def test_local_llm_inference_resolves_router_model_alias(tmp_path, monkeypatch):
+    """CuratorService resolves Router Mode aliases via client.models.list()."""
+    import asyncio
+    import socket as real_socket
+    import types
+    from botex.ops.curator import curator_service as cs
+
+    captured = {}
+
+    class DummySocket:
+        def settimeout(self, t):
+            pass
+
+        def connect(self, addr):
+            pass
+
+        def close(self):
+            pass
+
+    class DummyModels:
+        async def list(self, timeout=None):
+            return types.SimpleNamespace(
+                data=[
+                    types.SimpleNamespace(id="Bielik-11B-v3.1-instruct.Q4_K_M"),
+                    types.SimpleNamespace(id="Qwen3.5-9B-OBLITERATED.i1-Q4_K_M"),
+                ]
+            )
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            msg = types.SimpleNamespace(content='{"summary": "ok"}')
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+    class DummyClient:
+        def __init__(self, **kwargs):
+            self.models = DummyModels()
+            self.chat = types.SimpleNamespace(completions=DummyCompletions())
+
+    monkeypatch.setattr(
+        cs,
+        "socket",
+        types.SimpleNamespace(
+            AF_INET=real_socket.AF_INET,
+            SOCK_STREAM=real_socket.SOCK_STREAM,
+            socket=lambda *a, **kw: DummySocket(),
+        ),
+    )
+    import openai
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", DummyClient)
+
+    service = CuratorService(workspace_dir=str(tmp_path), local_model="bielik:latest")
+    out = asyncio.run(service._try_local_llm_inference("test prompt"))
+    assert out == '{"summary": "ok"}'
+    assert captured["model"] == "Bielik-11B-v3.1-instruct.Q4_K_M"
+    assert captured["extra_body"] == {
+        "chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}
+    }

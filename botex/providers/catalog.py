@@ -561,6 +561,8 @@ _VALID_PROVIDERS_MAP: Dict[str, str] = {
 
 _KNOWN_DISPLAY_NAMES: Dict[str, str] = {
     "bielik-direct:latest": "Bielik Direct (Lokalny 11B)",
+    "Bielik-11B-v3.1-instruct.Q4_K_M": "Bielik 11B v3.1 Instruct (Lokalny)",
+    "Qwen3.5-9B-OBLITERATED.i1-Q4_K_M": "Qwen 3.5 9B Obliterated (Lokalny)",
     "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M": "Bielik 11B v3.0 Instruct (Ollama)",
     "liquid/lfm-2.5-2.6b:free": "Liquid LFM 2.5:free",
     "deepseek/deepseek-r1": "DeepSeek R1",

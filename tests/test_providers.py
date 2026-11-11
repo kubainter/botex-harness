@@ -1091,3 +1091,59 @@ def test_nvidia_extra_body_excludes_context_compression():
         config={"extra_body": {"plugins": [{"id": "context-compression"}]}},
     )
     assert "plugins" not in g_prov.get_extra_body()
+
+
+def test_resolve_local_model_id_handles_router_case_and_aliases():
+    """resolve_local_model_id resolves Router Mode case and legacy Bielik aliases."""
+    from botex.providers.providers import resolve_local_model_id
+
+    live_ids = ["Bielik-11B-v3.1-instruct.Q4_K_M", "Qwen3.5-9B-OBLITERATED.i1-Q4_K_M"]
+    assert resolve_local_model_id("bielik:latest", live_ids) == "Bielik-11B-v3.1-instruct.Q4_K_M"
+    assert (
+        resolve_local_model_id("bielik-direct:latest", live_ids)
+        == "Bielik-11B-v3.1-instruct.Q4_K_M"
+    )
+    assert (
+        resolve_local_model_id("SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M", live_ids)
+        == "Bielik-11B-v3.1-instruct.Q4_K_M"
+    )
+    assert (
+        resolve_local_model_id("Qwen3.5-9B-OBLITERATED.i1-Q4_K_M", live_ids)
+        == "Qwen3.5-9B-OBLITERATED.i1-Q4_K_M"
+    )
+    assert resolve_local_model_id("bielik:latest", ["bielik:LATEST"]) == "bielik:LATEST"
+    assert resolve_local_model_id("some-other-model", live_ids) == "some-other-model"
+
+
+def test_generic_ollama_fetch_catalog_falls_back_to_llama_server_port():
+    """Local ollama provider probes :8080/v1 when configured :11434/v1 refuses connection."""
+    from botex.providers.providers import _LOCAL_LLM_BASE_URL_RESOLVED
+
+    _LOCAL_LLM_BASE_URL_RESOLVED.clear()
+
+    class _FakeResp:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError("http error")
+
+        def json(self):
+            return self._payload
+
+    class _FakeClient:
+        def get(self, url, headers=None, timeout=None):
+            if url.startswith("http://127.0.0.1:8080/v1/models"):
+                return _FakeResp(200, {"data": [{"id": "Qwen3.5-9B-OBLITERATED.i1-Q4_K_M"}]})
+            raise OSError("connection refused")
+
+    prov = ProviderRegistry.get("ollama", {"base_url": "http://127.0.0.1:11434/v1", "local": True})
+    try:
+        with patch("botex.providers.http_pool.get_sync_client", return_value=_FakeClient()):
+            models = prov.fetch_catalog()
+        assert [m["id"] for m in models] == ["Qwen3.5-9B-OBLITERATED.i1-Q4_K_M"]
+        assert prov.base_url == "http://127.0.0.1:8080/v1"
+    finally:
+        _LOCAL_LLM_BASE_URL_RESOLVED.clear()

@@ -35,6 +35,8 @@ try:
     from botex.providers.providers import (
         ProviderRegistry,
         build_async_client,
+        resolve_local_llm_base_url,
+        resolve_model_for_openai_client,
         sanitize_provider_error,
     )
     from botex.providers.retry import call_with_backoff, status_code_of
@@ -87,6 +89,8 @@ except (ImportError, ValueError):
     from providers import (
         ProviderRegistry,
         build_async_client,
+        resolve_local_llm_base_url,
+        resolve_model_for_openai_client,
         sanitize_provider_error,
     )
     from retry import call_with_backoff, status_code_of
@@ -1450,6 +1454,10 @@ async def stream_chat_turn(
             ):
                 requested_provider = "ollama"
         active_provider_name, active_provider_cfg = resolve_provider(requested_provider)
+        if active_provider_name in ("ollama", "bielik", "local"):
+            active_provider_cfg = await asyncio.to_thread(
+                resolve_local_llm_base_url, active_provider_name, active_provider_cfg
+            )
         effective_model = resolve_model(
             session.model, profile=session.profile or "fast", provider=active_provider_name
         )
@@ -1492,6 +1500,8 @@ async def stream_chat_turn(
             client = build_async_client(
                 active_provider_name, active_provider_cfg, api_key=api_key or None
             )
+            if active_provider_name in ("ollama", "bielik", "local"):
+                effective_model = await resolve_model_for_openai_client(client, effective_model)
         except Exception as exc:
             yield _provider_error_payload(
                 session,

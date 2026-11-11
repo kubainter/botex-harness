@@ -470,57 +470,18 @@ async def _generate_analytics_digest(
         return await _run_analytics_digest(workspace_dir, provider, model, days)
 
 
-# Local LLM serving stacks seen in the wild: llama-server (Bielik on the VPS)
-# listens on :8080, Ollama's OpenAI-compatible endpoint defaults to :11434.
-# A config pinned to the wrong port produced "Connection error." for every
-# local digest — probe both and cache the winner for the process lifetime.
-_LOCAL_LLM_BASE_URL_CANDIDATES = (
-    "http://127.0.0.1:8080/v1",
-    "http://127.0.0.1:11434/v1",
+# Local LLM serving stacks seen in the wild: llama-server (Bielik/Qwen on the
+# VPS) listens on :8080, Ollama defaults to :11434. Re-exported from
+# botex.providers.providers so catalog, chat, and digest share one probe cache.
+from botex.providers.providers import (
+    _LOCAL_LLM_BASE_URL_RESOLVED as _LOCAL_LLM_BASE_URL_RESOLVED,
 )
-_LOCAL_LLM_BASE_URL_RESOLVED: Dict[Any, str] = {}
-
-
-def _resolve_local_llm_base_url(prov_name: str, prov_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Return prov_cfg with a verified base_url for local (loopback) providers."""
-    configured = str(prov_cfg.get("base_url") or "").strip().rstrip("/")
-    is_loopback = (
-        prov_name in ("ollama", "bielik", "local")
-        or "127.0.0.1" in configured
-        or "localhost" in configured
-    )
-    if not is_loopback:
-        return prov_cfg
-    cache_key = (prov_name, configured)
-    cached = _LOCAL_LLM_BASE_URL_RESOLVED.get(cache_key)
-    if cached:
-        out = dict(prov_cfg)
-        out["base_url"] = cached
-        return out
-
-    from botex.providers.http_pool import get_sync_client
-
-    client = get_sync_client()
-    candidates = [configured] if configured else []
-    candidates += [c for c in _LOCAL_LLM_BASE_URL_CANDIDATES if c.rstrip("/") != configured]
-    candidates = list(dict.fromkeys(candidates))
-    for candidate in candidates:
-        try:
-            resp = client.get(candidate.rstrip("/") + "/models", timeout=4.0)
-            if resp.status_code < 400:
-                _LOCAL_LLM_BASE_URL_RESOLVED[cache_key] = candidate
-                logger.info("Local LLM endpoint for '%s' resolved to %s", prov_name, candidate)
-                out = dict(prov_cfg)
-                out["base_url"] = candidate
-                return out
-        except Exception:
-            continue
-    logger.warning(
-        "Local LLM endpoint probe failed for '%s' (tried: %s) — using config as-is",
-        prov_name,
-        ", ".join(candidates) or "none",
-    )
-    return prov_cfg
+from botex.providers.providers import (
+    resolve_local_llm_base_url as _resolve_local_llm_base_url,
+)
+from botex.providers.providers import (
+    resolve_model_for_openai_client as _resolve_model_for_openai_client,
+)
 
 
 async def _run_analytics_digest(
@@ -581,11 +542,23 @@ async def _run_analytics_digest(
             if (":8080" in resolved_url and model_id == "bielik-direct:latest")
             else model_id
         )
-        extra_body = (
-            {"chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}}
-            if "bielik" in effective_model.lower()
-            else None
-        )
+        if (
+            prov_name in ("ollama", "bielik", "local")
+            or ":8080" in resolved_url
+            or ":11434" in resolved_url
+        ):
+            effective_model = await _resolve_model_for_openai_client(client, effective_model)
+        eff_low = effective_model.lower()
+        if "qwen" in eff_low:
+            extra_body: Optional[Dict[str, Any]] = {
+                "chat_template_kwargs": {"enable_thinking": False}
+            }
+        elif "bielik" in eff_low:
+            extra_body = {
+                "chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}
+            }
+        else:
+            extra_body = None
         resp = await asyncio.wait_for(
             client.chat.completions.create(
                 model=effective_model,
