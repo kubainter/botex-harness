@@ -225,10 +225,15 @@ def load_analytics() -> List[Dict[str, Any]]:
     seen: set = set()
     out: List[Dict[str, Any]] = []
     for r in records:
-        key = (r.get("task_id"), r.get("timestamp"))
-        if key in seen:
-            continue
-        seen.add(key)
+        tid = r.get("task_id")
+        ts = r.get("timestamp")
+        # Only dedup rows carrying both identifiers — legacy rows without
+        # either field would all collapse onto the (None, None) key.
+        if tid and ts:
+            key = (tid, ts)
+            if key in seen:
+                continue
+            seen.add(key)
         out.append(r)
     return out
 
