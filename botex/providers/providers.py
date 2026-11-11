@@ -19,16 +19,14 @@ import asyncio
 import copy
 import json
 import os
-import socket
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Type
 
+import httpx2
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
 
 try:
@@ -746,14 +744,23 @@ class BaseProvider(ABC):
         api_key: Optional[str] = None,
         timeout: float = 10.0,
     ) -> List[Dict[str, Any]]:
-        """Fetch model list from provider's /models endpoint."""
+        """Fetch model list from provider's /models endpoint.
+
+        Goes through the shared httpx2 pool — the same transport that serves
+        completions — because urllib's resolver breaks on IPv6-only hosts
+        (the VPS catalog stayed stale forever with URLError while chat
+        completions succeeded).
+        """
         url = self.base_url.rstrip("/") + "/models"
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
         resolved_key = self.resolve_api_key(explicit_key=api_key)
+        headers = {"Accept": "application/json"}
         if resolved_key:
-            req.add_header("Authorization", f"Bearer {resolved_key}")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            headers["Authorization"] = f"Bearer {resolved_key}"
+        from botex.providers.http_pool import get_sync_client
+
+        resp = get_sync_client().get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json() or {}
         return data.get("data", [])
 
     def get_credits(self, api_key: Optional[str] = None) -> CreditsInfo:
@@ -927,24 +934,25 @@ class OpenRouterProvider(BaseProvider):
         key_data: Dict[str, Any] = {}
         key_error: Optional[str] = None
         key_url = f"{self.base_url.rstrip('/')}/auth/key"
+        from botex.providers.http_pool import get_sync_client
+
+        client = get_sync_client()
         try:
-            req_key = urllib.request.Request(key_url, headers=headers)
-            with urllib.request.urlopen(req_key, timeout=timeout) as resp:
-                raw_body = resp.read().decode("utf-8")
-                parsed_json = json.loads(raw_body)
+            resp = client.get(key_url, headers=headers, timeout=timeout)
+            if resp.status_code >= 400:
+                err_desc = _HTTP_ERROR_MAP.get(resp.status_code, f"HTTP Error {resp.status_code}")
+                key_error = f"auth/key HTTP {resp.status_code}: {err_desc}"
+            else:
+                parsed_json = resp.json()
                 if isinstance(parsed_json, dict):
                     inner = parsed_json.get("data")
                     key_data = inner if isinstance(inner, dict) else parsed_json
                     if not isinstance(key_data, dict):
                         key_data = {}
-        except urllib.error.HTTPError as exc:
-            err_desc = _HTTP_ERROR_MAP.get(exc.code, f"HTTP Error {exc.code}")
-            key_error = f"auth/key HTTP {exc.code}: {err_desc}"
-        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-            reason = getattr(exc, "reason", exc)
-            key_error = f"auth/key network error: {mask_secrets(str(reason))[:128]}"
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             key_error = f"auth/key invalid response: {mask_secrets(str(exc))[:128]}"
+        except httpx2.HTTPError as exc:
+            key_error = f"auth/key network error: {mask_secrets(str(exc))[:128]}"
         except Exception as exc:
             key_error = f"auth/key query failed: {mask_secrets(str(exc))[:128]}"
 
@@ -952,23 +960,21 @@ class OpenRouterProvider(BaseProvider):
         credits_error: Optional[str] = None
         credits_url = f"{self.base_url.rstrip('/')}/credits"
         try:
-            req_cred = urllib.request.Request(credits_url, headers=headers)
-            with urllib.request.urlopen(req_cred, timeout=timeout) as resp:
-                raw_body = resp.read().decode("utf-8")
-                parsed_json = json.loads(raw_body)
+            resp = client.get(credits_url, headers=headers, timeout=timeout)
+            if resp.status_code >= 400:
+                err_desc = _HTTP_ERROR_MAP.get(resp.status_code, f"HTTP Error {resp.status_code}")
+                credits_error = f"credits HTTP {resp.status_code}: {err_desc}"
+            else:
+                parsed_json = resp.json()
                 if isinstance(parsed_json, dict):
                     inner = parsed_json.get("data")
                     credits_data = inner if isinstance(inner, dict) else parsed_json
                     if not isinstance(credits_data, dict):
                         credits_data = {}
-        except urllib.error.HTTPError as exc:
-            err_desc = _HTTP_ERROR_MAP.get(exc.code, f"HTTP Error {exc.code}")
-            credits_error = f"credits HTTP {exc.code}: {err_desc}"
-        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-            reason = getattr(exc, "reason", exc)
-            credits_error = f"credits network error: {mask_secrets(str(reason))[:128]}"
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             credits_error = f"credits invalid response: {mask_secrets(str(exc))[:128]}"
+        except httpx2.HTTPError as exc:
+            credits_error = f"credits network error: {mask_secrets(str(exc))[:128]}"
         except Exception as exc:
             credits_error = f"credits query failed: {mask_secrets(str(exc))[:128]}"
 
@@ -1052,68 +1058,66 @@ class OpenRouterProvider(BaseProvider):
         }
         encoded_id = urllib.parse.quote(gen_clean, safe="")
         gen_url = f"{self.base_url.rstrip('/')}/generation?id={encoded_id}"
+        from botex.providers.http_pool import get_sync_client
+
         try:
-            req = urllib.request.Request(gen_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw_body = resp.read().decode("utf-8")
-                parsed_json = json.loads(raw_body)
-                if not isinstance(parsed_json, dict):
-                    return None
-                inner = parsed_json.get("data")
-                data = inner if isinstance(inner, dict) else parsed_json
-                if not isinstance(data, dict) or not data:
-                    return None
-                total_cost = _safe_float(
-                    data.get("total_cost")
-                    if data.get("total_cost") is not None
-                    else data.get("usage")
-                )
-                queue_ms = _safe_float(
-                    data.get("latency")
-                    if data.get("latency") is not None
-                    else data.get("queue_time")
-                )
-                gen_ms = _safe_float(data.get("generation_time"))
-                t_prompt = _safe_int(
-                    data.get("native_tokens_prompt")
-                    if data.get("native_tokens_prompt") is not None
-                    else data.get("tokens_prompt"),
-                    0,
-                )
-                t_comp = _safe_int(
-                    data.get("native_tokens_completion")
-                    if data.get("native_tokens_completion") is not None
-                    else data.get("tokens_completion"),
-                    0,
-                )
-                t_cached = _safe_int(
-                    data.get("native_tokens_cached")
-                    if data.get("native_tokens_cached") is not None
-                    else data.get("cached_tokens"),
-                    0,
-                )
-                t_cache_write = _safe_int(
-                    data.get("native_tokens_cache_write")
-                    if data.get("native_tokens_cache_write") is not None
-                    else data.get("cache_write_tokens"),
-                    0,
-                )
-                return GenerationStats(
-                    generation_id=mask_secrets(str(data.get("id") or gen_clean)),
-                    model=mask_secrets(str(data.get("model") or "")),
-                    total_cost=total_cost,
-                    queue_time_ms=queue_ms,
-                    generation_time_ms=gen_ms,
-                    tokens_prompt=t_prompt,
-                    tokens_completion=t_comp,
-                    cached_tokens=t_cached,
-                    cache_write_tokens=t_cache_write,
-                    provider_name=mask_secrets(str(data.get("provider_name") or "")),
-                )
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                raise _GenerationNotIndexedError(gen_clean) from exc
-            return None
+            resp = get_sync_client().get(gen_url, headers=headers, timeout=timeout)
+            if resp.status_code == 404:
+                raise _GenerationNotIndexedError(gen_clean)
+            if resp.status_code >= 400:
+                return None
+            parsed_json = resp.json()
+            if not isinstance(parsed_json, dict):
+                return None
+            inner = parsed_json.get("data")
+            data = inner if isinstance(inner, dict) else parsed_json
+            if not isinstance(data, dict) or not data:
+                return None
+            total_cost = _safe_float(
+                data.get("total_cost") if data.get("total_cost") is not None else data.get("usage")
+            )
+            queue_ms = _safe_float(
+                data.get("latency") if data.get("latency") is not None else data.get("queue_time")
+            )
+            gen_ms = _safe_float(data.get("generation_time"))
+            t_prompt = _safe_int(
+                data.get("native_tokens_prompt")
+                if data.get("native_tokens_prompt") is not None
+                else data.get("tokens_prompt"),
+                0,
+            )
+            t_comp = _safe_int(
+                data.get("native_tokens_completion")
+                if data.get("native_tokens_completion") is not None
+                else data.get("tokens_completion"),
+                0,
+            )
+            t_cached = _safe_int(
+                data.get("native_tokens_cached")
+                if data.get("native_tokens_cached") is not None
+                else data.get("cached_tokens"),
+                0,
+            )
+            t_cache_write = _safe_int(
+                data.get("native_tokens_cache_write")
+                if data.get("native_tokens_cache_write") is not None
+                else data.get("cache_write_tokens"),
+                0,
+            )
+            return GenerationStats(
+                generation_id=mask_secrets(str(data.get("id") or gen_clean)),
+                model=mask_secrets(str(data.get("model") or "")),
+                total_cost=total_cost,
+                queue_time_ms=queue_ms,
+                generation_time_ms=gen_ms,
+                tokens_prompt=t_prompt,
+                tokens_completion=t_comp,
+                cached_tokens=t_cached,
+                cache_write_tokens=t_cache_write,
+                provider_name=mask_secrets(str(data.get("provider_name") or "")),
+            )
+        except _GenerationNotIndexedError:
+            raise
         except Exception:
             return None
 

@@ -470,6 +470,57 @@ async def _generate_analytics_digest(
         return await _run_analytics_digest(workspace_dir, provider, model, days)
 
 
+# Local LLM serving stacks seen in the wild: llama-server (Bielik on the VPS)
+# listens on :8080, Ollama's OpenAI-compatible endpoint defaults to :11434.
+# A config pinned to the wrong port produced "Connection error." for every
+# local digest — probe both and cache the winner for the process lifetime.
+_LOCAL_LLM_BASE_URL_CANDIDATES = (
+    "http://127.0.0.1:8080/v1",
+    "http://127.0.0.1:11434/v1",
+)
+_LOCAL_LLM_BASE_URL_RESOLVED: Dict[str, str] = {}
+
+
+def _resolve_local_llm_base_url(prov_name: str, prov_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return prov_cfg with a verified base_url for local (loopback) providers."""
+    configured = str(prov_cfg.get("base_url") or "").strip().rstrip("/")
+    is_loopback = (
+        prov_name in ("ollama", "bielik", "local")
+        or "127.0.0.1" in configured
+        or "localhost" in configured
+    )
+    if not is_loopback:
+        return prov_cfg
+    cached = _LOCAL_LLM_BASE_URL_RESOLVED.get(prov_name)
+    if cached:
+        out = dict(prov_cfg)
+        out["base_url"] = cached
+        return out
+
+    from botex.providers.http_pool import get_sync_client
+
+    client = get_sync_client()
+    candidates = [configured] if configured else []
+    candidates += [c for c in _LOCAL_LLM_BASE_URL_CANDIDATES if c.rstrip("/") != configured]
+    for candidate in candidates:
+        try:
+            resp = client.get(candidate.rstrip("/") + "/models", timeout=4.0)
+            if resp.status_code < 400:
+                _LOCAL_LLM_BASE_URL_RESOLVED[prov_name] = candidate
+                logger.info("Local LLM endpoint for '%s' resolved to %s", prov_name, candidate)
+                out = dict(prov_cfg)
+                out["base_url"] = candidate
+                return out
+        except Exception:
+            continue
+    logger.warning(
+        "Local LLM endpoint probe failed for '%s' (tried: %s) — using config as-is",
+        prov_name,
+        ", ".join(candidates) or "none",
+    )
+    return prov_cfg
+
+
 async def _run_analytics_digest(
     workspace_dir: str,
     provider: str,
@@ -484,6 +535,7 @@ async def _run_analytics_digest(
     if not prov_name or not model_id:
         return {"ok": False, "error": "digest provider/model not configured"}
     prov_cfg = (cfg.get("providers") or {}).get(prov_name) or {}
+    prov_cfg = _resolve_local_llm_base_url(prov_name, prov_cfg)
 
     stats = await asyncio.to_thread(aggregate_stats, load_analytics(), days)
     compact = {
