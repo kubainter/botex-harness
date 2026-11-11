@@ -45,7 +45,7 @@ jobs:
         run: python -m pytest tests/test_skills_parity.py tests/test_config_safety.py -v
 
       - name: Set up Node.js for PWA Build
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: "npm"
