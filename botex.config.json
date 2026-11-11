@@ -206,7 +206,7 @@
     ]
   },
   "paths": {
-    "swarm_memory_dir": "C:\\Users\\kubai\\.ai\\harness"
+    "swarm_memory_dir": "C:\\Users\\kubai\\.ai\\harness\\.botex\\memory"
   },
   "memory": {
     "recall": {

@@ -135,7 +135,17 @@ def get_swarm_memory_dir() -> Optional[Path]:
         return None
     try:
         resolved = Path(raw).expanduser().resolve()
-        return resolved if resolved.is_dir() else None
+        if not resolved.is_dir():
+            return None
+        # Guard against misconfiguration pointing at a repo root: indexing
+        # AGENTS.md/pyproject.toml neighbors as "notes" poisons the graph
+        # (arena latent bug: swarm_memory_dir == workspace root).
+        if any(
+            (resolved / marker).exists()
+            for marker in ("pyproject.toml", "package.json", "AGENTS.md")
+        ):
+            return None
+        return resolved
     except Exception:
         return None
 
@@ -1081,19 +1091,7 @@ def search_memory(
             min_conf_val = min(max(min_conf_val, 0.0), 1.0)
 
         search_dirs: list[tuple[Path, str]] = []
-        swarm_dir = get_swarm_memory_dir()
-        if norm_scope == "global":
-            search_dirs.append((get_global_memory_dir(), "global"))
-        elif norm_scope == "swarm":
-            if swarm_dir:
-                search_dirs.append((swarm_dir, "swarm"))
-        elif norm_scope == "all":
-            search_dirs.append((Path(workspace_dir).resolve() / ".botex" / "memory", "local"))
-            search_dirs.append((get_global_memory_dir(), "global"))
-            if swarm_dir:
-                search_dirs.append((swarm_dir, "swarm"))
-        else:
-            search_dirs.append((Path(workspace_dir).resolve() / ".botex" / "memory", "local"))
+        search_dirs = _resolve_scope_dirs(workspace_dir, norm_scope)
 
         q_lower = query.strip().lower() if query else ""
         tag_lower = tag.strip().lower() if tag else ""
@@ -1221,7 +1219,9 @@ def search_memory(
                     raw_text = file_p.read_text(encoding="utf-8", errors="replace")
                     meta, body = _parse_frontmatter(raw_text)
                     entry_id = file_p.stem
-                    if entry_id in seen_ids:
+                    # Cross-vault shadowing fix: dedup is per (scope, id) —
+                    # a global note may no longer hide a same-stem local one.
+                    if (sc, entry_id) in seen_ids:
                         continue
                     entry_title = meta.get("title") or entry_id
                     entry_kind = str(meta.get("kind") or "context").lower()
@@ -1289,7 +1289,7 @@ def search_memory(
                         elif q_lower not in searchable:
                             continue
 
-                    seen_ids.add(entry_id)
+                    seen_ids.add((sc, entry_id))
                     preview = body[:240] + ("…" if len(body) > 240 else "")
                     if sc == "global":
                         path_str = f"~/.botex/memory/{file_p.name}"
@@ -1546,7 +1546,7 @@ def list_memory_projects(
                     try:
                         raw_text = file_p.read_text(encoding="utf-8", errors="replace")
                         meta, _ = _parse_frontmatter(raw_text)
-                        mid = str(meta.get("id") or file_p.stem)
+                        mid = file_p.stem
                         if not mid or mid in seen_ids:
                             continue
                         seen_ids.add(mid)
@@ -1648,7 +1648,20 @@ def _resolve_scope_dirs(workspace_dir: str = ".", scope: str = "local") -> list[
             search_dirs.append((swarm_dir, "swarm"))
     else:
         search_dirs.append((Path(workspace_dir).resolve() / ".botex" / "memory", "local"))
-    return search_dirs
+    # Same physical dir reachable under two scope labels (e.g. swarm vault
+    # == local vault) must not double-scan — dedup on resolved path.
+    resolved_seen: set = set()
+    deduped: list[tuple[Path, str]] = []
+    for d, sc in search_dirs:
+        try:
+            rp = d.resolve()
+        except Exception:
+            rp = d
+        if rp in resolved_seen:
+            continue
+        resolved_seen.add(rp)
+        deduped.append((d, sc))
+    return deduped
 
 
 def get_backlinks(
