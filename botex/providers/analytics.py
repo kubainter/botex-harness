@@ -176,7 +176,9 @@ def _ledger_archive_dir() -> Path:
     return _cfg_analytics_file().parent / "analytics-archive"
 
 
-def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
+def _read_jsonl(path: Path, strict: bool = False) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
     try:
         if path.suffix == ".gz":
             fh = gzip.open(path, "rt", encoding="utf-8")
@@ -196,6 +198,8 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
                     out.append(rec)
             return out
     except OSError:
+        if strict:
+            raise
         return []
 
 
@@ -204,7 +208,8 @@ def load_analytics() -> List[Dict[str, Any]]:
 
     Sources are merged oldest-first and deduplicated on (task_id,
     timestamp) so legacy records migrated into .jsonl are not counted
-    twice.
+    twice. Also reads any orphaned .rotating segments left by an
+    interrupted rotation.
     """
     records: List[Dict[str, Any]] = []
     archive = _ledger_archive_dir()
@@ -220,7 +225,12 @@ def load_analytics() -> List[Dict[str, Any]]:
                 records.extend(r for r in data if isinstance(r, dict))
         except Exception:
             pass
-    records.extend(_read_jsonl(_ledger_jsonl()))
+    live = _ledger_jsonl()
+    for rot_suffix in (".rotating", ".rotating2"):
+        rot_file = live.with_suffix(live.suffix + rot_suffix)
+        if rot_file.exists():
+            records.extend(_read_jsonl(rot_file))
+    records.extend(_read_jsonl(live))
 
     seen: set = set()
     out: List[Dict[str, Any]] = []
@@ -239,7 +249,7 @@ def load_analytics() -> List[Dict[str, Any]]:
 
 
 def save_analytics(records: List[Dict[str, Any]]):
-    """Full-replace the live .jsonl segment (test/migration helper)."""
+    """Full-replace the live .jsonl segment (test/migration helper; caller must pass merged load_analytics() output to preserve legacy rows)."""
     target_file = _ledger_jsonl()
     target_file.parent.mkdir(parents=True, exist_ok=True)
     tmp = target_file.with_suffix(target_file.suffix + ".tmp")

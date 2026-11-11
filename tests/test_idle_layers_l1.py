@@ -295,3 +295,110 @@ def test_repair_dead_links_suggest_and_apply(monkeypatch, tmp_path):
     assert "[[botex_prompt_cache_deployed]]" in text
     # ambiguous link left as-is
     assert "[[totally_missing_xyz]]" in (mem / "other.md").read_text("utf-8")
+
+
+# -- code review remediation regressions --------------------------------------
+
+
+def test_rotate_aborts_on_staged_read_failure_preserving_data(monkeypatch):
+    """CR #1/#4: if reading staged fails, rotation must abort and restore live."""
+    from botex.ops import maintenance
+    from botex.providers import analytics
+
+    _, live, _ = _analytics_paths()
+    recent_ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    analytics.save_analytics(
+        [_record("ancient", "2020-01-01T12:00:00"), _record("recent", recent_ts)]
+    )
+
+    orig_read = analytics._read_jsonl
+
+    def _boom_read(path, strict=False):
+        if str(path).endswith(".rotating"):
+            if strict:
+                raise OSError("simulated locked/corrupt staged read")
+            return []
+        return orig_read(path, strict=strict)
+
+    monkeypatch.setattr(analytics, "_read_jsonl", _boom_read)
+    res = maintenance.rotate_analytics_ledger()
+
+    assert res["archived"] == 0
+    assert res["kept"] == 0
+    assert live.exists()
+    ids = {r["task_id"] for r in analytics.load_analytics()}
+    assert ids == {"ancient", "recent"}
+
+
+def test_rotate_preserves_rows_without_task_id_or_timestamp_in_tail():
+    """CR #5/#6: tail rows lacking task_id/timestamp must not collapse onto (None, None)."""
+    from botex.ops import maintenance
+    from botex.providers import analytics
+
+    _, live, _ = _analytics_paths()
+    analytics.save_analytics([_record("ancient", "2020-01-01T12:00:00")])
+    with open(live, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"model": "m1", "cost_usd": 0.01}) + "\n")
+        f.write(json.dumps({"model": "m2", "cost_usd": 0.02}) + "\n")
+
+    res = maintenance.rotate_analytics_ledger()
+    assert res["archived"] == 1
+    assert res["kept"] == 2
+    kept_models = {r.get("model") for r in analytics._read_jsonl(live)}
+    assert kept_models == {"m1", "m2"}
+
+
+def test_rotate_recovers_orphan_rotating_segment():
+    """CR #7: an orphan .rotating file from a prior crash is folded into rotation and load."""
+    from botex.ops import maintenance
+    from botex.providers import analytics
+
+    _, live, _ = _analytics_paths()
+    live.parent.mkdir(parents=True, exist_ok=True)
+    recent_ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    orphan = live.with_suffix(".jsonl.rotating")
+    orphan.write_text(json.dumps(_record("orphan_row", recent_ts)) + "\n", "utf-8")
+    live.write_text(json.dumps(_record("live_row", recent_ts)) + "\n", "utf-8")
+
+    # Even before rotation, load_analytics sees the orphan row
+    assert {"orphan_row", "live_row"} <= {r.get("task_id") for r in analytics.load_analytics()}
+
+    maintenance.rotate_analytics_ledger()
+    assert not orphan.exists()
+    assert {"orphan_row", "live_row"} <= {r.get("task_id") for r in analytics.load_analytics()}
+
+
+def test_repair_dead_links_skips_fenced_code_blocks_and_unreadable_candidate(monkeypatch, tmp_path):
+    """CR #8/#9: fenced code blocks stay untouched and one unreadable candidate doesn't abort."""
+    from botex.ops import maintenance
+
+    ws = tmp_path / "ws"
+    mem = ws / ".botex" / "memory"
+    _note(mem, "botex_prompt_cache_deployed", "real target")
+    _note(
+        mem,
+        "handoff",
+        "prose [[botex_prompt_cache_depl0yed]] and\n```markdown\n[[botex_prompt_cache_depl0yed]]\n```\ndone",
+    )
+    monkeypatch.setenv("BOTEX_GLOBAL_MEMORY_DIR", str(tmp_path / "none"))
+
+    res = maintenance.repair_dead_links(str(ws), apply=True)
+    assert res["applied"] == 1
+    updated = (mem / "handoff.md").read_text("utf-8")
+    assert "prose [[botex_prompt_cache_deployed]] and" in updated
+    assert "```markdown\n[[botex_prompt_cache_depl0yed]]\n```" in updated
+
+
+def test_swarm_memory_dir_resolves_relative_path_portably(monkeypatch):
+    """Committed botex.config.json uses portable relative path and resolves to PROJECT_ROOT."""
+    from botex.server import config as srv_config
+
+    raw_cfg = json.loads((srv_config.PROJECT_ROOT / "botex.config.json").read_text("utf-8"))
+    raw_swarm = raw_cfg.get("paths", {}).get("swarm_memory_dir", "")
+    assert "\\" not in raw_swarm and not raw_swarm.startswith("C:")
+
+    # Call the real implementation (undoing conftest's autouse stub)
+    monkeypatch.undo()
+    resolved = Path(srv_config.swarm_memory_dir())
+    assert resolved.is_absolute()
+    assert resolved == (srv_config.PROJECT_ROOT / ".botex" / "memory").resolve()
