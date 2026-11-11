@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import os
 import sys
 import urllib.parse
@@ -1371,6 +1372,118 @@ class GenericOpenAIProvider(BaseProvider):
 
     def get_credits(self, api_key: Optional[str] = None) -> CreditsInfo:
         return CreditsInfo(supported=False, provider=self.name)
+
+    def fetch_catalog(
+        self,
+        api_key: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> List[Dict[str, Any]]:
+        """Query /models, falling back across loopback ports (:8080 vs :11434) for local LLMs."""
+        try:
+            return super().fetch_catalog(api_key=api_key, timeout=timeout)
+        except Exception:
+            if self.name.lower().strip() not in ("ollama", "bielik", "local"):
+                raise
+            resolved_cfg = resolve_local_llm_base_url(self.name, self.config)
+            alt_base = str(resolved_cfg.get("base_url") or "").strip().rstrip("/")
+            if not alt_base or alt_base == self.base_url.rstrip("/"):
+                raise
+            self.config = dict(self.config)
+            self.config["base_url"] = alt_base
+            return super().fetch_catalog(api_key=api_key, timeout=timeout)
+
+
+_LOCAL_LLM_LOG = logging.getLogger(__name__)
+LOCAL_LLM_BASE_URL_CANDIDATES = (
+    "http://127.0.0.1:8080/v1",
+    "http://127.0.0.1:11434/v1",
+)
+_LOCAL_LLM_BASE_URL_RESOLVED: Dict[Any, str] = {}
+
+
+def resolve_local_llm_base_url(prov_name: str, prov_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``prov_cfg`` with a verified loopback ``base_url`` for local LLMs."""
+    configured = str(prov_cfg.get("base_url") or "").strip().rstrip("/")
+    is_loopback = (
+        prov_name in ("ollama", "bielik", "local")
+        or "127.0.0.1" in configured
+        or "localhost" in configured
+    )
+    if not is_loopback:
+        return prov_cfg
+    cache_key = (prov_name, configured)
+    cached = _LOCAL_LLM_BASE_URL_RESOLVED.get(cache_key)
+    if cached:
+        out = dict(prov_cfg)
+        out["base_url"] = cached
+        return out
+
+    from botex.providers.http_pool import get_sync_client
+
+    client = get_sync_client()
+    candidates = [configured] if configured else []
+    candidates += [c for c in LOCAL_LLM_BASE_URL_CANDIDATES if c.rstrip("/") != configured]
+    candidates = list(dict.fromkeys(candidates))
+    for candidate in candidates:
+        try:
+            resp = client.get(candidate.rstrip("/") + "/models", timeout=4.0)
+            if resp.status_code < 400:
+                _LOCAL_LLM_BASE_URL_RESOLVED[cache_key] = candidate
+                _LOCAL_LLM_LOG.info(
+                    "Local LLM endpoint for '%s' resolved to %s", prov_name, candidate
+                )
+                out = dict(prov_cfg)
+                out["base_url"] = candidate
+                return out
+        except Exception:
+            continue
+    _LOCAL_LLM_LOG.warning(
+        "Local LLM endpoint probe failed for '%s' (tried: %s) — using config as-is",
+        prov_name,
+        ", ".join(candidates) or "none",
+    )
+    return prov_cfg
+
+
+def resolve_local_model_id(requested_model: str, available_ids: Sequence[str]) -> str:
+    """Match a requested model alias against live server model IDs.
+
+    Handles ``llama-server`` Router Mode uppercasing ``:latest`` to ``:LATEST``
+    and maps legacy Bielik aliases (``bielik:latest``, ``bielik-direct:latest``,
+    ``bielik:11b``, ``SpeakLeash/bielik-*``) onto loaded GGUF slugs.
+    """
+    req = (requested_model or "").strip()
+    ids = [m for m in available_ids if isinstance(m, str) and m.strip()]
+    if not req or not ids:
+        return requested_model
+    if req in ids:
+        return req
+    req_low = req.lower()
+    for mid in ids:
+        if mid.lower() == req_low:
+            return mid
+    if "bielik" in req_low:
+        bielik_matches = [mid for mid in ids if "bielik" in mid.lower()]
+        if bielik_matches:
+            for mid in bielik_matches:
+                if "v3.1" in mid.lower():
+                    return mid
+            return bielik_matches[0]
+    return requested_model
+
+
+async def resolve_model_for_openai_client(client: Any, requested_model: str) -> str:
+    """Best-effort alias resolution via ``client.models.list()``; falls back cleanly."""
+    models_api = getattr(client, "models", None)
+    if models_api is None or not callable(getattr(models_api, "list", None)):
+        return requested_model
+    try:
+        resp = await models_api.list(timeout=2.0)
+        raw_data = getattr(resp, "data", None) or []
+        ids = [getattr(m, "id", "") for m in raw_data if getattr(m, "id", "")]
+        return resolve_local_model_id(requested_model, ids)
+    except Exception:
+        return requested_model
 
 
 class ProviderRegistry:
