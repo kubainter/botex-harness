@@ -535,7 +535,7 @@ async def _run_analytics_digest(
     if not prov_name or not model_id:
         return {"ok": False, "error": "digest provider/model not configured"}
     prov_cfg = (cfg.get("providers") or {}).get(prov_name) or {}
-    prov_cfg = _resolve_local_llm_base_url(prov_name, prov_cfg)
+    prov_cfg = await asyncio.to_thread(_resolve_local_llm_base_url, prov_name, prov_cfg)
 
     stats = await asyncio.to_thread(aggregate_stats, load_analytics(), days)
     compact = {

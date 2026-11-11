@@ -196,6 +196,7 @@ def _provider_error_payload(
     """
     sanitized = sanitize_provider_error(exc)
     status = status_code_of(exc)
+    code = _classify_provider_error_code(exc)
     if status == 403:
         error_class = "policy_rejection"
         message = (
@@ -217,13 +218,14 @@ def _provider_error_payload(
         status if status is not None else "n/a",
         phase,
         error_class,
-        _classify_provider_error_code(exc),
+        code,
     )
     return {
         "type": "error",
         "session_id": session.session_id,
         "error": message,
         "error_class": error_class,
+        "code": code,
     }
 
 
