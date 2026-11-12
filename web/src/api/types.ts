@@ -470,6 +470,15 @@ export interface CuratorStatus {
   last_run_timestamp?: string | null
   status: string
   is_healthy: boolean
+  severity?: 'ok' | 'warn' | 'degraded'
+  degraded_reasons?: string[]
+  orphan_ratio?: number
+  ledger_count?: number
+  is_stale?: boolean
+  age_seconds?: number
+  stale_after_seconds?: number
+  links_applied?: number
+  batches_processed?: number
   total_nodes: number
   total_edges: number
   orphan_count: number

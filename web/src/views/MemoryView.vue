@@ -116,10 +116,27 @@
       <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-slate-400 pt-1 border-t border-botex-800/60">
         <span>{{ locale === 'pl' ? 'Węzły' : 'Nodes' }}: <strong class="text-slate-200">{{ curatorStatus.total_nodes }}</strong></span>
         <span>{{ locale === 'pl' ? 'Relacje' : 'Edges' }}: <strong class="text-slate-200">{{ curatorStatus.total_edges }}</strong></span>
-        <span>{{ locale === 'pl' ? 'Osierocone' : 'Orphans' }}: <strong :class="curatorStatus.orphan_count > 0 ? 'text-amber-400 font-bold' : 'text-slate-200'">{{ curatorStatus.orphan_count }}</strong></span>
+        <span>{{ locale === 'pl' ? 'Osierocone' : 'Orphans' }}: <strong :class="curatorStatus.orphan_count > 0 ? 'text-amber-400 font-bold' : 'text-slate-200'">{{ curatorStatus.orphan_count }}</strong><span v-if="curatorStatus.orphan_ratio !== undefined" class="text-slate-500 ml-1">({{ Math.round(curatorStatus.orphan_ratio * 100) }}%)</span></span>
+        <span v-if="curatorStatus.ledger_count">{{ locale === 'pl' ? 'Ledger' : 'Ledger' }}: <strong class="text-slate-300">{{ curatorStatus.ledger_count }}</strong></span>
         <span>{{ locale === 'pl' ? 'Martwe linki' : 'Broken' }}: <strong :class="curatorStatus.broken_count > 0 ? 'text-rose-400 font-bold' : 'text-slate-200'">{{ curatorStatus.broken_count }}</strong></span>
+        <span v-if="curatorStatus.is_stale" class="text-amber-400 font-semibold">
+          {{ locale === 'pl' ? 'Nieaktualny' : 'Stale' }}
+        </span>
         <span v-if="curatorStatus.last_run_timestamp" class="text-slate-400">
           {{ locale === 'pl' ? 'Ostatni audyt' : 'Last run' }}: {{ new Date(curatorStatus.last_run_timestamp).toLocaleTimeString() }}
+        </span>
+      </div>
+
+      <div
+        v-if="curatorStatus.degraded_reasons && curatorStatus.degraded_reasons.length > 0"
+        class="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] text-amber-300/90"
+      >
+        <span
+          v-for="(reason, idx) in curatorStatus.degraded_reasons"
+          :key="idx"
+          class="px-2 py-0.5 rounded bg-amber-950/60 border border-amber-800/60 font-mono"
+        >
+          {{ reason }}
         </span>
       </div>
     </div>

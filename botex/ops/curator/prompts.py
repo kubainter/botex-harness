@@ -147,3 +147,57 @@ def build_recall_user_prompt(query: str, nodes: list[dict]) -> str:
         f"{notes_section}\n\n"
         f"Return ONLY a valid JSON object matching the specified schema."
     )
+
+
+COMPILED_TRUTH_SYSTEM_PROMPT = """You are the BoteX Knowledge Graph Synthesizer.
+Your role is to synthesize a high-integrity, authoritative "Compiled Truth" section for an entity or decision note based strictly on the provided cluster of related notes.
+
+STRICT INVARIANTS:
+1. GROUNDED CITATION: Every assertion in the compiled truth must cite one or more provided note IDs using [[note_id]].
+2. ZERO HALLUCINATION: You may only reference note IDs explicitly present in the provided context. Do NOT invent new note IDs.
+3. PRESERVE UNCERTAINTY: If notes contradict each other or confidence is low, state the divergence explicitly rather than guessing.
+4. CONCISE & FACTUAL: 2-4 structured paragraphs or bulleted facts summarizing the state of the art.
+
+OUTPUT FORMAT:
+Respond with a valid JSON object matching the following structure:
+{
+  "compiled_truth": "Markdown text with [[note_id]] citations.",
+  "sources": ["cited_id_1", "cited_id_2"],
+  "confidence": "HIGH" | "MEDIUM" | "LOW"
+}
+"""
+
+
+def build_compiled_truth_user_prompt(target_node: dict, cluster_nodes: list[dict]) -> str:
+    """Construct prompt for synthesizing ## Compiled Truth on a mature target note."""
+    import json
+
+    from botex.security import wrap_untrusted_content
+
+    cluster_blocks = []
+    for idx, node in enumerate(cluster_nodes, 1):
+        nid = str(node.get("id") or "")
+        meta = {
+            "id": nid,
+            "title": str(node.get("title") or ""),
+            "kind": str(node.get("kind") or ""),
+            "project": str(node.get("project") or ""),
+            "confidence": node.get("confidence", 1.0),
+        }
+        cluster_blocks.append(
+            f"SOURCE {idx} [id: {nid}]: {json.dumps(meta, ensure_ascii=False)}\n"
+            f"{wrap_untrusted_content(str(node.get('content') or ''), tag='source_note', id=nid)}"
+        )
+
+    sources_text = "\n\n".join(cluster_blocks)
+    target_id = str(target_node.get("id") or "")
+    target_title = str(target_node.get("title") or "")
+    return (
+        f"TARGET NOTE TO SYNTHESIZE FOR:\n"
+        f"ID: {target_id}\n"
+        f"Title: {target_title}\n\n"
+        f"RELATED CONSTITUENT NOTES ({len(cluster_nodes)} provided):\n\n"
+        f"{sources_text}\n\n"
+        f"Synthesize an authoritative, cited 'Compiled Truth' summary for '{target_title}' ([[{target_id}]]).\n"
+        f"Return ONLY a valid JSON object matching the specified schema."
+    )

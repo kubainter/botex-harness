@@ -1,4 +1,4 @@
-# Fires botex-nightly-curator.service once daily at 03:30 AM
+# Fires botex-nightly-curator.service once daily at 01:00 AM
 # Install: /etc/systemd/system/botex-nightly-curator.timer
 # Enable:  systemctl enable --now botex-nightly-curator.timer
 [Unit]
@@ -6,7 +6,7 @@ Description=Nightly BoteX Knowledge Graph Curation and Memory Audit Timer
 Documentation=https://github.com/kubainter/botex-harness
 
 [Timer]
-OnCalendar=*-*-* 03:30:00
+OnCalendar=*-*-* 01:00:00
 RandomizedDelaySec=180
 Persistent=true
 

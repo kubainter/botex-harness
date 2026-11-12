@@ -174,6 +174,19 @@ def _task_temp_handoff_sweep(workspace_dir: str) -> Dict[str, Any]:
     return {"scanned": scanned, "expired_deleted": len(deleted), "deleted_ids": deleted}
 
 
+def _task_dead_link_repair(workspace_dir: str) -> Dict[str, Any]:
+    from botex.ops.maintenance import repair_dead_links
+
+    return dict(repair_dead_links(workspace_dir=workspace_dir, apply=True))
+
+
+def _task_purge_ephemeral(workspace_dir: str) -> Dict[str, Any]:
+    from botex.memory.memory import purge_ephemeral_memories
+
+    deleted = purge_ephemeral_memories(workspace_dir=workspace_dir, scope="all")
+    return {"deleted": deleted}
+
+
 DEFAULT_TASKS: Sequence[CuratorTask] = (
     CuratorTask("index_sync", TICK_INTERVAL_S, _task_index_sync),
     CuratorTask("frontmatter_repair", TICK_INTERVAL_S, _task_frontmatter_repair),
@@ -182,6 +195,8 @@ DEFAULT_TASKS: Sequence[CuratorTask] = (
     CuratorTask("provider_warmup", TICK_INTERVAL_S, _task_provider_warmup),
     CuratorTask("scratchpad_prune", 86400.0, _task_scratchpad_prune),
     CuratorTask("temp_handoff_sweep", 3600.0, _task_temp_handoff_sweep),
+    CuratorTask("dead_link_repair", 3600.0, _task_dead_link_repair),
+    CuratorTask("purge_ephemeral_memories", 86400.0, _task_purge_ephemeral),
 )
 
 
