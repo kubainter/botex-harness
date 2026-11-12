@@ -22,6 +22,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -782,6 +783,21 @@ def _verify_access_token(candidate_token: Optional[str]) -> bool:
     return False
 
 
+def _extract_mcp_origin_from_headers(headers: dict[bytes, bytes]) -> str:
+    """Extract and sanitize '<agent>@<host>' provenance from X-Agent-Id / X-Host headers."""
+    raw_agent = headers.get(b"x-agent-id", b"").decode("latin1", errors="ignore").strip()
+    raw_host = headers.get(b"x-host", b"").decode("latin1", errors="ignore").strip()
+    agent = re.sub(r"[^a-zA-Z0-9_.-]", "", raw_agent)[:32]
+    host = re.sub(r"[^a-zA-Z0-9_.-]", "", raw_host)[:32]
+    if agent and host:
+        return f"{agent}@{host}"
+    if agent:
+        return agent
+    if host:
+        return f"botex@{host}"
+    return ""
+
+
 class CloudAuthMiddleware:
     """ASGI Authentication middleware supporting Zero Friction Local and Strict Cloud modes.
 
@@ -821,6 +837,7 @@ class CloudAuthMiddleware:
 
         # Reject payloads exceeding 25 MiB to prevent memory exhaustion / OOM on constrained VPS
         headers = dict(scope.get("headers", []))
+        mcp_origin = _extract_mcp_origin_from_headers(headers) if path.startswith("/mcp") else ""
         content_length_raw = (
             headers.get(b"content-length", b"").decode("latin1", errors="ignore").strip()
         )
@@ -859,7 +876,12 @@ class CloudAuthMiddleware:
                 return
 
             logger.info("Zero Friction Local mode: allowing unauthenticated request to %s", path)
-            await self.app(scope, receive, send)
+            tok = botex_server.MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                if tok is not None:
+                    botex_server.MCP_CLIENT_ORIGIN.reset(tok)
             return
 
         # Extract token from Authorization header or query parameter
@@ -884,7 +906,12 @@ class CloudAuthMiddleware:
                     sid.hex for sid in getattr(_mcp_transport, "_read_stream_writers", {}).keys()
                 }
                 if session_id in active_sessions:
-                    await self.app(scope, receive, send)
+                    tok = botex_server.MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
+                    try:
+                        await self.app(scope, receive, send)
+                    finally:
+                        if tok is not None:
+                            botex_server.MCP_CLIENT_ORIGIN.reset(tok)
                     return
 
         # Constant-time token verification (supports plain token and SHA-256 hash)
@@ -899,7 +926,12 @@ class CloudAuthMiddleware:
             await resp(scope, receive, send)
             return
 
-        await self.app(scope, receive, send)
+        tok = botex_server.MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if tok is not None:
+                botex_server.MCP_CLIENT_ORIGIN.reset(tok)
 
 
 # ---------------------------------------------------------------------------
@@ -935,7 +967,9 @@ _mcp_subapp = botex_server.mcp.sse_app(
 
 
 class _MCPSseErrorGuard:
-    """Catch MCP SDK validation errors raised *after* the error response was sent.
+    """Catch MCP SDK validation errors raised *after* the error response was sent,
+    and attach ``X-Accel-Buffering: no`` on ``/mcp/sse`` responses so reverse
+    proxies (nginx / Cloudflare) do not buffer SSE frames or drop idle streams.
 
     ``connect_sse`` emits its error_response and then raises
     ``ValueError("Request validation failed")`` (mcp sse.py:145-148). Without
@@ -951,8 +985,18 @@ class _MCPSseErrorGuard:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
+        is_sse = scope.get("path", "").rstrip("/").endswith("/sse")
+
+        async def _send_with_no_buffer(message: dict[str, Any]) -> None:
+            if is_sse and message.get("type") == "http.response.start":
+                hdrs = list(message.get("headers") or [])
+                if not any(k.lower() == b"x-accel-buffering" for k, _ in hdrs):
+                    hdrs.append((b"x-accel-buffering", b"no"))
+                message = {**message, "headers": hdrs}
+            await send(message)
+
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, _send_with_no_buffer if is_sse else send)
         except ValueError as exc:
             logger.warning("MCP SSE transport rejected request: %s", exc)
 

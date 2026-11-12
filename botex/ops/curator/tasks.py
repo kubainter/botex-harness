@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -96,6 +98,82 @@ def _task_scratchpad_prune(workspace_dir: str) -> Dict[str, Any]:
     return {"removed": removed}
 
 
+_TEMP_HANDOFF_EXPIRES_RE = re.compile(r"(?im)^expires\s*:\s*(\d{4}-\d{2}-\d{2})\b")
+
+
+def _task_temp_handoff_sweep(workspace_dir: str) -> Dict[str, Any]:
+    """Delete expired ``temp-handoff`` notes from local and global memory roots.
+
+    Temp-handoff notes are ephemeral coordination crumbs: they carry
+    ``tags: [temp-handoff]`` and an ``expires: YYYY-MM-DD`` line (frontmatter or
+    body). Notes whose expiry is older than today (UTC) are removed through the
+    memory facade so the SQLite index stays consistent.
+    """
+    from botex import memory
+
+    ws = Path(workspace_dir).resolve()
+    mem_dirs: List[tuple] = [
+        (ws / ".botex" / "memory", "local"),
+        (memory.get_global_memory_dir(), "global"),
+    ]
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    scanned = 0
+    deleted: List[str] = []
+    seen_dirs: set = set()
+
+    for mem_dir, scope in mem_dirs:
+        if not mem_dir.is_dir():
+            continue
+        try:
+            dir_key = str(mem_dir.resolve())
+        except Exception:
+            dir_key = str(mem_dir)
+        if dir_key in seen_dirs:
+            continue
+        seen_dirs.add(dir_key)
+
+        for md_file in sorted(mem_dir.glob("*.md")):
+            if not md_file.is_file() or md_file.name.startswith("_"):
+                continue
+            try:
+                raw = md_file.read_text(encoding="utf-8", errors="replace")
+                meta, body = memory._parse_frontmatter(raw)
+            except Exception:
+                continue
+            if not meta:
+                continue
+            scanned += 1
+
+            raw_tags = meta.get("tags") or []
+            if isinstance(raw_tags, str):
+                raw_tags = [t.strip() for t in raw_tags.strip("[]").split(",") if t.strip()]
+            norm_tags = {str(t).strip().lower() for t in raw_tags}
+            if "temp-handoff" not in norm_tags:
+                continue
+
+            expires = str(meta.get("expires") or "").strip()
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", expires):
+                m = _TEMP_HANDOFF_EXPIRES_RE.search(body or raw)
+                expires = m.group(1) if m else ""
+            if not expires or not (today > expires):
+                continue
+
+            mid = md_file.stem
+            res = memory.delete_memory(workspace_dir=str(ws), memory_id=mid, scope=scope)
+            if res.get("ok"):
+                deleted.append(mid)
+                continue
+            try:
+                md_file.unlink()
+                memory.sync_memory_index(mem_dir)
+                deleted.append(mid)
+            except OSError:
+                continue
+
+    return {"scanned": scanned, "expired_deleted": len(deleted), "deleted_ids": deleted}
+
+
 DEFAULT_TASKS: Sequence[CuratorTask] = (
     CuratorTask("index_sync", TICK_INTERVAL_S, _task_index_sync),
     CuratorTask("frontmatter_repair", TICK_INTERVAL_S, _task_frontmatter_repair),
@@ -103,6 +181,7 @@ DEFAULT_TASKS: Sequence[CuratorTask] = (
     CuratorTask("ledger_rotation", TICK_INTERVAL_S, _task_ledger_rotation),
     CuratorTask("provider_warmup", TICK_INTERVAL_S, _task_provider_warmup),
     CuratorTask("scratchpad_prune", 86400.0, _task_scratchpad_prune),
+    CuratorTask("temp_handoff_sweep", 3600.0, _task_temp_handoff_sweep),
 )
 
 

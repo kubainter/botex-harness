@@ -115,8 +115,8 @@ These tools are exposed directly by `server.py` to the orchestrating agent over 
 - `get_task_status(task_id)`: Queries the background task ledger for current lifecycle `status`, live execution logs, and final `result_data`.
 
 #### Two-Tier Memory Vault
-- `save_memory(title, content, workspace_dir="", kind="context", tags=[], memory_id="", scope="local")`: Persists architectural decisions, context notes, handoffs, or lessons.
-- `search_memory(workspace_dir="", query="", tag="", kind="", scope="local")`: Queries notes across `local` (`.botex/memory/`), `global` (`~/.botex/memory/`), or both scopes using FTS5 search. Pass `scope="all"` explicitly for a consolidated search.
+- `save_memory(title, content, workspace_dir="", kind="context", tags=[], memory_id="", scope="local", confidence=1.0, project=None, origin="")`: Persists architectural decisions, context notes, handoffs, lessons, beliefs, or heuristics (`origin` falls back to `X-Agent-Id@X-Host` SSE headers).
+- `search_memory(workspace_dir="", query="", tag="", kind="", scope="local", project="")`: Queries notes across `local` (`.botex/memory/`), `global` (`~/.botex/memory/`), `swarm` (read-only), or `all` scopes using FTS5 search. Pass `scope="all"` explicitly for a consolidated search.
 - `read_memory(memory_id, workspace_dir="", scope="local")`: Retrieves complete note markdown, frontmatter, and metadata.
 - `patch_memory_section(memory_id, section, new_content, workspace_dir="", scope="local", append=false)`: Surgically replaces or appends to a single Markdown section (e.g. `## Compiled Truth`) preserving note history and frontmatter.
 - `delete_memory(memory_id, workspace_dir="", scope="local")`: Permanently deletes a specific memory note from local or global storage.
@@ -394,9 +394,10 @@ When communicating with BoteX Cloud Gateway over Server-Sent Events (`botex clou
 ## 10. Memory Vault Flow
 
 BoteX provides a persistent, two-tier Memory Vault with wikilink graph support:
-- **Local Scope (`scope="local"`, default)**: Stored at `<workspace_dir>/.botex/memory/` (automatically gitignored).
-- **Global Scope (`scope="global"`)**: Stored centrally at `~/.botex/memory/` (shared across projects).
-- **Consolidated Scope (`scope="all"`)**: Queries both local and global memory vaults concurrently.
+- **Local Scope (`scope="local"`, default)**: Stored at `<workspace_dir>/.botex/memory/` (automatically gitignored). Use only for workspace-private notes or ephemeral `temp-handoff` entries (`tags=["temp-handoff"]`, `expires: YYYY-MM-DD`).
+- **Global Scope (`scope="global"`)**: Stored centrally at `~/.botex/memory/` on the target BoteX server. In Cloud-First multi-host swarms, shared knowledge lives on BoteX Cloud under `scope="global"` + `project="swarm"` (with `origin="<agent>@<host>"`).
+- **Swarm Scope (`scope="swarm"`)**: Optional read-only third root configured via `paths.swarm_memory_dir`.
+- **Consolidated Scope (`scope="all"`)**: Queries local, global, and (when configured) swarm memory vaults concurrently.
 
 ### Standard Memory Workflow
 
@@ -424,6 +425,8 @@ Step 4 (Optional): find_graph_health(scope="local")
 - `decision`: Architectural Decision Records (ADRs) capturing design trade-offs and rationale.
 - `handoff`: State transfer between tasks or subagents (remaining work, pending verification).
 - `lesson`: Discovered edge cases, bug root causes, library quirks, or operational constraints.
+- `belief`: Probabilistic or provisional observations (`confidence` < 1.0) awaiting corroboration.
+- `heuristic`: Actionable rules of thumb and operational patterns distilled from repeated lessons.
 
 ### Task Receipts
 

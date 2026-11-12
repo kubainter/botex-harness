@@ -42,6 +42,8 @@ from botex.chat import (
 )
 from botex.config import (
     WorkspaceOutOfBounds,
+    get_mcp_client_origin,
+    is_cross_host_windows_path,
     load_config,
     resolve_provider,
     resolve_workspace,
@@ -952,6 +954,7 @@ async def save_memory(
     scope: str = "local",
     confidence: float = 1.0,
     project: Optional[str] = None,
+    origin: str = "",
 ) -> dict[str, Any]:
     """
     Saves a persistent context note, architectural decision, task handoff, lesson,
@@ -968,15 +971,23 @@ async def save_memory(
         memory_id: Optional custom identifier (alphanumeric/hyphen/underscore). Auto-generated if omitted.
         scope: Storage scope ('local' for workspace, 'global' for cross-workspace). Default is 'local'.
         confidence: Certainty score in [0.0, 1.0] for belief/heuristic-style entries. Default 1.0.
-        project: Optional project slug (e.g. 'botex', 'tw3se') for logical partitioning.
+        project: Optional project slug (e.g. 'botex', 'tw3se', 'swarm') for logical partitioning.
+        origin: Optional provenance identifier '<agent>@<host>'. Falls back to X-Agent-Id@X-Host session header or 'botex'.
     """
+    effective_origin = str(origin or "").strip() or get_mcp_client_origin("botex")
+    ws = (
+        "."
+        if str(scope).strip().lower() == "global" and is_cross_host_windows_path(workspace_dir)
+        else resolve_workspace(workspace_dir)
+    )
     return _save_memory(
-        workspace_dir=resolve_workspace(workspace_dir),
+        workspace_dir=ws,
         title=title,
         content=content,
         kind=kind,
         tags=tags,
         memory_id=memory_id or None,
+        origin=effective_origin,
         scope=scope,
         confidence=confidence,
         project=project,

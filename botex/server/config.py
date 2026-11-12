@@ -14,12 +14,34 @@ All paths declared in the config are resolved against the project root
 (the directory containing this ``botex`` package) unless absolute.
 """
 
+import contextvars
 import copy
 import fnmatch
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+# Context variable holding the authenticated MCP client's provenance ("<agent>@<host>")
+# populated by server_cloud.py from X-Agent-Id / X-Host headers on SSE/message requests.
+MCP_CLIENT_ORIGIN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "botex_mcp_client_origin", default=""
+)
+
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def is_cross_host_windows_path(value: str) -> bool:
+    """Return True when running on POSIX and ``value`` is a Windows drive path (e.g. ``C:\\...``)."""
+    return os.name != "nt" and bool(_WINDOWS_DRIVE_RE.match(str(value or "").strip()))
+
+
+def get_mcp_client_origin(default: str = "botex") -> str:
+    """Return the active MCP client origin from contextvars, or ``default`` if unset."""
+    val = MCP_CLIENT_ORIGIN.get("").strip()
+    return val if val else default
+
 
 try:
     from dotenv import load_dotenv
@@ -1051,7 +1073,12 @@ def _enforce_workspace_containment(real_path: str) -> None:
 
 def resolve_workspace(value: str = "") -> str:
     """Return the effective workspace path (see ``resolve_workspace_source``)."""
-    raw_path = resolve_workspace_source(value)[0]
+    if is_cross_host_windows_path(value):
+        # Prevent path mangling on Linux VPS (e.g. /opt/botex/C:\Users\...) when a Windows
+        # client passes its local host path. Fall back to the server's default workspace / cwd.
+        raw_path = resolve_workspace_source("")[0]
+    else:
+        raw_path = resolve_workspace_source(value)[0]
     # The cwd fallback ("." when no explicit/default workspace) goes through
     # containment too — otherwise an empty workspace_dir bypasses the
     # allowlist entirely (cross-review blocker: containment bypass).
