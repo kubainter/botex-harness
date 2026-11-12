@@ -55,6 +55,7 @@ LEGACY_MODULE_DOMAINS: Dict[str, str] = {
     # botex/skills
     "skills": "skills",
     "recipes": "skills",
+    "skillspector_gate": "skills",
     # botex/server
     "server_cloud": "server",
     "chat": "server",

@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 try:
     from botex.memory.memory import _parse_frontmatter, _serialize_frontmatter
     from botex.server.config import PROJECT_ROOT, load_config
+    from botex.skills.skillspector_gate import audit_skill_content
     from botex.tools.net_tools import fetch_url
     from botex.tools.security import (
         SecurityError,
@@ -48,6 +49,11 @@ except (ImportError, ValueError):
         sanitize_for_storage,
         sanitize_identifier,
     )
+
+    try:
+        from skillspector_gate import audit_skill_content
+    except (ImportError, ValueError):
+        audit_skill_content = None
 
 __all__ = [
     "get_skills_dir",
@@ -324,6 +330,31 @@ def _parse_skill_file(skill_file: Path, skills_root: Path) -> Dict[str, Any]:
         "size_bytes": len(raw_text.encode("utf-8")),
         "path": f"skills/{rel_path}",
         "content": body.strip(),
+        "audit_scanner": str(
+            meta.get("audit_scanner")
+            or (nested_meta.get("audit_scanner") if nested_meta else "")
+            or ""
+        ).strip(),
+        "audit_verdict": str(
+            meta.get("audit_verdict")
+            or (nested_meta.get("audit_verdict") if nested_meta else "")
+            or "UNVERIFIED_NO_SCANNER"
+        ).strip(),
+        "audit_risk_score": int(
+            meta.get("audit_risk_score")
+            or (nested_meta.get("audit_risk_score") if nested_meta else 0)
+            or 0
+        ),
+        "audit_scanned_at": str(
+            meta.get("audit_scanned_at")
+            or (nested_meta.get("audit_scanned_at") if nested_meta else "")
+            or ""
+        ).strip(),
+        "audit_scanner_version": str(
+            meta.get("audit_scanner_version")
+            or (nested_meta.get("audit_scanner_version") if nested_meta else "")
+            or ""
+        ).strip(),
     }
 
 
@@ -403,6 +434,7 @@ def _validate_and_write_skill(
     commit_sha: str = "",
     taxonomy: Optional[List[str]] = None,
     skills_dir: Optional[Path] = None,
+    audit_res: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Sanitize, enrich frontmatter, and write SKILL.md to disk."""
     if not raw_content or not raw_content.strip():
@@ -491,6 +523,35 @@ def _validate_and_write_skill(
     if eff_sha:
         meta_to_save["commit_sha"] = sanitize_for_storage(eff_sha)
 
+    if audit_res and isinstance(audit_res, dict):
+        meta_to_save["audit_scanner"] = sanitize_for_storage(
+            str(audit_res.get("scanner") or "SkillSpector")
+        )
+        meta_to_save["audit_verdict"] = sanitize_for_storage(
+            str(audit_res.get("verdict") or "PASS")
+        )
+        meta_to_save["audit_risk_score"] = int(audit_res.get("risk_score") or 0)
+        meta_to_save["audit_scanned_at"] = sanitize_for_storage(
+            str(audit_res.get("scanned_at") or now_iso)
+        )
+        meta_to_save["audit_scanner_version"] = sanitize_for_storage(
+            str(audit_res.get("scanner_version") or "unknown")
+        )
+    else:
+        meta_to_save["audit_scanner"] = sanitize_for_storage(
+            str(existing_meta.get("audit_scanner") or "SkillSpector")
+        )
+        meta_to_save["audit_verdict"] = sanitize_for_storage(
+            str(existing_meta.get("audit_verdict") or "UNVERIFIED_NO_SCANNER")
+        )
+        meta_to_save["audit_risk_score"] = int(existing_meta.get("audit_risk_score") or 0)
+        meta_to_save["audit_scanned_at"] = sanitize_for_storage(
+            str(existing_meta.get("audit_scanned_at") or now_iso)
+        )
+        meta_to_save["audit_scanner_version"] = sanitize_for_storage(
+            str(existing_meta.get("audit_scanner_version") or "none")
+        )
+
     full_doc = sanitize_for_storage(_serialize_frontmatter(meta_to_save, body.strip()))
 
     root = (skills_dir or get_skills_dir()).resolve()
@@ -511,6 +572,11 @@ def _validate_and_write_skill(
         "installed_at": parsed["installed_at"],
         "taxonomy": parsed["taxonomy"],
         "path": parsed["path"],
+        "audit_verdict": parsed["audit_verdict"],
+        "audit_risk_score": parsed["audit_risk_score"],
+        "audit_scanner": parsed["audit_scanner"],
+        "audit_scanned_at": parsed["audit_scanned_at"],
+        "audit_scanner_version": parsed["audit_scanner_version"],
         "skill": {k: v for k, v in parsed.items() if k != "content"},
     }
 
@@ -576,6 +642,33 @@ async def install_skill_async(
             candidate_name = _infer_skill_name_from_url(source_url)
 
         clean_name = _sanitize_skill_name(candidate_name)
+
+        # Security pre-flight check order (W3): 1. size -> 2. fast regex -> 3. SkillSpector
+        encoded_len = len(raw_content.encode("utf-8"))
+        if encoded_len > MAX_SKILL_BYTES:
+            return {
+                "ok": False,
+                "error": f"Skill content exceeds maximum allowed size ({MAX_SKILL_BYTES} bytes).",
+            }
+        for pat in _INJECTION_PATTERNS:
+            if pat.search(raw_content):
+                return {
+                    "ok": False,
+                    "error": "Security policy rejected skill: detected adversarial prompt-injection pattern.",
+                }
+
+        cfg = load_config()
+        audit_res: Optional[Dict[str, Any]] = None
+        if audit_skill_content is not None:
+            audit_res = await audit_skill_content(raw_content, clean_name, config=cfg)
+            if not audit_res.get("ok"):
+                return {
+                    "ok": False,
+                    "error": f"Security policy rejected skill by SkillSpector: {audit_res.get('reason')}",
+                    "audit_status": audit_res.get("status"),
+                    "audit": audit_res,
+                }
+
         return _validate_and_write_skill(
             clean_name,
             raw_content,
@@ -585,6 +678,7 @@ async def install_skill_async(
             commit_sha=commit_sha,
             taxonomy=taxonomy,
             skills_dir=skills_dir,
+            audit_res=audit_res,
         )
     except SecurityError as se:
         return {
@@ -609,35 +703,7 @@ def install_skill(
     taxonomy: Optional[List[str]] = None,
     skills_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Synchronous wrapper for installing a skill from content or local/remote source."""
-    if content and not source_url:
-        try:
-            candidate_name = (name or "").strip()
-            if not candidate_name:
-                fm, _ = _parse_frontmatter(content)
-                candidate_name = str(fm.get("name") or "").strip()
-            clean_name = _sanitize_skill_name(candidate_name)
-            return _validate_and_write_skill(
-                clean_name,
-                content,
-                description=description,
-                version=version,
-                origin_repo=origin_repo,
-                commit_sha=commit_sha,
-                taxonomy=taxonomy,
-                skills_dir=skills_dir,
-            )
-        except SecurityError as se:
-            return {
-                "ok": False,
-                "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
-            }
-        except Exception as exc:
-            return {
-                "ok": False,
-                "error": f"Failed to install skill: {coerce_text(mask_secrets(str(exc)))}",
-            }
-
+    """Synchronous wrapper for installing a skill, routing through canonical async pipeline."""
     import asyncio
 
     try:
@@ -645,44 +711,32 @@ def install_skill(
     except RuntimeError:
         loop = None
 
+    coro = install_skill_async(
+        name=name,
+        content=content,
+        source_url=source_url,
+        origin_repo=origin_repo,
+        version=version,
+        commit_sha=commit_sha,
+        description=description,
+        taxonomy=taxonomy,
+        skills_dir=skills_dir,
+    )
+
     if loop and loop.is_running():
         import concurrent.futures
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(
-                    asyncio.run,
-                    install_skill_async(
-                        name=name,
-                        content=content,
-                        source_url=source_url,
-                        origin_repo=origin_repo,
-                        version=version,
-                        commit_sha=commit_sha,
-                        description=description,
-                        taxonomy=taxonomy,
-                        skills_dir=skills_dir,
-                    ),
-                )
-                return fut.result(timeout=30)
+                fut = pool.submit(asyncio.run, coro)
+                return fut.result(timeout=120)
         except Exception as exc:
             return {
                 "ok": False,
                 "error": f"Failed to install skill: {coerce_text(mask_secrets(str(exc)))}",
             }
-    return asyncio.run(
-        install_skill_async(
-            name=name,
-            content=content,
-            source_url=source_url,
-            origin_repo=origin_repo,
-            version=version,
-            commit_sha=commit_sha,
-            description=description,
-            taxonomy=taxonomy,
-            skills_dir=skills_dir,
-        )
-    )
+    else:
+        return asyncio.run(coro)
 
 
 def delete_skill(name: str, skills_dir: Optional[Path] = None) -> Dict[str, Any]:
