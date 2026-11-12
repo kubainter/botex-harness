@@ -1444,7 +1444,10 @@ async def _run_botex_task_once(*args, task_id: Optional[str] = None, **kwargs):
     attempt_files_read: set = set()
     kwargs.setdefault("files_read_out", attempt_files_read)
     try:
-        result = await _run_botex_task_once_impl(*args, task_id=task_id, **kwargs)
+        from botex.core.tracing import start_span
+
+        with start_span("botex.task.attempt", {"task_id": task_id or ""}):
+            result = await _run_botex_task_once_impl(*args, task_id=task_id, **kwargs)
     finally:
         effective_task_id = task_id or (result.get("task_id") if isinstance(result, dict) else "")
         if effective_task_id:
@@ -2376,15 +2379,26 @@ async def _run_botex_task_once_impl(
             )
 
         try:
-            nresp = await call_with_backoff(
-                prov_adapter,
-                _run_model_request,
-                provider_cfg,
-                deadline_ts=(start_time + max_duration_s) if max_duration_s > 0 else None,
-                on_wait=_on_retry_wait,
-                circuit_breaker_cfg=_breaker_cfg_raw(provider_cfg),
-                provider_name=provider_name,
-            )
+            from botex.core.tracing import start_span
+
+            with start_span(
+                "botex.provider.call",
+                {
+                    "provider": provider_name,
+                    "model": model,
+                    "turn": turn,
+                    "stream": bool(use_stream),
+                },
+            ):
+                nresp = await call_with_backoff(
+                    prov_adapter,
+                    _run_model_request,
+                    provider_cfg,
+                    deadline_ts=(start_time + max_duration_s) if max_duration_s > 0 else None,
+                    on_wait=_on_retry_wait,
+                    circuit_breaker_cfg=_breaker_cfg_raw(provider_cfg),
+                    provider_name=provider_name,
+                )
         except APITimeoutError:
             rollback_verified = _rollback_attempt(task_id, files_touched)
             log_entry = log_run(

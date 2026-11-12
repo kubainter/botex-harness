@@ -523,7 +523,7 @@ def _validate_raw(raw: Optional[str], valid_ids: frozenset) -> Optional[Dict[str
     return _validate_recall_payload(parsed, valid_ids)
 
 
-async def _attempt(
+async def _attempt_impl(
     name: str,
     fn: Callable[[str, dict], Coroutine[Any, Any, Optional[str]]],
     prompt: str,
@@ -572,7 +572,51 @@ async def _attempt(
     return validated
 
 
+async def _traced_tier(name: str, attempts: List[dict], coro: Coroutine[Any, Any, Any]) -> Any:
+    from botex.core.tracing import start_span
+
+    before = len(attempts)
+    with start_span("botex.recall.tier", {"tier": name}) as span:
+        try:
+            return await coro
+        finally:
+            if len(attempts) > before:
+                last = attempts[-1]
+                span.set_attribute("tier_status", str(last.get("status")))
+                span.set_attribute("tier_ms", last.get("ms") or 0)
+
+
+async def _attempt(
+    name: str,
+    fn: Callable[[str, dict], Coroutine[Any, Any, Optional[str]]],
+    prompt: str,
+    tcfg: dict,
+    neg_ttl_s: float,
+    valid_ids: frozenset,
+    attempts: List[dict],
+) -> Optional[dict]:
+    return await _traced_tier(
+        name, attempts, _attempt_impl(name, fn, prompt, tcfg, neg_ttl_s, valid_ids, attempts)
+    )
+
+
 async def _tier1_flow(
+    prompt: str,
+    tcfg: dict,
+    queue_wait_s: float,
+    guard_tokens: float,
+    neg_ttl_s: float,
+    valid_ids: frozenset,
+    attempts: List[dict],
+) -> Optional[dict]:
+    return await _traced_tier(
+        "local-ollama",
+        attempts,
+        _tier1_flow_impl(prompt, tcfg, queue_wait_s, guard_tokens, neg_ttl_s, valid_ids, attempts),
+    )
+
+
+async def _tier1_flow_impl(
     prompt: str,
     tcfg: dict,
     queue_wait_s: float,

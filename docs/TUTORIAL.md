@@ -46,7 +46,7 @@ Entry points: `server.py` (stdio MCP & CLI dispatcher) and `botex/server_cloud.p
 │   ├── meta_harness.py    task taxonomy, patch probing & meta-lesson recommendations
 │   ├── recipes.py         recipe loader & system prompt injection
 │   ├── skills.py          server-side Skill Vault, safe installer & L0 triage
-│   ├── tracing.py         OTel-style span helpers (landed; wiring in progress)
+│   ├── tracing.py         OTel-style span helpers (engine, retry, recall_curator, server_cloud)
 │   ├── i18n.py            CLI localization (EN/PL); MCP responses are always EN
 │   ├── ui.py              ANSI helpers with plain-text fallback
 │   └── recipes/           bundled markdown persona prompts
@@ -201,7 +201,7 @@ BoteX can operate as a central HTTP/SSE daemon (`botex/server_cloud.py`):
   - Unauthenticated local mode when `BOTEX_ACCESS_TOKEN` is unset or empty.
   - Constant-time `hmac.compare_digest` Bearer token authentication when `BOTEX_ACCESS_TOKEN` is configured.
   - Public `GET /api/health` endpoint for Docker and proxy health checks.
-- **Remote MCP via SSE**: Exposes `GET /mcp/sse` and `POST /mcp/messages/` with keepalive comments, allowing remote IDEs (Cursor, Windsurf, Claude Desktop, Antigravity) to connect over WAN.
+- **Remote MCP (StreamableHTTP & SSE)**: Exposes StreamableHTTP at `/mcp/http` and legacy SSE at `GET /mcp/sse` + `POST /mcp/messages/` with keepalive comments, allowing remote IDEs and cloud orchestrators to connect over WAN.
 - **REST & WebSocket API**:
   - `/api/wallet` & `/api/key/status`: Live credit balance, API key budget limits (`limit_usd`, `spend_usd`, `remaining_usd`, `resets_at`, `free_model_daily_requests`), and `low_budget_warning` (`remaining_usd < $1.00`).
   - `/api/analytics` & `POST /api/analytics/digest`: Aggregated cost/token/cache statistics (`period=week|month|all`) and an optional local-LLM digest loop saved into the Memory Vault.
