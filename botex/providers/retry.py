@@ -240,6 +240,15 @@ def is_daily_quota(exc: BaseException) -> bool:
     return bool(_DAILY_TOKEN_RE.search(text) and _QUOTA_CTX_RE.search(text))
 
 
+async def _traced_attempt(
+    factory: Callable[[], Awaitable[Any]], provider: str, attempt: int
+) -> Any:
+    from botex.core.tracing import start_span
+
+    with start_span("botex.retry.attempt", {"provider": provider, "attempt": attempt}):
+        return await factory()
+
+
 async def call_with_backoff(
     provider: Any,
     factory: Callable[[], Awaitable[Any]],
@@ -296,7 +305,7 @@ async def call_with_backoff(
         breaker.can_execute(breaker_name)
     if not cfg["enabled"]:
         try:
-            result = await factory()
+            result = await _traced_attempt(factory, breaker_name, 0)
         except Exception as exc:
             _note_breaker_outcome(breaker, breaker_name, provider, exc)
             raise
@@ -306,7 +315,7 @@ async def call_with_backoff(
     waits = 0
     while True:
         try:
-            result = await factory()
+            result = await _traced_attempt(factory, breaker_name, waits)
         except Exception as exc:
             if waits >= cfg["max_waits"] or not provider.is_retryable(exc) or is_daily_quota(exc):
                 _note_breaker_outcome(breaker, breaker_name, provider, exc)

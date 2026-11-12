@@ -5,7 +5,7 @@ BoteX FastAPI Cloud Gateway & Remote MCP SSE Server
 ===================================================
 Production-ready cloud gateway exposing BoteX harness capabilities:
 1. Zero Friction Local / Strict Cloud Bearer Token authentication.
-2. Standard Remote Model Context Protocol (MCP) SSE transport at /mcp/sse and /mcp/messages.
+2. Remote Model Context Protocol (MCP): StreamableHTTP at /mcp/http, legacy SSE at /mcp/sse and /mcp/messages.
 3. RESTful endpoints for health probes, OpenRouter wallet balance, autonomous task delegation,
    operator human-in-the-loop approvals, and workspace Memory Vault operations.
 4. Real-time streaming chat over Server-Sent Events (POST /api/chat) and bidirectional WebSockets
@@ -666,7 +666,7 @@ async def _analytics_digest_loop() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _base_lifespan(app: FastAPI):
     # Non-blocking background warmup
     warmup_task = asyncio.create_task(_warmup_caches())
     digest_task: Optional[asyncio.Task] = None
@@ -701,6 +701,62 @@ async def lifespan(app: FastAPI):
         close_index_dbs()
     except Exception:
         logger.exception("Failed closing memory index dbs on shutdown")
+
+
+def _build_mcp_http_app() -> Any:
+    return botex_server.mcp.streamable_http_app(
+        streamable_http_path="/",
+        transport_security=_mcp_transport_security(),
+    )
+
+
+class _MCPHttpHolder:
+    """ASGI indirection so the StreamableHTTP app can be rebuilt per lifespan."""
+
+    def __init__(self) -> None:
+        self.app: Optional[ASGIApp] = None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self.app is None:
+            resp = JSONResponse(status_code=503, content={"detail": "MCP transport not ready"})
+            await resp(scope, receive, send)
+            return
+        if scope.get("type") == "http" and not scope.get("path"):
+            scope = {**scope, "path": "/"}
+
+        async def _send_with_no_buffer(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                hdrs = list(message.get("headers") or [])
+                is_sse_resp = any(
+                    k.lower() == b"content-type" and b"text/event-stream" in v.lower()
+                    for k, v in hdrs
+                )
+                if is_sse_resp and not any(k.lower() == b"x-accel-buffering" for k, _ in hdrs):
+                    hdrs.append((b"x-accel-buffering", b"no"))
+                    message = {**message, "headers": hdrs}
+            await send(message)
+
+        await self.app(scope, receive, _send_with_no_buffer)
+
+
+_mcp_http_holder = _MCPHttpHolder()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from botex.core.tracing import init_tracing
+
+    init_tracing()
+    # Mounted sub-apps do not receive lifespan events, and a session manager
+    # can run only once, so each app lifetime builds a fresh StreamableHTTP app.
+    http_app = _build_mcp_http_app()
+    _mcp_http_holder.app = http_app
+    try:
+        async with http_app.router.lifespan_context(http_app):
+            async with _base_lifespan(app):
+                yield
+    finally:
+        _mcp_http_holder.app = None
 
 
 app = FastAPI(
@@ -830,11 +886,12 @@ class CloudAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Normalize /mcp/messages to prevent Starlette Mount 307 redirects on POST
-        if path == "/mcp/messages":
-            scope["path"] = "/mcp/messages/"
+        # Normalize /mcp/messages and /mcp/http to prevent Starlette Mount 307/404 on POST
+        if path in ("/mcp/messages", "/mcp/http"):
+            normalized = f"{path}/"
+            scope["path"] = normalized
             if "raw_path" in scope:
-                scope["raw_path"] = b"/mcp/messages/"
+                scope["raw_path"] = normalized.encode("ascii")
 
         # Reject payloads exceeding 25 MiB to prevent memory exhaustion / OOM on constrained VPS
         headers = dict(scope.get("headers", []))
@@ -1006,6 +1063,9 @@ _mcp_transport = next(
     (r.app.__self__ for r in _mcp_subapp.routes if hasattr(getattr(r, "app", None), "__self__")),
     None,
 )
+# StreamableHTTP transport (current MCP spec) at /mcp/http; SSE stays for older clients.
+# Bearer auth is enforced per request by the auth middleware (any /mcp/* path).
+app.mount("/mcp/http", _mcp_http_holder)
 app.mount("/mcp", _MCPSseErrorGuard(_mcp_subapp))
 
 

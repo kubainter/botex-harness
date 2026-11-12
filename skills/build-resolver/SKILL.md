@@ -1,90 +1,107 @@
 ---
 name: build-resolver
-version: 2.0.0
-description: Surgical build and type-error diagnostic and repair skill. Resolves compilation failures, missing dependencies, and linter/type-checker errors with minimal code diffs and zero scope drift.
-botex_recipe: build-resolver
-tags: [build, compiler, typecheck, troubleshooting, minimal-diff]
+version: "2.0.0"
+description: Use when diagnosing and fixing compilation, type-checker, or linter failures with minimal diffs and verified re-build execution.
+taxonomy: [bugfix]
+metadata:
+  author: Swarm Protocol Team
+  tags: [build, compiler, typecheck, troubleshooting, minimal-diff]
+  botex_recipe: build-resolver
 ---
 
 # Build & Type-Error Resolver Skill
 
+## Purpose
+
+Diagnose and repair compilation, type-checking, and linting failures using minimal, surgical diffs followed by mandatory re-build verification via `run_command`.
+
+## Worker Honesty Contract
+
+- **Strict Scope**: Operate strictly within declared target files and contract boundaries. Report any out-of-scope issues in `findings` or `blocking_reason`; never fix or edit out-of-scope files.
+- **DECIDE -> BLOCKED**: If a required capability (`exec`, `net`, `destructive`) or prerequisite is missing, return `status: "BLOCKED"` with `blocking_reason` immediately; never bypass or fabricate. For medium-confidence reversible choices, act within scope and record them in `assumptions[]`.
+- **Verification Ledger**: Label every result claim `verified` (with observed command + `exit_code`), `partially_verified`, or `unverified`. Never claim `SUCCESS`, `GREEN`, or `works` without observed evidence from this run.
+- **Environment Guard**: Never read, print, or process `.env` or secret files; always mark them as `not inspected`.
+
+## Prerequisites
+
+- Execution capability enabled: `mode="full"` (or `mode="edit"` + `allow_exec=true` + `verify_command`) with `exec.enabled=true` on the BoteX server.
+- Reproducible build, type-check, or lint command (e.g., `mypy botex/`, `npm run build`, `cargo check`).
+
+## Limitations
+
+- Cannot verify fixes if `allow_exec` is disabled; in `edit`-only mode without `run_command`, the worker MUST return `BLOCKED` rather than claiming the build is fixed.
+- Does not perform architectural refactoring, dependency upgrades, or formatting sweeps outside the failing symbols.
+
 ## 1. Multi-Agent Delegation Contract (Delegacja do BoteXa)
-Gdy agent zewnętrzny (Antigravity, Devin, Codex) zleca naprawę błędu buildu do BoteXa:
-- **MCP Tool:** `botex.start_task` lub `botex.run_subagent`
+
+- **MCP Tool:** `botex.start_task` or `botex.run_subagent`
 - **Recipe:** `build-resolver`
-- **Tryb:** `edit` (BoteX lokalizuje błąd w logach kompilacji, aplikuje chirurgiczny patch i weryfikuje ponownym buildem)
-- **Format zlecenia:**
+- **Execution Mode (Critical):** MUST use `mode="full"` OR `mode="edit"` with `allow_exec=true` and `verify_command` set. Do NOT use `edit`-only, because re-build verification requires `run_command`.
+
 ```markdown
 ### GOAL
-Zdiagnozuj i napraw błąd kompilacji / typowania / lintingu: [krótki opis błędu lub komenda która pada].
+Diagnose and fix the build/type error for `mypy botex/` with minimal diff and verified re-build.
 
 ### CONSTRAINTS & CONTEXT
-- Zasada Minimal Diff: Wprowadź wyłącznie minimalne zmiany konieczne do zielonego buildu.
-- Zero Refactoring: Zakaz przepisywania architektury, zmian formatowania czy sprzątania kodu pobocznego.
-- Scope: [pliki zgłaszające błędy kompilatora/lintera]
+- Minimal Diff: Only touch lines required to resolve the compiler/type error.
+- Scope: [botex/server_cloud.py]
 
 ### REFS
-- Build Logs / Command: [np. `pytest`, `mypy botex/`, `npm run build`, `cargo check`]
-- Memory Vault Key: [opcjonalny klucz pamięci]
+- Verify Command: `mypy botex/`
+- Memory Vault Key: [build/repair-server-cloud]
 ```
 
----
+## 2. Canonical Engineering Rules
 
-## 2. Canonical Engineering Rules (Zasady Chirurgicznej Naprawy)
+### Filar I: Minimal Diff Invariant
+- Single objective: restore green build (`exit_code: 0`).
+- Zero refactoring, zero style reformatting, zero unrelated cleanup.
 
-### Filar I: Zasada Minimalnego Diffu (Minimal Diff Invariant)
-- **Cel pojedynczy:** Przywrócenie stanu zielonego buildu (`exit code 0`).
-- **Zakaz dryfu:** Naprawa błędu buildu to NIE jest moment na refaktoryzację, zmianę bibliotek, modernizację architektury czy formatowanie kodu.
-- **Odwracalność:** Każdy patch musi być zwięzły, czytelny i łatwy do zrewidowania w Code Review.
+### Filar II: Root-Cause Diagnosis
+1. Inspect the **first** error in the build output (downstream errors are often cascading).
+2. Classify the failure: missing import/dependency, type mismatch / signature drift, language version syntax mismatch, or circular import.
 
-### Filar II: Diagnoza Przyczyny Pierwotnej (Root-Cause Diagnosis)
-1. **Lokalizacja błędu:** Zbadaj pierwszy błąd w logu kompilacji (błędy kaskadowe poniżej często wynikają z pierwszego).
-2. **Kategorie awarii:**
-   - *Missing Import / Dependency:* Brakujący moduł, brakująca biblioteka w `requirements.txt` / `package.json` / `Cargo.toml`.
-   - *Type Mismatch / Signature Drift:* Zmiana sygnatury w upstreamie, niezgodność typów `Optional[T]` vs `T`, niekompatybilne generyki.
-   - *Syntax & Syntax Compatibility:* Błędy składniowe, użycie funkcji z nowszej wersji języka niż wspierana w środowisku (np. Python 3.10 match-case w 3.9).
-   - *Circular Dependency:* Zapętlenie importów w czasie ładowania modułów.
+### Filar III: Verification Loop
+1. **Reproduce:** Run the failing command via `run_command` and record exact error + exit code.
+2. **Surgical Patch:** Apply minimal fix via `apply_patch`.
+3. **Re-Build:** Re-run the exact same command; `build_status.status` is `"verified"` ONLY when observed `exit_code == 0`.
 
-### Filar III: Pętla Weryfikacji (Verification Loop)
-1. **Reprodukcja:** Uruchom komendę wywołującą błąd (`run_command`), rejestrując dokładny kod błędu i linię.
-2. **Surgical Patch:** Zastosuj punktową poprawkę (`apply_patch`).
-3. **Re-Test:** Uruchom tę samą komendę buildu. Upewnij się, że błąd ustąpił i nie pojawiły się nowe błędy w powiązanych modułach.
+## 3. Stack-Specific Repair Patterns
 
----
+- **Python / Mypy / Pyright:** `Item "None" of "Optional[X]" has no attribute "Y"` -> add guard clause `if val is None: raise ValueError(...)` or narrowing check.
+- **TypeScript / ESLint:** `Type 'X | undefined' is not assignable to type 'X'` -> optional chaining `?.`, nullish coalescing `??`, or type guard.
+- **Rust / Cargo:** `cannot borrow as mutable more than once` -> narrow borrow scope `{ ... }`, pass `&`, or `.clone()` if appropriate.
 
-## 3. Typowe Błędy i Wzorce Naprawcze według Stosu
-- **Python / Mypy / Pyright:**
-  - *Błąd:* `Item "None" of "Optional[X]" has no attribute "Y"`
-  - *Fix:* Dodanie asercji lub guard clause: `if val is None: return ...` lub `assert val is not None`.
-- **TypeScript / ESLint:**
-  - *Błąd:* `Type 'X | undefined' is not assignable to type 'X'`
-  - *Fix:* Optional chaining `?.`, nullish coalescing `??`, lub narrowing przez `typeof`/`if`.
-- **Rust / Cargo:**
-  - *Błąd:* `cannot borrow as mutable more than once at a time` / `value moved here`
-  - *Fix:* Klonowanie jeśli dozwolone (`.clone()`), refaktoryzacja zakresu borrowa `{ ... }`, lub przekazywanie referencji `&`.
+## 4. Structured Handoff & Memory Contract
 
----
+**Repo-Relative Paths:** All `artifact_refs` MUST be repo-relative POSIX paths (e.g., `botex/server_cloud.py`).
 
-## 4. Structured Handoff & Memory Contract (Portable Remote/VPS Format)
-> **Zasada Ścieżek Przenośnych (Repo-Relative Paths):** Wszelkie wpisy w `artifact_refs` MUSZĄ być ścieżkami względnymi względem roota repozytorium z separatorami Unix (`/`), np. `botex/server_cloud.py`. Bezwzględny zakaz stosowania ścieżek bezwzględnych (`C:\...`, `/home/...`).
-
-Zakończenie zadania naprawy buildu musi zwrócić ustrukturyzowany blok:
 ```json
 {
-  "status": "DONE" | "FAILED" | "BLOCKED",
-  "summary": "Syntetyczne podsumowanie: zdiagnozowany błąd pierwotny, nałożony patch, wynik re-kompilacji",
+  "status": "DONE",
+  "summary": "Fixed Optional[str] narrowing in botex/server_cloud.py; mypy exited 0.",
   "build_status": {
     "command": "mypy botex/",
     "exit_code": 0,
-    "status": "SUCCESS"
+    "status": "verified"
   },
-  "artifact_refs": [
-    "botex/server_cloud.py"
+  "assumptions": [
+    {
+      "claim": "None value on config_path is an invalid caller state",
+      "status": "verified",
+      "evidence": "botex/server_cloud.py:42 raises ValueError on empty path"
+    }
   ],
-  "memory_keys": [
-    "build/repair-<module-name>"
-  ],
+  "artifact_refs": ["botex/server_cloud.py"],
+  "memory_keys": ["build/repair-server-cloud"],
   "blocking_reason": null
 }
 ```
-Zapisz wpis diagnostyczny w BoteX Memory Vault.
+
+## Troubleshooting
+
+| Error | Cause | Solution |
+|---|---|---|
+| `BLOCKED` (missing `run_command`) | Delegated with `mode="edit"` without `allow_exec=true`. | Re-dispatch with `mode="full"` or `mode="edit"` + `allow_exec=true` + `verify_command`. |
+| `VERIFICATION_FAILED` | Patch fixed primary error but exposed secondary type error or failed `verify_command` 3 times. | Inspect scratchpad logs, address the next root error, and re-run. |
+| Out-of-scope file fails build | Error originates in a file outside declared `Scope`. | Report the out-of-scope file in `blocking_reason` and return `BLOCKED`; do not edit undeclared files. |

@@ -77,14 +77,14 @@ Register BoteX using the included zero-install launchers (`botex.cmd` on Windows
 }
 ```
 
-#### Option B: Remote MCP via SSE (Cloud or VPS)
-Start the gateway with `botex cloud` and connect via Server-Sent Events (SSE):
+#### Option B: Remote MCP (Cloud or VPS)
+Start the gateway with `botex cloud` and connect via StreamableHTTP (`/mcp/http`) or legacy SSE (`/mcp/sse`):
 
 ```json
 {
   "mcpServers": {
     "botex-cloud": {
-      "url": "http://127.0.0.1:8000/mcp/sse",
+      "url": "http://127.0.0.1:8000/mcp/http",
       "headers": {
         "Authorization": "Bearer <your_token>"
       }
@@ -405,7 +405,7 @@ botex cloud --host 0.0.0.0 --port 8000
 ```
 *Zero-Friction Local mode runs unauthenticated when `BOTEX_ACCESS_TOKEN` is unset. Set `BOTEX_ACCESS_TOKEN` in `.env` to enforce Bearer token verification on all protected endpoints.*
 
-REST surface (all under `/api/`): `health`, `wallet`, `key/status`, `analytics` (+`POST analytics/digest`), `models`, `models/recommended`, `recipes`, `skills` (+`/{name}`), `tasks` (+`/{id}`, `/{id}/cancel`, `/{id}/followup`, `/{id}/events` SSE), `approvals` (+`/{id}/decide`), `memory` (+`/graph`, `/backlinks`), `curator/status`, `curator/run`, `rate_limits`, `delegation/devin`, `chat` (+`/abort`, `/sessions`, `/sessions/{id}`, `/sessions/{id}/save_to_memory`), and WebSocket `/api/chat/ws`. `/api/health`, `/api/delegation/devin`, and the PWA shell stay public.
+REST surface (all under `/api/`): `health`, `wallet`, `key/status`, `analytics` (+`POST analytics/digest`), `models`, `models/recommended`, `recipes`, `skills` (+`/{name}`), `tasks` (+`/{id}`, `/{id}/cancel`, `/{id}/followup`, `/{id}/events` SSE), `approvals` (+`/{id}/decide`), `memory` (+`/graph`, `/backlinks`), `curator/status`, `curator/run`, `rate_limits`, `delegation/devin`, `chat` (+`/abort`, `/sessions`, `/sessions/{id}`, `/sessions/{id}/save_to_memory`), and WebSocket `/api/chat/ws`. `/api/health` and the PWA shell stay public; `/api/delegation/devin` requires Bearer authentication like all other `/api/*` routes.
 
 ### Maintenance & Observability
 
@@ -465,7 +465,7 @@ botex/
   retry.py             Shared transient-failure backoff (429 / connection errors / Google 503 overload) & provider circuit breaker
   benchmarks.py        Live model recommendations (recommend_models) & task-tier estimator
   contracts.py         Task completion verification, status taxonomy & canonical handoff schema
-  tracing.py           OTel-style span helpers (landed; wiring in progress)
+  tracing.py           OTel-style span helpers (engine, retry, recall_curator, server_cloud)
   skills.py            Server-side Skill Vault, safe install/update & L0 task triage
   recipes.py           Recipe loading & system-prompt injection
   i18n.py / ui.py      CLI language & status rendering

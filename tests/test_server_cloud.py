@@ -1117,3 +1117,39 @@ def test_resolve_local_llm_base_url_probe_failure_degrades():
         out = _resolve_local_llm_base_url("ollama", cfg)
     assert out is cfg
     _LOCAL_LLM_BASE_URL_RESOLVED.clear()
+
+
+def test_devin_status_endpoint_requires_token(client, monkeypatch):
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
+    assert client.get("/api/delegation/devin").status_code == 401
+    assert client.get("/api/health").status_code == 200
+
+
+def test_streamable_http_mcp_requires_token(client, monkeypatch):
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
+    resp = client.post("/mcp/http", json={})
+    assert resp.status_code == 401
+
+
+def test_streamable_http_mcp_initialize(client, monkeypatch):
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
+    resp = client.post(
+        "/mcp/http",
+        headers={
+            "Authorization": "Bearer super-secret-key-12345",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0"},
+            },
+        },
+    )
+    assert resp.status_code == 200
+    assert "serverInfo" in resp.text
