@@ -25,9 +25,7 @@ from botex.server.server_cloud import (
 
 def test_extract_mcp_origin_from_headers():
     assert (
-        _extract_mcp_origin_from_headers(
-            {b"x-agent-id": b"devin", b"x-host": b"Botek"}
-        )
+        _extract_mcp_origin_from_headers({b"x-agent-id": b"devin", b"x-host": b"Botek"})
         == "devin@Botek"
     )
     assert _extract_mcp_origin_from_headers({b"x-agent-id": b"zcode"}) == "zcode"

@@ -14,8 +14,8 @@ All paths declared in the config are resolved against the project root
 (the directory containing this ``botex`` package) unless absolute.
 """
 
-import copy
 import contextvars
+import copy
 import fnmatch
 import json
 import os

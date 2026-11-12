@@ -41,7 +41,6 @@ from botex.chat import (
     stream_chat_turn,
 )
 from botex.config import (
-    MCP_CLIENT_ORIGIN,
     WorkspaceOutOfBounds,
     get_mcp_client_origin,
     is_cross_host_windows_path,
@@ -976,7 +975,11 @@ async def save_memory(
         origin: Optional provenance identifier '<agent>@<host>'. Falls back to X-Agent-Id@X-Host session header or 'botex'.
     """
     effective_origin = str(origin or "").strip() or get_mcp_client_origin("botex")
-    ws = "." if str(scope).strip().lower() == "global" and is_cross_host_windows_path(workspace_dir) else resolve_workspace(workspace_dir)
+    ws = (
+        "."
+        if str(scope).strip().lower() == "global" and is_cross_host_windows_path(workspace_dir)
+        else resolve_workspace(workspace_dir)
+    )
     return _save_memory(
         workspace_dir=ws,
         title=title,
