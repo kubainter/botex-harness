@@ -76,6 +76,7 @@ from botex.catalog import (
 )
 from botex.chat import default_chat_manager, stream_chat_turn
 from botex.config import (
+    MCP_CLIENT_ORIGIN,
     WorkspaceOutOfBounds,
     analytics_setting,
     get_tasks_dir,
@@ -876,12 +877,12 @@ class CloudAuthMiddleware:
                 return
 
             logger.info("Zero Friction Local mode: allowing unauthenticated request to %s", path)
-            tok = botex_server.MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
+            tok = MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
             try:
                 await self.app(scope, receive, send)
             finally:
                 if tok is not None:
-                    botex_server.MCP_CLIENT_ORIGIN.reset(tok)
+                    MCP_CLIENT_ORIGIN.reset(tok)
             return
 
         # Extract token from Authorization header or query parameter
@@ -906,12 +907,12 @@ class CloudAuthMiddleware:
                     sid.hex for sid in getattr(_mcp_transport, "_read_stream_writers", {}).keys()
                 }
                 if session_id in active_sessions:
-                    tok = botex_server.MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
+                    tok = MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
                     try:
                         await self.app(scope, receive, send)
                     finally:
                         if tok is not None:
-                            botex_server.MCP_CLIENT_ORIGIN.reset(tok)
+                            MCP_CLIENT_ORIGIN.reset(tok)
                     return
 
         # Constant-time token verification (supports plain token and SHA-256 hash)
@@ -926,12 +927,12 @@ class CloudAuthMiddleware:
             await resp(scope, receive, send)
             return
 
-        tok = botex_server.MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
+        tok = MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
         try:
             await self.app(scope, receive, send)
         finally:
             if tok is not None:
-                botex_server.MCP_CLIENT_ORIGIN.reset(tok)
+                MCP_CLIENT_ORIGIN.reset(tok)
 
 
 # ---------------------------------------------------------------------------

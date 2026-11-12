@@ -127,3 +127,37 @@ def test_sse_error_guard_injects_no_buffering_header():
     assert len(sent_messages) == 1
     hdrs = dict(sent_messages[0]["headers"])
     assert hdrs.get(b"x-accel-buffering") == b"no"
+
+
+def test_cloud_auth_middleware_populates_mcp_client_origin(monkeypatch):
+    from botex.server.server_cloud import CloudAuthMiddleware
+
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "tok-test")
+    seen_origin = []
+
+    async def inner(scope, receive, send):
+        seen_origin.append(MCP_CLIENT_ORIGIN.get(""))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    mw = CloudAuthMiddleware(inner)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/mcp/sse",
+        "headers": [
+            (b"authorization", b"Bearer tok-test"),
+            (b"x-agent-id", b"devin"),
+            (b"x-host", b"Botek"),
+        ],
+    }
+
+    async def _noop_receive():
+        return {"type": "http.request", "body": b""}
+
+    async def _noop_send(_msg):
+        pass
+
+    asyncio.run(mw(scope, _noop_receive, _noop_send))
+    assert seen_origin == ["devin@Botek"]
+    assert MCP_CLIENT_ORIGIN.get("") == ""
