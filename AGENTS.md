@@ -147,9 +147,10 @@ External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge)
 ### 6.4. Memory Vault & Zero-Bloat Knowledge Recall (`recall_memory`)
 - When querying project context, architectural decisions, or prior lessons from BoteX Memory Vault, ALWAYS use `recall_memory(query="...")` first via direct MCP.
 - `recall_memory` performs automatic 1-hop graph expansion (wikilinks + backlinks) and server-side curator synthesis (hedged 4-tier cascade: local qwen2.5:3b → NVIDIA → Gemini → OR-free), returning concise facts and cited sources in 1 turn without token-stuffing agent history.
-- **ALWAYS pass `workspace_dir="C:\Users\kubai\.ai\harness"`** when querying swarm knowledge — the swarm vault lives in the harness repo, and the default workspace resolves elsewhere (verified trap: `recall_status=ZERO_NODES_FOUND` usually means wrong vault, not a dead model). Every response now carries `recall_status`, `tier_attempts`, `workspace_searched` — read them before assuming a miss.
-- Swarm knowledge is also reachable via `scope="swarm"` (third read-only root, configured in `paths.swarm_memory_dir`); `scope="all"` includes it when configured.
-- Use `read_memory(memory_id="...")` only when exact raw note contents must be inspected for surgical editing. Avoid multi-turn `search_memory` hunting loops; if you must use `search_memory`, pass the same `workspace_dir`.
+- **Vault Locality (Cloud-First):** Shared swarm knowledge lives in **BoteX Cloud** (`scope="global"`, `project="swarm"`). Physical vault location follows the called server endpoint (`botex` cloud vs `botex-local`), not `scope` alone. Never pass local Windows `workspace_dir` paths (`C:\Users\...`) to a remote Linux VPS for swarm queries — use `scope="global"`, `project="swarm"`, `workspace_dir=""` (remote `save_memory` also auto-populates `origin` from `X-Agent-Id`/`X-Host` headers or the `origin` parameter).
+- Local notes (`scope="local"`) are reserved for workspace-private context or ephemeral `temp-handoff` entries (`tags=["temp-handoff"]`, `expires: YYYY-MM-DD`), which are swept automatically by the Curator.
+- Swarm knowledge is also reachable via `scope="swarm"` (optional third read-only root, configured in `paths.swarm_memory_dir`); `scope="all"` includes it when configured.
+- Use `read_memory(memory_id="...")` only when exact raw note contents must be inspected for surgical editing. Avoid multi-turn `search_memory` hunting loops. Every `recall_memory` response carries `recall_status`, `tier_attempts`, `workspace_searched` — inspect them before assuming a miss.
 
 
 
