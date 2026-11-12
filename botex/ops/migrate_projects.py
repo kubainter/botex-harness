@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from botex.memory.memory import (
     _normalize_project_slug,
     _parse_frontmatter,
+    _raw_project_slug,
     _resolve_scope_dirs,
     _serialize_frontmatter,
     get_global_memory_dir,
@@ -31,10 +32,14 @@ from botex.tools.security import sanitize_for_storage
 
 logger = logging.getLogger(__name__)
 
-SENTINEL_FILENAME = ".project_backfill_v2.done"
+SENTINEL_FILENAME = ".project_backfill_v3.done"
 
 # Canonical renames applied to previously assigned project slugs.
-_LEGACY_PROJECT_SLUGS = {"swarm-skills": "swarm"}
+_LEGACY_PROJECT_SLUGS = {
+    "swarm-skills": "swarm",
+    "the-witcher-3-wild-hunt-goty": "witcher3",
+    "witcher-3": "witcher3",
+}
 
 
 def infer_project_from_note(meta: Dict[str, Any], body: str, stem: str) -> str:
@@ -149,16 +154,28 @@ def migrate_memory_dir(
             if not meta and not raw_text.lstrip().startswith("---"):
                 continue
 
-            existing_proj = _normalize_project_slug(meta.get("project"))
-            remap = _LEGACY_PROJECT_SLUGS.get(existing_proj)
-            if existing_proj and existing_proj != "_unassigned" and not force and remap is None:
+            raw_proj = _raw_project_slug(meta.get("project"))
+            existing_proj = _normalize_project_slug(raw_proj)
+            remap = _LEGACY_PROJECT_SLUGS.get(raw_proj)
+            if (
+                raw_proj
+                and raw_proj != "_unassigned"
+                and not force
+                and remap is None
+                and raw_proj == existing_proj
+            ):
                 project_counts[existing_proj] = project_counts.get(existing_proj, 0) + 1
                 continue
 
-            inferred = remap or infer_project_from_note(meta, body, file_p.stem)
+            if remap is not None:
+                inferred = remap
+            elif existing_proj and existing_proj != "_unassigned" and raw_proj != existing_proj:
+                inferred = existing_proj
+            else:
+                inferred = infer_project_from_note(meta, body, file_p.stem)
             project_counts[inferred] = project_counts.get(inferred, 0) + 1
 
-            if existing_proj == inferred:
+            if raw_proj == inferred:
                 continue
 
             meta["project"] = inferred
@@ -239,8 +256,9 @@ def consolidate_mangled_windows_dirs(
                 raw = src.read_text(encoding="utf-8", errors="replace")
                 meta, body = _parse_frontmatter(raw)
                 meta["scope"] = "global"
-                existing = _normalize_project_slug(meta.get("project"))
-                remapped = _LEGACY_PROJECT_SLUGS.get(existing)
+                raw_existing = _raw_project_slug(meta.get("project"))
+                existing = _normalize_project_slug(raw_existing)
+                remapped = _LEGACY_PROJECT_SLUGS.get(raw_existing)
                 if remapped:
                     meta["project"] = remapped
                 elif existing and existing != "_unassigned":

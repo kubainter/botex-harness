@@ -2119,6 +2119,7 @@ async def trigger_curator_run_endpoint(
         force=body.force,
         model_override=body.model_override,
         notify_telegram=body.notify_telegram,
+        max_batches=1,
     )
     return botex_server.mask_secrets_recursive(res)
 

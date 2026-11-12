@@ -66,6 +66,7 @@ __all__ = [
     "VALID_KINDS",
     "VALID_SCOPES",
     "VALID_STATUSES",
+    "set_memory_status",
     "MAX_MEMORY_BYTES",
     "SCHEMA_VERSION",
 ]
@@ -351,8 +352,34 @@ def _sanitize_id(memory_id: str) -> str:
     return safe
 
 
-def _normalize_project_slug(project: Optional[str]) -> str:
-    """Normalize a project identifier into a canonical lowercase slug ([a-z0-9_-], max 64 chars)."""
+_PROJECT_ALIASES: Dict[str, str] = {
+    "the-witcher-3-wild-hunt-goty": "witcher3",
+    "witcher-3": "witcher3",
+}
+
+
+def _get_project_aliases() -> Dict[str, str]:
+    """Return canonical project alias map, merging optional ``memory.project_aliases`` config."""
+    aliases = dict(_PROJECT_ALIASES)
+    try:
+        from botex.config import load_config
+
+        cfg = load_config()
+        mem_cfg = cfg.get("memory") if isinstance(cfg, dict) else None
+        extra = mem_cfg.get("project_aliases") if isinstance(mem_cfg, dict) else None
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                rk = _raw_project_slug(str(k))
+                rv = _raw_project_slug(str(v))
+                if rk and rv and rk != "_unassigned" and rv != "_unassigned":
+                    aliases[rk] = rv
+    except Exception:
+        pass
+    return aliases
+
+
+def _raw_project_slug(project: Optional[str]) -> str:
+    """Normalize raw project text to a slug without applying alias unification."""
     if project is None:
         return ""
     raw = str(project).strip().lower()
@@ -362,6 +389,14 @@ def _normalize_project_slug(project: Optional[str]) -> str:
         return "_unassigned"
     slug = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-_")
     return sanitize_for_storage(slug[:64])
+
+
+def _normalize_project_slug(project: Optional[str]) -> str:
+    """Normalize a project identifier into a canonical lowercase slug ([a-z0-9_-], max 64 chars)."""
+    slug = _raw_project_slug(project)
+    if not slug or slug == "_unassigned":
+        return slug
+    return _get_project_aliases().get(slug, slug)
 
 
 def _find_existing_memory_file(mem_dir: Path, mid: str) -> Optional[Path]:
@@ -1852,6 +1887,100 @@ def patch_memory_section(
         return {"ok": False, "error": f"Failed to patch section: {exc}"}
 
 
+_LEDGER_TAGS = frozenset({"task-receipt", "task_report", "temp-handoff", "ephemeral"})
+
+
+def _is_ledger_node(node: Dict[str, Any]) -> bool:
+    """Return True for ephemeral/operational ledger or deprecated nodes excluded from orphan_count."""
+    # Exclude deprecated / superseded notes from orphan counting (terminal state)
+    status = str(node.get("status") or "").strip().lower()
+    if status in ("deprecated", "superseded"):
+        return True
+    nid = str(node.get("id") or "").strip().lower()
+    if nid == "curator_health_status" or nid.startswith("task-receipt") or nid.startswith("task_report"):
+        return True
+    tags = {str(t).strip().lower().lstrip("#") for t in (node.get("tags") or [])}
+    return bool(tags & _LEDGER_TAGS)
+
+
+def set_memory_status(
+    workspace_dir: str,
+    memory_id: str,
+    status: str,
+    superseded_by: Optional[str] = None,
+    reason: str = "",
+    scope: str = "all",
+) -> bool:
+    """Update note status (e.g. deprecated / superseded) without losing provenance.
+
+    Preserves original timestamp, custom frontmatter keys, and adds an audit line
+    into ## Timeline containing [[canonical_id]] so an active graph edge is formed.
+    """
+    clean_id = _sanitize_id(memory_id)
+    norm_status = str(status).strip().lower()
+    if norm_status not in VALID_STATUSES:
+        raise ValueError(f"Invalid status '{status}'. Must be one of {sorted(VALID_STATUSES)}")
+
+    search_dirs = _resolve_scope_dirs(workspace_dir, scope)
+    target_path: Optional[Path] = None
+    for s_dir, _ in search_dirs:
+        cand = _find_existing_memory_file(s_dir, clean_id)
+        if cand is not None:
+            target_path = cand
+            break
+
+    if target_path is None or not target_path.exists():
+        logger.warning("set_memory_status: Note '%s' not found", clean_id)
+        return False
+
+    mem_dir = target_path.parent
+    try:
+        timeline_msg = f"Status updated to '{norm_status}'."
+        if superseded_by:
+            clean_super = _sanitize_id(superseded_by.strip("[]"))
+            timeline_msg = f"Deprecated in favor of [[{clean_super}]]."
+        if reason:
+            timeline_msg += f" Reason: {reason.strip()}"
+
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        audit_line = f"- {today_str}: {timeline_msg}"
+
+        # 1. Append audit line to Timeline section using patch_memory_section
+        patch_res = patch_memory_section(
+            workspace_dir=workspace_dir,
+            memory_id=clean_id,
+            section="Timeline",
+            new_content=audit_line,
+            append=True,
+            scope=scope,
+        )
+        if not patch_res.get("ok"):
+            logger.warning("set_memory_status: patch_memory_section failed for %s: %s", clean_id, patch_res.get("error"))
+            return False
+
+        # 2. Update status in frontmatter preserving all keys & original timestamp
+        updated_raw = target_path.read_text(encoding="utf-8", errors="replace")
+        up_meta, up_body = _parse_frontmatter(updated_raw)
+        up_meta["status"] = norm_status
+        if superseded_by:
+            up_meta["superseded_by"] = _sanitize_id(superseded_by.strip("[]"))
+
+        new_doc = sanitize_for_storage(_serialize_frontmatter(up_meta, up_body))
+        target_path.write_text(new_doc, encoding="utf-8")
+
+        conn = _get_index_db(mem_dir)
+        try:
+            _index_memory_file(mem_dir, conn, target_path)
+        finally:
+            conn.close()
+
+        logger.info("set_memory_status: Note '%s' updated to status='%s'", clean_id, norm_status)
+        return True
+    except Exception as exc:
+        logger.error("set_memory_status: Failed on '%s': %s", clean_id, exc)
+        return False
+
+
 def find_graph_health(
     workspace_dir: str = ".",
     scope: str = "local",
@@ -1876,7 +2005,7 @@ def find_graph_health(
             conn = _get_index_db(mem_dir)
             try:
                 rows = conn.execute(
-                    "SELECT id, title, kind, tags, status, compiled_truth FROM memories_meta;"
+                    "SELECT id, title, kind, tags, status, compiled_truth, project, mtime, confidence FROM memories_meta;"
                 ).fetchall()
                 for r in rows:
                     mid = r["id"]
@@ -1895,6 +2024,11 @@ def find_graph_health(
                         "compiled_truth": bool(r["compiled_truth"]),
                         "tags": tags_list,
                         "scope": sc,
+                        "project": _normalize_project_slug(r["project"]) if r["project"] else "",
+                        "mtime": float(r["mtime"] or 0.0),
+                        "confidence": float(
+                            r["confidence"] if r["confidence"] is not None else 1.0
+                        ),
                     }
 
                 edge_rows = conn.execute(
@@ -1925,11 +2059,20 @@ def find_graph_health(
             else:
                 broken_links.append({"source": src, "target": tgt})
 
-        orphans = [
+        isolated_nodes = [
             node_metadata[nid]
             for nid in all_ids
             if in_deg.get(nid, 0) == 0 and out_deg.get(nid, 0) == 0
         ]
+        ledger_nodes = [n for n in isolated_nodes if _is_ledger_node(n)]
+        orphans = sorted(
+            (n for n in isolated_nodes if not _is_ledger_node(n)),
+            key=lambda n: (str(n.get("project") or ""), str(n.get("id") or "")),
+        )
+        all_nodes_sorted = sorted(
+            node_metadata.values(),
+            key=lambda n: (str(n.get("project") or ""), str(n.get("id") or "")),
+        )
 
         # Cycle detection via iterative DFS (O(V+E), no recursion limit)
         adj: Dict[str, List[str]] = {nid: [] for nid in all_ids}
@@ -1985,6 +2128,9 @@ def find_graph_health(
             "broken_count": len(broken_links),
             "orphans": orphans,
             "orphan_count": len(orphans),
+            "ledger_count": len(ledger_nodes),
+            "all_nodes": all_nodes_sorted,
+            "edges": edges,
             "cycles": cycles,
             "cycle_count": len(cycles),
             "is_healthy": is_healthy,

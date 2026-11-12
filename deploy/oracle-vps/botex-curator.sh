@@ -2,7 +2,7 @@
 # ==============================================================================
 # botex-curator.sh - Autonomous Knowledge Graph Nightly Curator (Bielik LLM)
 # ==============================================================================
-# Fired nightly at 03:30 by botex-nightly-curator.timer.
+# Fired nightly at 01:00 by botex-nightly-curator.timer (window 01:00-05:30).
 # Operating Principles:
 # 1. Non-destructive: Never alters original technical conclusions or code.
 # 2. Append-only linking: Enriches graph topology via verified wikilinks.
@@ -53,7 +53,7 @@ fi
 
 # 3. Execute Curator Logic via Unified Python Service
 log "Dispatching curation engine via botex.ops.curator.curator_service..."
-"$PYTHON_BIN" -m botex.ops.curator.curator_service --scope all
+"$PYTHON_BIN" -m botex.ops.curator.curator_service --scope all --window-end 05:30 --apply-links --apply-truth
 
 log "Nightly Knowledge Graph Curation cycle completed successfully."
 
