@@ -1970,6 +1970,26 @@ async def post_install_skill(body: SkillInstallRequest) -> Dict[str, Any]:
         taxonomy=body.taxonomy,
     )
     if not res.get("ok"):
+        audit_status = res.get("audit_status")
+        if audit_status == "REJECT":
+            masked_detail = botex_server.mask_secrets_recursive(
+                {"error": res.get("error"), "audit": res.get("audit")}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=masked_detail,
+            )
+        if audit_status == "SCANNER_ERROR":
+            masked_detail = botex_server.mask_secrets_recursive(
+                {
+                    "error": res.get("error")
+                    or "Skill security scanner failed or timed out. Installation aborted."
+                }
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=masked_detail,
+            )
         err_msg = coerce_text(mask_secrets(str(res.get("error") or "Failed to install skill.")))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -85,6 +85,27 @@ else
 fi
 log_ok "Python environment ready."
 
+# 5.1 SkillSpector security gate binary provisioning (isolated tools directory)
+log_info "Provisioning NVIDIA SkillSpector security scanner binary..."
+mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/tools"
+chown -R botex:botex "$INSTALL_DIR/bin" "$INSTALL_DIR/tools"
+if ! command -v uv &>/dev/null; then
+    export UV_INSTALL_DIR="/usr/local/bin"
+    curl -LsSf https://astral.sh/uv/install.sh | sh || true
+fi
+export PATH="$PATH:/usr/local/bin:$INSTALL_DIR/bin"
+if command -v uv &>/dev/null; then
+    sudo -u botex env "PATH=$PATH" "HOME=/home/botex" uv tool install --tool-dir "$INSTALL_DIR/tools" --bin-dir "$INSTALL_DIR/bin" "skillspector[mcp] @ git+https://github.com/NVIDIA/skillspector.git" || log_warn "Failed to install skillspector via uv; will attempt venv fallback."
+fi
+if [ ! -f "$INSTALL_DIR/bin/skillspector" ]; then
+    log_info "Provisioning skillspector via dedicated /opt/skillspector-venv fallback..."
+    python3 -m venv /opt/skillspector-venv || true
+    if [ -d "/opt/skillspector-venv" ]; then
+        /opt/skillspector-venv/bin/pip install "skillspector[mcp] @ git+https://github.com/NVIDIA/skillspector.git" || log_warn "Failed to install skillspector into /opt/skillspector-venv"
+        ln -sf /opt/skillspector-venv/bin/skillspector "$INSTALL_DIR/bin/skillspector" || true
+    fi
+fi
+
 # 6. Environment configuration (.env)
 if [ ! -f "$INSTALL_DIR/.env" ]; then
     log_info "Generating secure default .env configuration..."

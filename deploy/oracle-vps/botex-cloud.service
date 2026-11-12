@@ -17,6 +17,7 @@ WorkingDirectory=/opt/botex
 # BoteX also loads that file itself via python-dotenv; this additionally exposes
 # the variables in the process environment. '-' prefix = ignore if missing.
 EnvironmentFile=-/opt/botex/.env
+Environment="PATH=/opt/botex/bin:/opt/botex/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 
 # Single worker is a hard invariant: task registry, idempotency cache and the
 # SSE replay buffer are per-process (see botex/server_cloud.py).

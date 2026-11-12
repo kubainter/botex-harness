@@ -444,6 +444,11 @@ export interface SkillCatalogItem {
   size_bytes: number
   path: string
   preview?: string
+  audit_verdict?: 'PASS' | 'REJECT' | 'UNVERIFIED_NO_SCANNER' | 'SCANNER_ERROR' | string
+  audit_risk_score?: number
+  audit_scanner?: string
+  audit_scanned_at?: string
+  audit_scanner_version?: string
 }
 
 export interface SkillDetail extends SkillCatalogItem {

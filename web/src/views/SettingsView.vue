@@ -306,6 +306,26 @@
                 >
                   {{ tax }}
                 </span>
+                <span
+                  v-if="sk.audit_verdict === 'PASS'"
+                  class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-950/60 text-emerald-300 border border-emerald-700/60 flex items-center gap-1"
+                  :title="sk.audit_scanner ? `Audited by ${sk.audit_scanner} (Score: ${sk.audit_risk_score ?? 0})` : 'Verified'"
+                >
+                  ✓ {{ locale === 'pl' ? 'Zweryfikowany' : 'Verified' }} (Score: {{ sk.audit_risk_score ?? 0 }})
+                </span>
+                <span
+                  v-else-if="sk.audit_verdict === 'UNVERIFIED_NO_SCANNER'"
+                  class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700"
+                  title="Scanner not available during install"
+                >
+                  {{ locale === 'pl' ? 'Niezweryfikowany' : 'Unverified' }}
+                </span>
+                <span
+                  v-else-if="sk.audit_verdict"
+                  class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-950/60 text-amber-300 border border-amber-700/60"
+                >
+                  {{ sk.audit_verdict }}
+                </span>
               </div>
               <p class="text-xs text-slate-200">{{ sk.description }}</p>
             </div>
@@ -884,9 +904,18 @@ async function handleInstallSkill() {
       await fetchSkills()
     }
   } catch (err: any) {
+    let errMsg = err?.message || 'Failed to install skill'
+    if (err?.payload && typeof err.payload === 'object') {
+      const p = err.payload as any
+      if (p.audit?.reason) {
+        errMsg = `${locale.value === 'pl' ? 'Odrzucono przez SkillSpector' : 'Rejected by SkillSpector'}: ${p.audit.reason}`
+      } else if (p.error) {
+        errMsg = p.error
+      }
+    }
     skillStatusBanner.value = {
       ok: false,
-      message: err?.message || 'Failed to install skill'
+      message: errMsg
     }
   } finally {
     installingSkill.value = false

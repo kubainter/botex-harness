@@ -70,11 +70,13 @@ export const authError = ref<string | null>(null)
 export class ApiError extends Error {
   status: number
   detail: string
-  constructor(status: number, detail: string) {
+  payload?: unknown
+  constructor(status: number, detail: string, payload?: unknown) {
     super(`API Error ${status}: ${detail}`)
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
+    this.payload = payload
   }
 }
 
@@ -103,9 +105,20 @@ async function request<T>(
 
   if (!response.ok) {
     let errorDetail = response.statusText
+    let payload: unknown = undefined
     try {
       const errJson = await response.json()
-      errorDetail = errJson.detail || errJson.message || JSON.stringify(errJson)
+      payload = errJson
+      if (typeof errJson.detail === 'string') {
+        errorDetail = errJson.detail
+      } else if (errJson.detail && typeof errJson.detail === 'object') {
+        errorDetail = errJson.detail.error || errJson.detail.message || JSON.stringify(errJson.detail)
+        payload = errJson.detail
+      } else if (errJson.message) {
+        errorDetail = errJson.message
+      } else {
+        errorDetail = JSON.stringify(errJson)
+      }
     } catch {
       try {
         const text = await response.text()
@@ -117,7 +130,7 @@ async function request<T>(
     if (response.status === 401 || response.status === 403) {
       authError.value = `HTTP ${response.status}`
     }
-    throw new ApiError(response.status, errorDetail)
+    throw new ApiError(response.status, errorDetail, payload)
   }
 
   authError.value = null

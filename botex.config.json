@@ -240,5 +240,13 @@
   },
   "cloud": {
     "allowed_workspaces": []
+  },
+  "skills": {
+    "audit": {
+      "enabled": true,
+      "risk_threshold": 30,
+      "timeout_s": 90,
+      "binary_path": "skillspector"
+    }
   }
 }
