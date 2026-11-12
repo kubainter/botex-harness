@@ -17,6 +17,11 @@ STRICT INVARIANTS:
 2. ZERO HALLUCINATION: You may only recommend wikilinks to existing note IDs provided in the CANDIDATE_NODES list. Do NOT invent new node IDs.
 3. CONCISE & ACTIONABLE: Provide structured recommendations and an executive summary of graph health.
 
+LINKING POLICY (Cloud-First / Swarm):
+4. PROJECT & RUN LOCALITY: Prefer [[wikilink]] recommendations between nodes sharing the same "project" (especially project="swarm") and within the same swarm run (tags trio:<run_id>, arena:<run_id>). Recommend cross-project links only for strong architectural convergence.
+5. TEMP-HANDOFF ISOLATION: Nodes tagged "temp-handoff" are ephemeral and expire. NEVER recommend linking durable notes (decision, lesson, heuristic, context, belief) to temp-handoff nodes — expired handoffs would produce broken_links. Instead flag stale or orphaned temp-handoff nodes in orphan_insights for the sweep.
+6. KNOWLEDGE EVOLUTION CHAINS: Recommend linking lower/medium-confidence "lesson"/"belief" notes to the high-confidence "decision"/"heuristic" notes that confirm them, forming verifiable evolution chains across the 6 memory kinds.
+
 OUTPUT FORMAT:
 Respond with a valid JSON object matching the following structure:
 {
@@ -62,6 +67,9 @@ def build_curator_user_prompt(
                 "title": n.get("title"),
                 "kind": n.get("kind"),
                 "tags": n.get("tags", []),
+                "project": n.get("project"),
+                "origin": n.get("origin"),
+                "confidence": n.get("confidence", 1.0),
             }
             for n in orphan_nodes[:25]
         ],
@@ -72,6 +80,9 @@ def build_curator_user_prompt(
                 "title": n.get("title"),
                 "kind": n.get("kind"),
                 "tags": n.get("tags", []),
+                "project": n.get("project"),
+                "origin": n.get("origin"),
+                "confidence": n.get("confidence", 1.0),
             }
             for n in recent_nodes[:30]
         ],
@@ -120,6 +131,9 @@ def build_recall_user_prompt(query: str, nodes: list[dict]) -> str:
             "kind": str(node.get("kind") or ""),
             "scope": str(node.get("scope") or ""),
             "relation": str(node.get("relation") or ""),
+            "project": str(node.get("project") or ""),
+            "origin": str(node.get("origin") or ""),
+            "confidence": node.get("confidence", 1.0),
         }
         note_blocks.append(
             f"NOTE {idx} METADATA: {json.dumps(meta, ensure_ascii=False)}\n"

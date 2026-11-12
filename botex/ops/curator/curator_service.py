@@ -160,6 +160,10 @@ def check_active_agent_tasks() -> bool:
     return False
 
 
+def _has_temp_handoff_tag(node: Dict[str, Any]) -> bool:
+    return any(str(t).strip().lower() == "temp-handoff" for t in node.get("tags") or [])
+
+
 def _compute_deterministic_recommendations(
     orphan_nodes: List[Dict[str, Any]],
     all_nodes: List[Dict[str, Any]],
@@ -168,10 +172,16 @@ def _compute_deterministic_recommendations(
     recommended_links = []
     orphan_insights = []
 
+    orphan_ids = {o.get("id") for o in orphan_nodes}
+    # Ephemeral temp-handoff nodes are never valid link targets: they expire and
+    # would leave broken_links behind.
+    non_orphans = [
+        n for n in all_nodes if n.get("id") not in orphan_ids and not _has_temp_handoff_tag(n)
+    ]
+    node_by_id = {n.get("id"): n for n in non_orphans}
+
     # Map words & tags to non-orphan nodes
     tag_to_nodes: Dict[str, List[str]] = {}
-    non_orphans = [n for n in all_nodes if n.get("id") not in {o.get("id") for o in orphan_nodes}]
-
     for node in non_orphans:
         nid = node.get("id")
         for tag in node.get("tags") or []:
@@ -182,13 +192,36 @@ def _compute_deterministic_recommendations(
     for orphan in orphan_nodes:
         oid = orphan.get("id")
         otitle = orphan.get("title", "")
-        otags = [str(t).strip().lower() for t in orphan.get("tags") or []]
 
-        candidates = set()
+        # An orphaned temp-handoff is pending sweep, not integration.
+        if _has_temp_handoff_tag(orphan):
+            orphan_insights.append(
+                {
+                    "note_id": oid,
+                    "observation": (
+                        f"Notatka tymczasowa '{otitle}' (temp-handoff) — podlega sweepowi "
+                        "po dacie `expires`; trwałe notatki nie powinny do niej linkować."
+                    ),
+                }
+            )
+            continue
+
+        otags = [str(t).strip().lower() for t in orphan.get("tags") or []]
+        o_project = str(orphan.get("project") or "").strip()
+
+        candidates: List[tuple] = []  # (target_id, rationale, same_project)
+        seen: set = set()
         for t in otags:
             for matched in tag_to_nodes.get(t, [])[:3]:
-                if matched != oid:
-                    candidates.add((matched, f"Wspólny tag #{t}"))
+                if matched == oid or matched in seen:
+                    continue
+                seen.add(matched)
+                target_project = str((node_by_id.get(matched) or {}).get("project") or "").strip()
+                same_proj = bool(o_project) and o_project == target_project
+                rationale = f"Wspólny tag #{t}"
+                if same_proj:
+                    rationale += " (ten sam project)"
+                candidates.append((matched, rationale, same_proj))
 
         # If no tag match, check words in title (> 4 chars)
         if not candidates and otitle:
@@ -197,13 +230,19 @@ def _compute_deterministic_recommendations(
                 ntitle = node.get("title", "").lower()
                 matched_words = [w for w in words if w in ntitle]
                 if matched_words:
-                    candidates.add(
-                        (node.get("id"), f"Zbieżność tematyczna: {', '.join(matched_words)}")
-                    )
+                    target_project = str(node.get("project") or "").strip()
+                    same_proj = bool(o_project) and o_project == target_project
+                    rationale = f"Zbieżność tematyczna: {', '.join(matched_words)}"
+                    if same_proj:
+                        rationale += " (ten sam project)"
+                    candidates.append((node.get("id"), rationale, same_proj))
                     if len(candidates) >= 2:
                         break
 
-        for target_id, rationale in list(candidates)[:2]:
+        # Same-project candidates take precedence; stable ordering otherwise.
+        candidates.sort(key=lambda c: not c[2])
+
+        for target_id, rationale, _same_proj in candidates[:2]:
             recommended_links.append(
                 {
                     "source_id": oid,
