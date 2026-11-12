@@ -438,8 +438,7 @@ def _mtime_hash(node: Dict[str, Any]) -> str:
 def _cluster_mtime_hash(cluster_nodes: List[Dict[str, Any]]) -> str:
     """Stable hash of cluster members' mtimes to detect if constituent notes changed."""
     items = sorted(
-        f"{str(n.get('id', ''))}:{float(n.get('mtime', 0.0) or 0.0):.3f}"
-        for n in cluster_nodes
+        f"{str(n.get('id', ''))}:{float(n.get('mtime', 0.0) or 0.0):.3f}" for n in cluster_nodes
     )
     raw = "|".join(items)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
@@ -478,15 +477,18 @@ def _build_project_batches(
 ) -> List[Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]]:
     """Partition pending orphans by canonical project into batches with top-30 anchors."""
     pending = [
-        o for o in orphans
-        if not memory._is_ledger_node(o) and drain_state.get(str(o.get("id") or "")) != _mtime_hash(o)
+        o
+        for o in orphans
+        if not memory._is_ledger_node(o)
+        and drain_state.get(str(o.get("id") or "")) != _mtime_hash(o)
     ]
     if not pending:
         return []
 
     orphan_ids = {str(o.get("id") or "") for o in orphans}
     anchors_all = [
-        n for n in all_nodes
+        n
+        for n in all_nodes
         if str(n.get("id") or "") not in orphan_ids and not memory._is_ledger_node(n)
     ]
     anchors_by_project: Dict[str, List[Dict[str, Any]]] = {}
@@ -500,7 +502,8 @@ def _build_project_batches(
         )
     fallback_anchors = sorted(
         (
-            a for a in anchors_all
+            a
+            for a in anchors_all
             if str(a.get("kind") or "") in ("decision", "lesson")
             and float(a.get("confidence") or 1.0) >= 0.8
         ),
@@ -965,11 +968,13 @@ class CuratorService:
         lane_cfg = providers_cfg.get(lane) if isinstance(providers_cfg.get(lane), dict) else {}
         if lane == "nvidia":
             api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
-            model = self.primary_model or (lane_cfg.get("models") or {}).get("fast") or DEFAULT_PRIMARY_MODEL
+            model = (
+                self.primary_model
+                or (lane_cfg.get("models") or {}).get("fast")
+                or DEFAULT_PRIMARY_MODEL
+            )
             extra_body = (
-                {"chat_template_kwargs": {"thinking": False}}
-                if "nemotron-3" in model
-                else None
+                {"chat_template_kwargs": {"thinking": False}} if "nemotron-3" in model else None
             )
         elif lane == "openrouter-free":
             api_key = (
@@ -1121,8 +1126,10 @@ class CuratorService:
         await asyncio.gather(*(_worker(lane) for lane in active_lanes))
 
         unique_tiers = list(dict.fromkeys(tiers_used))
-        primary_tier = unique_tiers[0] if len(unique_tiers) == 1 else (
-            "+".join(unique_tiers) if unique_tiers else "deterministic"
+        primary_tier = (
+            unique_tiers[0]
+            if len(unique_tiers) == 1
+            else ("+".join(unique_tiers) if unique_tiers else "deterministic")
         )
         summary = (
             f"Przetworzono {processed} paczek projektowych ({len(all_recs)} rekomendacji linków"
@@ -1454,13 +1461,17 @@ class CuratorService:
             # Human Freeze Gate:
             # if source/origin == "human" or tags contain "human-curated" or "frozen",
             # or note contains ## Compiled Truth WITHOUT the marker <!-- curator:ct , SKIP IT!
-            source_val = str(
-                meta.get("source")
-                or meta.get("origin")
-                or cand.get("source")
-                or cand.get("origin")
-                or ""
-            ).strip().lower()
+            source_val = (
+                str(
+                    meta.get("source")
+                    or meta.get("origin")
+                    or cand.get("source")
+                    or cand.get("origin")
+                    or ""
+                )
+                .strip()
+                .lower()
+            )
             if source_val == "human":
                 skipped_records.append({"target_id": target_id, "reason": "human_freeze_source"})
                 continue
@@ -1479,16 +1490,22 @@ class CuratorService:
                 skipped_records.append({"target_id": target_id, "reason": "human_freeze_tag"})
                 continue
 
-            has_ct_section = bool(re.search(r"^#{1,6}\s*Compiled Truth\b", raw_text, re.MULTILINE | re.IGNORECASE))
+            has_ct_section = bool(
+                re.search(r"^#{1,6}\s*Compiled Truth\b", raw_text, re.MULTILINE | re.IGNORECASE)
+            )
             has_curator_marker = "<!-- curator:ct " in raw_text
             if (has_ct_section or "## Compiled Truth" in raw_text) and not has_curator_marker:
-                skipped_records.append({"target_id": target_id, "reason": "human_freeze_manual_section"})
+                skipped_records.append(
+                    {"target_id": target_id, "reason": "human_freeze_manual_section"}
+                )
                 continue
 
             # Cluster formation:
             # 1-hop in+out neighbours from health.get("edges", []) with same project, status == "active", non-ledger;
             # cap 6 notes; truncate each note content to 1000 chars.
-            target_project = memory._normalize_project_slug(cand.get("project") or meta.get("project") or "")
+            target_project = memory._normalize_project_slug(
+                cand.get("project") or meta.get("project") or ""
+            )
             if target_project == "_unassigned":
                 target_project = ""
             neighbour_ids: set[str] = set()
@@ -1522,7 +1539,11 @@ class CuratorService:
                 continue
 
             valid_neighbours.sort(
-                key=lambda x: (float(x.get("confidence") or 1.0), float(x.get("mtime") or 0.0), str(x.get("id"))),
+                key=lambda x: (
+                    float(x.get("confidence") or 1.0),
+                    float(x.get("mtime") or 0.0),
+                    str(x.get("id")),
+                ),
                 reverse=True,
             )
             cluster_nodes = valid_neighbours[:6]
@@ -1541,7 +1562,9 @@ class CuratorService:
             cluster_for_prompt: List[Dict[str, Any]] = []
             for cn in cluster_nodes:
                 cid = str(cn.get("id"))
-                loaded = memory._load_recall_node(workspace_dir=str(self.ws_path), memory_id=cid, scope="all")
+                loaded = memory._load_recall_node(
+                    workspace_dir=str(self.ws_path), memory_id=cid, scope="all"
+                )
                 content = (loaded.get("content") or "") if loaded else ""
                 cn_copy = dict(cn)
                 cn_copy["content"] = content[:1000]
@@ -1556,7 +1579,9 @@ class CuratorService:
 
             raw_output = await self._infer_compiled_truth(user_prompt)
             if not raw_output:
-                skipped_records.append({"target_id": target_id, "reason": "inference_failed_or_unavailable"})
+                skipped_records.append(
+                    {"target_id": target_id, "reason": "inference_failed_or_unavailable"}
+                )
                 continue
 
             try:
@@ -1575,10 +1600,14 @@ class CuratorService:
                     continue
                 raw_truth = str(parsed.get("compiled_truth") or "").strip()
                 if not raw_truth:
-                    skipped_records.append({"target_id": target_id, "reason": "empty_compiled_truth"})
+                    skipped_records.append(
+                        {"target_id": target_id, "reason": "empty_compiled_truth"}
+                    )
                     continue
             except Exception as exc:
-                skipped_records.append({"target_id": target_id, "reason": f"json_parse_error: {exc}"})
+                skipped_records.append(
+                    {"target_id": target_id, "reason": f"json_parse_error: {exc}"}
+                )
                 continue
 
             allowed_ids = {target_id} | {str(c.get("id")) for c in cluster_nodes}
@@ -1586,11 +1615,14 @@ class CuratorService:
             truth_text = _clean_truth_citations(raw_truth, allowed_ids)
 
             clean_sources: List[str] = []
-            for s in (parsed.get("sources") or []):
+            for s in parsed.get("sources") or []:
                 s_id = str(s).strip().strip("[]").split("|")[0].strip()
                 if s_id in allowed_ids and s_id not in clean_sources:
                     clean_sources.append(s_id)
-                elif s_id.lower() in allowed_lower and allowed_lower[s_id.lower()] not in clean_sources:
+                elif (
+                    s_id.lower() in allowed_lower
+                    and allowed_lower[s_id.lower()] not in clean_sources
+                ):
                     clean_sources.append(allowed_lower[s_id.lower()])
             sources = clean_sources
 
@@ -1604,7 +1636,12 @@ class CuratorService:
                     scope="all",
                 )
                 if not patch_res.get("ok"):
-                    skipped_records.append({"target_id": target_id, "reason": f"patch_failed: {patch_res.get('error')}"})
+                    skipped_records.append(
+                        {
+                            "target_id": target_id,
+                            "reason": f"patch_failed: {patch_res.get('error')}",
+                        }
+                    )
                     continue
 
             compiled_records.append(

@@ -171,6 +171,7 @@ Respond with a valid JSON object matching the following structure:
 def build_compiled_truth_user_prompt(target_node: dict, cluster_nodes: list[dict]) -> str:
     """Construct prompt for synthesizing ## Compiled Truth on a mature target note."""
     import json
+
     from botex.security import wrap_untrusted_content
 
     cluster_blocks = []
@@ -200,4 +201,3 @@ def build_compiled_truth_user_prompt(target_node: dict, cluster_nodes: list[dict
         f"Synthesize an authoritative, cited 'Compiled Truth' summary for '{target_title}' ([[{target_id}]]).\n"
         f"Return ONLY a valid JSON object matching the specified schema."
     )
-

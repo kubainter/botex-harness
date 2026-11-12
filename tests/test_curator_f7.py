@@ -319,7 +319,10 @@ async def test_cloud_lane_forwards_openrouter_provider_cfg(tmp_path, monkeypatch
     providers_cfg = svc._load_providers_config()
     assert "openrouter-free" in providers_cfg
     assert (
-        providers_cfg["openrouter-free"].get("extra_body", {}).get("provider", {}).get("data_collection")
+        providers_cfg["openrouter-free"]
+        .get("extra_body", {})
+        .get("provider", {})
+        .get("data_collection")
         == "allow"
     )
 
@@ -336,7 +339,9 @@ async def test_cloud_lane_forwards_openrouter_provider_cfg(tmp_path, monkeypatch
         out = await svc._try_cloud_lane_inference("openrouter-free", "prompt", providers_cfg, None)
 
     assert out == '{"summary":"ok"}'
-    mock_get.assert_called_once_with("openrouter-free", provider_cfg=providers_cfg["openrouter-free"])
+    mock_get.assert_called_once_with(
+        "openrouter-free", provider_cfg=providers_cfg["openrouter-free"]
+    )
     call_kwargs = mock_client.chat.completions.create.call_args.kwargs
     assert call_kwargs["extra_body"]["provider"]["data_collection"] == "allow"
 
@@ -390,7 +395,10 @@ def test_set_memory_status_updates_status_adds_timeline_edge_and_preserves_front
     assert meta["kind"] == "decision"
     # Timeline section with active edge [[modern_node]]
     assert "## Timeline" in raw_text
-    assert "Deprecated in favor of [[modern_node]]. Reason: Superseded by event-driven architecture." in raw_text
+    assert (
+        "Deprecated in favor of [[modern_node]]. Reason: Superseded by event-driven architecture."
+        in raw_text
+    )
 
     # Graph edge created
     health = find_graph_health(workspace_dir=str(ws), scope="local")
@@ -468,7 +476,7 @@ async def test_run_compiled_truth_phase_candidate_selection_and_human_freeze_gat
             workspace_dir=str(ws),
             memory_id=f"sat_{i}",
             title=f"Satellite {i}",
-            content=f"Reference to [[hub_target]] in cluster.",
+            content="Reference to [[hub_target]] in cluster.",
             kind="context",
             tags=["core"],
             project="botex",
@@ -820,14 +828,22 @@ async def test_compiled_truth_candidate_selection_ignores_self_loops_and_duplica
     health = find_graph_health(workspace_dir=str(ws), scope="local")
     edges_with_dups = list(health["edges"])
     # Add self-loop edge and duplicate edge
-    edges_with_dups.append({"source": "self_loop_hub", "target": "self_loop_hub", "kind": "wikilink"})
-    edges_with_dups.append({"source": "single_pred_sat", "target": "single_pred_hub", "kind": "wikilink"})
-    edges_with_dups.append({"source": "single_pred_sat", "target": "single_pred_hub", "kind": "wikilink"})
+    edges_with_dups.append(
+        {"source": "self_loop_hub", "target": "self_loop_hub", "kind": "wikilink"}
+    )
+    edges_with_dups.append(
+        {"source": "single_pred_sat", "target": "single_pred_hub", "kind": "wikilink"}
+    )
+    edges_with_dups.append(
+        {"source": "single_pred_sat", "target": "single_pred_hub", "kind": "wikilink"}
+    )
     health["edges"] = edges_with_dups
 
     svc = CuratorService(workspace_dir=str(ws))
     svc._infer_compiled_truth = AsyncMock(
-        return_value=json.dumps({"compiled_truth": "Synthesized [[genuine_sat_1]].", "sources": ["genuine_sat_1"]})
+        return_value=json.dumps(
+            {"compiled_truth": "Synthesized [[genuine_sat_1]].", "sources": ["genuine_sat_1"]}
+        )
     )
 
     res = await svc._run_compiled_truth_phase(health, apply_truth=True, max_clusters=5)
@@ -892,4 +908,3 @@ async def test_compiled_truth_source_brackets_and_alias_citation_cleaning(tmp_pa
     assert "[[sub_1|Subsystem One]]" in body
     assert "[[sub_2]]" in body
     assert "phantom_ghost" not in body
-

@@ -1897,7 +1897,11 @@ def _is_ledger_node(node: Dict[str, Any]) -> bool:
     if status in ("deprecated", "superseded"):
         return True
     nid = str(node.get("id") or "").strip().lower()
-    if nid == "curator_health_status" or nid.startswith("task-receipt") or nid.startswith("task_report"):
+    if (
+        nid == "curator_health_status"
+        or nid.startswith("task-receipt")
+        or nid.startswith("task_report")
+    ):
         return True
     tags = {str(t).strip().lower().lstrip("#") for t in (node.get("tags") or [])}
     return bool(tags & _LEDGER_TAGS)
@@ -1955,7 +1959,11 @@ def set_memory_status(
             scope=scope,
         )
         if not patch_res.get("ok"):
-            logger.warning("set_memory_status: patch_memory_section failed for %s: %s", clean_id, patch_res.get("error"))
+            logger.warning(
+                "set_memory_status: patch_memory_section failed for %s: %s",
+                clean_id,
+                patch_res.get("error"),
+            )
             return False
 
         # 2. Update status in frontmatter preserving all keys & original timestamp
