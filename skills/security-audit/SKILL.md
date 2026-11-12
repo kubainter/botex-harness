@@ -1,102 +1,125 @@
 ---
 name: security-audit
-version: 2.0.0
-description: Comprehensive application security audit, multi-language taint analysis, and vulnerability hardening. Aligned with OWASP Top 10, CWE standards, and defensive engineering patterns.
-botex_recipe: security-reviewer
-secondary_recipe: security-taint-hardener
-tags: [security, owasp, taint-analysis, hardening, cwe]
+version: "2.0.0"
+description: Use when auditing code for OWASP/CWE vulnerabilities, tracing taint flows, or applying strict-scope input hardening.
+taxonomy: [analysis]
+metadata:
+  author: Swarm Protocol Team
+  tags: [security, owasp, taint-analysis, hardening, cwe]
+  botex_recipe: security-reviewer
+  secondary_recipe: security-taint-hardener
 ---
 
 # Defensive Security Audit & Taint Analysis Skill
 
+## Purpose
+
+Conduct multi-language application security audits aligned with OWASP Top 10 and CWE standards, trace source-to-sink taint flows with explicit confidence labels, and apply strict-scope input hardening.
+
+## Worker Honesty Contract
+
+- **Strict Scope**: Operate strictly within declared target files and contract boundaries. Report any out-of-scope vulnerabilities in `findings` or `blocking_reason`; never fix or edit out-of-scope files.
+- **DECIDE -> BLOCKED**: If a required capability (`exec`, `net`, `destructive`) or target file is missing, return `status: "BLOCKED"` with `blocking_reason` immediately; never bypass or fabricate. For medium-confidence reversible choices, act within scope and record them in `assumptions[]`.
+- **Verification Ledger**: Label every result claim `verified` (full taint trace or observed check) or `suspected` / `unverified`. Never claim `SUCCESS` or `secure` without observed evidence from this run.
+- **Environment Guard**: Never read, print, or process `.env` or secret files; always mark them as `not inspected`.
+
+## Prerequisites
+
+- `mode="readonly"` for `security-reviewer` audits; `mode="edit"` (strictly scoped to declared target files) for `security-taint-hardener`.
+- Declared target files or endpoints in `files` / `Scope`.
+
+## Limitations
+
+- Static taint analysis cannot resolve all runtime reflection, dynamic imports, or external WAF/proxy rules; mark unconfirmed paths as `suspected`.
+- `.env` files, private keys, and production secrets are never inspected (`not inspected`).
+
 ## 1. Multi-Agent Delegation Contract (Delegacja do BoteXa)
-Gdy agent zewnętrzny (Antigravity, Devin, Codex) zleca audyt bezpieczeństwa do BoteXa:
-- **MCP Tool:** `botex.start_task` lub `botex.run_subagent`
-- **Recipe:** 
-  - `security-reviewer` (w trybie readonly do analizy i raportowania podatności)
-  - `security-taint-hardener` (w trybie edit do implementacji filtrów i walidacji wejść)
-- **Format zlecenia:**
+
+- **MCP Tool:** `botex.start_task` or `botex.run_subagent`
+- **Recipes:**
+  - `security-reviewer` (`mode="readonly"`): taint analysis and vulnerability reporting.
+  - `security-taint-hardener` (`mode="edit"`): strict-scope input validation and sanitization **only in declared target files**.
+
 ```markdown
 ### GOAL
-Przeprowadź audyt bezpieczeństwa i analizę przepływu danych (Taint Analysis) w wyznaczonych modułach.
+Audit src/api/export.py for path traversal and command injection; label each finding verified or suspected.
 
 ### CONSTRAINTS & CONTEXT
-- Zakres: [moduły sieciowe, endpointy API, parsery, operacje filesystem/subprocess]
-- Zasady: Zero tolerancji dla twardych sekretów, SQLi, SSRF i Command Injection.
-- Ochrona .env: Ścisły zakaz odczytu plików .env i sekretów produkcyjnych.
+- Mode: readonly (audit) or edit (strict-scope hardening on declared files only)
+- Scope: [src/api/export.py]
+- Environment Guard: Never read .env files; mark as not inspected.
 
 ### REFS
-- Files: [file:///...]
-- Memory Vault Key: [opcjonalny klucz pamięci]
+- Files: [src/api/export.py]
+- Memory Vault Key: [security/audit-export]
 ```
 
----
+## 2. Canonical Engineering Rules
 
-## 2. Canonical Engineering Rules (Wspólny Rdzeń Bezpieczeństwa)
-Każdy audyt musi przejść przez weryfikację wektorów ataku według klasyfikacji CWE / OWASP Top 10:
+### Filar I: Taint Flow Analysis (Sources -> Sanitizers -> Sinks)
+- **Command Injection (CWE-78):** `subprocess.Popen(..., shell=True)`, `os.system()`, `child_process.exec()` -> remediate with `shell=False` / `execFile` + argument arrays + allowlists.
+- **Path Traversal (CWE-22):** `open()`, `Path.joinpath()`, `fs.readFile()` -> remediate with `Path.resolve()` + `resolved.is_relative_to(base_dir)`.
+- **SQL Injection (CWE-89):** String concatenation in queries -> remediate with parameterized queries.
+- **Unsafe Deserialization / Eval (CWE-502 / CWE-95):** `pickle.loads()`, `yaml.load()` without `SafeLoader`, `eval()`, `exec()` -> remediate with JSON + strict DTO/Pydantic validation.
 
-### Filar I: Analiza Przepływu Danych (Taint Flow: Sources -> Sanitizers -> Sinks)
-Zidentyfikuj zewnętrzne źródła danych (*Sources*), sprawdź obecność rygorystycznej walidacji (*Sanitizers*) i zbadaj miejsca wykonania (*Sinks*):
-- **Command Injection (CWE-78):**
-  - *Sinks:* `subprocess.Popen(..., shell=True)`, `os.system()`, `child_process.exec()`, `exec.Command("sh", "-c")`.
-  - *Remediation:* Zamiana na tablicę argumentów (`shell=False`, `execFile`), walidacja allowlistą znaków alfanumerycznych.
-- **Path Traversal & Insecure Filesystem (CWE-22):**
-  - *Sinks:* `open()`, `Path.joinpath()`, `fs.readFile()` z parametrem od użytkownika.
-  - *Remediation:* Normalizacja przez `Path.resolve()`, asercja `resolved_path.is_relative_to(base_dir)`.
-- **SQL / Query Injection (CWE-89):**
-  - *Sinks:* Konkatenacja stringów w zapytaniach SQL / NoSQL / ORM raw queries.
-  - *Remediation:* Bezwzględne użycie zapytań parametryzowanych (*prepared statements*).
-- **Unsafe Deserialization & Code Evaluation (CWE-502 / CWE-95):**
-  - *Sinks:* `pickle.loads()`, `yaml.load()` bez `SafeLoader`, `eval()`, `exec()`, `vm.runInContext()`.
-  - *Remediation:* Zastąpienie bezpiecznym parserem JSON lub zdekodowaniem do ściśle typowanego DTO / Pydantic.
+### Filar II: SSRF & Network Boundaries (CWE-918)
+- Validate outbound URLs (`httpx`, `fetch`, `requests`) against loopback (`127.0.0.1`, `localhost`), RFC 1918 private ranges, and link-local metadata (`169.254.169.254`).
 
-### Filar II: SSRF i Ochrona Granic Sieciowych (CWE-918)
-- **Unrestricted Outbound HTTP:**
-  - Weryfikacja docelowych adresów URL przed wykonaniem żądania `httpx`, `fetch`, `requests`.
-  - Blokowanie pętli zwrotnych (`127.0.0.1`, `localhost`), prywatnych podsieci RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) oraz adresów link-local (`169.254.169.254` dla AWS metadata).
+### Filar III: Secrets & Environment Integrity (CWE-798)
+- Zero `.env` access; production code reads secrets only via `os.environ.get()`. Mask `Authorization` headers, cookies, and tokens in logs.
 
-### Filar III: Zarządzanie Sekretami i Integralność Środowiska (CWE-798)
-- **Zero .env Access Protocol:** Bezwzględny zakaz odczytu, wyświetlania lub commitowania plików `.env`, kluczy prywatnych `.pem`, tokenów JWT.
-- **Weryfikacja wyłącznie systemowa:** Odczyt zmiennych wyłącznie przez `os.environ.get()` w kodzie produkcyjnym.
-- **Log Masking:** Wszelkie nagłówki `Authorization`, ciasteczka sesyjne i payloady logowań muszą być maskowane w logach i telemetrii.
+### Filar IV: Access Control & IDOR (CWE-639)
+- Verify ownership/authorization on every resource access rather than trusting caller-supplied `user_id` or `resource_id`.
 
-### Filar IV: Kontrola Dostępu i IDOR (CWE-639)
-- Weryfikacja czy operacje na zasobach sprawdzają tożsamość i uprawnienia bieżącego użytkownika (Ownership Verification), a nie polegają wyłącznie na przekazanym identyfikatorze `user_id` / `resource_id`.
+## 3. Vulnerability Report Format
 
----
+Every finding MUST carry an explicit confidence label:
+- **`verified`**: Full observed taint trace from external `Source` through missing/bypassed `Sanitizer` to `Sink` in inspected code.
+- **`suspected`**: Probable `Source -> Sink` path where sanitizer effectiveness, upstream validation, or dynamic dispatch could not be fully confirmed.
 
-## 3. Direct Execution / Vulnerability Report Format
-Każda wykryta podatność musi zostać opisana według jednolitego schematu:
-- **Title:** Zwięzły opis luki (np. `Path Traversal w module export_report`)
-- **Severity:** `CRITICAL` | `HIGH` | `MEDIUM` | `LOW`
-- **CWE / OWASP:** np. `CWE-22`, `OWASP A01:2021`
-- **Vulnerable Code Location:** `file:///sciezka/plik.ext#L10-L25`
-- **Taint Trace:** Opis wejścia użytkownika i drogi do niebezpiecznego wykonania.
-- **Concrete Fix:** Gotowy snippet kodu remediacyjnego.
+```markdown
+- **Title:** Path Traversal in export_report
+- **Confidence:** verified
+- **Severity:** HIGH | **CWE:** CWE-22 (OWASP A01:2021)
+- **Location:** src/api/export.py:42-51
+- **Taint Trace:** `request.args["file"]` -> `os.path.join(BASE_DIR, filename)` -> `open()` (no `is_relative_to` check).
+- **Concrete Fix:** Resolve path and assert `resolved.is_relative_to(BASE_DIR.resolve())`.
+```
 
----
+## 4. Structured Handoff & Memory Contract
 
-## 4. Structured Handoff & Memory Contract (Portable Remote/VPS Format)
-> **Zasada Ścieżek Przenośnych (Repo-Relative Paths):** Wszelkie wpisy w `artifact_refs` MUSZĄ być ścieżkami względnymi względem roota repozytorium z separatorami Unix (`/`), np. `botex/security.py` lub `docs/security/audit-report.md`. Bezwzględny zakaz stosowania ścieżek bezwzględnych (`C:\...`, `/home/...`).
+**Repo-Relative Paths:** All `artifact_refs` MUST be repo-relative POSIX paths (e.g., `src/api/export.py`).
 
-Zakończenie zadania audytu lub hardeningu musi zwrócić ustrukturyzowany blok:
 ```json
 {
-  "status": "DONE" | "FAILED" | "BLOCKED",
-  "summary": "Syntetyczne podsumowanie audytu bezpieczeństwa i liczby zidentyfikowanych ryzyk",
-  "vulnerabilities": {
-    "critical": 0,
-    "high": 0,
-    "medium": 0,
-    "low": 0
-  },
-  "artifact_refs": [
-    "sciezka/wzgledna/do/pliku.py"
+  "status": "DONE",
+  "summary": "Audited src/api/export.py: 1 verified HIGH (CWE-22), 1 suspected MEDIUM (CWE-918).",
+  "vulnerabilities": { "critical": 0, "high": 1, "medium": 1, "low": 0 },
+  "findings": [
+    {
+      "cwe": "CWE-22",
+      "severity": "HIGH",
+      "confidence": "verified",
+      "location": "src/api/export.py:42-51"
+    }
   ],
-  "memory_keys": [
-    "security/audit-<target-module>"
+  "assumptions": [
+    {
+      "claim": "API gateway does not strip '../' segments before forwarding",
+      "status": "unverified",
+      "evidence": "gateway config not inspected"
+    }
   ],
+  "artifact_refs": ["src/api/export.py"],
+  "memory_keys": ["security/audit-export"],
   "blocking_reason": null
 }
 ```
-Raport bezpieczeństwa (bez wrażliwych sekretów) rejestrowany jest w BoteX Memory Vault.
+
+## Troubleshooting
+
+| Error | Cause | Solution |
+|---|---|---|
+| `BLOCKED` on `.env` check | Task requested inspecting `.env` for leaked secrets. | Never read `.env`; mark as `not inspected` and check `os.environ.get()` usage in code. |
+| Out-of-scope hardening needed | Sanitizer must be added to an undeclared upstream caller. | Report the out-of-scope file in `findings`/`blocking_reason`; harden only declared files. |
+| Overstated `verified` findings | Flagged sink without tracing whether an upstream sanitizer exists. | Downgrade to `suspected` until the full `Source -> Sanitizer -> Sink` path is observed. |
