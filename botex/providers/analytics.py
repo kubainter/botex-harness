@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -310,12 +311,23 @@ def log_run(
     cache_write_tokens: int = 0,
     queue_time_ms: Optional[float] = None,
     generation_time_ms: Optional[float] = None,
+    origin: Optional[str] = None,
+    recipe: Optional[str] = None,
+    routed_tier: Optional[str] = None,
+    taxonomy: Optional[str] = None,
+    applied_skills: Optional[List[str]] = None,
+    applied_lessons: Optional[List[str]] = None,
+    syntax_rejections: int = 0,
+    rollback_count: int = 0,
 ) -> Dict[str, Any]:
     """Record a completed BoteX run into the ledger.
 
     Privacy: the summary is secret-masked before persisting. Unless
     ``analytics.store_full_text`` is enabled, only a truncated preview is
     stored; the complete text survives solely as ``summary_sha256``.
+    Attribution fields (origin/recipe/routed_tier/taxonomy, applied skills
+    and lessons, syntax-rejection and rollback counters) are masked and
+    persisted only when non-empty, so legacy records keep their shape.
     """
     if is_free_model(model, provider_name=provider or ""):
         cost_usd = 0.0
@@ -359,6 +371,28 @@ def log_run(
         entry["queue_time_ms"] = round(float(queue_time_ms), 2)
     if generation_time_ms is not None:
         entry["generation_time_ms"] = round(float(generation_time_ms), 2)
+
+    def _attr_text(val: Optional[str]) -> str:
+        # Flatten CR/LF so untrusted multi-line text cannot forge ledger lines.
+        flat = re.sub(r"[\r\n]+", " ", str(val or "").strip())
+        return coerce_text(mask_secrets(flat))[:64]
+
+    if origin:
+        entry["origin"] = _attr_text(origin)
+    if recipe:
+        entry["recipe"] = _attr_text(recipe)
+    if routed_tier:
+        entry["routed_tier"] = _attr_text(routed_tier)
+    if taxonomy:
+        entry["taxonomy"] = _attr_text(taxonomy)
+    if applied_skills:
+        entry["applied_skills"] = [_attr_text(s) for s in applied_skills][:8]
+    if applied_lessons:
+        entry["applied_lessons"] = [_attr_text(s) for s in applied_lessons][:8]
+    if syntax_rejections and not isinstance(syntax_rejections, bool):
+        entry["syntax_rejections"] = int(syntax_rejections)
+    if rollback_count and not isinstance(rollback_count, bool):
+        entry["rollback_count"] = int(rollback_count)
 
     _append_ledger(entry)
     return entry

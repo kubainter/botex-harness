@@ -91,7 +91,13 @@ _VALID_SCOPES_MAP: dict[str, str] = {
 }
 VALID_SCOPES = frozenset(["local", "global", "swarm", "all"])
 
-VALID_STATUSES = frozenset(["active", "superseded", "deprecated"])
+_VALID_STATUSES_MAP: dict[str, str] = {
+    "active": "active",
+    "superseded": "superseded",
+    "deprecated": "deprecated",
+    "candidate": "candidate",
+}
+VALID_STATUSES = frozenset(_VALID_STATUSES_MAP.keys())
 
 # Recall admission gate (arena-recall S.1): OR-matching admits single-token
 # noise, so admission needs >=2 distinct matched tokens — a lone match only
@@ -1001,9 +1007,13 @@ def save_memory(
             if il not in clean_links:
                 clean_links.append(il)
 
-        norm_status = str(status).strip().lower() if status else "active"
-        if norm_status not in VALID_STATUSES:
-            norm_status = "active"
+        # CWE-020: normalized via static map returning module literals, never
+        # the mutated caller string.
+        norm_status = (
+            _VALID_STATUSES_MAP.get(str(status).strip().lower() if status else "", "active")
+            if status is not None
+            else "active"
+        )
 
         conf_val = _coerce_confidence(confidence)
 
@@ -1080,13 +1090,16 @@ def search_memory(
     until: Optional[str] = None,
     min_confidence: Optional[float] = None,
     project: Optional[str] = None,
+    status: Optional[str] = "active",
 ) -> Dict[str, Any]:
     """
     Search memories by keyword query, tag, or kind across local, global, or all scopes.
     Uses SQLite FTS5 index with fallback to disk scanning.
     ``since``/``until`` are ISO-8601 chronological bounds applied to entry
     timestamps; ``min_confidence`` keeps only entries at or above the given
-    certainty threshold. When a query produces FTS5 hits, spreading
+    certainty threshold. ``status`` filters by lifecycle state (default
+    ``active``); pass ``"all"``, ``""``, or ``None`` to disable the filter
+    (full vault scan). When a query produces FTS5 hits, spreading
     activation over the wikilink edge graph also surfaces directly linked
     notes via reciprocal-rank-fusion bonuses.
     """
@@ -1094,6 +1107,26 @@ def search_memory(
         norm_scope = _VALID_SCOPES_MAP.get(str(scope).strip().lower(), "local")
         if namespace == "_global":
             norm_scope = "global"
+
+        # CWE-020: static-map normalization; only module literals are compared.
+        if isinstance(status, bool):
+            return {
+                "ok": False,
+                "error": "Invalid 'status' filter; expected a string, not a boolean.",
+            }
+        if status is None or (isinstance(status, str) and status.strip().lower() in ("", "all")):
+            status_filter: Optional[str] = None
+        else:
+            raw_status = str(status).strip().lower()
+            status_filter = _VALID_STATUSES_MAP.get(raw_status)
+            if status_filter is None:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Invalid 'status' filter '{coerce_text(str(status))[:32]}'; "
+                        f"expected one of: {', '.join(sorted(VALID_STATUSES))}, all."
+                    ),
+                }
 
         try:
             since_dt = _parse_temporal_bound(since, end_of_day=False)
@@ -1147,6 +1180,7 @@ def search_memory(
             or until_dt is not None
             or min_conf_val is not None
             or target_project is not None
+            or status_filter is not None
         )
         allowed_by_dir: Dict[Path, Optional[set]] = {}
         if filters_active:
@@ -1165,7 +1199,8 @@ def search_memory(
                                 WHERE (? IS NULL OR (timestamp <> '' AND timestamp >= ?))
                                   AND (? IS NULL OR (timestamp <> '' AND timestamp <= ?))
                                   AND (? IS NULL OR confidence >= ?)
-                                  AND (? IS NULL OR project = ?);
+                                  AND (? IS NULL OR project = ?)
+                                  AND (? IS NULL OR status = ?);
                                 """,
                                 (
                                     since_str,
@@ -1176,6 +1211,8 @@ def search_memory(
                                     min_conf_val,
                                     target_project,
                                     target_project,
+                                    status_filter,
+                                    status_filter,
                                 ),
                             ).fetchall()
                             ids_set = {r["id"] for r in rows}
@@ -1272,6 +1309,12 @@ def search_memory(
 
                     # Filter by kind
                     if kind_lower and entry_kind != kind_lower:
+                        continue
+
+                    # Lifecycle gate: candidate/deprecated/superseded entries
+                    # never leak into status-scoped searches, regardless of
+                    # whether the SQLite pre-filter was reachable.
+                    if status_filter is not None and entry_status != status_filter:
                         continue
 
                     # Filter by tag
@@ -1522,8 +1565,14 @@ def list_memories(
     kind: Optional[str] = None,
     namespace: Optional[str] = None,
     project: Optional[str] = None,
+    status: Optional[str] = "active",
 ) -> Dict[str, Any]:
-    """List memory entries for the given workspace and scope."""
+    """List memory entries for the given workspace and scope.
+
+    ``status`` selects the lifecycle filter (default ``active``); pass e.g.
+    ``"candidate"``/``"deprecated"`` to inspect other tiers or ``"all"``/``None``
+    for a full vault listing.
+    """
     return search_memory(
         workspace_dir=workspace_dir,
         query="",
@@ -1532,6 +1581,7 @@ def list_memories(
         scope=scope,
         namespace=namespace,
         project=project,
+        status=status,
     )
 
 

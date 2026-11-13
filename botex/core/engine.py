@@ -1229,6 +1229,8 @@ async def run_botex_task(
                         _extra_once_kw["handoff_context"] = handoff_context
                     _extra_once_kw["plugin_registry"] = plugin_registry
                     _extra_once_kw["plugin_vault"] = plugin_vault
+                    if routed_tier:
+                        _extra_once_kw["routed_tier"] = routed_tier
                     last_result = await _run_botex_task_once(
                         task=task,
                         files=files,
@@ -1606,6 +1608,7 @@ async def _run_botex_task_once_impl(
     files_read_out: Optional[set] = None,
     plugin_registry: Optional[TaskLocalPluginRegistry] = None,
     plugin_vault: Optional[PluginVaultManager] = None,
+    routed_tier: str = "",
 ) -> Dict[str, Any]:
     """
     Executes an autonomous coding task in workspace_dir using the BoteX engine.
@@ -2179,13 +2182,29 @@ async def _run_botex_task_once_impl(
             "in the final STATUS: DONE response.\n"
         )
     tax = classify_task_taxonomy(task, files)
-    meta_lessons = get_relevant_meta_lessons(tax, workspace_dir=root_path, max_lessons=2)
+    applied_lesson_ids: List[str] = []
+    meta_lessons = get_relevant_meta_lessons(
+        tax,
+        workspace_dir=root_path,
+        max_lessons=2,
+        lesson_ids_out=applied_lesson_ids,
+    )
     if meta_lessons:
         lesson_bullets = "\n".join(f"- {ml}" for ml in meta_lessons)
         initial_user_prompt += f"HARNESS LESSONS ({tax.upper()}):\n{lesson_bullets}\n"
     matched_skills = triage_skills_for_task(task, files, taxonomy=tax, max_skills=2)
     applied_skills = [str(s["name"]) for s in matched_skills if s.get("name")]
     skills_block = format_skills_prompt_block(matched_skills)
+    # Attribution telemetry shared by every log_run call site in this attempt.
+    attribution_kw: Dict[str, Any] = {"origin": "engine", "taxonomy": tax}
+    if recipe:
+        attribution_kw["recipe"] = recipe
+    if routed_tier:
+        attribution_kw["routed_tier"] = routed_tier
+    if applied_skills:
+        attribution_kw["applied_skills"] = applied_skills
+    if applied_lesson_ids:
+        attribution_kw["applied_lessons"] = applied_lesson_ids
     if CAP_NET in caps:
         if effective_net_policy == "public" and not (net_hosts or net_urls):
             access_note = (
@@ -2269,6 +2288,7 @@ async def _run_botex_task_once_impl(
     last_full_signature = ""
     no_tool_strikes = 0
     syntax_rejections = 0
+    rollback_count = 0
     last_syntax_error = ""
     # Invocation-level failures (malformed JSON args, non-object args,
     # unknown tool, dispatch crash) are the model's fault — tracked so a
@@ -2401,6 +2421,7 @@ async def _run_botex_task_once_impl(
                 )
         except APITimeoutError:
             rollback_verified = _rollback_attempt(task_id, files_touched)
+            rollback_count += 1
             log_entry = log_run(
                 task_id=task_id,
                 model=model,
@@ -2416,6 +2437,9 @@ async def _run_botex_task_once_impl(
                 lines_removed=lines_removed_total,
                 status="REQUEST_TIMEOUT",
                 summary=f"Request exceeded {request_timeout_s}s ({model}).",
+                **attribution_kw,
+                syntax_rejections=syntax_rejections,
+                rollback_count=rollback_count,
             )
             print_run_summary(log_entry)
             return {
@@ -2438,6 +2462,7 @@ async def _run_botex_task_once_impl(
         except Exception as e:
             # Rollback on fatal API failure if changes were made
             rollback_verified = _rollback_attempt(task_id, files_touched)
+            rollback_count += 1
             failure_kind = classify_api_error(e)
             log_entry = log_run(
                 task_id=task_id,
@@ -2455,6 +2480,9 @@ async def _run_botex_task_once_impl(
                 status="API_ERROR",
                 summary=sanitize_provider_error(e, max_error_chars),
                 failure_kind=failure_kind,
+                **attribution_kw,
+                syntax_rejections=syntax_rejections,
+                rollback_count=rollback_count,
             )
             print_run_summary(log_entry)
             return {
@@ -2530,6 +2558,7 @@ async def _run_botex_task_once_impl(
             _, past_spend = check_budget_limit(budget_limit_usd)
             if (past_spend + current_run_cost) >= budget_limit_usd:
                 rollback_verified = _rollback_attempt(task_id, files_touched)
+                rollback_count += 1
                 duration = time.time() - start_time
                 summary_text = (
                     f"[BUDGET BLOCK] Task exceeded daily limit (${budget_limit_usd:.2f}) "
@@ -2549,6 +2578,9 @@ async def _run_botex_task_once_impl(
                     lines_removed=lines_removed_total,
                     status="BUDGET_EXCEEDED",
                     summary=summary_text,
+                    **attribution_kw,
+                    syntax_rejections=syntax_rejections,
+                    rollback_count=rollback_count,
                 )
                 print_run_summary(log_entry)
                 return {
@@ -2570,6 +2602,7 @@ async def _run_botex_task_once_impl(
             # failure, not an idle model turn — classify immediately
             # instead of burning retry turns on an empty message.
             rollback_verified = _rollback_attempt(task_id, files_touched)
+            rollback_count += 1
             duration = time.time() - start_time
             summary_text = (
                 f"Provider returned a malformed or error response ({nresp.raw_finish_reason})."
@@ -2589,6 +2622,9 @@ async def _run_botex_task_once_impl(
                 status="API_ERROR",
                 summary=summary_text,
                 failure_kind="provider_error",
+                **attribution_kw,
+                syntax_rejections=syntax_rejections,
+                rollback_count=rollback_count,
             )
             print_run_summary(log_entry)
             return {
@@ -2660,6 +2696,9 @@ async def _run_botex_task_once_impl(
                     status="BLOCKED",
                     summary=blocking_reason,
                     failure_kind="fail_stop_blocked",
+                    **attribution_kw,
+                    syntax_rejections=syntax_rejections,
+                    rollback_count=rollback_count,
                 )
                 print_run_summary(log_entry)
                 return {
@@ -2755,6 +2794,9 @@ async def _run_botex_task_once_impl(
                                 lines_removed=lines_removed_total,
                                 status="DONE_WITHOUT_WRITE",
                                 summary=msg_no_write,
+                                **attribution_kw,
+                                syntax_rejections=syntax_rejections,
+                                rollback_count=rollback_count,
                             )
                             print_run_summary(log_entry)
                             return {
@@ -2803,6 +2845,9 @@ async def _run_botex_task_once_impl(
                         status="INCOMPLETE",
                         summary=msg_short,
                         failure_kind="contract_failed",
+                        **attribution_kw,
+                        syntax_rejections=syntax_rejections,
+                        rollback_count=rollback_count,
                     )
                     print_run_summary(log_entry)
                     return {
@@ -2860,6 +2905,9 @@ async def _run_botex_task_once_impl(
                             status="INCOMPLETE",
                             summary=msg_rat,
                             failure_kind="contract_failed",
+                            **attribution_kw,
+                            syntax_rejections=syntax_rejections,
+                            rollback_count=rollback_count,
                         )
                         print_run_summary(log_entry)
                         return {
@@ -2909,6 +2957,7 @@ async def _run_botex_task_once_impl(
                         continue
                     else:
                         rollback_verified = _rollback_attempt(task_id, files_touched)
+                        rollback_count += 1
                         rolled_ok = rollback_verified is not False
                         duration = time.time() - start_time
                         summary_text = "Verification command failed after 3 attempts. " + (
@@ -2932,6 +2981,9 @@ async def _run_botex_task_once_impl(
                             lines_removed=lines_removed_total,
                             status="VERIFICATION_FAILED",
                             summary=summary_text,
+                            **attribution_kw,
+                            syntax_rejections=syntax_rejections,
+                            rollback_count=rollback_count,
                         )
                         print_run_summary(log_entry)
                         return {
@@ -3010,6 +3062,9 @@ async def _run_botex_task_once_impl(
                     status="DONE",
                     summary=summary_text,
                     cost_usd=live_cost_usd,
+                    **attribution_kw,
+                    syntax_rejections=syntax_rejections,
+                    rollback_count=rollback_count,
                 )
                 print_run_summary(log_entry)
                 _save_task_receipt(
@@ -3144,6 +3199,9 @@ async def _run_botex_task_once_impl(
                         lines_removed=lines_removed_total,
                         status=status,
                         summary=summary_text,
+                        **attribution_kw,
+                        syntax_rejections=syntax_rejections,
+                        rollback_count=rollback_count,
                     )
                     print_run_summary(log_entry)
                     return {
@@ -3199,6 +3257,9 @@ async def _run_botex_task_once_impl(
                         status=status,
                         summary=summary_text,
                         failure_kind=failure_kind,
+                        **attribution_kw,
+                        syntax_rejections=syntax_rejections,
+                        rollback_count=rollback_count,
                     )
                     print_run_summary(log_entry)
                     return {
@@ -3348,6 +3409,7 @@ async def _run_botex_task_once_impl(
                     if agency_error:
                         if "aborted" in agency_error.lower():
                             rollback_verified = _rollback_attempt(task_id, files_touched)
+                            rollback_count += 1
                             rolled_ok = rollback_verified is not False
                             duration = time.time() - start_time
                             summary_text = f"Task aborted by operator during '{fn_name}'. " + (
@@ -3369,6 +3431,9 @@ async def _run_botex_task_once_impl(
                                 lines_removed=lines_removed_total,
                                 status="ABORTED",
                                 summary=summary_text,
+                                **attribution_kw,
+                                syntax_rejections=syntax_rejections,
+                                rollback_count=rollback_count,
                             )
                             print_run_summary(log_entry)
                             return {
@@ -3655,6 +3720,7 @@ async def _run_botex_task_once_impl(
                 turn=turn,
             )
             rollback_verified = _rollback_attempt(task_id, files_touched)
+            rollback_count += 1
             rolled_ok = rollback_verified is not False
             duration = time.time() - start_time
 
@@ -3683,6 +3749,9 @@ async def _run_botex_task_once_impl(
                 lines_removed=lines_removed_total,
                 status="STAGNANT_ROLLBACK",
                 summary=summary_text,
+                **attribution_kw,
+                syntax_rejections=syntax_rejections,
+                rollback_count=rollback_count,
             )
             print_run_summary(log_entry)
             return {
@@ -3727,6 +3796,9 @@ async def _run_botex_task_once_impl(
         lines_removed=lines_removed_total,
         status=end_status,
         summary=end_summary,
+        **attribution_kw,
+        syntax_rejections=syntax_rejections,
+        rollback_count=rollback_count,
     )
     print_run_summary(log_entry)
 

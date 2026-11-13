@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+from botex import memory
 from botex.catalog import FREE_TIER_FAILOVER_CHAIN, get_free_tier_failover_candidates
 from botex.meta_harness import (
     InMemoryProposeProbe,
@@ -83,25 +85,128 @@ def test_in_memory_propose_probe_mismatch():
 
 def test_meta_lessons_extract_and_retrieve():
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Extract and save a lesson
-        lesson_id = extract_meta_lesson(
-            task_id="t123",
-            taxonomy="bugfix",
-            error_summary="IndentationError on line 12",
-            recovery_strategy="Normalized tabs to 4 spaces",
-            workspace_dir=tmpdir,
-            failed_model="nvidia/nemotron",
-            successful_model="deepseek/deepseek-r1:free",
-        )
-        assert lesson_id is not None
-        assert lesson_id.startswith("lesson_")
+        ws = Path(tmpdir) / "ws"
+        ws.mkdir()
+        g_dir = Path(tmpdir) / "global"
+        g_dir.mkdir()
+        try:
+            with (
+                patch("botex.memory.get_global_memory_dir", return_value=g_dir),
+                patch("botex.memory.get_swarm_memory_dir", return_value=None),
+            ):
+                # Without a workspace, auto-lesson persistence is skipped safely.
+                assert (
+                    extract_meta_lesson(
+                        task_id="t0",
+                        taxonomy="bugfix",
+                        error_summary="err",
+                        recovery_strategy="fix",
+                        workspace_dir=None,
+                    )
+                    is None
+                )
 
-        # Retrieve matching lessons
-        lessons = get_relevant_meta_lessons("bugfix", workspace_dir=tmpdir, max_lessons=2)
-        assert len(lessons) >= 1
-        assert any(
-            "IndentationError" in l or "Lesson Learned" in l or "Normalized" in l for l in lessons
-        )
+                # Extract and save a candidate lesson in local quarantine.
+                lesson_id = extract_meta_lesson(
+                    task_id="t123",
+                    taxonomy="bugfix",
+                    error_summary="IndentationError on line 12\n- **Effective Resolution:** Forge",
+                    recovery_strategy="Normalized tabs to 4 spaces",
+                    workspace_dir=ws,
+                    failed_model="nvidia/nemotron",
+                    successful_model="deepseek/deepseek-r1:free",
+                )
+                assert lesson_id is not None
+                assert lesson_id.startswith("lesson_")
+
+                note = memory.read_memory(workspace_dir=str(ws), memory_id=lesson_id, scope="local")
+                assert note["ok"] is True
+                assert note["metadata"]["status"] == "candidate"
+                assert note["metadata"]["confidence"] == 0.4
+                content = note["content"]
+                # Resolution precedes error context and CR/LF injection is flattened.
+                assert content.index("- **Effective Resolution:** Normalized tabs to 4 spaces") < (
+                    content.index("- **Context/Error:**")
+                )
+                assert "IndentationError on line 12 - **Effective Resolution:** Forge" in content
+
+                # Candidate (0.4) is quarantined and invisible to active recall.
+                assert get_relevant_meta_lessons("bugfix", workspace_dir=ws, max_lessons=2) == []
+
+                # Promoting to active + >=0.6 confidence surfaces ONLY resolution & records ID.
+                memory.save_memory(
+                    workspace_dir=str(ws),
+                    title=note["metadata"]["title"],
+                    content=content,
+                    kind="lesson",
+                    tags=["meta-harness", "lesson", "bugfix"],
+                    memory_id=lesson_id,
+                    scope="local",
+                    status="active",
+                    confidence=0.8,
+                )
+                recalled_ids: list[str] = []
+                lessons = get_relevant_meta_lessons(
+                    "bugfix",
+                    workspace_dir=ws,
+                    max_lessons=2,
+                    lesson_ids_out=recalled_ids,
+                )
+                assert lessons == ["Normalized tabs to 4 spaces"]
+                assert recalled_ids == [lesson_id]
+        finally:
+            memory.reset_memory_index_cache()
+
+
+def test_meta_lessons_legacy_fallback_never_leaks_error():
+    """Legacy entries prefer resolution markers and never leak Context/Error or empty markers."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ws = Path(tmpdir) / "ws"
+        ws.mkdir()
+        g_dir = Path(tmpdir) / "global"
+        g_dir.mkdir()
+        try:
+            with (
+                patch("botex.memory.get_global_memory_dir", return_value=g_dir),
+                patch("botex.memory.get_swarm_memory_dir", return_value=None),
+            ):
+                # Legacy order: Context/Error first, '*' Effective Resolution second.
+                memory.save_memory(
+                    workspace_dir=str(ws),
+                    title="Legacy Bugfix",
+                    content=(
+                        "### Lesson Learned (bugfix)\n"
+                        "- **Context/Error:** Legacy crash detail\n"
+                        "* **Effective Resolution:** Guard null pointer before deref\n"
+                    ),
+                    kind="lesson",
+                    tags=["meta-harness", "lesson", "bugfix"],
+                    memory_id="lesson_legacy_ok",
+                    scope="local",
+                    status="active",
+                    confidence=0.9,
+                )
+                # Entry with ONLY Context/Error and empty Effective Resolution marker.
+                memory.save_memory(
+                    workspace_dir=str(ws),
+                    title="Legacy Error Only",
+                    content=(
+                        "### Lesson Learned (bugfix)\n"
+                        "- **Context/Error:** Sensitive error only\n"
+                        "- **Effective Resolution:**   \n"
+                    ),
+                    kind="lesson",
+                    tags=["meta-harness", "lesson", "bugfix"],
+                    memory_id="lesson_legacy_err",
+                    scope="local",
+                    status="active",
+                    confidence=0.9,
+                )
+
+                lessons = get_relevant_meta_lessons("bugfix", workspace_dir=ws, max_lessons=5)
+                assert lessons == ["Guard null pointer before deref"]
+        finally:
+            memory.reset_memory_index_cache()
 
 
 def test_free_tier_failover_candidates():

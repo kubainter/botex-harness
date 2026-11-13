@@ -13,6 +13,7 @@ Implements Google Harness² dual-level recursion:
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -40,8 +41,6 @@ _TAXONOMY_MAP: Dict[str, str] = {
 
 def classify_task_taxonomy(task: str, files: Optional[List[str]] = None) -> str:
     """Classifies task intent into a canonical taxonomy domain for lesson matching."""
-    import re
-
     t_low = (task or "").lower()
     words = set(re.findall(r"\b[a-z_0-9-]+\b", t_low))
     files_str = " ".join(files or []).lower()
@@ -111,12 +110,26 @@ class InMemoryProposeProbe:
         return True, patched_content, None, level
 
 
+# Lesson lifecycle confidences: candidates start low, recall only surfaces
+# promoted lessons. PR 2 (update_lesson_confidence) and PR 3 (Curator
+# candidate -> active promotion) move lessons across this gap.
+_CANDIDATE_INITIAL_CONFIDENCE = 0.4
+_RECALL_MIN_CONFIDENCE = 0.6
+
+_RESOLUTION_LINE_RE = re.compile(r"^\s*[-*]\s*\*\*Effective Resolution:?\*\*:?\s*(.+)$")
+
+
 def get_relevant_meta_lessons(
     taxonomy: str,
     workspace_dir: Optional[str | Path] = None,
     max_lessons: int = 3,
+    lesson_ids_out: Optional[List[str]] = None,
 ) -> List[str]:
-    """Retrieves concise, deduplicated architectural lessons matching the task taxonomy."""
+    """Retrieves concise, deduplicated architectural lessons matching the task taxonomy.
+
+    When `lesson_ids_out` is a list, the memory IDs of the appended lessons are
+    pushed onto it so callers can attribute lessons by exact ID.
+    """
     norm_tax = _TAXONOMY_MAP.get(str(taxonomy or "").strip().lower(), "general")
     ws = str(workspace_dir or ".")
 
@@ -126,6 +139,8 @@ def get_relevant_meta_lessons(
             query=norm_tax,
             kind="lesson",
             scope="all",
+            status="active",
+            min_confidence=_RECALL_MIN_CONFIDENCE,
         )
     except Exception:
         return []
@@ -151,18 +166,37 @@ def get_relevant_meta_lessons(
             if full.get("ok"):
                 content = str(full.get("content") or "").strip()
                 if content:
-                    # Extract the first substantive resolution bullet, ignoring markdown headers and XML tags
+                    # Prefer the explicit Effective Resolution line — the
+                    # Context/Error bullet must never be injected as guidance.
                     substantive = ""
                     for line in content.splitlines():
-                        l = line.strip()
-                        if not l or l.startswith("<") or l.startswith("#"):
-                            continue
-                        cand = l.lstrip("- *").strip()
-                        if cand:
-                            substantive = cand
+                        m = _RESOLUTION_LINE_RE.match(line)
+                        if m:
+                            substantive = m.group(1).strip()
                             break
+                    if not substantive:
+                        # Legacy entries without an explicit resolution line:
+                        # fall back to the first non-header/non-tag bullet.
+                        for line in content.splitlines():
+                            l = line.strip()
+                            if not l or l.startswith("<") or l.startswith("#"):
+                                continue
+                            cand = l.lstrip("- *").strip()
+                            if (
+                                cand
+                                and not cand.lower().startswith(
+                                    ("context/error", "effective resolution", "model telemetry")
+                                )
+                                and not l.lower().startswith(
+                                    ("context/error", "effective resolution", "model telemetry")
+                                )
+                            ):
+                                substantive = cand
+                                break
                     if substantive and substantive not in lessons:
                         lessons.append(mask_secrets(substantive))
+                        if lesson_ids_out is not None and mem_id:
+                            lesson_ids_out.append(mem_id)
                         if len(lessons) >= max_lessons:
                             break
         except Exception:
@@ -185,8 +219,10 @@ def extract_meta_lesson(
     Called when a task succeeds after an initial mutation failure, rollback, or syntax rejection.
     """
     clean_tax = _TAXONOMY_MAP.get(str(taxonomy or "").strip().lower(), "general")
-    clean_err = mask_secrets(str(error_summary or "").strip()[:200])
-    clean_strat = mask_secrets(str(recovery_strategy or "").strip()[:300])
+    # Flatten CR/LF so untrusted multi-line errors cannot inject synthetic
+    # "- **Effective Resolution:**" lines into the persisted lesson body.
+    clean_err = mask_secrets(re.sub(r"[\r\n]+", " ", str(error_summary or ""))[:200].strip())
+    clean_strat = mask_secrets(re.sub(r"[\r\n]+", " ", str(recovery_strategy or ""))[:300].strip())
 
     if not clean_err and not clean_strat:
         return None
@@ -196,15 +232,20 @@ def extract_meta_lesson(
     lesson_id = f"lesson_{lesson_hash}"
 
     title = f"Meta-Lesson [{clean_tax}]: {clean_err[:60] or clean_strat[:60]}"
+    # Resolution first: recall-side extraction takes the leading bullet of
+    # legacy entries, so the actionable fix must precede the error context.
     body = (
         f"### Lesson Learned ({clean_tax})\n"
-        f"- **Context/Error:** {clean_err or 'None reported'}\n"
         f"- **Effective Resolution:** {clean_strat or 'Strategy adaptation'}\n"
+        f"- **Context/Error:** {clean_err or 'None reported'}\n"
     )
     if failed_model or successful_model:
         body += f"- **Model Telemetry:** Failed={mask_secrets(failed_model or 'None')}, Resolved={mask_secrets(successful_model or 'None')}\n"
 
-    ws = str(workspace_dir or ".")
+    if not workspace_dir:
+        # Never fall back to the process CWD (".") for lesson persistence.
+        return None
+    ws = str(workspace_dir)
     try:
         res = save_memory(
             workspace_dir=ws,
@@ -213,7 +254,9 @@ def extract_meta_lesson(
             kind="lesson",
             tags=["meta-harness", "lesson", clean_tax],
             memory_id=lesson_id,
-            scope="local" if workspace_dir else "global",
+            scope="local",
+            status="candidate",
+            confidence=_CANDIDATE_INITIAL_CONFIDENCE,
         )
         if isinstance(res, dict) and res.get("ok"):
             return lesson_id

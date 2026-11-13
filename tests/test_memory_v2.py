@@ -410,3 +410,76 @@ def test_migrate_projects_cli_dry_run(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[local]" in out
     assert "updated=1" in out
+
+
+def test_search_memory_status_quarantine_and_opt_out(memory_dirs):
+    """search_memory defaults to status='active', blocking candidate/deprecated/superseded."""
+    ws_dir, _ = memory_dirs
+    assert "candidate" in memory.VALID_STATUSES
+    assert memory._VALID_STATUSES_MAP["candidate"] == "candidate"
+
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Active Anchor",
+        content="Routing bugfix guide linking [[mem_cand]] and [[mem_dep]].",
+        kind="context",
+        memory_id="mem_anchor",
+        status="active",
+        links=["mem_cand", "mem_dep"],
+    )
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Candidate Note",
+        content="Unvetted candidate lesson about routing bugfix.",
+        kind="lesson",
+        memory_id="mem_cand",
+        status="candidate",
+    )
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Deprecated Note",
+        content="Old deprecated routing bugfix note.",
+        kind="lesson",
+        memory_id="mem_dep",
+        status="deprecated",
+    )
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Superseded Note",
+        content="Superseded routing bugfix note.",
+        kind="lesson",
+        memory_id="mem_sup",
+        status="superseded",
+    )
+
+    # Default search hides candidate, deprecated, and superseded — even across RRF neighbors.
+    res_active = memory.search_memory(workspace_dir=str(ws_dir), query="routing bugfix")
+    assert res_active["ok"] is True
+    active_ids = {m["id"] for m in res_active["memories"]}
+    assert active_ids == {"mem_anchor"}
+
+    # Explicit candidate filter and list_memories forwarding work.
+    res_cand = memory.search_memory(workspace_dir=str(ws_dir), query="", status="candidate")
+    assert {m["id"] for m in res_cand["memories"]} == {"mem_cand"}
+    listed_cand = memory.list_memories(workspace_dir=str(ws_dir), status="candidate")
+    assert {m["id"] for m in listed_cand["memories"]} == {"mem_cand"}
+
+    # Opt-outs ('all', '', None) return every lifecycle state.
+    for opt_out in ("all", "", None):
+        res_all = memory.search_memory(workspace_dir=str(ws_dir), query="", status=opt_out)
+        assert res_all["ok"] is True
+        assert {m["id"] for m in res_all["memories"]} == {
+            "mem_anchor",
+            "mem_cand",
+            "mem_dep",
+            "mem_sup",
+        }
+
+
+def test_search_memory_rejects_invalid_and_bool_status(memory_dirs):
+    """Invalid status strings and bool status values must fail cleanly rather than disabling filter."""
+    ws_dir, _ = memory_dirs
+    for bad in ("bogus", False, True):
+        res = memory.search_memory(workspace_dir=str(ws_dir), query="", status=bad)
+        assert res["ok"] is False
+        assert "status" in res["error"].lower()

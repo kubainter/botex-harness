@@ -298,3 +298,84 @@ def test_check_health_reports_local_endpoint():
     health = asyncio.run(server.check_health())
     assert "[OK] ollama: local endpoint active" in health
     assert "OLLAMA_API_KEY (check .env)" not in health
+
+
+def test_log_run_attribution_fields_and_guards(monkeypatch: pytest.MonkeyPatch):
+    """log_run persists masked/flattened attribution fields and skips bool counters."""
+    import botex.providers.analytics as analytics_mod
+
+    written: list[dict] = []
+    monkeypatch.setattr(analytics_mod, "_append_ledger", lambda e: written.append(dict(e)))
+
+    # Legacy defaults omit new attribution keys to preserve record shape.
+    legacy = log_run(
+        task_id="t-legacy",
+        model="vendor/free:free",
+        duration_s=1.0,
+        steps=1,
+        prompt_tokens=10,
+        completion_tokens=5,
+        cached_tokens=0,
+        files_touched=[],
+        lines_added=0,
+        lines_removed=0,
+    )
+    for key in (
+        "origin",
+        "recipe",
+        "routed_tier",
+        "taxonomy",
+        "applied_skills",
+        "applied_lessons",
+        "syntax_rejections",
+        "rollback_count",
+    ):
+        assert key not in legacy
+
+    attributed = log_run(
+        task_id="t-attr",
+        model="vendor/free:free",
+        duration_s=2.5,
+        steps=4,
+        prompt_tokens=100,
+        completion_tokens=40,
+        cached_tokens=10,
+        files_touched=["botex/core/engine.py"],
+        lines_added=3,
+        lines_removed=1,
+        origin="engine\ninjected",
+        recipe="reviewer\r\n",
+        routed_tier="free",
+        taxonomy="bugfix",
+        applied_skills=["code-review"],
+        applied_lessons=["lesson_abc123"],
+        syntax_rejections=2,
+        rollback_count=1,
+    )
+    assert attributed["origin"] == "engine injected"
+    assert attributed["recipe"] == "reviewer"
+    assert attributed["routed_tier"] == "free"
+    assert attributed["taxonomy"] == "bugfix"
+    assert attributed["applied_skills"] == ["code-review"]
+    assert attributed["applied_lessons"] == ["lesson_abc123"]
+    assert attributed["syntax_rejections"] == 2
+    assert attributed["rollback_count"] == 1
+
+    # Bool must not coerce into integer counts (bool is a subclass of int in Python).
+    bool_guarded = log_run(
+        task_id="t-bool",
+        model="vendor/free:free",
+        duration_s=1.0,
+        steps=1,
+        prompt_tokens=1,
+        completion_tokens=1,
+        cached_tokens=0,
+        files_touched=[],
+        lines_added=0,
+        lines_removed=0,
+        syntax_rejections=True,  # type: ignore[arg-type]
+        rollback_count=True,  # type: ignore[arg-type]
+    )
+    assert "syntax_rejections" not in bool_guarded
+    assert "rollback_count" not in bool_guarded
+    assert len(written) == 3
