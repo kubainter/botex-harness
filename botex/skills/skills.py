@@ -1010,7 +1010,9 @@ async def write_skill_proposal_draft(
         audit_res: Optional[Dict[str, Any]] = None
         now_iso = datetime.now(timezone.utc).isoformat()
         if audit_skill_content is not None:
-            audit_res = await audit_skill_content(raw_skill, clean_name, config=cfg)
+            audit_res = await audit_skill_content(
+                sanitize_for_storage(raw_skill), clean_name, config=cfg
+            )
             if not audit_res.get("ok"):
                 return {
                     "ok": False,

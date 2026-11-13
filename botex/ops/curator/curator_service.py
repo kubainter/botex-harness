@@ -2213,38 +2213,38 @@ class CuratorService:
             else:
                 untagged_by_tax.setdefault(tax, []).append(entry)
 
-        # Fallback clustering requires >=2 co-occurring significant tokens to avoid
+        # Fallback clustering requires >=2 co-occurring significant words to avoid
         # collapsing unrelated lessons that happen to share one generic word.
         for tax, items in untagged_by_tax.items():
             if len(items) < min_cluster_size:
                 continue
-            doc_token_sets: List[Tuple[str, Dict[str, Any], set[str]]] = []
-            token_freq: Dict[str, int] = {}
+            doc_word_sets: List[Tuple[str, Dict[str, Any], set[str]]] = []
+            word_freq: Dict[str, int] = {}
             for entry in items:
                 text = f"{entry.get('title') or ''} {entry.get('content') or ''}".lower()
-                doc_tokens = {
-                    tok
-                    for tok in re.findall(r"\b[a-z][a-z0-9_]{3,}\b", text)
-                    if tok not in stopwords
+                doc_words = {
+                    word
+                    for word in re.findall(r"\b[a-z][a-z0-9_]{3,}\b", text)
+                    if word not in stopwords
                 }
-                doc_token_sets.append((str(entry.get("id") or ""), entry, doc_tokens))
-                for tok in doc_tokens:
-                    token_freq[tok] = token_freq.get(tok, 0) + 1
+                doc_word_sets.append((str(entry.get("id") or ""), entry, doc_words))
+                for word in doc_words:
+                    word_freq[word] = word_freq.get(word, 0) + 1
 
-            frequent_tokens = sorted(
-                (t for t, c in token_freq.items() if c >= min_cluster_size),
-                key=lambda t: (-token_freq[t], t),
+            frequent_words = sorted(
+                (w for w, c in word_freq.items() if c >= min_cluster_size),
+                key=lambda w: (-word_freq[w], w),
             )
             assigned_ids: set[str] = set()
-            for idx, tok1 in enumerate(frequent_tokens):
-                for tok2 in frequent_tokens[idx + 1 :]:
+            for idx, word1 in enumerate(frequent_words):
+                for word2 in frequent_words[idx + 1 :]:
                     pair_docs = [
                         (lid, d)
-                        for lid, d, dset in doc_token_sets
-                        if lid not in assigned_ids and tok1 in dset and tok2 in dset
+                        for lid, d, dset in doc_word_sets
+                        if lid not in assigned_ids and word1 in dset and word2 in dset
                     ]
                     if len(pair_docs) >= min_cluster_size:
-                        bkey = (tax, _slug(f"{tok1}-{tok2}"))
+                        bkey = (tax, _slug(f"{word1}-{word2}"))
                         for lid, d in pair_docs:
                             _add_to_bucket(bkey, d, lid)
                             assigned_ids.add(lid)
