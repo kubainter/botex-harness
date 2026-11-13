@@ -483,3 +483,106 @@ def test_search_memory_rejects_invalid_and_bool_status(memory_dirs):
         res = memory.search_memory(workspace_dir=str(ws_dir), query="", status=bad)
         assert res["ok"] is False
         assert "status" in res["error"].lower()
+
+
+def test_update_lesson_confidence_rewards_and_deprecates(memory_dirs):
+    """Confidence nudges update candidate confidence without promoting, and auto-deprecate < 0.2."""
+    ws_dir, _ = memory_dirs
+
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Candidate Lesson",
+        content="Avoid unclosed brackets in foo.py.",
+        kind="lesson",
+        memory_id="mem_cand_conf",
+        scope="local",
+        status="candidate",
+        confidence=0.4,
+    )
+    up = memory.update_lesson_confidence(str(ws_dir), "mem_cand_conf", 0.1)
+    assert up == {
+        "ok": True,
+        "id": "mem_cand_conf",
+        "old_confidence": 0.4,
+        "new_confidence": 0.5,
+        "status": "candidate",
+    }
+    # Clamp at 1.0 cleanly and never promote candidate -> active.
+    clamped = memory.update_lesson_confidence(str(ws_dir), "mem_cand_conf", 0.9)
+    assert clamped["ok"] is True
+    assert clamped["new_confidence"] == 1.0
+    assert clamped["status"] == "candidate"
+
+    # Active lesson crossing below 0.2 transitions to deprecated + writes Timeline audit + re-indexes.
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Active Lesson To Deprecate",
+        content="Legacy workaround for retry timeouts.",
+        kind="lesson",
+        memory_id="mem_dep_conf",
+        scope="local",
+        status="active",
+        confidence=0.3,
+    )
+    down = memory.update_lesson_confidence(str(ws_dir), "mem_dep_conf", -0.15)
+    assert down["ok"] is True
+    assert down["old_confidence"] == 0.3
+    assert down["new_confidence"] == 0.15
+    assert down["status"] == "deprecated"
+
+    read_back = memory.read_memory(
+        workspace_dir=str(ws_dir), memory_id="mem_dep_conf", scope="local"
+    )
+    assert read_back["ok"] is True
+    assert "fell below 0.2000; status updated to 'deprecated'" in read_back["content"]
+
+    active_hits = memory.search_memory(
+        workspace_dir=str(ws_dir), query="retry timeouts", status="active"
+    )
+    assert "mem_dep_conf" not in {m["id"] for m in active_hits["memories"]}
+    dep_hits = memory.search_memory(
+        workspace_dir=str(ws_dir), query="retry timeouts", status="deprecated"
+    )
+    assert "mem_dep_conf" in {m["id"] for m in dep_hits["memories"]}
+
+
+def test_update_lesson_confidence_validates_inputs_and_masks_errors(memory_dirs, monkeypatch):
+    """Boolean/non-finite floats, invalid IDs, and runtime write errors are rejected/masked safely."""
+    ws_dir, _ = memory_dirs
+
+    for bad_delta in (True, False, float("nan"), float("inf"), "not-a-float"):
+        res = memory.update_lesson_confidence(str(ws_dir), "mem_any", bad_delta)
+        assert res["ok"] is False
+
+    for bad_thresh in (True, -0.1, 1.5, float("nan")):
+        res = memory.update_lesson_confidence(
+            str(ws_dir), "mem_any", 0.1, deprecate_below=bad_thresh
+        )
+        assert res["ok"] is False
+
+    bad_id = memory.update_lesson_confidence(str(ws_dir), "../escape", 0.1)
+    assert bad_id["ok"] is False
+
+    missing = memory.update_lesson_confidence(str(ws_dir), "mem_does_not_exist", 0.1)
+    assert missing["ok"] is False
+
+    memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="Mask Err Test",
+        content="Some note.",
+        kind="lesson",
+        memory_id="mem_err_mask",
+        scope="local",
+        status="candidate",
+        confidence=0.4,
+    )
+    monkeypatch.setattr(
+        memory,
+        "_serialize_frontmatter",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            RuntimeError("boom sk-1234567890abcdef1234567890")
+        ),
+    )
+    err_res = memory.update_lesson_confidence(str(ws_dir), "mem_err_mask", 0.1)
+    assert err_res["ok"] is False
+    assert "sk-1234567890" not in err_res["error"]

@@ -67,6 +67,7 @@ __all__ = [
     "VALID_SCOPES",
     "VALID_STATUSES",
     "set_memory_status",
+    "update_lesson_confidence",
     "MAX_MEMORY_BYTES",
     "SCHEMA_VERSION",
 ]
@@ -2037,6 +2038,126 @@ def set_memory_status(
     except Exception as exc:
         logger.error("set_memory_status: Failed on '%s': %s", clean_id, exc)
         return False
+
+
+def update_lesson_confidence(
+    workspace_dir: str,
+    memory_id: str,
+    delta: float,
+    *,
+    scope: str = "local",
+    deprecate_below: float = 0.2,
+) -> Dict[str, Any]:
+    """Deterministically adjust a lesson's confidence from end-of-task feedback.
+
+    Rewards (+delta) or penalizes (-delta) a stored note with no LLM call.
+    Notes crossing below ``deprecate_below`` transition to ``deprecated``;
+    promotion stays with the Curator — this never raises scope or status.
+    ``scope`` defaults to ``"local"`` so quarantined candidate lessons are
+    the only notes touched unless the caller explicitly scopes otherwise.
+    """
+    if isinstance(delta, bool):
+        return {"ok": False, "error": "Invalid 'delta'; expected a finite float."}
+    try:
+        dval = float(delta)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Invalid 'delta'; expected a finite float."}
+    if not math.isfinite(dval):
+        return {"ok": False, "error": "Invalid 'delta'; expected a finite float."}
+    if isinstance(deprecate_below, bool):
+        return {
+            "ok": False,
+            "error": "Invalid 'deprecate_below'; expected a float in [0.0, 1.0].",
+        }
+    try:
+        threshold = float(deprecate_below)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "error": "Invalid 'deprecate_below'; expected a float in [0.0, 1.0].",
+        }
+    if not math.isfinite(threshold) or not (0.0 <= threshold <= 1.0):
+        return {
+            "ok": False,
+            "error": "Invalid 'deprecate_below'; expected a float in [0.0, 1.0].",
+        }
+
+    try:
+        clean_id = _sanitize_id(memory_id)
+    except SecurityError as se:
+        return {
+            "ok": False,
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
+        }
+
+    norm_scope = _VALID_SCOPES_MAP.get(str(scope).strip().lower(), "local")
+    search_dirs = _resolve_scope_dirs(workspace_dir, norm_scope)
+    target_path: Optional[Path] = None
+    for s_dir, _ in search_dirs:
+        cand = _find_existing_memory_file(s_dir, clean_id)
+        if cand is not None:
+            target_path = cand
+            break
+
+    if target_path is None or not target_path.exists():
+        return {"ok": False, "error": f"Memory entry '{clean_id}' not found."}
+
+    mem_dir = target_path.parent
+    try:
+        raw_text = target_path.read_text(encoding="utf-8", errors="replace")
+        meta, body = _parse_frontmatter(raw_text)
+        old_conf = _coerce_confidence(meta.get("confidence"))
+        new_conf = round(min(max(old_conf + dval, 0.0), 1.0), 4)
+        old_status = _VALID_STATUSES_MAP.get(
+            str(meta.get("status") or "active").strip().lower(), "active"
+        )
+        new_status = "deprecated" if new_conf < threshold else old_status
+
+        if new_status == "deprecated" and old_status != "deprecated":
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            audit_line = (
+                f"- {today_str}: Confidence {old_conf:.4f} -> {new_conf:.4f} "
+                f"fell below {threshold:.4f}; status updated to 'deprecated'."
+            )
+            patch_res = patch_memory_section(
+                workspace_dir=workspace_dir,
+                memory_id=clean_id,
+                section="Timeline",
+                new_content=audit_line,
+                append=True,
+                scope=norm_scope,
+            )
+            if not patch_res.get("ok"):
+                return {
+                    "ok": False,
+                    "error": f"Timeline audit failed: {patch_res.get('error')}",
+                }
+            raw_text = target_path.read_text(encoding="utf-8", errors="replace")
+            meta, body = _parse_frontmatter(raw_text)
+
+        meta["confidence"] = new_conf
+        meta["status"] = new_status
+        new_doc = sanitize_for_storage(_serialize_frontmatter(meta, body))
+        target_path.write_text(new_doc, encoding="utf-8")
+
+        conn = _get_index_db(mem_dir)
+        try:
+            _index_memory_file(mem_dir, conn, target_path)
+        finally:
+            conn.close()
+
+        return {
+            "ok": True,
+            "id": clean_id,
+            "old_confidence": old_conf,
+            "new_confidence": new_conf,
+            "status": new_status,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Failed to update confidence: {coerce_text(mask_secrets(str(exc)))}",
+        }
 
 
 def find_graph_health(

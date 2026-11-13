@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from botex.memory.memory import read_memory, save_memory, search_memory
@@ -118,17 +119,108 @@ _RECALL_MIN_CONFIDENCE = 0.6
 
 _RESOLUTION_LINE_RE = re.compile(r"^\s*[-*]\s*\*\*Effective Resolution:?\*\*:?\s*(.+)$")
 
+# Provider-side failure vocabulary: infrastructure noise is owned by
+# retry.py/denylist.py and must never become an episodic lesson or feed
+# negative confidence adjustments.
+_INFRA_FAILURE_KINDS = frozenset(
+    {
+        "rate_limit",
+        "timeout",
+        "connection_error",
+        "auth_error",
+        "budget_exceeded",
+        "provider_error",
+        "quota_exceeded",
+        "config_error",
+        "request_timeout",
+    }
+)
+
+# Engine-side failure_kind vocabulary (contracts.STATUS_FAILURE_KIND /
+# classify_api_error) mapped onto the generic infra classes via substring —
+# "provider_rate_limited" hits "rate_limit", "budget_or_price_block" hits
+# "budget", etc.
+_INFRA_KIND_MARKERS = (
+    "rate_limit",
+    "timeout",
+    "timed_out",
+    "connection",
+    "auth",
+    "quota",
+    "budget",
+    "provider_unavailable",
+    "provider_policy_denied",
+    "provider_error",
+    "config_error",
+)
+
+# "\b429\b" is word-bounded so plain numbers like "1429"/"4291" embedded in
+# payloads never false-positive as HTTP 429 rate-limit noise.
+_INFRA_TEXT_RE = re.compile(r"\b429\b|timed out|rate limit|connection error")
+
+
+def is_infra_failure(failure_kind: Optional[str], error_text: str = "") -> bool:
+    """Deterministic infrastructure-noise gate for episodic lesson extraction.
+
+    Rate limits, timeouts, connection/quota/auth/budget/config failures are
+    provider-side — never lesson material and never confidence penalties.
+    """
+    norm = str(failure_kind or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if norm:
+        if norm in _INFRA_FAILURE_KINDS:
+            return True
+        if any(marker in norm for marker in _INFRA_KIND_MARKERS):
+            return True
+    text = str(error_text or "").lower()
+    return bool(text) and bool(_INFRA_TEXT_RE.search(text))
+
+
+def _file_dir_prefixes(files: Optional[List[str]], limit: int = 3) -> List[str]:
+    """Normalize file paths into POSIX parent-dir prefixes for lesson binding."""
+    prefixes: List[str] = []
+    for raw in files or []:
+        norm = re.sub(r"/{2,}", "/", str(raw or "").replace("\\", "/")).strip().strip("/")
+        if not norm or norm.startswith(".."):
+            continue
+        parent = norm.rsplit("/", 1)[0] if "/" in norm else ""
+        if parent and parent not in prefixes:
+            prefixes.append(parent)
+        if len(prefixes) >= limit:
+            break
+    return prefixes
+
+
+def _memory_matches_path_prefix(memory: Dict[str, Any], dir_prefixes: List[str]) -> bool:
+    """True when a lesson's ``path:<dir>`` binding tags cover any given dir."""
+    if not isinstance(memory, dict):
+        return False
+    tags = memory.get("tags") or []
+    if isinstance(tags, str):
+        tags = re.split(r"[\s,]+", tags)
+    bound = [str(t).strip().lower()[5:] for t in tags if str(t).strip().lower().startswith("path:")]
+    if not bound:
+        return False
+    for d in dir_prefixes:
+        dl = d.lower()
+        for p in bound:
+            if p and (dl == p or dl.startswith(p + "/") or p.startswith(dl + "/")):
+                return True
+    return False
+
 
 def get_relevant_meta_lessons(
     taxonomy: str,
     workspace_dir: Optional[str | Path] = None,
     max_lessons: int = 3,
     lesson_ids_out: Optional[List[str]] = None,
+    files: Optional[List[str]] = None,
 ) -> List[str]:
     """Retrieves concise, deduplicated architectural lessons matching the task taxonomy.
 
     When `lesson_ids_out` is a list, the memory IDs of the appended lessons are
-    pushed onto it so callers can attribute lessons by exact ID.
+    pushed onto it so callers can attribute lessons by exact ID. When `files`
+    is given, lessons bound to matching ``path:<dir>`` prefixes rank ahead of
+    generic taxonomy matches.
     """
     norm_tax = _TAXONOMY_MAP.get(str(taxonomy or "").strip().lower(), "general")
     ws = str(workspace_dir or ".")
@@ -146,6 +238,13 @@ def get_relevant_meta_lessons(
         return []
 
     memories = results.get("memories", []) if isinstance(results, dict) else []
+    if files:
+        dir_prefixes = _file_dir_prefixes(files)
+        if dir_prefixes:
+            memories = sorted(
+                memories,
+                key=lambda m: 0 if _memory_matches_path_prefix(m, dir_prefixes) else 1,
+            )
     lessons: List[str] = []
     seen: set[str] = set()
 
@@ -213,11 +312,16 @@ def extract_meta_lesson(
     workspace_dir: Optional[str | Path] = None,
     failed_model: str = "",
     successful_model: str = "",
+    failure_kind: Optional[str] = None,
+    files_touched: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Generates and persists an architectural lesson (kind='lesson') into Memory Vault.
 
     Called when a task succeeds after an initial mutation failure, rollback, or syntax rejection.
     """
+    if is_infra_failure(failure_kind, str(error_summary or "")):
+        # Provider-side noise is not a lesson — retry.py/denylist.py own it.
+        return None
     clean_tax = _TAXONOMY_MAP.get(str(taxonomy or "").strip().lower(), "general")
     # Flatten CR/LF so untrusted multi-line errors cannot inject synthetic
     # "- **Effective Resolution:**" lines into the persisted lesson body.
@@ -246,13 +350,18 @@ def extract_meta_lesson(
         # Never fall back to the process CWD (".") for lesson persistence.
         return None
     ws = str(workspace_dir)
+    tags = ["meta-harness", "lesson", clean_tax]
+    # Path-prefix binding (not blob SHAs): later tasks touching the same
+    # directories rank this lesson ahead of generic taxonomy matches.
+    for prefix in _file_dir_prefixes(files_touched):
+        tags.append(f"path:{mask_secrets(prefix)}")
     try:
         res = save_memory(
             workspace_dir=ws,
             title=title,
             content=body,
             kind="lesson",
-            tags=["meta-harness", "lesson", clean_tax],
+            tags=tags,
             memory_id=lesson_id,
             scope="local",
             status="candidate",
@@ -263,3 +372,66 @@ def extract_meta_lesson(
     except Exception:
         pass
     return None
+
+
+def _pack_lessons_linear(sections: List[str], budget: int) -> List[str]:
+    """Byte-budget prefix pack used only when ContextKnapsack itself fails."""
+    packed: List[str] = []
+    used = 0
+    for s in sections:
+        size = len(s.encode("utf-8"))
+        overhead = 1 if packed else 0
+        if used + size + overhead > budget:
+            break
+        packed.append(s)
+        used += size + overhead
+    return packed
+
+
+def pack_lessons_within_budget(
+    lessons: List[str],
+    max_bytes: int = 800,
+    base_dir: Optional[Any] = None,
+) -> List[str]:
+    """Return the subset of ``lessons`` that fits ``max_bytes`` under ContextKnapsack.
+
+    Order is preserved and overflow entries are dropped — the knapsack's
+    ``[context overflow ...]`` scratchpad pointer is never injected as a fake
+    lesson.
+    """
+    if isinstance(max_bytes, bool):
+        return []
+    try:
+        budget = int(max_bytes)
+    except (TypeError, ValueError):
+        budget = 800
+    if budget <= 0:
+        return []
+    sections = [str(ln or "").strip() for ln in lessons]
+    sections = [s for s in sections if s]
+    if not sections:
+        return []
+    try:
+        try:
+            from botex.core.context_inclusion import ContextKnapsack
+        except (ImportError, ValueError):
+            from context_inclusion import ContextKnapsack
+        result = ContextKnapsack(budget_bytes=budget).pack(
+            sections, scratch_id="meta-lessons", base_dir=base_dir
+        )
+    except Exception:
+        return _pack_lessons_linear(sections, budget)
+    overflow = result.get("overflow_sections") or []
+    if not overflow:
+        return sections
+    # Identical strings pack greedily in order: of N copies the first
+    # (N - overflowed) survived, so occurrence-index mapping is exact.
+    over = Counter(overflow)
+    total = Counter(sections)
+    seen: Counter = Counter()
+    packed_out: List[str] = []
+    for s in sections:
+        seen[s] += 1
+        if seen[s] <= max(0, total[s] - over.get(s, 0)):
+            packed_out.append(s)
+    return packed_out

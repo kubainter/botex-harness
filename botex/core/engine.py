@@ -8,6 +8,7 @@ Quota Optimization, and Automatic Self-Healing.
 """
 
 import asyncio
+import collections
 import contextlib
 import copy
 import inspect
@@ -23,7 +24,11 @@ from dotenv import load_dotenv
 from openai import APITimeoutError, AsyncOpenAI
 
 try:
-    from botex.memory.memory import extract_implicit_links, save_memory
+    from botex.memory.memory import (
+        extract_implicit_links,
+        save_memory,
+        update_lesson_confidence,
+    )
     from botex.providers.analytics import (
         calculate_cost_usd,
         check_budget_limit,
@@ -118,6 +123,8 @@ try:
         classify_task_taxonomy,
         extract_meta_lesson,
         get_relevant_meta_lessons,
+        is_infra_failure,
+        pack_lessons_within_budget,
     )
     from .state import InFlightTaskState
 except (ImportError, ValueError):
@@ -170,11 +177,13 @@ except (ImportError, ValueError):
         read_file,
         read_file_lines,
     )
-    from memory import extract_implicit_links, save_memory
+    from memory import extract_implicit_links, save_memory, update_lesson_confidence
     from meta_harness import (
         classify_task_taxonomy,
         extract_meta_lesson,
         get_relevant_meta_lessons,
+        is_infra_failure,
+        pack_lessons_within_budget,
     )
     from net_tools import read_url, resolve_net_scope
     from patch_engine import apply_patch, snapshot_manager, validate_syntax
@@ -1306,6 +1315,13 @@ async def run_botex_task(
                     reason=str(last_result.get("message") or ""),
                     turns=int(last_result.get("steps") or 0),
                 )
+                for _sr in last_result.get("syntax_rejections_detail") or []:
+                    if isinstance(_sr, dict):
+                        in_flight_state.record_syntax_rejection(
+                            str(_sr.get("file") or ""), str(_sr.get("error") or "")
+                        )
+                if last_result.get("rollback_reason"):
+                    in_flight_state.record_rollback_reason(str(last_result["rollback_reason"]))
                 handoff_context = in_flight_state.format_handoff_context()
 
                 # Fallback policy: a mutated workspace is handed to the next
@@ -1422,15 +1438,21 @@ async def run_botex_task(
                 fail_reason = str(
                     attempts[-2].get("status") or attempts[-2].get("failure_kind") or "model_failed"
                 )
-                extract_meta_lesson(
-                    task_id=str(attempts[-1].get("task_id") or ""),
-                    taxonomy=tax,
-                    error_summary=f"Model {fail_m} failed with {fail_reason}",
-                    recovery_strategy=f"Switched to fallback model {succ_m}",
-                    workspace_dir=workspace_dir,
-                    failed_model=fail_m,
-                    successful_model=succ_m,
-                )
+                if not is_infra_failure(
+                    attempts[-2].get("failure_kind"),
+                    str(attempts[-2].get("status") or ""),
+                ):
+                    extract_meta_lesson(
+                        task_id=str(attempts[-1].get("task_id") or ""),
+                        taxonomy=tax,
+                        error_summary=f"Model {fail_m} failed with {fail_reason}",
+                        recovery_strategy=f"Switched to fallback model {succ_m}",
+                        workspace_dir=workspace_dir,
+                        failed_model=fail_m,
+                        successful_model=succ_m,
+                        failure_kind=str(attempts[-2].get("failure_kind") or ""),
+                        files_touched=list(last_result.get("files_touched") or []),
+                    )
             except Exception:
                 pass
     return last_result
@@ -1445,6 +1467,8 @@ async def _run_botex_task_once(*args, task_id: Optional[str] = None, **kwargs):
     result: Dict[str, Any] = {}
     attempt_files_read: set = set()
     kwargs.setdefault("files_read_out", attempt_files_read)
+    contrastive: Dict[str, Any] = {}
+    kwargs.setdefault("contrastive_out", contrastive)
     try:
         from botex.core.tracing import start_span
 
@@ -1475,6 +1499,40 @@ async def _run_botex_task_once(*args, task_id: Optional[str] = None, **kwargs):
             result["applied_skills"] = []
     if "files_read" not in result and attempt_files_read:
         result["files_read"] = sorted(attempt_files_read)
+    if contrastive.get("syntax_rejections_detail"):
+        result["syntax_rejections_detail"] = list(contrastive["syntax_rejections_detail"])
+    if contrastive.get("rollback_reason"):
+        result["rollback_reason"] = str(contrastive["rollback_reason"])
+    if contrastive.get("verify_failures"):
+        result["verify_failures"] = int(contrastive["verify_failures"])
+
+    # End-of-attempt episodic feedback (PR 2): deterministic confidence
+    # nudges on injected lessons. No LLM call; provider-side infrastructure
+    # noise is excluded by contract (retry.py/denylist.py own it).
+    applied_ids = [
+        str(x).strip() for x in (contrastive.get("applied_lesson_ids") or []) if str(x).strip()
+    ]
+    ws_dir = str(kwargs.get("workspace_dir") or (args[2] if len(args) > 2 else ""))
+    if applied_ids and ws_dir:
+        rb_count = int(contrastive.get("rollback_count") or 0)
+        res_status = str(result.get("status") or "")
+        res_kind = str(result.get("failure_kind") or "")
+        try:
+            if res_status == "DONE" and rb_count == 0:
+                for lid in applied_ids:
+                    update_lesson_confidence(ws_dir, lid, 0.1)
+            elif (
+                res_status not in {"REQUEST_TIMEOUT", "API_ERROR", "BUDGET_EXCEEDED", "ABORTED"}
+                and not is_infra_failure(res_kind)
+                and (
+                    rb_count > 0
+                    or res_status in {"VERIFICATION_FAILED", "STAGNANT_ROLLBACK", "INCOMPLETE"}
+                )
+            ):
+                for lid in applied_ids:
+                    update_lesson_confidence(ws_dir, lid, -0.15)
+        except Exception as exc:
+            sys.stderr.write(f"Lesson confidence update skipped: {exc}\n")
     return result
 
 
@@ -1609,12 +1667,17 @@ async def _run_botex_task_once_impl(
     plugin_registry: Optional[TaskLocalPluginRegistry] = None,
     plugin_vault: Optional[PluginVaultManager] = None,
     routed_tier: str = "",
+    contrastive_out: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Executes an autonomous coding task in workspace_dir using the BoteX engine.
     """
     task_id = task_id or str(uuid.uuid4())[:8]
     start_time = time.time()
+    # Mutable cross-attempt telemetry sink consumed by _run_botex_task_once:
+    # syntax-rejection pairs, rollback reasons/counters, verify failures and
+    # the injected lesson IDs for end-of-attempt confidence feedback.
+    ct_out: Dict[str, Any] = contrastive_out if isinstance(contrastive_out, dict) else {}
 
     # Recipe / persona resolution
     recipe_content = ""
@@ -2188,7 +2251,23 @@ async def _run_botex_task_once_impl(
         workspace_dir=root_path,
         max_lessons=2,
         lesson_ids_out=applied_lesson_ids,
+        files=files,
     )
+    if meta_lessons:
+        # ContextKnapsack budget: the injected lesson block is capped at
+        # <=800 B (~15-20% of the 4096 B context budget). Overflow lessons
+        # are dropped — never replaced by a scratchpad pointer — and
+        # applied_lesson_ids stays in sync with what actually fit.
+        packed_lessons = pack_lessons_within_budget(meta_lessons, max_bytes=800, base_dir=root_path)
+        packed_counts = collections.Counter(packed_lessons)
+        kept_ids: List[str] = []
+        for ml, lid in zip(meta_lessons, applied_lesson_ids):
+            if packed_counts.get(ml, 0) > 0:
+                packed_counts[ml] -= 1
+                kept_ids.append(lid)
+        applied_lesson_ids[:] = kept_ids
+        meta_lessons = packed_lessons
+        ct_out["applied_lesson_ids"] = applied_lesson_ids
     if meta_lessons:
         lesson_bullets = "\n".join(f"- {ml}" for ml in meta_lessons)
         initial_user_prompt += f"HARNESS LESSONS ({tax.upper()}):\n{lesson_bullets}\n"
@@ -2290,6 +2369,9 @@ async def _run_botex_task_once_impl(
     syntax_rejections = 0
     rollback_count = 0
     last_syntax_error = ""
+    verify_failures = 0
+    max_failed_mutations = 0
+    max_stagnant_turns = 0
     # Invocation-level failures (malformed JSON args, non-object args,
     # unknown tool, dispatch crash) are the model's fault — tracked so a
     # surrender after only-failed calls reports model_tool_misuse instead
@@ -2422,6 +2504,8 @@ async def _run_botex_task_once_impl(
         except APITimeoutError:
             rollback_verified = _rollback_attempt(task_id, files_touched)
             rollback_count += 1
+            ct_out["rollback_count"] = rollback_count
+            ct_out["rollback_reason"] = "rollback: provider request timeout"
             log_entry = log_run(
                 task_id=task_id,
                 model=model,
@@ -2463,7 +2547,9 @@ async def _run_botex_task_once_impl(
             # Rollback on fatal API failure if changes were made
             rollback_verified = _rollback_attempt(task_id, files_touched)
             rollback_count += 1
+            ct_out["rollback_count"] = rollback_count
             failure_kind = classify_api_error(e)
+            ct_out["rollback_reason"] = f"rollback: provider api error ({failure_kind})"
             log_entry = log_run(
                 task_id=task_id,
                 model=model,
@@ -2559,6 +2645,8 @@ async def _run_botex_task_once_impl(
             if (past_spend + current_run_cost) >= budget_limit_usd:
                 rollback_verified = _rollback_attempt(task_id, files_touched)
                 rollback_count += 1
+                ct_out["rollback_count"] = rollback_count
+                ct_out["rollback_reason"] = "rollback: daily budget limit exceeded"
                 duration = time.time() - start_time
                 summary_text = (
                     f"[BUDGET BLOCK] Task exceeded daily limit (${budget_limit_usd:.2f}) "
@@ -2603,6 +2691,8 @@ async def _run_botex_task_once_impl(
             # instead of burning retry turns on an empty message.
             rollback_verified = _rollback_attempt(task_id, files_touched)
             rollback_count += 1
+            ct_out["rollback_count"] = rollback_count
+            ct_out["rollback_reason"] = "rollback: provider malformed/error response"
             duration = time.time() - start_time
             summary_text = (
                 f"Provider returned a malformed or error response ({nresp.raw_finish_reason})."
@@ -2942,6 +3032,8 @@ async def _run_botex_task_once_impl(
                     if verification.get("ok"):
                         verify_passed = True
                     elif verify_attempts < 3:
+                        verify_failures += 1
+                        ct_out["verify_failures"] = verify_failures
                         messages.append(
                             {
                                 "role": "user",
@@ -2956,8 +3048,12 @@ async def _run_botex_task_once_impl(
                         )
                         continue
                     else:
+                        verify_failures += 1
+                        ct_out["verify_failures"] = verify_failures
                         rollback_verified = _rollback_attempt(task_id, files_touched)
                         rollback_count += 1
+                        ct_out["rollback_count"] = rollback_count
+                        ct_out["rollback_reason"] = "rollback: verification failed after 3 attempts"
                         rolled_ok = rollback_verified is not False
                         duration = time.time() - start_time
                         summary_text = "Verification command failed after 3 attempts. " + (
@@ -3098,6 +3194,9 @@ async def _run_botex_task_once_impl(
                     except Exception as exc:
                         sys.stderr.write(f"Snapshot pruning skipped: {exc}\n")
 
+                # Contrastive episodic lessons (PR 2): deterministic emission
+                # on recovery from syntax rejections, verify fail->pass, or
+                # stagnation — always quarantined as local candidates.
                 if syntax_rejections > 0:
                     try:
                         extract_meta_lesson(
@@ -3107,6 +3206,44 @@ async def _run_botex_task_once_impl(
                             recovery_strategy="Model corrected patch syntax in subsequent turn",
                             workspace_dir=root_path,
                             successful_model=model,
+                            files_touched=list(files_touched),
+                        )
+                    except Exception:
+                        pass
+                if verify_failures > 0:
+                    try:
+                        extract_meta_lesson(
+                            task_id=task_id,
+                            taxonomy=tax,
+                            error_summary=(
+                                f"verify_command failed {verify_failures}x before passing"
+                            ),
+                            recovery_strategy=(
+                                "Model inspected verification output and repaired the "
+                                "workspace until verify_command passed"
+                            ),
+                            workspace_dir=root_path,
+                            successful_model=model,
+                            files_touched=list(files_touched),
+                        )
+                    except Exception:
+                        pass
+                if max_failed_mutations > 0 or max_stagnant_turns >= 2:
+                    try:
+                        extract_meta_lesson(
+                            task_id=task_id,
+                            taxonomy=tax,
+                            error_summary=(
+                                f"Stagnation recovered: {max_failed_mutations} failed "
+                                f"mutation(s), {max_stagnant_turns} stagnant turn(s)"
+                            ),
+                            recovery_strategy=(
+                                "Model changed strategy and completed the task after "
+                                "repeated failed mutations"
+                            ),
+                            workspace_dir=root_path,
+                            successful_model=model,
+                            files_touched=list(files_touched),
                         )
                     except Exception:
                         pass
@@ -3410,6 +3547,8 @@ async def _run_botex_task_once_impl(
                         if "aborted" in agency_error.lower():
                             rollback_verified = _rollback_attempt(task_id, files_touched)
                             rollback_count += 1
+                            ct_out["rollback_count"] = rollback_count
+                            ct_out["rollback_reason"] = "rollback: task aborted by operator"
                             rolled_ok = rollback_verified is not False
                             duration = time.time() - start_time
                             summary_text = f"Task aborted by operator during '{fn_name}'. " + (
@@ -3519,6 +3658,16 @@ async def _run_botex_task_once_impl(
                                     if "syntax" in err_str.lower() or "rejected" in err_str.lower():
                                         syntax_rejections += 1
                                         last_syntax_error = err_str[:150]
+                                        sr_detail = ct_out.setdefault(
+                                            "syntax_rejections_detail", []
+                                        )
+                                        if len(sr_detail) < 5:
+                                            sr_detail.append(
+                                                {
+                                                    "file": str(target_p or ""),
+                                                    "error": last_syntax_error,
+                                                }
+                                            )
                         elif fn_name == "create_file":
                             target_p = args.get("path", "")
                             norm_p = _normalize_track_path(target_p, root_path)
@@ -3669,9 +3818,13 @@ async def _run_botex_task_once_impl(
         elif current_action_sig:
             stagnant_turns = 1
             last_action_signature = current_action_sig
+        if stagnant_turns > max_stagnant_turns:
+            max_stagnant_turns = stagnant_turns
 
         if mut_actions and not turn_mutated:
             failed_mutations_streak += 1
+            if failed_mutations_streak > max_failed_mutations:
+                max_failed_mutations = failed_mutations_streak
         elif turn_mutated:
             failed_mutations_streak = 0
 
@@ -3721,6 +3874,7 @@ async def _run_botex_task_once_impl(
             )
             rollback_verified = _rollback_attempt(task_id, files_touched)
             rollback_count += 1
+            ct_out["rollback_count"] = rollback_count
             rolled_ok = rollback_verified is not False
             duration = time.time() - start_time
 
@@ -3729,6 +3883,7 @@ async def _run_botex_task_once_impl(
                 if stagnant_turns >= 3
                 else "3 consecutive failed mutations"
             )
+            ct_out["rollback_reason"] = f"rollback: no-progress loop ({reason})"
             summary_text = f"No-progress loop detected ({reason}). " + (
                 "Changes were rolled back."
                 if rolled_ok

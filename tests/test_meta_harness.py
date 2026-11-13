@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from botex import memory
 from botex.catalog import FREE_TIER_FAILOVER_CHAIN, get_free_tier_failover_candidates
 from botex.meta_harness import (
@@ -234,3 +236,219 @@ def test_free_tier_failover_candidates():
     assert len(remaining) == len(FREE_TIER_FAILOVER_CHAIN) - len(attempted)
     for att in attempted:
         assert all(c["model"] != att for c in remaining)
+
+
+def test_is_infra_failure_gates_provider_noise_without_false_positives():
+    """Provider infra failures match cleanly without false positives on numbers like 1429."""
+    from botex.core.meta_harness import is_infra_failure
+
+    for kind in (
+        "rate_limit",
+        "provider_rate_limited",
+        "budget_or_price_block",
+        "request_timeout",
+        "auth_error",
+        "provider_unavailable",
+    ):
+        assert is_infra_failure(kind) is True
+
+    assert is_infra_failure(None, "HTTP 429 Too Many Requests") is True
+    assert is_infra_failure("", "Request timed out after 30s") is True
+    assert is_infra_failure("", "connection error resetting peer") is True
+
+    assert is_infra_failure("syntax_error", "SyntaxError on port 1429") is False
+    assert is_infra_failure("stagnation", "exit code 4291") is False
+    assert is_infra_failure(None, "") is False
+
+
+def test_extract_meta_lesson_skips_infra_and_binds_path_prefixes(tmp_path):
+    """Infra failures never persist lessons; real recoveries bind path:<dir> prefixes and rank first."""
+    from botex.core.meta_harness import extract_meta_lesson, get_relevant_meta_lessons
+    from botex.memory.memory import read_memory, set_memory_status, update_lesson_confidence
+
+    infra_res = extract_meta_lesson(
+        task_id="t-infra",
+        taxonomy="bugfix",
+        error_summary="HTTP 429 from upstream",
+        recovery_strategy="Switched to backup",
+        workspace_dir=tmp_path,
+        failure_kind="provider_rate_limited",
+        files_touched=["botex/core/engine.py"],
+    )
+    assert infra_res is None
+
+    # Save generic active lesson and path-bound active lesson for same taxonomy.
+    id_generic = extract_meta_lesson(
+        task_id="t-gen",
+        taxonomy="bugfix",
+        error_summary="Generic failure across repo",
+        recovery_strategy="Run ruff check after editing.",
+        workspace_dir=tmp_path,
+    )
+    id_path = extract_meta_lesson(
+        task_id="t-path",
+        taxonomy="bugfix",
+        error_summary="Patch failure in providers module",
+        recovery_strategy="Use async context manager in botex/providers.",
+        workspace_dir=tmp_path,
+        files_touched=[
+            "botex\\providers\\analytics.py",
+            "botex/providers/wallet.py",
+            "botex/core/a.py",
+            "botex/tools/b.py",
+            "ignored/extra/c.py",
+        ],
+    )
+    assert id_generic and id_path
+    note = read_memory(workspace_dir=str(tmp_path), memory_id=id_path, scope="local")
+    path_tags = [t for t in note["metadata"]["tags"] if str(t).startswith("path:")]
+    assert len(path_tags) == 3  # capped at 3 unique parent dirs
+    assert "path:botex/providers" in path_tags
+
+    assert set_memory_status(str(tmp_path), id_generic, "active", scope="local")
+    assert set_memory_status(str(tmp_path), id_path, "active", scope="local")
+    assert update_lesson_confidence(str(tmp_path), id_generic, 0.3)["ok"]
+    assert update_lesson_confidence(str(tmp_path), id_path, 0.3)["ok"]
+
+    ranked = get_relevant_meta_lessons(
+        taxonomy="bugfix",
+        workspace_dir=tmp_path,
+        max_lessons=2,
+        files=["botex/providers/retry.py"],
+    )
+    assert len(ranked) == 2
+    assert "botex/providers" in ranked[0]
+
+
+def test_pack_lessons_within_budget_drops_overflow_and_handles_duplicates(tmp_path):
+    """Knapsack packing respects 800 B, never emits overflow pointers, and handles duplicates."""
+    from botex.core.meta_harness import pack_lessons_within_budget
+
+    assert pack_lessons_within_budget(["a"], max_bytes=True) == []
+    assert pack_lessons_within_budget(["a"], max_bytes=0) == []
+
+    dup = "D" * 300
+    tail = "T" * 300
+    packed = pack_lessons_within_budget([dup, dup, tail], max_bytes=800, base_dir=tmp_path)
+    assert len(packed) == 2
+    assert all("[context overflow" not in ln for ln in packed)
+
+    # Falls back to linear prefix packing if ContextKnapsack raises.
+    with patch(
+        "botex.core.context_inclusion.ContextKnapsack.pack",
+        side_effect=RuntimeError("knapsack unavailable"),
+    ):
+        linear = pack_lessons_within_budget(["one", "two", "X" * 900], max_bytes=50)
+    assert linear == ["one", "two"]
+
+
+@pytest.mark.anyio
+async def test_engine_confidence_feedback_and_infra_skip(tmp_path, monkeypatch):
+    """End-of-attempt confidence rewards DONE, penalizes quality failures, skips ABORTED/infra."""
+    import botex.core.engine as engine
+    from botex.memory.memory import read_memory, save_memory
+
+    save_memory(
+        workspace_dir=str(tmp_path),
+        title="Injected Lesson One",
+        content="Use helper X.",
+        kind="lesson",
+        memory_id="mem_fb_1",
+        scope="local",
+        status="candidate",
+        confidence=0.4,
+    )
+
+    async def fake_impl_done(*args, **kwargs):
+        ct_out = kwargs.get("contrastive_out")
+        if isinstance(ct_out, dict):
+            ct_out["applied_lesson_ids"] = ["mem_fb_1"]
+            ct_out["rollback_count"] = 0
+        return {"ok": True, "task_id": "t1", "status": "DONE", "files_touched": []}
+
+    with patch.object(engine, "_run_botex_task_once_impl", side_effect=fake_impl_done):
+        await engine._run_botex_task_once("t1", "Fix python bug", str(tmp_path), "m1", mode="edit")
+    after_done = read_memory(workspace_dir=str(tmp_path), memory_id="mem_fb_1", scope="local")
+    assert after_done["metadata"]["confidence"] == 0.5
+
+    # ABORTED / REQUEST_TIMEOUT / API_ERROR / BUDGET_EXCEEDED even with rb_count > 0 must NOT penalize.
+    for status, fkind in (
+        ("ABORTED", "aborted"),
+        ("REQUEST_TIMEOUT", "request_timeout"),
+        ("API_ERROR", "provider_rate_limited"),
+        ("BUDGET_EXCEEDED", "budget_or_price_block"),
+    ):
+
+        async def fake_non_quality(*args, _st=status, _fk=fkind, **kwargs):
+            ct_out = kwargs.get("contrastive_out")
+            if isinstance(ct_out, dict):
+                ct_out["applied_lesson_ids"] = ["mem_fb_1"]
+                ct_out["rollback_count"] = 1
+            return {"ok": False, "task_id": "t2", "status": _st, "failure_kind": _fk}
+
+        with patch.object(engine, "_run_botex_task_once_impl", side_effect=fake_non_quality):
+            await engine._run_botex_task_once(
+                "t2", "Fix python bug", str(tmp_path), "m1", mode="edit"
+            )
+        check = read_memory(workspace_dir=str(tmp_path), memory_id="mem_fb_1", scope="local")
+        assert check["metadata"]["confidence"] == 0.5
+
+    # Genuine quality failure (VERIFICATION_FAILED) penalizes -0.15.
+    async def fake_verify_fail(*args, **kwargs):
+        ct_out = kwargs.get("contrastive_out")
+        if isinstance(ct_out, dict):
+            ct_out["applied_lesson_ids"] = ["mem_fb_1"]
+            ct_out["rollback_count"] = 1
+        return {
+            "ok": False,
+            "task_id": "t3",
+            "status": "VERIFICATION_FAILED",
+            "failure_kind": "verification_failed",
+        }
+
+    with patch.object(engine, "_run_botex_task_once_impl", side_effect=fake_verify_fail):
+        await engine._run_botex_task_once("t3", "Fix python bug", str(tmp_path), "m1", mode="edit")
+    after_pen = read_memory(workspace_dir=str(tmp_path), memory_id="mem_fb_1", scope="local")
+    assert after_pen["metadata"]["confidence"] == 0.35
+
+    # Infra fallback in run_botex_task must NOT call extract_meta_lesson.
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-nv-key")
+    calls = 0
+
+    async def fake_once_infra(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "ok": False,
+                "task_id": "ti1",
+                "status": "API_ERROR",
+                "failure_kind": "provider_rate_limited",
+                "message": "429",
+                "steps": 0,
+                "cost_usd": 0.0,
+            }
+        return {
+            "ok": True,
+            "task_id": "ti2",
+            "status": "DONE",
+            "message": "ok",
+            "steps": 1,
+            "cost_usd": 0.0,
+        }
+
+    with (
+        patch.object(engine, "resolve_model_candidates", return_value=["m1", "m2"]),
+        patch.object(engine, "_run_botex_task_once", side_effect=fake_once_infra),
+        patch.object(engine, "check_model_price", return_value=(True, "")),
+        patch.object(engine, "check_model_tools", return_value=(True, "")),
+        patch.object(engine, "check_budget_limit", return_value=(False, 0.0)),
+        patch.object(engine, "extract_meta_lesson") as mock_extract,
+    ):
+        await engine.run_botex_task(
+            task="Task with rate-limit fallback",
+            workspace_dir=str(tmp_path),
+            provider="nvidia",
+            mode="readonly",
+        )
+    mock_extract.assert_not_called()

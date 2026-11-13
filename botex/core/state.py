@@ -15,6 +15,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+try:
+    from botex.tools.security import mask_secrets
+except (ImportError, ValueError):
+    from security import mask_secrets
+
+_MAX_SYNTAX_REJECTIONS = 5
+_MAX_ROLLBACK_REASONS = 5
+_MAX_REJECTION_FIELD_CHARS = 200
+
 
 @dataclass
 class CanonicalAgentTurn:
@@ -73,6 +82,8 @@ class InFlightTaskState:
     task_plugins: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     step_snapshots: Dict[int, str] = field(default_factory=dict)
     staged_plugins: List[Dict[str, Any]] = field(default_factory=list)
+    syntax_rejections: List[Dict[str, str]] = field(default_factory=list)
+    rollback_reasons: List[str] = field(default_factory=list)
 
     def add_plan_step(self, step: str) -> None:
         """Add a planned action step if not already recorded."""
@@ -111,6 +122,24 @@ class InFlightTaskState:
                 "timestamp": time.time(),
             }
         )
+
+    def record_syntax_rejection(self, file_path: str, error: str) -> None:
+        """Record an in-memory patch rejection (file + error) for cross-fallback hints."""
+        fp = mask_secrets(str(file_path or "").replace("\\", "/").strip())[
+            :_MAX_REJECTION_FIELD_CHARS
+        ]
+        err = mask_secrets(" ".join(str(error or "").split()))[:_MAX_REJECTION_FIELD_CHARS]
+        if not fp and not err:
+            return
+        self.syntax_rejections.append({"file": fp, "error": err})
+        self.syntax_rejections = self.syntax_rejections[-_MAX_SYNTAX_REJECTIONS:]
+
+    def record_rollback_reason(self, reason: str) -> None:
+        """Record why a rollback fired (stagnation, verify failure, provider error)."""
+        cleaned = mask_secrets(" ".join(str(reason or "").split()))[:_MAX_REJECTION_FIELD_CHARS]
+        if cleaned:
+            self.rollback_reasons.append(cleaned)
+            self.rollback_reasons = self.rollback_reasons[-_MAX_ROLLBACK_REASONS:]
 
     def ingest_swarm_payload(self, raw_payload: Any, agent_type: str) -> CanonicalAgentTurn:
         """Normalize a raw agent payload and fold its effects into this state."""
@@ -163,6 +192,16 @@ class InFlightTaskState:
                 f"provider={last.get('provider')}, failure={last.get('failure_kind') or 'error'}"
             )
 
+        if self.syntax_rejections:
+            rejects_preview = "\n".join(
+                f"- {sr.get('file') or 'unknown'}: {sr.get('error') or ''}"
+                for sr in self.syntax_rejections[-3:]
+            )
+            parts.append(f"Rejected Edits (do NOT repeat these):\n{rejects_preview}")
+
+        if self.rollback_reasons:
+            parts.append(f"Rollback Reasons: {'; '.join(self.rollback_reasons[-3:])}")
+
         parts.append(
             "Instructions: Use these established findings to proceed immediately without re-inspecting "
             "already examined files from scratch."
@@ -206,12 +245,14 @@ class InFlightTaskState:
             "task_plugins": dict(self.task_plugins),
             "step_snapshots": {int(k): str(v) for k, v in self.step_snapshots.items()},
             "staged_plugins": [dict(p) for p in self.staged_plugins],
+            "syntax_rejections": [dict(s) for s in self.syntax_rejections],
+            "rollback_reasons": list(self.rollback_reasons),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> InFlightTaskState:
         """Reconstruct state from a dictionary."""
-        return cls(
+        state = cls(
             task_id=str(data.get("task_id", "")),
             goal=str(data.get("goal", "")),
             plan_steps=list(data.get("plan_steps") or []),
@@ -228,3 +269,11 @@ class InFlightTaskState:
             step_snapshots={int(k): str(v) for k, v in (data.get("step_snapshots") or {}).items()},
             staged_plugins=list(data.get("staged_plugins") or []),
         )
+        # Restored contrastive fields re-enter through the recorders so
+        # masking, whitespace normalization, and bounds are re-enforced.
+        for s in data.get("syntax_rejections") or []:
+            if isinstance(s, dict):
+                state.record_syntax_rejection(str(s.get("file") or ""), str(s.get("error") or ""))
+        for r in data.get("rollback_reasons") or []:
+            state.record_rollback_reason(str(r))
+        return state

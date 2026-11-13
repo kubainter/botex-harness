@@ -412,3 +412,116 @@ async def test_run_botex_task_free_quota_fallbacks_exclude_paid(
         attempt_providers = [a["provider"] for a in result["attempts"]]
         assert attempt_providers == ["openrouter-free", "nvidia"]
         assert "openrouter" not in attempt_providers
+
+
+def test_in_flight_task_state_contrastive_fields_roundtrip_and_bounds():
+    """Syntax rejections & rollback reasons normalize whitespace, mask secrets, cap at 5."""
+    state = InFlightTaskState(task_id="t-pr2", goal="Fix bug")
+
+    long_err = "SyntaxError: bad token  sk-1234567890abcdef1234567890  " + ("x" * 300)
+    for i in range(7):
+        state.record_syntax_rejection(f"botex\\core\\file_{i}.py", f"err {i} {long_err}")
+        state.record_rollback_reason(f"reason\n{i}\t sk-1234567890abcdef1234567890 " + ("y" * 250))
+
+    assert len(state.syntax_rejections) == 5
+    assert state.syntax_rejections[0]["file"] == "botex/core/file_2.py"
+    assert state.syntax_rejections[-1]["file"] == "botex/core/file_6.py"
+    assert len(state.syntax_rejections[-1]["error"]) <= 200
+    assert "\n" not in state.syntax_rejections[-1]["error"]
+    assert "sk-1234567890" not in state.syntax_rejections[-1]["error"]
+
+    assert len(state.rollback_reasons) == 5
+    assert state.rollback_reasons[0].startswith("reason 2")
+    assert len(state.rollback_reasons[-1]) <= 200
+    assert "\n" not in state.rollback_reasons[-1]
+    assert "sk-1234567890" not in state.rollback_reasons[-1]
+
+    handoff = state.format_handoff_context()
+    assert "Rejected Edits (do NOT repeat these):" in handoff
+    assert "botex/core/file_6.py" in handoff
+    assert "botex/core/file_2.py" not in handoff  # only last 3 rendered
+    assert "Rollback Reasons:" in handoff
+    assert "reason 6" in handoff
+    assert "reason 2" not in handoff
+
+    restored = InFlightTaskState.from_dict(state.to_dict())
+    assert restored.syntax_rejections == state.syntax_rejections
+    assert restored.rollback_reasons == state.rollback_reasons
+
+    # Tampered checkpoint dict must also re-enforce bounds, whitespace flattening, and masking.
+    tampered = state.to_dict()
+    tampered["syntax_rejections"] = [
+        {"file": f"a\\b_{i}.py", "error": f"bad\nsk-secretkey1234567890abcdef {i}"}
+        for i in range(8)
+    ]
+    tampered["rollback_reasons"] = [f"rb\n{i} sk-secretkey1234567890abcdef" for i in range(8)]
+    hardened = InFlightTaskState.from_dict(tampered)
+    assert len(hardened.syntax_rejections) == 5
+    assert len(hardened.rollback_reasons) == 5
+    assert all("sk-secretkey1234567890abcdef" not in str(s) for s in hardened.syntax_rejections)
+    assert all("sk-secretkey1234567890abcdef" not in r for r in hardened.rollback_reasons)
+
+
+@pytest.mark.anyio
+async def test_run_botex_task_forwards_contrastive_failures_into_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Attempt 1 syntax rejections and rollback reasons reach attempt 2 handoff_context."""
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-nv-key")
+    cfg = copy.deepcopy(load_config())
+    cfg["provider_fallbacks"] = {"nvidia": []}
+    captured_handoffs: List[str] = []
+    attempt_calls = 0
+
+    async def fake_once(*args, **kwargs):
+        nonlocal attempt_calls
+        attempt_calls += 1
+        captured_handoffs.append(str(kwargs.get("handoff_context") or ""))
+        if attempt_calls == 1:
+            return {
+                "ok": False,
+                "task_id": "t1",
+                "status": "MAX_TURNS_REACHED",
+                "failure_kind": "turns_exhausted",
+                "message": "No progress",
+                "steps": 4,
+                "cost_usd": 0.0,
+                "files_touched": [],
+                "syntax_rejections_detail": [
+                    {"file": "botex/core/foo.py", "error": "SyntaxError: invalid syntax"}
+                ],
+                "rollback_reason": "rollback: no-progress loop (3 consecutive failed mutations)",
+            }
+        return {
+            "ok": True,
+            "task_id": "t2",
+            "status": "DONE",
+            "message": "Fixed cleanly",
+            "steps": 1,
+            "cost_usd": 0.0,
+            "files_touched": ["botex/core/foo.py"],
+        }
+
+    with (
+        patch("botex.engine.load_config", return_value=cfg),
+        patch.object(engine, "resolve_model_candidates", return_value=["m1", "m2"]),
+        patch.object(engine, "_run_botex_task_once", side_effect=fake_once),
+        patch.object(engine, "check_model_price", return_value=(True, "")),
+        patch.object(engine, "check_model_tools", return_value=(True, "")),
+        patch.object(engine, "check_budget_limit", return_value=(False, 0.0)),
+        patch.object(engine, "extract_meta_lesson", return_value=None) as mock_extract,
+    ):
+        res = await engine.run_botex_task(
+            task="Repair foo.py",
+            workspace_dir=str(tmp_path),
+            provider="nvidia",
+            mode="edit",
+        )
+
+    assert res["status"] == "DONE"
+    assert len(captured_handoffs) == 2
+    assert captured_handoffs[0] == ""
+    assert "Rejected Edits (do NOT repeat these):" in captured_handoffs[1]
+    assert "botex/core/foo.py: SyntaxError: invalid syntax" in captured_handoffs[1]
+    assert "rollback: no-progress loop (3 consecutive failed mutations)" in captured_handoffs[1]
+    mock_extract.assert_called_once()
