@@ -126,10 +126,9 @@ BoteX exposes a focused set of MCP tools:
 * **`start_task(task, ...)`**: Launches a task asynchronously in the background and returns a `task_id`.
 * **`get_task_status(task_id)`**: Polls progress, logs, and results for a background task.
 
-#
-## Context Inclusion Layer (Swarm Relay)
+### Context Inclusion Layer (Swarm Relay)
 
-BoteX provides an in-process, deterministic Context Inclusion Layer (`botex/context_inclusion.py`) for multi-agent swarm collaboration (Antigravity, Devin, ZCode, BoteX):
+BoteX provides an in-process, deterministic Context Inclusion Layer (`botex/core/context_inclusion.py`) for multi-agent swarm collaboration (Antigravity, Devin, ZCode, BoteX):
 
 - **`OutputNormalizer`**: Zero-LLM deterministic parser that extracts statuses, summaries, mutated files, memory keys, and blocking reasons from heterogeneous agent outputs (Devin JSON, ZCode Markdown, BoteX receipts, plain text), converting all Windows paths to POSIX repo-relative paths (`/`).
 - **`DeterministicSignalGate`**:
@@ -141,7 +140,7 @@ BoteX provides an in-process, deterministic Context Inclusion Layer (`botex/cont
 
 ## Two-Tier Memory Vault
 * **`save_memory(title, content, workspace_dir, kind, tags, memory_id, scope, confidence, project, origin)`**: Saves persistent notes, decisions, handoffs, beliefs, heuristics, or lessons (`confidence` from 0.0 to 1.0). Scope can be `"local"` (`<workspace_dir>/.botex/memory/`) or `"global"` (`~/.botex/memory/`). Use `project="swarm"` with `scope="global"` on BoteX Cloud for shared multi-host swarm knowledge; `origin` (`<agent>@<host>`) is recorded explicitly or inherited from `X-Agent-Id`/`X-Host` SSE headers. Ephemeral local handoffs (`tags=["temp-handoff"]`, `expires: YYYY-MM-DD`) are pruned automatically by the Curator.
-* **`read_memory(memory_id, workspace_dir, scope)`** / **`search_memory(workspace_dir, query, tag, kind, scope, since, until, min_confidence, project)`**: Retrieves saved memory across local, global, or swarm storage (`scope="all"` searches all configured roots). Supports temporal range filters (`since`, `until` in ISO 8601), confidence thresholds (`min_confidence`), project partitioning (`project`), and spreading activation across linked notes combined with FTS5 via Reciprocal Rank Fusion (RRF).
+* **`read_memory(memory_id, workspace_dir, scope)`** / **`search_memory(workspace_dir, query, tag, kind, scope, since, until, min_confidence, status, project)`**: Retrieves saved memory across local, global, or swarm storage (`scope="all"` searches all configured roots). Supports temporal range filters (`since`, `until` in ISO 8601), confidence thresholds (`min_confidence`), lifecycle filtering (`status`, default `"active"`; pass `"all"` for a full scan), project partitioning (`project`), and spreading activation across linked notes combined with FTS5 via Reciprocal Rank Fusion (RRF).
 * **`patch_memory_section(memory_id, section, new_content, workspace_dir, scope, append)`**: Replaces or appends one Markdown section in a memory note without touching frontmatter, other sections, or the Timeline trail.
 * **`delete_memory(memory_id, workspace_dir, scope)`**: Deletes a specific memory note from local or global storage.
 * **`get_backlinks(memory_id, workspace_dir, scope)`**: Lists memories that link to the given note through `[[wikilinks]]`.
@@ -208,11 +207,11 @@ BoteX provides an in-process, deterministic Context Inclusion Layer (`botex/cont
 BoteX builds the API **System Prompt** dynamically for each run. It fuses a hardcoded operational core (tool rules, syntax validation checks, output formats) with an optional **Recipe** (a markdown file).
 This means that providing a `--recipe <name>` (or the `"recipe": "<name>"` JSON parameter) acts as an injection mechanism for your custom System Prompts, giving the agent specialized personas or specific constraints.
 
-Recipes live in the `botex/recipes/` directory.
+Recipes live in the `botex/skills/recipes/` directory.
 
 ### Examples of custom System Prompts for Modding and Analysis
 
-If you are using BoteX as an MCP Server to analyze game mods or reverse-engineer engine behavior, you can create custom recipes like `botex/recipes/ue4.md` or `botex/recipes/lua_audit.md`.
+If you are using BoteX as an MCP Server to analyze game mods or reverse-engineer engine behavior, you can create custom recipes like `botex/skills/recipes/ue4.md` or `botex/skills/recipes/lua_audit.md`.
 
 * **Unreal Engine 4 Modding (`--recipe ue4`)**
   ```text
@@ -287,9 +286,47 @@ BoteX uses two complementary failover layers:
 1. **In-Payload OpenRouter Failovers (`extra_body.models`)**: Before sending the first turn to OpenRouter, BoteX runs each fallback candidate through all five safety gates (`Denylist`, `Decisions`, `ZDR`, `Price`, `Tools`) and passes up to three validated slugs in `extra_body["models"]`. If the primary endpoint is overloaded on the initial request, OpenRouter switches to the next validated model on the wire without an extra client round-trip. Meta-routers (`openrouter/auto`, `openrouter/pareto-code`, `openrouter/free`) are excluded from `models: [...]`, and once a run modifies any file (`files_touched`) or executes a command (`exec_ran`), BoteX strips `models` from subsequent turns so a different model never takes over a mutated workspace mid-task.
 2. **Engine-Level Rollback & Retry**: If an attempt fails mid-run, **BoteX verifies that all partial file changes from the failed attempt were rolled back** before starting the next candidate model. A fallback model never inherits a dirty workspace.
 
-Before a candidate can fail at all, a shared retry layer (`botex/retry.py`, configured per provider via `providers.<name>.retry`) waits out *unbilled* transient rejections: HTTP 429 and connection errors (Google additionally retries 503 "overloaded"), honoring server wait hints (`Retry-After` header, `retryDelay`/`quotaResetDelay` body fields). Timeouts and other 5xx are never retried — the request may already have executed, so a retry could double-bill it — and daily-quota errors skip the wait entirely so the run falls back immediately. While the layer is enabled, SDK-internal retries are disabled (`max_retries=0`) so exactly one layer owns the backoff policy; setting `"retry": false` on a provider hands control back to the SDK. Config keys: `enabled` (default `true`), `max_waits` (2), `max_wait_s` (60.0), `base_delay_s` (1.0), `jitter_s` (1.5). A persistent 429 surfaces as `failure_kind: "provider_rate_limited"`, which is eligible for the `model_fallbacks` chain.
+Before a candidate can fail at all, a shared retry layer (`botex/providers/retry.py`, configured per provider via `providers.<name>.retry`) waits out *unbilled* transient rejections: HTTP 429 and connection errors (Google additionally retries 503 "overloaded"), honoring server wait hints (`Retry-After` header, `retryDelay`/`quotaResetDelay` body fields). Timeouts and other 5xx are never retried — the request may already have executed, so a retry could double-bill it — and daily-quota errors skip the wait entirely so the run falls back immediately. While the layer is enabled, SDK-internal retries are disabled (`max_retries=0`) so exactly one layer owns the backoff policy; setting `"retry": false` on a provider hands control back to the SDK. Config keys: `enabled` (default `true`), `max_waits` (2), `max_wait_s` (60.0), `base_delay_s` (1.0), `jitter_s` (1.5). A persistent 429 surfaces as `failure_kind: "provider_rate_limited"`, which is eligible for the `model_fallbacks` chain.
 
-For OpenRouter runs, BoteX also sets `extra_body.provider` (`data_collection: "deny"` when ZDR is active, `require_parameters: true` when tools or `response_format` are present, `allow_fallbacks: true`, and `sort: "throughput"`), automatically stripping `reasoning` parameters for non-reasoning model slugs so `require_parameters: true` never triggers HTTP 404 rejections. On `DONE`, BoteX queries `GET /api/v1/generation?id=...` in parallel (with a short 404 retry) to record official billing (`total_cost`), queue latency (`queue_time_ms`), inference time (`generation_time_ms`), and prompt cache read/write tokens in `.agent_analytics.json` and `.botex/memory/` task receipts.
+For OpenRouter runs, BoteX also sets `extra_body.provider` (`data_collection: "deny"` when ZDR is active, `require_parameters: true` when tools or `response_format` are present, `allow_fallbacks: true`, and `sort: "throughput"`), automatically stripping `reasoning` parameters for non-reasoning model slugs so `require_parameters: true` never triggers HTTP 404 rejections. On `DONE`, BoteX queries `GET /api/v1/generation?id=...` in parallel (with a short 404 retry) to record official billing (`total_cost`), queue latency (`queue_time_ms`), inference time (`generation_time_ms`), and prompt cache read/write tokens in `.agent_analytics.jsonl` and `.botex/memory/` task receipts.
+
+---
+
+## Self-Improvement Loop
+
+BoteX feeds run telemetry back through deterministic checks. Across all layers, learning stays local and evidence-gated: promotion into live behavior requires verified confirmation counts or a human-reviewed PR.
+
+### Telemetry & Attribution
+
+`analytics.log_run` (`botex/providers/analytics.py`) appends every run to the append-only ledger `.agent_analytics.jsonl` (a legacy `.agent_analytics.json` is folded in once; monthly rollups rotate to `analytics-archive/`). Beyond cost/token/duration fields, each entry carries masked attribution fields when non-empty:
+
+* `origin`, `recipe`, `routed_tier`, `taxonomy`: provenance and task class. `taxonomy` is assigned by `classify_task_taxonomy` (`botex/core/meta_harness.py`) into `bugfix`, `refactor`, `test`, `infra`, `analysis`, `feature`, or `general`; `routed_tier`/`routed_profile` appear when the opt-in `engine.task_size_routing` block assigns a tier profile.
+* `applied_skills`, `applied_lessons`: the Skill Vault entries and meta-lesson ids actually injected into the run (max 8 each).
+* `syntax_rejections`, `rollback_count`: contrastive quality counters.
+* `shadow_recommended_model`: the Layer C advisory pick, when one exists.
+
+Attribution strings are CR/LF-flattened, `mask_secrets`-masked, and capped at 64 characters, keeping a consistent ledger schema across runs.
+
+### Contrastive Episodic Learning
+
+When a task recovers after a failure, BoteX writes structured traces:
+
+* **Contrastive handoffs**: `InFlightTaskState` (`botex/core/state.py`) keeps two bounded ring buffers (`syntax_rejections`, last 5 `{file, error}` pairs, and `rollback_reasons`, last 5), masked and capped at 200 chars per field. On model/provider fallback they ride the checkpoint into the next candidate's prompt ("Rejected Edits (do NOT repeat these)" plus rollback context), so a different model does not repeat the same mistakes.
+* **Lesson extraction**: when a task recovers after a model failure, `extract_meta_lesson` (`botex/core/meta_harness.py`) persists a `kind="lesson"` note as `status="candidate"` with `confidence=0.4`, written resolution-first and tagged `path:<dir>` for the touched directories. The `is_infra_failure` gate keeps provider-side noise (rate limits, timeouts, quota/auth/budget/config errors, HTTP 429 text) out of the vault, so infrastructure failures never become lessons and never penalize confidence.
+* **Bounded recall**: `get_relevant_meta_lessons` surfaces only `status="active"` lessons at `confidence >= 0.6`; lessons bound to matching `path:<dir>` prefixes rank ahead of generic taxonomy matches. `pack_lessons_within_budget` caps the injected block at 800 bytes via `ContextKnapsack`; overflow lessons are dropped rather than replaced by a pointer.
+* **Deterministic feedback**: `update_lesson_confidence` (`botex/memory/memory.py`) nudges injected lesson ids with no LLM call: `+0.1` on `DONE` with zero rollbacks, `-0.15` on quality failures (any rollback, `VERIFICATION_FAILED`, `STAGNANT_ROLLBACK`, or `INCOMPLETE`), and never on infra failures or `ABORTED`. Confidence is clamped to [0, 1]; crossing below `0.2` marks the note `deprecated` with a Timeline audit line.
+* **Curator promotion**: `CuratorService.promote_candidate_lessons` (step 6d of `botex/ops/curator/curator_service.py`) flips `candidate` -> `active` only when `confidence >= 0.8` **and** at least 2 distinct `DONE`, zero-rollback ledger runs cite the lesson in `applied_lessons`. `origin="human"`, `human-curated`, and `frozen` notes are never mutated. The opt-in `promote_to_global=True` additionally copies verified lessons into `scope="global"`, `project="swarm"`, skipping notes that contain secret patterns or duplicate existing swarm content.
+* **API origin hardening**: `POST /api/memory` ignores the client-supplied `origin` field. Provenance comes from sanitized `X-Agent-Id`/`X-Host` headers (NFKC-folded, `[a-zA-Z0-9_.-]` allowlist, 32 chars per part); claims of reserved agents (`human`, `human-curated`, `operator`, `curator`) are rejected server-side.
+
+### Layer B: PR-Only Skill Crystallization
+
+`CuratorService.crystallize_skill_proposals` (step 6e) clusters recurring `active` lessons (`min_cluster_size >= 5` sharing a `path:` or domain tag, or untagged lessons with at least 2 co-occurring significant tokens) and drafts `learned-<taxonomy>-<topic>` `SKILL.md` + `recipe.md` proposals via `write_skill_proposal_draft` (`botex/skills/skills.py`).
+
+Drafts land solely under `<workspace>/.botex/proposals/skills/` and `.botex/proposals/recipes/` after passing size (128 KB), secret (`mask_secrets`), prompt-injection (`has_injection_pattern`), and SkillSpector (`audit_skill_content`, `skills.audit.risk_threshold` = 30) gates. Frontmatter is stamped `proposal_only: true`, `author: botex-curator`, and records the audit verdict. Live `skills/` and `botex/skills/recipes/` are never touched; a human-reviewed PR is required to promote a draft.
+
+### Layer C: Shadow Meta-Routing (Advisory Only)
+
+`recommend_shadow_model` / `get_shadow_routing_advice` (`botex/providers/analytics.py`) score models per `(recipe, taxonomy)` bucket from the ledger once >= 10 matching samples exist: a smoothed success rate, a quality penalty from rollbacks and syntax rejections (capped at 0.25), and a small cost bonus where `_SHADOW_COST_FLOOR_USD` ($0.0001) keeps `:free` model costs finite. The engine evaluates the advice off the event loop (`asyncio.to_thread`), emits a `shadow_routing` event (`EventKind.SHADOW_ROUTING`) carrying `recommended_model`/`actual_model`/`diverged`/`sample_count`, and records `shadow_recommended_model` in the ledger. Guarantees: `shadow_only` / `actual_override: false`, `hard_banned_models` stays empty, and active routing is never overridden. Divergence data provides empirical evidence before changing live routing defaults.
 
 ---
 
@@ -434,50 +471,78 @@ pyproject.toml         Package configuration (exposes `botex` CLI command)
 requirements.txt       Runtime dependencies
 botex.config.json      Committed defaults (providers, engine limits, exec/net policy)
 ROADMAP.md             Deferred features & technical rationale
-botex/
-  approval.py          Human-in-the-loop approval manager, async actions, and rollback integration
-  chat.py              Conversational chat sessions, token streaming, and read-only sandbox
-  server_cloud.py      FastAPI cloud gateway, Remote MCP SSE, WebSocket chat, and REST API
-  catalog.py           Dynamic model catalog, TTL caching, and live provider query
-  denylist.py          Hierarchical model exclusions (globs and regex)
-  wallet.py            Key credits, spend analytics, and daily query limits
-  engine.py            Autonomous execution loop, context management & rollback triggers
-  state.py             In-flight task state checkpointing across model and provider fallbacks
-  rate_limiter.py      Asynchronous token-bucket rate limiter (RPM/TPM) and cooldown tracking
-  curator.py           Memory Vault periodic curator and Telegram dispatch
-  delegation.py        Subagent delegation bridge (Devin ACP)
-  events.py            Engine event emitter taxonomy
-  file_tools.py        Safe outline-first reading, file creation, moving & deletion
-  patch_engine.py      Fuzzy patch matching, syntax validation & snapshot management
-  security.py          Path traversal defenses, secret masking & gitignore filtering
-  exec_tools.py        Policy-controlled command execution & argument filtering
-  capabilities.py      Permission presets (readonly, edit, destructive, full)
-  config.py            Layered config loader (defaults < local < env)
-  context_guard.py     Context compaction & verification output pruning
-  net_tools.py         Net policy enforcement (read_url / fetch_url)
-  memory.py            Two-tier memory vault with wikilink graph & scratchpad offload
-  embeddings.py        Local embedding helpers for memory/graph features
-  obsidian.py          Obsidian PKM vault export & graph index generation
-  meta_harness.py      Task taxonomy, patch probing & meta-lesson recommendations
-  analytics.py         Cost/token ledger, budgeting & summary reporting
-  pricing.py           Live model price guardrail & catalog checks
-  providers.py         Provider adapters (OpenRouter, NVIDIA, Google AI Studio, etc.) & request normalizer
-  retry.py             Shared transient-failure backoff (429 / connection errors / Google 503 overload) & provider circuit breaker
-  benchmarks.py        Live model recommendations (recommend_models) & task-tier estimator
-  contracts.py         Task completion verification, status taxonomy & canonical handoff schema
-  tracing.py           OTel-style span helpers (engine, retry, recall_curator, server_cloud)
-  skills.py            Server-side Skill Vault, safe install/update & L0 task triage
-  recipes.py           Recipe loading & system-prompt injection
-  i18n.py / ui.py      CLI language & status rendering
-  recipes/             Specialized agent personas (planner, reviewer, tdd,
-                       code-explorer, build-resolver, security-reviewer,
-                       security-taint-hardener, architecture-adr, ui-craftsman)
-ops/curator/           Nightly Knowledge-Graph curator service & Telegram dispatch
+botex/                 Domain subpackages (legacy flat imports like `botex.engine`
+                       still resolve via the alias graft in `botex/__init__.py`;
+                       see docs/IMPORT_MAP.md)
+  core/
+    engine.py            Autonomous execution loop, 5-gate in-payload failovers,
+                         in-flight checkpointing, provider fallbacks & rollback triggers
+    state.py             InFlightTaskState checkpoints + contrastive ring buffers
+    contracts.py         Task completion verification & status taxonomy
+    events.py            Engine event emitter taxonomy (EventKind)
+    capabilities.py      Permission presets & agency middleware
+    approval.py          Human-in-the-loop approval manager
+    context_guard.py     Context compaction & verification output pruning
+    context_inclusion.py Deterministic swarm context relay (ContextKnapsack)
+    meta_harness.py      Task taxonomy, episodic lesson extraction/recall,
+                         infra-failure gate, lesson budget packing
+    tracing.py           OTel-style span helpers
+  providers/
+    providers.py         Provider registry & adapters + request normalizer
+    analytics.py         Cost/token ledger, run attribution, shadow meta-routing
+    benchmarks.py        recommend_models & task-tier estimation
+    catalog.py           Dynamic model catalog with TTL caching
+    denylist.py          Hierarchical model denylist (exact/glob/regex)
+    pricing.py           Live model price guardrail
+    rate_limiter.py      Token-bucket RPM/TPM limiter & cooldowns
+    retry.py             Shared transient-failure backoff & circuit breaker
+    wallet.py            Credit balance & key budget status
+    delegation.py        Devin ACP delegation bridge
+    http_pool.py         Pooled httpx clients
+    prompt_cache.py      Prompt-cache policy gating
+    adapters/zai.py      Z.ai GLM Coding Plan adapter
+  tools/
+    file_tools.py        Outline-first reads, create/move/delete
+    patch_engine.py      Fuzzy patching, in-memory syntax checks & snapshots
+    exec_tools.py        run_command policy & argument filtering
+    net_tools.py         SSRF-safe read_url / fetch_url
+    security.py          Path traversal defense, secret masking & .gitignore
+    vision.py            Vision input triage
+  memory/
+    memory.py            Two-tier Memory Vault, wikilink graph, lifecycle
+                         statuses & confidence, scratchpad offload
+    curator.py           Facade re-exporting botex.ops.curator service API
+    embeddings.py        Local embedding helpers for memory/graph features
+    obsidian.py          Obsidian PKM vault export & _GRAPH_INDEX.md
+  ops/
+    curator/             Nightly Knowledge-Graph curator (CuratorService):
+                         lesson promotion, PR-only skill crystallization into
+                         .botex/proposals/, recall cascade, Telegram dispatch
+    maintenance.py       Maintenance jobs (WAL checkpoints, index sync)
+    migrate_projects.py  Vault migration tooling
+  skills/
+    skills.py            Server-side Skill Vault, safe install/update, L0 triage
+                         & PR-only write_skill_proposal_draft
+    skillspector_gate.py SkillSpector pre-flight audit gate
+    recipes.py           Recipe loader & system-prompt injection
+    recipes/             Bundled persona prompts (planner, reviewer, tdd,
+                         code-explorer, build-resolver, security-reviewer,
+                         security-taint-hardener, architecture-adr, ui-craftsman)
+  server/
+    server_cloud.py      FastAPI Cloud Gateway, Remote MCP SSE/HTTP, REST API
+                         & memory-origin hardening
+    chat.py              Conversational chat sessions & read-only sandbox
+    config.py            Layered config loader & workspace containment
+    plugins.py           ZeroTrust subprocess plugin runner
+    i18n.py / ui.py      CLI localization & ANSI styling
+web/                   Vue 3 + Vite + Pinia + Tailwind CSS PWA frontend
 skills/                Caller-side SKILL.md (botex) + server-side skill packs
-tests/                 Comprehensive test suite (615 unit, cloud gateway, chat, approvals)
+tests/                 Comprehensive test suite (1344 tests across 67 files)
 deploy/oracle-vps/     systemd units & one-click installer for Oracle A1.Flex ARM64
 docs/
   TUTORIAL.md          Architecture deep dive and technical walkthrough
+  IMPORT_MAP.md        Canonical vs legacy import paths (v2.1.0 modularization)
+  TELEGRAM_NOTIFICATIONS.md  Curator alert setup guide
 ```
 
 ---

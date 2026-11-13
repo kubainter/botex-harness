@@ -1,6 +1,6 @@
 ---
 name: botex
-version: "2.2.0"
+version: "2.3.0"
 description: Use when delegating bounded code inspection, surgical patching, verification, or Memory Vault operations to the BoteX MCP harness.
 taxonomy: [general]
 metadata:
@@ -85,6 +85,16 @@ MCP tools: `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `fin
 - [Result, Status Taxonomy & Verified Ledger](references/status-contract.md)
 - [Two-Tier Memory Vault Workflow](references/memory-vault.md)
 - [Extended Troubleshooting & Remedies](references/troubleshooting.md)
+
+## 6. Self-Improvement Loop (Caller-Relevant)
+
+BoteX records every run in a local analytics ledger and feeds that evidence back deterministically:
+
+- **Result attribution:** `result_data` carries `applied_skills` (server-side Skill Vault entries auto-injected by L0 triage), `routed_tier`/`routed_profile` (when `engine.task_size_routing` assigned a tier), `attempts` (fallback audit log), and `syntax_rejections_detail`/`rollback_reason` on quality failures. The ledger also records `taxonomy`, `applied_lessons`, `rollback_count`, and `shadow_recommended_model`.
+- **Vault lifecycle:** `kind="lesson"` notes carry `status` (`candidate` -> `active` -> `deprecated`/`superseded`) and a `confidence` score. `search_memory` defaults to `status="active"`; pass `status="all"` to include candidates and deprecated notes. Engine-extracted lessons start as `candidate` and only the Curator promotes them to `active`, so callers do not manage lifecycle directly.
+- **Provenance:** on BoteX Cloud, `save_memory`/`POST /api/memory` derive `origin` server-side from sanitized `X-Agent-Id`/`X-Host` headers; reserved claims (`human`, `human-curated`, `operator`, `curator`) are rejected. Never claim a reserved origin.
+- **Skill proposals:** the Curator may draft `learned-*` `SKILL.md`/`recipe.md` proposals under `<workspace>/.botex/proposals/` only. The loop never mutates live `skills/` or `botex/skills/recipes/`; promotion happens via a reviewed PR, so do not delegate writes into live skill directories as a promotion path.
+- **Shadow routing:** the engine's per-`(recipe, taxonomy)` shadow model advice is advisory telemetry only and never overrides the `model`/`profile` you selected. `recommend_models` remains the caller-facing ranking surface.
 
 ## Troubleshooting
 
