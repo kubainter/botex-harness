@@ -234,6 +234,7 @@ async def test_engine_pads_malformed_batch_results(tmp_path: Path):
             task="Read app.py",
             workspace_dir=str(tmp_path),
             provider="openrouter",
+            api_key="test-or-key",
             mode="edit",
             tool_executor=ex,
         )
@@ -309,6 +310,7 @@ async def test_engine_real_executor_conflict_retry_recovers_after_drift(tmp_path
             task="Bump y in app.py",
             workspace_dir=str(tmp_path),
             provider="openrouter",
+            api_key="test-or-key",
             mode="edit",
             tool_executor=ex,
         )
@@ -365,6 +367,7 @@ async def test_engine_uses_injected_executor_batches_reads_and_retries_conflict(
             task="Update hello return value in app.py",
             workspace_dir=str(tmp_path),
             provider="openrouter",
+            api_key="test-or-key",
             mode="edit",
             tool_executor=ex,
         )
@@ -421,6 +424,7 @@ async def test_engine_stops_conflict_retries_after_three_attempts(tmp_path: Path
             task="Attempt conflicting edit",
             workspace_dir=str(tmp_path),
             provider="openrouter",
+            api_key="test-or-key",
             mode="edit",
             tool_executor=ex,
         )

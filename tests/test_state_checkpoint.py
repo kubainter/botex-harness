@@ -592,6 +592,7 @@ async def test_run_botex_task_clears_inflight_checkpoint_on_completion(tmp_path:
             task="Verify app.py",
             workspace_dir=str(tmp_path),
             provider="openrouter",
+            api_key="test-or-key",
             mode="readonly",
         )
 
