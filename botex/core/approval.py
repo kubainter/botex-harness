@@ -204,6 +204,7 @@ class ApprovalManager:
         policy: Optional[ApprovalPolicy] = None,
         custom_confirm_fn: Optional[Callable[..., Any]] = None,
         timeout: Optional[float] = None,
+        require_explicit: bool = False,
     ) -> bool:
         """
         Request approval for an action.
@@ -211,7 +212,9 @@ class ApprovalManager:
         If a custom synchronous or asynchronous confirm_fn is provided, it is evaluated first.
         Otherwise, registers a PendingAction with an asyncio.Future and blocks until resolved.
         """
-        if not self.is_action_requiring_approval(tool_name, policy=policy, task_id=task_id):
+        if not require_explicit and not self.is_action_requiring_approval(
+            tool_name, policy=policy, task_id=task_id
+        ):
             return True
 
         if not preview:

@@ -554,6 +554,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body)
     })
+  },
+
+  // 12. Connected Devices & Controlled Delegation
+  async listConnectedDevices(): Promise<{ ok: boolean; devices: import('./types').ConnectedDeviceInfo[] }> {
+    return request<{ ok: boolean; devices: import('./types').ConnectedDeviceInfo[] }>('/api/edge/devices')
+  },
+
+  async delegateToDevice(
+    body: import('./types').DeviceDelegateRequest
+  ): Promise<import('./types').DeviceDelegateResponse> {
+    return request<import('./types').DeviceDelegateResponse>('/api/edge/delegate', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    })
   }
 }
 

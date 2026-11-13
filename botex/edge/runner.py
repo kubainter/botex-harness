@@ -16,6 +16,8 @@ Security posture (fail-closed):
   ``json.dumps``; the bearer token never reaches logs or result payloads.
 - Duplicate ``call_id`` deliveries after reconnect are answered from the
   idempotency ring so mutations never execute twice.
+- ``delegate_skill`` frames run only operator-pinned skills from the opt-in
+  ``delegation`` section of ``edge_caps.json`` (disabled by default).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from botex import __version__
+from botex.edge.delegation import EdgeDelegationHandler, EdgeDelegationPolicy
 from botex.tools.exec_tools import run_command
 from botex.tools.file_tools import (
     create_file,
@@ -256,6 +259,8 @@ class EdgeRunner:
         ping_timeout_s: float = 15.0,
         max_backoff_s: float = 30.0,
         logger: Optional[logging.Logger] = None,
+        delegation_policy: Optional[EdgeDelegationPolicy] = None,
+        delegation_handler: Optional[EdgeDelegationHandler] = None,
     ) -> None:
         self.server_url = str(server_url)
         self._token = token or os.environ.get("BOTEX_EDGE_TOKEN", "")
@@ -271,6 +276,17 @@ class EdgeRunner:
         self.ping_timeout_s = float(ping_timeout_s)
         self.max_backoff_s = float(max_backoff_s)
         self._log = logger or _LOG
+        if delegation_policy is not None:
+            self._delegation_policy = delegation_policy
+        elif delegation_handler is not None:
+            self._delegation_policy = delegation_handler.policy
+        else:
+            self._delegation_policy = EdgeDelegationPolicy.load(self.workspace_root)
+        self._delegation_handler = delegation_handler or EdgeDelegationHandler(
+            self._delegation_policy,
+            self.workspace_root,
+            max_output_bytes=self.caps.max_output_bytes,
+        )
         self._idem = _IdemCache()
         self._stop = asyncio.Event()
         self._pending: set[asyncio.Task] = set()
@@ -284,11 +300,13 @@ class EdgeRunner:
     # -- wire frames ---------------------------------------------------------
 
     def _hello_frame(self) -> Dict[str, Any]:
+        capabilities = self.caps.to_dict()
+        capabilities["delegation"] = self._delegation_policy.to_public_dict()
         return {
             "type": "hello",
             "device_id": self.device_id,
             "workspace_id": self.workspace_id,
-            "capabilities": self.caps.to_dict(),
+            "capabilities": capabilities,
             "protocol_version": PROTOCOL_VERSION,
             "client_version": __version__,
         }
@@ -493,6 +511,32 @@ class EdgeRunner:
             # reconnect and the idem ring answers replays without re-executing.
             self._log.debug("tool_result for call_id=%s lost on a dead socket", call_id)
 
+    async def _delegate_skill_task(self, ws: Any, frame: Dict[str, Any]) -> None:
+        call_id = str(frame.get("call_id") or "")
+        task_id = str(frame.get("task_id") or "")
+        key = (task_id, f"del:{call_id}") if call_id else None
+        reply = self._idem.get(key) if key is not None else None
+        if reply is None:
+            try:
+                result = await self._delegation_handler.handle(
+                    str(frame.get("skill") or ""),
+                    str(frame.get("sha256") or ""),
+                    frame.get("params"),
+                )
+                reply = {"type": "delegate_result", "call_id": call_id, "result": result}
+            except Exception as exc:
+                reply = {
+                    "type": "delegate_error",
+                    "call_id": call_id,
+                    "error": f"{type(exc).__name__}: {mask_secrets(str(exc))[:200]}",
+                }
+            if key is not None:
+                self._idem.put(key, reply)
+        try:
+            await self._send_json(ws, reply)
+        except Exception:
+            self._log.debug("delegate reply for call_id=%s lost on a dead socket", call_id)
+
     async def _serve(self, ws: Any) -> None:
         await self._send_json(ws, self._hello_frame())
         async for raw in ws:
@@ -509,6 +553,10 @@ class EdgeRunner:
                 await self._send_json(ws, {"type": "pong", "ts": frame.get("ts")})
             elif ftype == "tool_call":
                 task = asyncio.create_task(self._tool_call_task(ws, frame))
+                self._pending.add(task)
+                task.add_done_callback(self._pending.discard)
+            elif ftype == "delegate_skill":
+                task = asyncio.create_task(self._delegate_skill_task(ws, frame))
                 self._pending.add(task)
                 task.add_done_callback(self._pending.discard)
 
