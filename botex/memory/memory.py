@@ -67,6 +67,7 @@ __all__ = [
     "VALID_SCOPES",
     "VALID_STATUSES",
     "set_memory_status",
+    "update_lesson_confidence",
     "MAX_MEMORY_BYTES",
     "SCHEMA_VERSION",
 ]
@@ -91,7 +92,13 @@ _VALID_SCOPES_MAP: dict[str, str] = {
 }
 VALID_SCOPES = frozenset(["local", "global", "swarm", "all"])
 
-VALID_STATUSES = frozenset(["active", "superseded", "deprecated"])
+_VALID_STATUSES_MAP: dict[str, str] = {
+    "active": "active",
+    "superseded": "superseded",
+    "deprecated": "deprecated",
+    "candidate": "candidate",
+}
+VALID_STATUSES = frozenset(_VALID_STATUSES_MAP.keys())
 
 # Recall admission gate (arena-recall S.1): OR-matching admits single-token
 # noise, so admission needs >=2 distinct matched tokens — a lone match only
@@ -1001,9 +1008,13 @@ def save_memory(
             if il not in clean_links:
                 clean_links.append(il)
 
-        norm_status = str(status).strip().lower() if status else "active"
-        if norm_status not in VALID_STATUSES:
-            norm_status = "active"
+        # CWE-020: normalized via static map returning module literals, never
+        # the mutated caller string.
+        norm_status = (
+            _VALID_STATUSES_MAP.get(str(status).strip().lower() if status else "", "active")
+            if status is not None
+            else "active"
+        )
 
         conf_val = _coerce_confidence(confidence)
 
@@ -1080,13 +1091,16 @@ def search_memory(
     until: Optional[str] = None,
     min_confidence: Optional[float] = None,
     project: Optional[str] = None,
+    status: Optional[str] = "active",
 ) -> Dict[str, Any]:
     """
     Search memories by keyword query, tag, or kind across local, global, or all scopes.
     Uses SQLite FTS5 index with fallback to disk scanning.
     ``since``/``until`` are ISO-8601 chronological bounds applied to entry
     timestamps; ``min_confidence`` keeps only entries at or above the given
-    certainty threshold. When a query produces FTS5 hits, spreading
+    certainty threshold. ``status`` filters by lifecycle state (default
+    ``active``); pass ``"all"``, ``""``, or ``None`` to disable the filter
+    (full vault scan). When a query produces FTS5 hits, spreading
     activation over the wikilink edge graph also surfaces directly linked
     notes via reciprocal-rank-fusion bonuses.
     """
@@ -1094,6 +1108,26 @@ def search_memory(
         norm_scope = _VALID_SCOPES_MAP.get(str(scope).strip().lower(), "local")
         if namespace == "_global":
             norm_scope = "global"
+
+        # CWE-020: static-map normalization; only module literals are compared.
+        if isinstance(status, bool):
+            return {
+                "ok": False,
+                "error": "Invalid 'status' filter; expected a string, not a boolean.",
+            }
+        if status is None or (isinstance(status, str) and status.strip().lower() in ("", "all")):
+            status_filter: Optional[str] = None
+        else:
+            raw_status = str(status).strip().lower()
+            status_filter = _VALID_STATUSES_MAP.get(raw_status)
+            if status_filter is None:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Invalid 'status' filter '{coerce_text(str(status))[:32]}'; "
+                        f"expected one of: {', '.join(sorted(VALID_STATUSES))}, all."
+                    ),
+                }
 
         try:
             since_dt = _parse_temporal_bound(since, end_of_day=False)
@@ -1147,6 +1181,7 @@ def search_memory(
             or until_dt is not None
             or min_conf_val is not None
             or target_project is not None
+            or status_filter is not None
         )
         allowed_by_dir: Dict[Path, Optional[set]] = {}
         if filters_active:
@@ -1165,7 +1200,8 @@ def search_memory(
                                 WHERE (? IS NULL OR (timestamp <> '' AND timestamp >= ?))
                                   AND (? IS NULL OR (timestamp <> '' AND timestamp <= ?))
                                   AND (? IS NULL OR confidence >= ?)
-                                  AND (? IS NULL OR project = ?);
+                                  AND (? IS NULL OR project = ?)
+                                  AND (? IS NULL OR status = ?);
                                 """,
                                 (
                                     since_str,
@@ -1176,6 +1212,8 @@ def search_memory(
                                     min_conf_val,
                                     target_project,
                                     target_project,
+                                    status_filter,
+                                    status_filter,
                                 ),
                             ).fetchall()
                             ids_set = {r["id"] for r in rows}
@@ -1272,6 +1310,12 @@ def search_memory(
 
                     # Filter by kind
                     if kind_lower and entry_kind != kind_lower:
+                        continue
+
+                    # Lifecycle gate: candidate/deprecated/superseded entries
+                    # never leak into status-scoped searches, regardless of
+                    # whether the SQLite pre-filter was reachable.
+                    if status_filter is not None and entry_status != status_filter:
                         continue
 
                     # Filter by tag
@@ -1522,8 +1566,14 @@ def list_memories(
     kind: Optional[str] = None,
     namespace: Optional[str] = None,
     project: Optional[str] = None,
+    status: Optional[str] = "active",
 ) -> Dict[str, Any]:
-    """List memory entries for the given workspace and scope."""
+    """List memory entries for the given workspace and scope.
+
+    ``status`` selects the lifecycle filter (default ``active``); pass e.g.
+    ``"candidate"``/``"deprecated"`` to inspect other tiers or ``"all"``/``None``
+    for a full vault listing.
+    """
     return search_memory(
         workspace_dir=workspace_dir,
         query="",
@@ -1532,6 +1582,7 @@ def list_memories(
         scope=scope,
         namespace=namespace,
         project=project,
+        status=status,
     )
 
 
@@ -1987,6 +2038,126 @@ def set_memory_status(
     except Exception as exc:
         logger.error("set_memory_status: Failed on '%s': %s", clean_id, exc)
         return False
+
+
+def update_lesson_confidence(
+    workspace_dir: str,
+    memory_id: str,
+    delta: float,
+    *,
+    scope: str = "local",
+    deprecate_below: float = 0.2,
+) -> Dict[str, Any]:
+    """Deterministically adjust a lesson's confidence from end-of-task feedback.
+
+    Rewards (+delta) or penalizes (-delta) a stored note with no LLM call.
+    Notes crossing below ``deprecate_below`` transition to ``deprecated``;
+    promotion stays with the Curator — this never raises scope or status.
+    ``scope`` defaults to ``"local"`` so quarantined candidate lessons are
+    the only notes touched unless the caller explicitly scopes otherwise.
+    """
+    if isinstance(delta, bool):
+        return {"ok": False, "error": "Invalid 'delta'; expected a finite float."}
+    try:
+        dval = float(delta)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Invalid 'delta'; expected a finite float."}
+    if not math.isfinite(dval):
+        return {"ok": False, "error": "Invalid 'delta'; expected a finite float."}
+    if isinstance(deprecate_below, bool):
+        return {
+            "ok": False,
+            "error": "Invalid 'deprecate_below'; expected a float in [0.0, 1.0].",
+        }
+    try:
+        threshold = float(deprecate_below)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "error": "Invalid 'deprecate_below'; expected a float in [0.0, 1.0].",
+        }
+    if not math.isfinite(threshold) or not (0.0 <= threshold <= 1.0):
+        return {
+            "ok": False,
+            "error": "Invalid 'deprecate_below'; expected a float in [0.0, 1.0].",
+        }
+
+    try:
+        clean_id = _sanitize_id(memory_id)
+    except SecurityError as se:
+        return {
+            "ok": False,
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
+        }
+
+    norm_scope = _VALID_SCOPES_MAP.get(str(scope).strip().lower(), "local")
+    search_dirs = _resolve_scope_dirs(workspace_dir, norm_scope)
+    target_path: Optional[Path] = None
+    for s_dir, _ in search_dirs:
+        cand = _find_existing_memory_file(s_dir, clean_id)
+        if cand is not None:
+            target_path = cand
+            break
+
+    if target_path is None or not target_path.exists():
+        return {"ok": False, "error": f"Memory entry '{clean_id}' not found."}
+
+    mem_dir = target_path.parent
+    try:
+        raw_text = target_path.read_text(encoding="utf-8", errors="replace")
+        meta, body = _parse_frontmatter(raw_text)
+        old_conf = _coerce_confidence(meta.get("confidence"))
+        new_conf = round(min(max(old_conf + dval, 0.0), 1.0), 4)
+        old_status = _VALID_STATUSES_MAP.get(
+            str(meta.get("status") or "active").strip().lower(), "active"
+        )
+        new_status = "deprecated" if new_conf < threshold else old_status
+
+        if new_status == "deprecated" and old_status != "deprecated":
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            audit_line = (
+                f"- {today_str}: Confidence {old_conf:.4f} -> {new_conf:.4f} "
+                f"fell below {threshold:.4f}; status updated to 'deprecated'."
+            )
+            patch_res = patch_memory_section(
+                workspace_dir=workspace_dir,
+                memory_id=clean_id,
+                section="Timeline",
+                new_content=audit_line,
+                append=True,
+                scope=norm_scope,
+            )
+            if not patch_res.get("ok"):
+                return {
+                    "ok": False,
+                    "error": f"Timeline audit failed: {patch_res.get('error')}",
+                }
+            raw_text = target_path.read_text(encoding="utf-8", errors="replace")
+            meta, body = _parse_frontmatter(raw_text)
+
+        meta["confidence"] = new_conf
+        meta["status"] = new_status
+        new_doc = sanitize_for_storage(_serialize_frontmatter(meta, body))
+        target_path.write_text(new_doc, encoding="utf-8")
+
+        conn = _get_index_db(mem_dir)
+        try:
+            _index_memory_file(mem_dir, conn, target_path)
+        finally:
+            conn.close()
+
+        return {
+            "ok": True,
+            "id": clean_id,
+            "old_confidence": old_conf,
+            "new_confidence": new_conf,
+            "status": new_status,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Failed to update confidence: {coerce_text(mask_secrets(str(exc)))}",
+        }
 
 
 def find_graph_health(

@@ -3,6 +3,7 @@
 import asyncio
 
 from botex.events import (
+    ALL_KINDS,
     EventKind,
     TaskEventEmitter,
     drop_emitter,
@@ -89,6 +90,30 @@ def test_queue_overflow_does_not_block_emit():
         em.emit("k")  # full queue must not raise or block
     assert q.qsize() == 1
     assert em.last_seq == 5
+
+
+def test_shadow_routing_kind_registered_and_emit():
+    """Layer C: SHADOW_ROUTING is a first-class kind and payloads round-trip."""
+    assert EventKind.SHADOW_ROUTING == "shadow_routing"
+    assert EventKind.SHADOW_ROUTING in ALL_KINDS
+
+    em = TaskEventEmitter("t-shadow")
+    em.emit(
+        EventKind.SHADOW_ROUTING,
+        recipe="planner",
+        taxonomy="bugfix",
+        recommended_model="vendor/best:free",
+        actual_model="paid/live",
+        diverged=True,
+        sample_count=25,
+        shadow_only=True,
+    )
+    ev = em.tail(1)[0]
+    assert ev["kind"] == "shadow_routing"
+    assert ev["data"]["recommended_model"] == "vendor/best:free"
+    assert ev["data"]["actual_model"] == "paid/live"
+    assert ev["data"]["diverged"] is True
+    assert ev["data"]["shadow_only"] is True
 
 
 def json_dumps(obj):

@@ -24,7 +24,7 @@ The script will automatically configure dependencies, Python venv, user permissi
 | File | Install to | Purpose |
 |---|---|---|
 | `install.sh` | CLI runner | One-click automated production installer |
-| `botex-cloud.service` | `/etc/systemd/system/` | Uvicorn `botex.server_cloud:app`, 1 worker, `0.0.0.0:8000`, pinned to OCPU 0 |
+| `botex-cloud.service` | `/etc/systemd/system/` | Uvicorn `botex.server_cloud:app` (legacy alias of `botex.server.server_cloud`), 1 worker, `0.0.0.0:8000`, pinned to OCPU 0 |
 | `bielik.service` | `/etc/systemd/system/` | `llama-server` for Bielik-11B-v3.1 Q4_K_M, `127.0.0.1:8080`, `-c 8192`, OCPUs 1-2 at idle priority |
 | `botex-maintenance.service` | `/etc/systemd/system/` | `oneshot` background maintenance: SQLite WAL checkpoints, Obsidian graph indexing, log cleanup |
 | `botex-maintenance.timer` | `/etc/systemd/system/` | Periodic trigger: runs 5 min after boot, then every 30 minutes |
@@ -35,6 +35,8 @@ The script will automatically configure dependencies, Python venv, user permissi
 
 CPU partitioning: OCPU 0 = BoteX, OCPUs 1-2 = Bielik, maintenance runs at `SCHED_IDLE` / nice 19 so it never competes with live agent workloads.
 RAM budget: BoteX <= 6 GiB (cap), Bielik <= 10 GiB (cap, ~8.5 GiB with context in 4-bit quantization), maintenance <= 4 GiB (cap).
+
+The nightly curator also runs the self-improvement steps: it promotes verified `candidate` lessons to `active` (confidence >= 0.8 plus >= 2 distinct clean-run confirmations) and writes `learned-*` skill drafts into `/opt/botex/.botex/proposals/` (covered by `ReadWritePaths=/opt/botex`). Drafts are PR-only and never touch live `skills/` or `botex/skills/recipes/`; `promote_to_global` stays off because the CLI does not expose it. Memory provenance (`origin`) on `POST /api/memory` is derived server-side from sanitized `X-Agent-Id`/`X-Host` headers; callers cannot claim reserved origins (`human`, `human-curated`, `operator`, `curator`).
 
 ## 1. Prepare the system
 
@@ -106,9 +108,9 @@ sudo systemctl enable --now botex-maintenance.timer
    - Katalog: `/opt/botex/skills/` (lub ścieżka zdefiniowana w `botex.config.json` pod `paths.skills_dir`).
    - Wrzucamy tam standardowe skille inżynieryjne w formacie `SKILL.md` (np. `code-review`, `security-audit`, `refactoring`, `api-design`, `test-generation`).
 2. **Autonomiczny Triage i Administracja przez Bielika (`bielik.service` / loopback:8080):**
-   - Po odebraniu zadania przez MCP (`run_subagent` / `start_task`) moduł `botex/skills.py` (`triage_skills_for_task`) dopasowuje intencję zadania do zainstalowanych skilli w `/opt/botex/skills/`.
+   - Po odebraniu zadania przez MCP (`run_subagent` / `start_task`) moduł `botex/skills/skills.py` (`triage_skills_for_task`) dopasowuje intencję zadania do zainstalowanych skilli w `/opt/botex/skills/`.
    - Wybrany skill (`SKILL.md`) jest dynamicznie wstrzykiwany jako instrukcja proceduralna do kontekstu modelu wykonawczego, a wynik zwraca listę `applied_skills`.
-   - **Wytyczne dla Bielika w roli Administratora Vaulta (`botex/chat.py`):**
+   - **Wytyczne dla Bielika w roli Administratora Vaulta (`botex/server/chat.py`):**
      - Bielik działa w reżimie **Single-Shot / High-Level Semantic Tools** (`save_memory`, `patch_memory_section`, `delete_memory`, `find_graph_health`, `list_skills`, `install_skill`) zamiast wieloetapowych diffów plikowych (`apply_patch`).
      - Obowiązuje twardy zakaz symulowania wywołań narzędzi w tekście (Zero Fast-Forwarding) oraz zakaz zapisywania tymczasowych raportów telemetrycznych/kuratorskich do `.botex/memory/` (trafiają do `.botex/analytics_digest.json` i `.botex/curator_audit_latest.json`).
      - W razie potrzeby odciążenia lokalnego CPU przy złożonych zadaniach wieloetapowych jako bezpłatny fallback w konfiguracji służy provider `nvidia` (np. `nvidia/nemotron-3-ultra-550b-a55b`).

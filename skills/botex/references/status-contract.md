@@ -2,7 +2,7 @@
 
 ## Verification Ledger Invariant
 
-Lifecycle `status == "DONE"` from `get_task_status` indicates ONLY that the run finished—not that the task succeeded.
+Lifecycle `status == "DONE"` from `get_task_status` indicates ONLY that the run finished, not that the task succeeded.
 
 A task is **`verified`** ONLY when BOTH conditions hold:
 - Asynchronous (`start_task` / `get_task_status`): `result_data.ok == true && result_data.status == "DONE"`
@@ -53,3 +53,9 @@ Any other combination (`ok == false`, `BLOCKED`, `FAILED`, `VERIFICATION_FAILED`
 - `rollback_verified` (`boolean`): Confirms snapshot restoration on failure.
 - `duration_s` (`number`) / `cost_usd` (`number`): Execution telemetry.
 - `attempts` (`array[object]`): Model fallback audit log.
+- `applied_skills` (`array[string]`): Server-side Skill Vault entries auto-injected by L0 triage.
+- `routed_tier` / `routed_profile` (`string`, optional): Present when `engine.task_size_routing` assigned a tier profile.
+- `syntax_rejections_detail` (`array[object]`, optional) / `rollback_reason` (`string`, optional): Contrastive failure detail on quality failures.
+- `in_flight_state` (`object`): Serialized `InFlightTaskState` checkpoint (plan steps, findings, bounded `syntax_rejections`/`rollback_reasons` buffers).
+
+The analytics ledger (`.agent_analytics.jsonl`) records additional attribution per run: `origin`, `recipe`, `taxonomy`, `routed_tier`, `applied_skills`, `applied_lessons`, `syntax_rejections`, `rollback_count`, `shadow_recommended_model` (advisory Layer C pick; routing is never overridden).

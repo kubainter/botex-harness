@@ -113,12 +113,12 @@ the same budget and typically starves the same way, so repeat retries
 just re-burned the read budget (the observed double-burn).
 
 ### 10. Skill Vault, Remote AI Skill Installer & Workspace Root Normalization (Stage 4.7) — partially implemented
-Already shipped: recipes split & metadata, `/api/recipes` + `/api/models/recommended` endpoints, meta-lessons engine (`meta_harness.py`), and the Obsidian/wikilink memory graph (`obsidian.py`, `embeddings.py`, graph MCP tools). Shipped since (Stage 4.8): the Skill Vault itself (`botex/skills.py` — repo `skills/<slug>/` or `BOTEX_SKILLS_DIR`, not `~/.botex/`), the deterministic fetch/sanitize half of the remote installer, `GET/POST/DELETE /api/skills`, chat-mode `list_skills`/`install_skill` tools, and engine L0 triage auto-injection (`applied_skills`). Still open: the model-delegated ingestion phase of the installer, the Skills PWA tab, `list_skills`/`read_skill` MCP tools (chat-mode only today), an explicit `skills=` task parameter, and workspace root normalization.
+Already shipped: recipes split & metadata, `/api/recipes` + `/api/models/recommended` endpoints, meta-lessons engine (`botex/core/meta_harness.py`), and the Obsidian/wikilink memory graph (`botex/memory/obsidian.py`, `botex/memory/embeddings.py`, graph MCP tools). Shipped since (Stage 4.8): the Skill Vault itself (`botex/skills/skills.py` — repo `skills/<slug>/` or `BOTEX_SKILLS_DIR`, not `~/.botex/`), the deterministic fetch/sanitize half of the remote installer, `GET/POST/DELETE /api/skills`, chat-mode `list_skills`/`install_skill` tools, and engine L0 triage auto-injection (`applied_skills`). Still open: the model-delegated ingestion phase of the installer, the Skills PWA tab, `list_skills`/`read_skill` MCP tools (chat-mode only today), an explicit `skills=` task parameter, and workspace root normalization.
 
-When BoteX runs as a remote gateway over VPN/VPS, worker models execute in an isolated system prompt and cannot see caller-side skills unless the caller pastes the full skill instructions into `task`. At the same time, built-in `recipes` (`botex/recipes/`) define engine execution personas (`planner`, `reviewer`, `tdd`) and should stay separate from domain/style skills (`humanizer`, `miodkuj`, `impeccable`, or third-party GitHub skills).
+When BoteX runs as a remote gateway over VPN/VPS, worker models execute in an isolated system prompt and cannot see caller-side skills unless the caller pastes the full skill instructions into `task`. At the same time, built-in `recipes` (`botex/skills/recipes/`) define engine execution personas (`planner`, `reviewer`, `tdd`) and should stay separate from domain/style skills (`humanizer`, `miodkuj`, `impeccable`, or third-party GitHub skills).
 
 Stage 4.7 introduces a dedicated **Skill Vault** (`~/.botex/skills/<slug>/` with `SKILL.md` and `manifest.json`) managed directly from a new **Skills** tab in the PWA without SSH access:
-- **Two-phase remote installation (zero-RCE):** Python deterministically fetches only Markdown files (`SKILL.md`, `README.md`) via SSRF-safe `net_tools` (rejecting scripts and binaries), then delegates metadata extraction (`repo_url`, `version`, `summary`, `commands`, `tags`), Markdown normalization, and a Prompt Injection security check to a user-selected free model (`openrouter :free` or `nvidia`).
+- **Two-phase remote installation (zero-RCE):** Python deterministically fetches only Markdown files (`SKILL.md`, `README.md`) via SSRF-safe `botex/tools/net_tools.py` (rejecting scripts and binaries), then delegates metadata extraction (`repo_url`, `version`, `summary`, `commands`, `tags`), Markdown normalization, and a Prompt Injection security check to a user-selected free model (`openrouter :free` or `nvidia`).
 - **Centralized Skill Hub:** Installed skills can be attached to BoteX tasks (`skills=[...]`) alongside a `recipe`, and are also exposed via MCP (`list_skills`, `read_skill`) so any agent connecting over VPN shares one skill library.
 - **Workspace root normalization:** Keep the PWA bound to the server's configured workspace (no raw host path picker over HTTP) while normalizing self-referential workspace root paths (e.g. `list_dir("harness")` inside `.../harness` -> `"."`).
 
@@ -133,7 +133,7 @@ warning. Add a symmetric pre-kill nudge at `failed_mutations_streak == 2`
 (or `stagnant_turns == 2`) injecting the last mutation's concrete error and
 a "simplify approach, N attempts left" message — gives good models a
 course-correction turn before the atomic rollback. ~15 lines in
-`engine.py` next to the existing nudge at ~line 2894. Optionally make the
+`botex/core/engine.py` next to the existing read-only nudge. Optionally make the
 threshold configurable per mode (`edit` could tolerate 4-5).
 
 ### 12. Task-event emitter TTL eviction
@@ -141,7 +141,7 @@ threshold configurable per mode (`edit` could tolerate 4-5).
 ### 13. Recall modernization (OR+coverage retrieval, hedged cascade, swarm scope) — implemented
 `recall_memory` silently returned zero hits whenever one query token was
 missing from the vault: `_sanitize_fts_query` joined tokens with implicit
-AND (`memory.py:615-620`), the substring fallback required all tokens, and
+AND (`botex/memory/memory.py`), the substring fallback required all tokens, and
 spreading activation only fired on FTS hits. Local Qwen (bielik:latest) was
 also not installed, so the curator cascade burned its first tier on a 404.
 
@@ -160,15 +160,15 @@ observed failure class cheaper. See "Later" below.
 
 ### 14. VPS containment for memory routes (`cloud.allowed_workspaces`) — next
 Config keys exist (`cloud.allowed_workspaces`, `rate_limits.recall_rpm`),
-but `server_cloud.py` does not consume them yet: memory routes still resolve
+but `botex/server/server_cloud.py` does not consume them yet: memory routes still resolve
 `workspace_dir` without realpath containment for non-loopback callers, and
 recall has no dedicated limiter. Auth itself is fail-closed
-(`server_cloud.py:637`, Bearer `compare_digest`), so this blocks the VPS
+(Bearer `compare_digest`), so this blocks the VPS
 exposure phase only — local stdio sessions are unaffected. Required before
 `botex cloud` faces WAN.
-`botex/events.py` keeps one emitter (≤1000-event ring) per task in
+`botex/core/events.py` keeps one emitter (≤1000-event ring) per task in
 `_REGISTRY` forever — mirroring the already-unbounded `_TASKS` history in
-`server_cloud.py`. Fine at hundreds of tasks, but a long-lived gateway
+`botex/server/server_cloud.py`. Fine at hundreds of tasks, but a long-lived gateway
 accumulates ~200 KB per task worst-case. Add TTL/LRU eviction (e.g. drop
 emitters N hours after terminal state, or when the `_TASKS` entry is
 evicted) once `_TASKS` gains a bound of its own.
@@ -214,6 +214,15 @@ per-command report, each gated by the same exec policy.
 ### Cost from the provider catalog, not the static table — implemented for OpenRouter
 OpenRouter runs reconcile USD spend directly from `GET /api/v1/generation?id=...` (`total_cost`, `queue_time_ms`, `generation_time_ms`, `cached_tokens`, `cache_write_tokens`) with fallback to inline `usage.cost` and `analytics.MODEL_PRICING_ESTIMATES` for offline or non-OpenRouter providers.
 
+### Shadow meta-routing graduation — advisory only by design
+`recommend_shadow_model` scores per-`(recipe, taxonomy)` candidates purely as
+telemetry (`shadow_only`, `actual_override: false`, `hard_banned_models: []`).
+Promoting it into live candidate ordering needs two things first: enough
+`diverged` samples per bucket to argue the ranking beats the configured
+`model_fallbacks` order, and a config gate (e.g. `engine.shadow_routing.apply`)
+plus per-bucket sample floors so a noisy bucket cannot silently re-route
+production runs. Until then it stays a measurement layer, not a router.
+
 ### Symlink-safe writes (TOCTOU)
 `resolve_safe_path` validates before use, but a race remains between path
 resolution and the write — a hostile workspace could swap a symlink in that
@@ -234,13 +243,13 @@ edit.
 
 Why deferred: current refusal detection and contract checks are
 deterministic and free, and a new endpoint means a new transport plus a new
-failure point. Revisit when `.agent_analytics.json` shows
+failure point. Revisit when `.agent_analytics.jsonl` shows
 `model_refusal`/`no_progress` as a dominant failure driver, or when a
 caller wants cheap typed judging.
 
 Implementation plan, when resumed:
 
-1. **Transport** — `botex/decisions.py`: plain `httpx` POST to
+1. **Transport** — `botex/providers/decisions.py`: plain `httpx` POST to
    `{base_url}/../alpha/decisions` (OpenRouter path is
    `POST /api/alpha/decisions`), not the `AsyncOpenAI` path. Provider-scoped:
    reuse key resolution and `mask_secrets`; no `extra_body` ZDR injection
@@ -261,16 +270,18 @@ Implementation plan, when resumed:
    (chat slug rejected, decisions slug accepted), cost/record fields.
    `test_live_e2e.py`: one opt-in scenario only.
 6. **Docs** — README tools list + parameter table, TUTORIAL §6, and the
-   `decisions_models` docstring in `config.py` (it currently describes only
+   `decisions_models` docstring in `botex/server/config.py` (it currently describes only
    the rejection path).
 
 ### Smart Context Scaling (task-size-aware model routing) — partially implemented
 `recommend_models` exists and picks cost-effective models by task type, and
 `estimate_task_tier(prompt, files, outline_lines)` now lives in
-`botex/benchmarks.py` (`high` / `standard` / `budget` from prompt, file
-count, and outline size) — but it is not yet wired into task routing.
-Next step: call the estimator during candidate resolution and route tiny
-tasks to small-context cheap models, huge repos to 1M+ context models.
+`botex/providers/benchmarks.py` (`high` / `standard` / `budget` from prompt, file
+count, and outline size) — wired in behind the opt-in
+`engine.task_size_routing` block, which fills only a fully empty
+model/profile resolution and records `routed_tier`/`routed_profile` in the
+result and ledger. Next step: evaluate whether the Layer C shadow-routing
+divergence data justifies widening where the estimator may route.
 `engine.mode_profiles` already routes `readonly` -> `fast`; this
 generalizes the idea to size.
 
@@ -379,7 +390,7 @@ periodically on `skills/` and config. Tooling dependency, not engine code.
 ### Eval metrics for `benchmarks.py`
 ECC's eval-harness material (grader types, pass@k) is inspiration for richer
 benchmark reporting — e.g. per-model success rates across repeated tasks to
-inform `model_fallbacks` ordering from `.agent_analytics.json` data.
+inform `model_fallbacks` ordering from `.agent_analytics.jsonl` data.
 
 ## Covered by existing mechanics (retired ideas)
 
@@ -412,32 +423,60 @@ rest.
 
 ## Done recently (for reference)
 
+- **Self-Improvement Loop (feat/self-improvement-loop, PRs 1-4):**
+  - Telemetry & attribution: `log_run` (`botex/providers/analytics.py`) persists
+    masked, non-empty-only fields (`origin`, `recipe`, `routed_tier`,
+    `taxonomy`, `applied_skills`, `applied_lessons`, `syntax_rejections`,
+    `rollback_count`, `shadow_recommended_model`) to `.agent_analytics.jsonl`.
+  - Contrastive episodic learning: `InFlightTaskState` ring buffers
+    (`syntax_rejections`, `rollback_reasons`, last 5 each) forwarded across
+    fallbacks; `is_infra_failure` noise gate; `path:<dir>` lesson binding;
+    `pack_lessons_within_budget` (≤800 B via `ContextKnapsack`);
+    `update_lesson_confidence` (`+0.1` / `-0.15`, `<0.2` auto-deprecation;
+    infra failures and `ABORTED` never penalize).
+  - Curator lesson promotion (step 6d): `promote_candidate_lessons` flips
+    `candidate` -> `active` at `confidence >= 0.8` with ≥2 distinct `DONE`
+    zero-rollback confirmations; human/`human-curated`/`frozen` notes are
+    untouchable; opt-in `promote_to_global` into `scope="global"`,
+    `project="swarm"` with a secret-leak guard. `POST /api/memory` origin
+    hardening: server-side provenance from `X-Agent-Id`/`X-Host` (NFKC fold,
+    `_RESERVED_ORIGIN_AGENTS` rejected).
+  - Layer B (PR-only skill crystallization, step 6e):
+    `crystallize_skill_proposals` clusters ≥5 recurring `active` lessons by
+    `path:`/domain tag or ≥2 co-occurring tokens and drafts
+    `learned-<tax>-<topic>` `SKILL.md` + `recipe.md` into
+    `.botex/proposals/` only (size/secret/injection/SkillSpector gates;
+    manual PR review to promote). Layer C (shadow meta-routing):
+    `recommend_shadow_model` / `get_shadow_routing_advice` log advisory
+    per-`(recipe, taxonomy)` picks (`EventKind.SHADOW_ROUTING`, ≥10 samples,
+    `_SHADOW_COST_FLOOR_USD` floor for `:free`, zero hard-bans, never
+    overrides routing).
 - Stage 4.8 groundwork: canonical handoff envelope
   (`CANONICAL_HANDOFF_SCHEMA_V1` + `format_handoff_response` in
-  `botex/contracts.py`), `ProviderCircuitBreaker` in `botex/retry.py`,
-  `estimate_task_tier` in `botex/benchmarks.py`, OTel-style spans in
-  `botex/tracing.py`. Landed and unit-tested, but not yet invoked inside
+  `botex/core/contracts.py`), `ProviderCircuitBreaker` in `botex/providers/retry.py`,
+  `estimate_task_tier` in `botex/providers/benchmarks.py`, OTel-style spans in
+  `botex/core/tracing.py`. Landed and unit-tested, but not yet invoked inside
   the engine/provider request path — treat as foundation code, not shipped
   behavior.
-- Task event emitters (`botex/events.py`): per-task `TaskEventEmitter` ring
+- Task event emitters (`botex/core/events.py`): per-task `TaskEventEmitter` ring
   feeding live `GET /api/tasks/{id}/events` SSE streams and
   `POST /api/tasks/{id}/followup` continuation on the Cloud Gateway
-- Devin ACP delegation bridge (`botex/delegation.py`): spawn/monitor/cancel
+- Devin ACP delegation bridge (`botex/providers/delegation.py`): spawn/monitor/cancel
   external `devin` executor runs with a public `/api/delegation/devin`
   availability probe (`delegation.devin` config)
-- Knowledge-Graph curator daemon (`ops/curator/` + `botex/curator.py`
-  shim): scheduled vault synthesis, `GET /api/curator/status`,
-  `POST /api/curator/run`, CLI `python -m ops.curator.curator_service`,
+- Knowledge-Graph curator daemon (`botex/ops/curator/` + `botex/memory/curator.py`
+  facade): scheduled vault synthesis, `GET /api/curator/status`,
+  `POST /api/curator/run`, CLI `python -m botex.ops.curator.curator_service`,
   optional Telegram alerts (`docs/TELEGRAM_NOTIFICATIONS.md`),
   `deploy/oracle-vps/botex-nightly-curator.{service,timer}` units
-- Google AI Studio provider (`GoogleAIStudioProvider` in `botex/providers.py`;
+- Google AI Studio provider (`GoogleAIStudioProvider` in `botex/providers/providers.py`;
   `google`/`aistudio`/`gemini` registry aliases, `GEMINI_API_KEY` >
   `GOOGLE_API_KEY` > `secrets.google_api_key` key resolution, configured
   `pricing_overrides`/`capabilities` standing in for a catalog that publishes
   neither, no credits API, Gemini `thought_signature` echoed via
   `extra_content` so thinking turns stay valid)
-- Free-tier rate limiting and state carryover: token-bucket rate limiter (`botex/rate_limiter.py`) tracking RPM/TPM with debt queues and cooldown windows; in-flight task checkpointing (`botex/state.py`) capturing plan steps, findings, and inspected files across model and provider fallbacks without losing context after clean snapshot rollbacks
-- Shared retry layer (`botex/retry.py`): unbilled-failure backoff for
+- Free-tier rate limiting and state carryover: token-bucket rate limiter (`botex/providers/rate_limiter.py`) tracking RPM/TPM with debt queues and cooldown windows; in-flight task checkpointing (`botex/core/state.py`) capturing plan steps, findings, and inspected files across model and provider fallbacks without losing context after clean snapshot rollbacks
+- Shared retry layer (`botex/providers/retry.py`): unbilled-failure backoff for
   provider calls — HTTP 429, connection errors, provider-blessed overloads
   (Google 503) — with server delay hints (`Retry-After`, `retryDelay`,
   `quotaResetDelay`, "retry in Xs"), immediate re-raise on daily-quota
@@ -446,13 +485,13 @@ rest.
 - **One-Shot Knowledge Recall & Curator Cascade (Stage 4.10 / Memory Distillation)**:
   - `recall_memory` MCP tool: single-turn natural language knowledge recall answering questions directly from the Memory Vault graph.
   - Graph Context Expansion: FTS match seed + 1-hop outgoing wikilinks (`[[...]]`) and incoming backlinks with strict token budget (~5000 tokens) and obsolete note pruning.
-  - Multi-tier LLM Curator Cascade (`ops/curator/recall_curator.py`): `local-ollama` (Bielik/Ollama auto-probe) -> `nvidia` (Nemotron 3.5 Lightning, `thinking=False`) -> `gemini` (Gemini Flash) -> `openrouter-free` -> `deterministic_recall` fallback.
+  - Multi-tier LLM Curator Cascade (`botex/ops/curator/recall_curator.py`): `local-ollama` (Bielik/Ollama auto-probe) -> `nvidia` (Nemotron 3.5 Lightning, `thinking=False`) -> `gemini` (Gemini Flash) -> `openrouter-free` -> `deterministic_recall` fallback.
   - Anti-hallucination & ground-truth guards: strict citation enforcement, secret masking (`mask_secrets`), and untrusted note boundary encapsulation (`wrap_untrusted_content`), eliminating client-side context bloat by up to 98.8%.
 - **Context Inclusion Layer & Hindsight Memory Evolution (Stage 4.9)**:
-  - In-process deterministic context relay for swarm agents (`botex/context_inclusion.py`): `OutputNormalizer` (agent-agnostic output normalization and POSIX path enforcement), `DeterministicSignalGate` (AST diff pruning, failure traceback isolation, observation deduplication), `ContextKnapsack` (4KB token budget with traversal-hardened scratchpad offload).
-  - Memory Evolution (`botex/memory.py`, `server.py`): `belief` and `heuristic` memory kinds, SQLite `confidence` column with frontmatter synchronization, temporal query filters (`since`, `until`), confidence filtering (`min_confidence`), spreading activation along `memories_edges` wikilink graph blended via Reciprocal Rank Fusion (RRF), and the `reflect_memory` MCP tool.
+  - In-process deterministic context relay for swarm agents (`botex/core/context_inclusion.py`): `OutputNormalizer` (agent-agnostic output normalization and POSIX path enforcement), `DeterministicSignalGate` (AST diff pruning, failure traceback isolation, observation deduplication), `ContextKnapsack` (4KB token budget with traversal-hardened scratchpad offload).
+  - Memory Evolution (`botex/memory/memory.py`, `server.py`): `belief` and `heuristic` memory kinds, SQLite `confidence` column with frontmatter synchronization, temporal query filters (`since`, `until`), confidence filtering (`min_confidence`), spreading activation along `memories_edges` wikilink graph blended via Reciprocal Rank Fusion (RRF), and the `reflect_memory` MCP tool.
 - Memory knowledge graph (Stage 4.7 partial): `[[wikilinks]]` between notes, `get_backlinks`, `patch_memory_section`, `find_graph_health` (broken links / orphans / cycles), `init_obsidian_vault` with per-kind graph colors + `_GRAPH_INDEX.md`, `read_scratchpad` for offloaded execution logs
-- Meta-lessons layer: `botex/meta_harness.py` (task taxonomy classification, patch probing, meta-lesson extraction & recommendations)
+- Meta-lessons layer: `botex/core/meta_harness.py` (task taxonomy classification, patch probing, meta-lesson extraction & recommendations)
 - Analytics & stats: `aggregate_stats()` shared by CLI and `GET /api/analytics?period=`, per-model/daily aggregates with cache-hit metrics, `POST /api/analytics/digest` + optional local-LLM (Bielik) digest loop writing to the Memory Vault, SVG stats panel inside WalletView
 - Task retry/clone: persisted `request` in task entries, `GET /api/tasks/{id}` returns saved request, PWA "Ponów" prefill action for terminal tasks
 - PWA mobile overhaul: collapsible memory filters (collapsed by default), Polish default locale with reactive `document.lang`, skin persistence (`botex_skin` + `theme-color` meta), 44px touch targets, zero horizontal overflow at 320-1024px
@@ -466,7 +505,7 @@ rest.
 - Fallback as policy: `should_fallback` on `failure_kind`, rollback
   confirmation via the snapshot mutation registry, `attempts[]`,
   `max_task_duration_s` chain budget, `move_file` `.created` registration
-- Provider-neutral layer: `botex/providers.py` (response normalization,
+- Provider-neutral layer: `botex/providers/providers.py` (response normalization,
   per-provider headers/`extra_body`, classified provider errors) — OpenRouter
   attribution/ZDR no longer leaks to NVIDIA
 - Structured MCP outputs: `run_subagent` returns `CallToolResult` with

@@ -8,7 +8,7 @@ This document serves as a guide and rulebook for AI agents working on the **Bote
 
 ## 1. Architecture Overview
 
-BoteX is an execution harness for autonomous code-editing agents, functioning as an MCP server. The main directories and modules are:
+BoteX is an execution harness for autonomous code-editing agents, functioning as an MCP server. Since v2.1.0 the package is organized into domain subpackages; legacy flat imports (`botex.engine`, `botex.memory`, ...) still resolve through the alias graft in `botex/__init__.py` (see `docs/IMPORT_MAP.md`). The main directories and modules are:
 
 *   **Root files:**
     *   `server.py` - Main MCP server entry point and CLI dispatcher.
@@ -16,46 +16,70 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `botex.cmd` / `botex.sh` - Zero-install execution launchers.
     *   `pyproject.toml` / `requirements.txt` - Project packaging and dependencies.
     *   `ROADMAP.md` - Technical roadmap, deferred features, and architecture rationale.
-*   **`botex/`** - Main application package.
-    *   `engine.py` - Autonomous execution loop, 5-gate in-payload failovers, in-flight state checkpointing, provider fallbacks, context management, deterministic task receipts, and rollback triggers.
-    *   `state.py` - In-flight execution checkpoints (`InFlightTaskState`), plan/finding carryover across model/provider fallbacks.
-    *   `rate_limiter.py` - Token-bucket rate limiting (RPM/TPM) and cooldown tracking for free and cloud providers.
-    *   `curator.py` / `ops/curator/` - Autonomous Memory Vault synthesis, telemetry digests, and multi-tier LLM recall synthesis (`recall_curator.py`).
-    *   `delegation.py` - Delegation bridge to external specialized agents (e.g. Devin).
-    *   `events.py` - Engine and lifecycle event taxonomy (`EventKind`).
+*   **`botex/core/`** - Engine internals.
+    *   `engine.py` - Autonomous execution loop, 5-gate in-payload failovers, in-flight state checkpointing, provider fallbacks, context management, deterministic task receipts, rollback triggers, attribution telemetry wiring, and `SHADOW_ROUTING` advisory emission.
+    *   `state.py` - In-flight execution checkpoints (`InFlightTaskState`), plan/finding carryover and contrastive ring buffers (`syntax_rejections`, `rollback_reasons`, last 5 each) across model/provider fallbacks.
+    *   `rate_limiter.py` - see `botex/providers/rate_limiter.py`.
     *   `contracts.py` - Task completion contract verification, strict JSON Schema (`TASK_COMPLETION_JSON_SCHEMA`), and status taxonomy.
+    *   `events.py` - Engine and lifecycle event taxonomy (`EventKind`, incl. `SHADOW_ROUTING`).
+    *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`) and agency middleware.
+    *   `approval.py` - Human-in-the-Loop approval manager, async pending actions, and risk policies.
+    *   `context_guard.py` - Context compaction and verification output pruning.
+    *   `context_inclusion.py` - Deterministic swarm context relay (`OutputNormalizer`, `DeterministicSignalGate`, `ContextKnapsack`).
+    *   `meta_harness.py` - Task taxonomy classification, episodic meta-lesson extraction/recall (`extract_meta_lesson`, `get_relevant_meta_lessons`), `is_infra_failure` noise gate, `path:<dir>` lesson binding, and `pack_lessons_within_budget` (800 B cap).
+    *   `tracing.py` - OTel-style span helpers.
+*   **`botex/providers/`** - Provider-facing services.
+    *   `providers.py` - Provider registry, adapters (`OpenRouterProvider`, `NvidiaProvider`, `GoogleAIStudioProvider`, `GenericOpenAIProvider`), `/api/v1/generation` telemetry reconciliation, and request normalizer.
+    *   `analytics.py` - Cost/token ledger (`.agent_analytics.jsonl` + `analytics-archive/` rollups), run-attribution fields, advisory shadow meta-routing (`recommend_shadow_model`, `get_shadow_routing_advice`, `_SHADOW_COST_FLOOR_USD`), budget tracking, and CLI reports.
+    *   `benchmarks.py` - Authenticated live model recommendations (`recommend_models`), tier-aware rankings, and task-size estimation (`estimate_task_tier`, `resolve_tier_profile`).
+    *   `catalog.py` - Dynamic model catalog service with TTL caching and ZDR checks.
+    *   `denylist.py` - Hierarchical model denylist filter (exact, glob, regex).
+    *   `pricing.py` - Model pricing guardrail, live catalog checks, and cost caps.
+    *   `rate_limiter.py` - Token-bucket rate limiting (RPM/TPM) and cooldown tracking for free and cloud providers.
+    *   `retry.py` - Shared transient-failure backoff layer for provider calls (429, connection errors, provider-blessed overloads); when active the SDK client is built with `max_retries=0`.
+    *   `wallet.py` - Credit balance, key budget status (`get_key_status`), and low-budget warnings.
+    *   `delegation.py` - Delegation bridge to external specialized agents (e.g. Devin).
+    *   `http_pool.py` - Pooled httpx clients; `prompt_cache.py` - prompt-cache policy gating; `adapters/zai.py` - Z.ai GLM adapter.
+*   **`botex/tools/`** - Worker tool implementations.
     *   `patch_engine.py` - Fuzzy patch mechanism, in-memory syntax validation, and snapshot management.
     *   `file_tools.py` - Safe file reading (outline-first), creation, moving, and deletion.
     *   `security.py` - Protections against Path Traversal attacks, secret masking, and `.gitignore` filtering.
     *   `exec_tools.py` - Command execution with policy control and argument filtering.
-    *   `capabilities.py` - Permission presets (modes: `readonly`, `edit`, `destructive`, `full`) and agency middleware.
-    *   `approval.py` - Human-in-the-Loop approval manager, async pending actions, and risk policies.
-    *   `chat.py` - Conversational chat sessions, SSE/WebSocket token streaming, and read-only sandbox.
-    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE server, rate-limited task queue, and REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/analytics`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/recipes`, `/api/skills`, `/api/chat`).
-    *   `pricing.py` - Model pricing guardrail, live catalog checks, and cost caps.
-    *   `analytics.py` - Cost/token ledger, generation latency/cache telemetry, budget tracking, and CLI reports.
-    *   `providers.py` - Provider registry, adapters (`OpenRouterProvider`, `NvidiaProvider`, `GoogleAIStudioProvider`, `GenericOpenAIProvider`), `/api/v1/generation` telemetry reconciliation, and request normalizer.
-    *   `retry.py` - Shared transient-failure backoff layer for provider calls (429, connection errors, provider-blessed overloads); when active the SDK client is built with `max_retries=0`.
-    *   `catalog.py` - Dynamic model catalog service with TTL caching and ZDR checks.
-    *   `denylist.py` - Hierarchical model denylist filter (exact, glob, regex).
-    *   `wallet.py` - Credit balance, key budget status (`get_key_status`), and low-budget warnings.
-    *   `benchmarks.py` - Authenticated live model recommendations (`recommend_models`) and tier-aware (`high` / `standard` / `budget`) rankings.
-    *   `context_guard.py` - Context compaction and verification output pruning.
     *   `net_tools.py` - SSRF-safe network fetching tools (`read_url`, `fetch_url`).
-    *   `memory.py` - Persistent two-tier Memory Vault (local `.botex/memory/` and global `~/.botex/memory/`) with wikilink graph, 1-hop recall context gathering, and scratchpad offload.
+    *   `vision.py` - Vision input triage.
+*   **`botex/memory/`** - Memory Vault stack.
+    *   `memory.py` - Persistent two-tier Memory Vault (local `.botex/memory/` and global `~/.botex/memory/`) with wikilink graph, lifecycle statuses (`candidate`/`active`/`deprecated`/`superseded`), confidence scoring, `update_lesson_confidence` feedback, 1-hop recall context gathering, and scratchpad offload.
+    *   `curator.py` - Facade re-exporting the `botex.ops.curator` service API.
     *   `embeddings.py` - Local embedding helpers supporting memory/graph features.
     *   `obsidian.py` - Obsidian PKM vault export, per-kind graph colors, and `_GRAPH_INDEX.md` generation.
-    *   `meta_harness.py` - Task taxonomy classification, patch probing, and meta-lesson extraction/recommendation (self-improvement layer).
+*   **`botex/ops/`** - Autonomous operations.
+    *   `curator/` - `CuratorService` nightly vault synthesis: graph health, batch drain, append-only linking, compiled truth, lesson promotion (step 6d, `promote_candidate_lessons`), PR-only skill crystallization (step 6e, `crystallize_skill_proposals` into `.botex/proposals/`), `recall_curator.py` multi-tier LLM recall cascade, Telegram dispatch.
+    *   `maintenance.py` / `migrate_projects.py` - Maintenance and vault migration jobs.
+*   **`botex/skills/`** - Skill Vault stack.
+    *   `skills.py` - Server-side Skill Vault (`skills/<name>/SKILL.md` catalog, safe install/update with injection guards), L0 task triage with `applied_skills` telemetry, and `write_skill_proposal_draft` for PR-only `.botex/proposals/` drafts.
+    *   `skillspector_gate.py` - SkillSpector pre-flight audit (`audit_skill_content`; threshold via `skills.audit.risk_threshold`).
     *   `recipes.py` - Recipe loader and system-prompt injection.
-    *   `skills.py` - Server-side Skill Vault (`skills/<name>/SKILL.md` catalog, safe install/update with injection guards) and L0 task triage with `applied_skills` telemetry.
-    *   `config.py` - Layered configuration loader (defaults < local < env) with `mtime` hot-reload.
-    *   `i18n.py` - CLI localization (EN/PL).
-    *   `ui.py` - ANSI styling helpers with plain-text fallback.
     *   `recipes/` - Bundled persona prompts (`planner`, `reviewer`, `tdd`, `build-resolver`, `security-reviewer`, `security-taint-hardener`, `code-explorer`, `architecture-adr`, `ui-craftsman`).
+*   **`botex/server/`** - Interfaces.
+    *   `server_cloud.py` - FastAPI Cloud Gateway, Remote MCP SSE/HTTP server, rate-limited task queue, REST/WebSocket API (`/api/wallet`, `/api/key/status`, `/api/analytics`, `/api/tasks`, `/api/approvals`, `/api/memory`, `/api/models`, `/api/recipes`, `/api/skills`, `/api/chat`), and memory-origin hardening (`_RESERVED_ORIGIN_AGENTS`, NFKC-folded `X-Agent-Id`/`X-Host` sanitization).
+    *   `chat.py` - Conversational chat sessions, SSE/WebSocket token streaming, and read-only sandbox.
+    *   `config.py` - Layered configuration loader (defaults < local < env) with `mtime` hot-reload, workspace containment, and `MCP_CLIENT_ORIGIN` provenance context.
+    *   `plugins.py` - ZeroTrust subprocess plugin runner; `i18n.py` - CLI localization (EN/PL); `ui.py` - ANSI styling helpers.
 *   **`web/`** - Vue 3 + Vite + Pinia + Tailwind CSS PWA frontend for the Cloud Gateway.
-*   **`tests/`** - Test suite (40 files, 650 collected tests: 	est_context_inclusion.py, 	est_memory_hindsight_features.py, `test_botex.py`, `test_rate_limiter.py`, `test_state_checkpoint.py`, `test_curator.py`, `test_delegation.py`, `test_events.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_stage_4_8.py`, `test_retry.py`, `test_skills_parity.py`, `test_server_cloud.py`, `test_approval.py`, `test_chat.py`, `test_wallet.py`, `test_catalog.py`, `test_denylist.py`, `test_providers.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_context_guard.py`, `test_analytics.py`, `test_embeddings.py`, `test_meta_harness.py`, `test_obsidian_graph.py`, `test_obsidian_edge_cases.py`, `test_nvidia_streaming.py`, `test_credits_stress.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_integration.py`, `test_circuit_breaker.py`, `test_tracing.py`, `test_task_size_routing.py`, `test_structured_contracts_v1.py`, `test_caller_skill_contract.py`, `test_config_safety.py`, and live integration tests in `test_live_e2e.py`).
-*   **`docs/`** - Documentation (`TUTORIAL.md`).
-*   **`skills/`** - Skill definitions: caller-side contract (`skills/botex/SKILL.md`) plus server-side packs (`architecture-planner`, `build-resolver`, `code-review`, `security-audit`, `tdd-verification`) managed by `botex/skills.py`.
+*   **`tests/`** - Test suite (67 files, 1344 collected tests: `test_botex.py`, `test_analytics.py`, `test_approval.py`, `test_caller_skill_contract.py`, `test_catalog.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_challenger_m7_concurrency.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_challenger_m8_empirical.py`, `test_challenger_m9_empirical.py`, `test_chat.py`, `test_chat_error_observability.py`, `test_circuit_breaker.py`, `test_config_keys_enforced.py`, `test_config_safety.py`, `test_containment_recall_gate.py`, `test_context_guard.py`, `test_context_inclusion.py`, `test_credits_stress.py`, `test_curator.py`, `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_curator_tasks.py`, `test_delegation.py`, `test_denylist.py`, `test_deps_parity.py`, `test_e2e_contracts.py`, `test_embeddings.py`, `test_events.py`, `test_http_pool.py`, `test_idle_backend_layers.py`, `test_idle_layers_l1.py`, `test_integration.py`, `test_memory_hindsight_features.py`, `test_memory_recall.py`, `test_memory_twotier.py`, `test_memory_v2.py`, `test_meta_harness.py`, `test_module_aliases.py`, `test_nvidia_streaming.py`, `test_obsidian_edge_cases.py`, `test_obsidian_graph.py`, `test_ops_package.py`, `test_plugins_creator.py`, `test_prompt_cache.py`, `test_providers.py`, `test_rate_limiter.py`, `test_recall_curator.py`, `test_recall_observability.py`, `test_retry.py`, `test_security_hardening.py`, `test_server_cloud.py`, `test_server_f4_provenance.py`, `test_skills_parity.py`, `test_skills_security.py`, `test_stage_4_6.py`, `test_stage_4_7.py`, `test_stage_4_8.py`, `test_state_checkpoint.py`, `test_structured_contracts_v1.py`, `test_task_size_routing.py`, `test_tracing.py`, `test_tracing_wiring.py`, `test_vision_pipeline.py`, `test_wallet.py`, `test_zai_provider.py`, and live integration tests in `test_live_e2e.py`).
+*   **`docs/`** - Documentation (`TUTORIAL.md`, `IMPORT_MAP.md`, `TELEGRAM_NOTIFICATIONS.md`).
+*   **`skills/`** - Skill definitions: caller-side contract (`skills/botex/SKILL.md`) plus server-side packs (`architecture-planner`, `build-resolver`, `code-review`, `security-audit`, `tdd-verification`) managed by `botex/skills/skills.py`.
+
+### 1.1. Self-Improvement Loop (Layers A-C)
+
+BoteX records its own runs and feeds the evidence back deterministically. Learning stays local and evidence-gated: promotion into live behavior requires verified confirmation counts or a human-reviewed PR.
+
+*   **Layer A (telemetry & attribution):** every run lands in `.agent_analytics.jsonl` with masked attribution fields (`origin`, `recipe`, `routed_tier`, `taxonomy`, `applied_skills`, `applied_lessons`, `syntax_rejections`, `rollback_count`, `shadow_recommended_model`), persisted only when non-empty.
+*   **Episodic learning:** a task that recovers after a model failure persists a `kind="lesson"` note as `status="candidate"`, `confidence=0.4` (`extract_meta_lesson`), tagged `path:<dir>` for touched directories. `is_infra_failure` keeps provider-side noise (rate limits, timeouts, quota/auth/budget/config errors, HTTP 429) out of the vault. Recall (`get_relevant_meta_lessons`) surfaces only `active` lessons at `confidence >= 0.6`, path-bound lessons first, packed to <= 800 B. `update_lesson_confidence` nudges `+0.1` on `DONE` zero-rollback runs and `-0.15` on quality failures (never on infra failures or `ABORTED`); below `0.2` the note becomes `deprecated`.
+*   **Curator promotion (step 6d):** `promote_candidate_lessons` flips `candidate` -> `active` only at `confidence >= 0.8` with >= 2 distinct `DONE` zero-rollback ledger confirmations (`applied_lessons` citations). `human`, `human-curated`, and `frozen` notes are never mutated. `promote_to_global=True` (code-level opt-in) copies verified lessons into `scope="global"`, `project="swarm"` behind a secret-leak guard.
+*   **Layer B (PR-only skill crystallization, step 6e):** `crystallize_skill_proposals` clusters recurring `active` lessons (`min_cluster_size >= 5`, `path:`/domain tags or >= 2 co-occurring tokens) and drafts `learned-<tax>-<topic>` `SKILL.md` + `recipe.md` into `.botex/proposals/` only, after size, secret, prompt-injection, and SkillSpector gates. It never mutates `skills/` or `botex/skills/recipes/`; promotion requires a reviewed PR. Agents must not hand-edit proposal drafts into live skill directories.
+*   **Layer C (shadow meta-routing):** `get_shadow_routing_advice` logs an advisory per-`(recipe, taxonomy)` model pick once >= 10 samples exist (`EventKind.SHADOW_ROUTING`, `_SHADOW_COST_FLOOR_USD` floor for `:free`, `hard_banned_models` empty, `actual_override: false`). It never overrides active routing.
+*   **Provenance hardening:** `POST /api/memory` ignores the client-supplied `origin`; provenance derives from sanitized `X-Agent-Id`/`X-Host` headers, and reserved claims (`human`, `human-curated`, `operator`, `curator`) are rejected server-side.
 
 ## 2. Tools and Commands
 
@@ -91,7 +115,8 @@ Under no circumstances should you modify the following locations:
 *   `build/`, `dist/`, `*.egg-info/` - build process artifacts.
 *   `.snapshots/` - directory for backup copies created during operation (modified only by the BoteX system itself).
 *   `.env`, `botex.config.local.json` - configuration files containing sensitive data and developer environment secrets.
-*   `.agent_analytics.json`, `.model_pricing.json` - files storing state and history.
+*   `.agent_analytics.json`, `.agent_analytics.jsonl`, `analytics-archive/`, `.model_pricing.json` - files storing state and history.
+*   `.botex/proposals/` - Curator-generated skill draft workspace; promotion happens only via a reviewed PR, never by editing drafts into `skills/`.
 
 ### 3.2. Repository Conventions
 *   **Commits:** Try to keep commit messages concise, factual, and in English. The title should not exceed 50 characters, and if a longer description is needed, add it after a blank line.
@@ -100,7 +125,7 @@ Under no circumstances should you modify the following locations:
 
 ### 3.3. Deployment Flow & Internal-Surface Hygiene (HARD RULES)
 *   **Single change path:** All BoteX logic changes flow exclusively through `local changes → PR → merge to main → deploy to VPS`. Never patch files or data directly on the VPS; never bypass the PR gate with a "quick" direct fix — including memory-vault data repairs, which must ship as code (e.g. maintenance jobs) through the normal pipeline.
-*   **No internal surface in client code:** Files under `web/src/**` ship to browsers unauthenticated users can reach. They must NEVER embed internal file paths, module/class names, route names, or config keys of the backend (e.g. `botex/server_cloud.py`, `botex.config.json`). UI copy, starter prompts, placeholders and docs links stay generic; anything needing internals belongs behind authenticated API responses.
+*   **No internal surface in client code:** Files under `web/src/**` ship to browsers unauthenticated users can reach. They must NEVER embed internal file paths, module/class names, route names, or config keys of the backend (e.g. `botex/server/server_cloud.py`, `botex.config.json`). UI copy, starter prompts, placeholders and docs links stay generic; anything needing internals belongs behind authenticated API responses.
 
 ## 4. Autonomy Criteria
 
@@ -152,6 +177,7 @@ External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge,
 - Local notes (`scope="local"`) are reserved for workspace-private context or ephemeral `temp-handoff` entries (`tags=["temp-handoff"]`, `expires: YYYY-MM-DD`), which are swept automatically by the Curator.
 - Swarm knowledge is also reachable via `scope="swarm"` (optional third read-only root, configured in `paths.swarm_memory_dir`); `scope="all"` includes it when configured.
 - Use `read_memory(memory_id="...")` only when exact raw note contents must be inspected for surgical editing. Avoid multi-turn `search_memory` hunting loops. Every `recall_memory` response carries `recall_status`, `tier_attempts`, `workspace_searched` — inspect them before assuming a miss.
+- **Vault lifecycle:** `kind="lesson"` notes carry a lifecycle (`candidate` -> `active` -> `deprecated`/`superseded`) plus a `confidence` score. Engine-extracted lessons start as `candidate` (0.4) and only the Curator promotes them to `active`; callers should leave lifecycle management to the loop and must never spoof `origin` claims (`human`, `human-curated`, `operator`, `curator` are reserved and server-rejected).
 
 
 
@@ -161,12 +187,12 @@ External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge,
 ## 7. Multi-Agent Interoperability & Portable Path Invariant (VPS / Cloud Alignment)
 
 ### 7.1. Portable Repo-Relative Paths in Handoffs
-*   **Zero Absolute Paths:** All agent-to-agent and agent-to-human communications containing `artifact_refs` or file pointers MUST use repository-relative paths with POSIX forward slashes (`/`), e.g., `botex/engine.py`, `src/services/auth.ts`, `docs/ADR-001.md`.
+*   **Zero Absolute Paths:** All agent-to-agent and agent-to-human communications containing `artifact_refs` or file pointers MUST use repository-relative paths with POSIX forward slashes (`/`), e.g., `botex/core/engine.py`, `src/services/auth.ts`, `docs/ADR-001.md`.
 *   **Cross-Environment Interoperability:** Never emit absolute Windows drive paths (`C:\Users\...`) or Linux home paths (`/home/ubuntu/...`) in JSON handoff contracts. This ensures seamless interoperability between local developer workstations and remote Linux VPS instances (e.g. Oracle Linux ARM).
 
 ### 7.2. Skills <-> Recipes Parity Invariant
 *   **Dual-Mode Parity:** BoteX engineering rules live symmetrically in two layers:
     1.  Public contract layer: `skills/<skill_name>/SKILL.md` (read by external orchestrators like Antigravity, Devin, Codex).
-    2.  Kernel execution layer: `botex/recipes/<recipe_name>.md` (injected directly into BoteX model prompts).
+    2.  Kernel execution layer: `botex/skills/recipes/<recipe_name>.md` (injected directly into BoteX model prompts).
 *   **Mandatory Synchronization:** Whenever engineering checklists, linting requirements, or runtime targets are updated, both layers must be updated in tandem. Parity is enforced by automated tests in `tests/test_skills_parity.py`.
-*   **Dependencies Parity:** `requirements.txt` (the sole install source for CI and the VPS deploy) and `pyproject.toml` `[project.dependencies]` (packaging source of truth) must list identical core dependencies with identical specifiers. Drift is enforced by `tests/test_deps_parity.py`.
+*   **Dependencies Parity:** `requirements.txt` (the sole install source for CI and the VPS deploy) and `pyproject.toml` `[project.dependencies]` must list identical core dependencies with identical specifiers. Drift is enforced by `tests/test_deps_parity.py`.

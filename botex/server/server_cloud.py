@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -855,6 +856,41 @@ def _extract_mcp_origin_from_headers(headers: dict[bytes, bytes]) -> str:
     return ""
 
 
+# Identity claims that must never be accepted from client-controlled
+# headers/payloads: they freeze or impersonate privileged vault provenance.
+_RESERVED_ORIGIN_AGENTS = frozenset({"human", "human-curated", "operator", "curator"})
+
+
+def _normalize_origin_claim(raw: str) -> str:
+    """NFKC-normalize and strictly sanitize a provenance agent claim.
+
+    Unicode homoglyphs and full-width lookalikes are folded to their ASCII
+    compatibles before the allowlist strip, so ``ｈｕｍａｎ``-style spoofing of
+    reserved identity claims cannot survive normalization.
+    """
+    norm = unicodedata.normalize("NFKC", str(raw or "")).strip()
+    return re.sub(r"[^a-zA-Z0-9_.-]", "", norm.split("@", 1)[0])[:32]
+
+
+def _sanitize_mcp_client_origin(raw: str) -> str:
+    """Guard reserved identity claims in client-supplied provenance."""
+    if not raw:
+        return ""
+    norm = unicodedata.normalize("NFKC", str(raw)).strip()
+    parts = norm.split("@", 1)
+    agent = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[0])[:32]
+    host = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[1])[:32] if len(parts) > 1 else ""
+    if agent.lower() in _RESERVED_ORIGIN_AGENTS:
+        return "cloud_api"
+    if agent and host:
+        return f"{agent}@{host}"
+    if agent:
+        return agent
+    if host:
+        return f"botex@{host}"
+    return "cloud_api"
+
+
 class CloudAuthMiddleware:
     """ASGI Authentication middleware supporting Zero Friction Local and Strict Cloud modes.
 
@@ -895,7 +931,12 @@ class CloudAuthMiddleware:
 
         # Reject payloads exceeding 25 MiB to prevent memory exhaustion / OOM on constrained VPS
         headers = dict(scope.get("headers", []))
-        mcp_origin = _extract_mcp_origin_from_headers(headers) if path.startswith("/mcp") else ""
+        # X-Agent-Id/X-Host provenance is honored on MCP and REST API paths
+        # alike, but reserved identity claims (human/operator/curator) are
+        # rejected so headers can never spoof privileged vault origins.
+        mcp_origin = ""
+        if path.startswith("/mcp") or path.startswith("/api"):
+            mcp_origin = _sanitize_mcp_client_origin(_extract_mcp_origin_from_headers(headers))
         content_length_raw = (
             headers.get(b"content-length", b"").decode("latin1", errors="ignore").strip()
         )
@@ -1934,13 +1975,25 @@ async def get_memory(
 
 @app.post("/api/memory")
 async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
-    """Save an entry to the Memory Vault."""
+    """Save an entry to the Memory Vault.
+
+    Provenance is taken strictly from server-side context (X-Agent-Id /
+    X-Host headers validated by CloudAuthMiddleware); the client-supplied
+    ``body.origin`` is ignored — an unauthenticated claim like ``human``
+    must never freeze or impersonate privileged vault origins.
+    """
     ws = resolve_workspace(body.workspace_dir)
     clean_mid = sanitize_identifier(body.memory_id) if body.memory_id else None
     if body.memory_id and not clean_mid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid memory_id format.",
+        )
+    origin = _sanitize_mcp_client_origin(MCP_CLIENT_ORIGIN.get("")) or "cloud_api"
+    if _normalize_origin_claim(body.origin).lower() in _RESERVED_ORIGIN_AGENTS:
+        # Static message only (CWE-117): never echo untrusted origin text into logs.
+        logger.warning(
+            "Rejected reserved origin claim on POST /api/memory; using server provenance."
         )
     res = await asyncio.to_thread(
         save_memory,
@@ -1950,7 +2003,7 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
         kind=body.kind,
         tags=body.tags,
         memory_id=clean_mid,
-        origin=body.origin,
+        origin=origin,
         scope=body.scope,
         project=body.project,
     )

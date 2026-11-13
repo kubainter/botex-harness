@@ -9,8 +9,8 @@
 
 ## Standard Memory Workflow
 
-1. **One-Shot Recall (Preferred):** `recall_memory(query="...", scope="all")` — expands hits via 1-hop wikilinks/backlinks and synthesizes facts with cited sources (up to 98% token reduction).
-2. **Diagnostic Search (Fallback):** `search_memory(query="...", scope="all")` — raw FTS5 candidate discovery or chronological filtering.
+1. **One-Shot Recall (Preferred):** `recall_memory(query="...", scope="all")`: expands hits via 1-hop wikilinks/backlinks and synthesizes facts with cited sources (up to 98% token reduction).
+2. **Diagnostic Search (Fallback):** `search_memory(query="...", scope="all")`: raw FTS5 candidate discovery or chronological filtering.
 3. **Full Inspection:** `read_memory(memory_id="...", scope="local")` — read complete markdown, frontmatter, and `[[wikilinks]]`.
 4. **Write / Update:**
    - Existing note: `patch_memory_section(memory_id, section="Compiled Truth", new_content=...)`
@@ -25,6 +25,13 @@
 - `lesson`: Discovered edge cases, bug root causes, operational constraints.
 - `belief`: Provisional observations (`confidence < 1.0`).
 - `heuristic`: Actionable rules of thumb distilled from lessons.
+
+## Vault Lifecycle & Provenance
+
+- Every note carries `status` (`candidate` -> `active` -> `deprecated`/`superseded`) and `confidence` (0.0-1.0). `search_memory` defaults to `status="active"`; pass `status="all"` for a full scan, or an explicit `status` to target one state.
+- Engine-extracted `lesson` notes start as `candidate` (confidence 0.4) and are promoted to `active` only by the Curator after verified evidence (`confidence >= 0.8` plus >= 2 distinct clean-run confirmations). Human-authored notes (`origin="human"`, `human-curated`, `frozen` tags) are never mutated by the loop.
+- On BoteX Cloud, `origin` is derived server-side from sanitized `X-Agent-Id`/`X-Host` headers; client-supplied `origin` fields are ignored and reserved claims (`human`, `human-curated`, `operator`, `curator`) are rejected.
+- Curator skill drafts land under `<workspace>/.botex/proposals/` only and require a reviewed PR to reach live `skills/`/`botex/skills/recipes/`; they are not part of the vault.
 
 ## Task Receipts
 

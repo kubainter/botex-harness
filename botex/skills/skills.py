@@ -64,6 +64,8 @@ __all__ = [
     "delete_skill",
     "triage_skills_for_task",
     "format_skills_prompt_block",
+    "has_injection_pattern",
+    "write_skill_proposal_draft",
     "MAX_SKILL_BYTES",
     "VALID_SKILL_TAXONOMIES",
 ]
@@ -102,6 +104,12 @@ _UNTRUSTED_WEB_WRAPPER_RE = re.compile(
     r"^\s*<untrusted_web_content[^>]*>\r?\n?(.*?)\r?\n?</untrusted_web_content>\s*$",
     re.DOTALL | re.IGNORECASE,
 )
+
+
+def has_injection_pattern(raw_text: str) -> bool:
+    """Return True when raw_text matches any adversarial prompt-injection heuristic."""
+    text = str(raw_text or "")
+    return any(pat.search(text) for pat in _INJECTION_PATTERNS)
 
 
 def _unwrap_untrusted_web_content(raw_text: str) -> str:
@@ -447,12 +455,11 @@ def _validate_and_write_skill(
             "error": f"Skill content exceeds maximum allowed size ({MAX_SKILL_BYTES} bytes).",
         }
 
-    for pat in _INJECTION_PATTERNS:
-        if pat.search(raw_content):
-            return {
-                "ok": False,
-                "error": "Security policy rejected skill: detected adversarial prompt-injection pattern.",
-            }
+    if has_injection_pattern(raw_content):
+        return {
+            "ok": False,
+            "error": "Security policy rejected skill: detected adversarial prompt-injection pattern.",
+        }
 
     existing_meta, body = _parse_frontmatter(raw_content)
     if not body.strip() and not raw_content.startswith("---"):
@@ -650,12 +657,11 @@ async def install_skill_async(
                 "ok": False,
                 "error": f"Skill content exceeds maximum allowed size ({MAX_SKILL_BYTES} bytes).",
             }
-        for pat in _INJECTION_PATTERNS:
-            if pat.search(raw_content):
-                return {
-                    "ok": False,
-                    "error": "Security policy rejected skill: detected adversarial prompt-injection pattern.",
-                }
+        if has_injection_pattern(raw_content):
+            return {
+                "ok": False,
+                "error": "Security policy rejected skill: detected adversarial prompt-injection pattern.",
+            }
 
         cfg = load_config()
         audit_res: Optional[Dict[str, Any]] = None
@@ -854,3 +860,209 @@ def format_skills_prompt_block(
             body = body[:max_chars_per_skill].rstrip() + "\n...[truncated for context efficiency]"
         blocks.append(f"--- [SKILL: {name} (v{ver})] ---\n{body}")
     return "\n\n".join(blocks) + "\n"
+
+
+def _is_human_or_frozen_proposal(path: Path) -> bool:
+    """Protect human-authored or frozen skill proposals from automated overwrite."""
+    if not path.is_file():
+        return False
+    try:
+        meta, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    except Exception:
+        # Fail closed on unreadable/corrupt existing files to avoid clobbering manual drafts.
+        return True
+    nested = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+    origin = (
+        str(meta.get("origin") or meta.get("source") or nested.get("origin") or "").strip().lower()
+    )
+    if origin == "human":
+        return True
+    tags = meta.get("tags") or nested.get("tags") or []
+    if isinstance(tags, str):
+        tags = re.split(r"[\s,]+", tags)
+    tag_lows = {str(t).strip().lower() for t in tags if str(t).strip()}
+    return "human-curated" in tag_lows or "frozen" in tag_lows
+
+
+def _proposal_body_unchanged(
+    skill_path: Path,
+    candidate_doc: str,
+    recipe_path: Optional[Path] = None,
+    candidate_recipe: str = "",
+) -> bool:
+    """Compare proposal skill + recipe text ignoring volatile audit timestamps."""
+    if not skill_path.is_file():
+        return False
+    try:
+        ex_meta, ex_body = _parse_frontmatter(skill_path.read_text(encoding="utf-8"))
+        new_meta, new_body = _parse_frontmatter(candidate_doc)
+    except Exception:
+        return False
+    skill_same = (
+        str(ex_meta.get("name") or "") == str(new_meta.get("name") or "")
+        and str(ex_meta.get("description") or "") == str(new_meta.get("description") or "")
+        and ex_body.strip() == new_body.strip()
+    )
+    if not skill_same:
+        return False
+    if candidate_recipe.strip():
+        if recipe_path is None or not recipe_path.is_file():
+            return False
+        try:
+            if recipe_path.read_text(encoding="utf-8").strip() != candidate_recipe.strip():
+                return False
+        except Exception:
+            return False
+    return True
+
+
+async def write_skill_proposal_draft(
+    name: str,
+    skill_markdown: str,
+    recipe_markdown: str = "",
+    *,
+    proposals_dir: Optional[Path] = None,
+    recipe_name: Optional[str] = None,
+    workspace_dir: str | Path = ".",
+    audit_cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Write a PR-only SKILL.md + matching recipe draft under ``.botex/proposals/``.
+
+    Never mutates live ``skills/``, ``botex/skills/recipes/``, or remote servers.
+    Enforces size bounds, raw secret detection, prompt-injection patterns,
+    SkillSpector pre-flight scanning, and path containment inside proposals/.
+    """
+    try:
+        clean_name = _sanitize_skill_name(name)
+        raw_skill = str(skill_markdown or "").strip()
+        raw_recipe = str(recipe_markdown or "").strip()
+        if not raw_skill:
+            return {"ok": False, "rejected_reason": "empty", "error": "Empty skill proposal."}
+
+        if len(raw_skill.encode("utf-8")) > MAX_SKILL_BYTES or (
+            raw_recipe and len(raw_recipe.encode("utf-8")) > MAX_SKILL_BYTES
+        ):
+            return {
+                "ok": False,
+                "rejected_reason": "size_limit",
+                "error": f"Proposal content exceeds MAX_SKILL_BYTES ({MAX_SKILL_BYTES}).",
+            }
+
+        # Secret & prompt-injection gates run before any disk inspection or write.
+        if mask_secrets(raw_skill) != raw_skill or (
+            raw_recipe and mask_secrets(raw_recipe) != raw_recipe
+        ):
+            return {
+                "ok": False,
+                "rejected_reason": "secret_detected",
+                "error": "Security policy rejected proposal: detected credential/secret pattern.",
+            }
+        if has_injection_pattern(raw_skill) or (raw_recipe and has_injection_pattern(raw_recipe)):
+            return {
+                "ok": False,
+                "rejected_reason": "prompt_injection",
+                "error": "Security policy rejected proposal: adversarial prompt-injection pattern.",
+            }
+
+        proposals_root = (
+            proposals_dir or (Path(workspace_dir).resolve() / ".botex" / "proposals")
+        ).resolve()
+        skill_dir = (proposals_root / "skills" / clean_name).resolve()
+        skill_file = (skill_dir / "SKILL.md").resolve()
+        try:
+            skill_file.relative_to(proposals_root)
+        except ValueError:
+            return {
+                "ok": False,
+                "rejected_reason": "path_traversal",
+                "error": "Security policy rejected proposal: path escapes proposals root.",
+            }
+
+        recipe_file: Optional[Path] = None
+        recipes_root: Optional[Path] = None
+        clean_recipe_doc = sanitize_for_storage(raw_recipe).strip() + "\n" if raw_recipe else ""
+        if raw_recipe:
+            clean_recipe = _sanitize_skill_name(recipe_name or clean_name)
+            recipes_root = (proposals_root / "recipes").resolve()
+            recipe_file = (recipes_root / f"{clean_recipe}.md").resolve()
+            try:
+                recipe_file.relative_to(proposals_root)
+            except ValueError:
+                return {
+                    "ok": False,
+                    "rejected_reason": "path_traversal",
+                    "error": "Security policy rejected proposal: recipe path escapes proposals root.",
+                }
+
+        meta, body = _parse_frontmatter(raw_skill)
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["name"] = clean_name
+        meta.setdefault("version", "0.1.0")
+
+        if _is_human_or_frozen_proposal(skill_file):
+            return {"ok": True, "skipped": True, "reason": "human_or_frozen", "name": clean_name}
+        pre_doc = sanitize_for_storage(_serialize_frontmatter(meta, body.strip())) + "\n"
+        if _proposal_body_unchanged(skill_file, pre_doc, recipe_file, clean_recipe_doc):
+            return {"ok": True, "skipped": True, "reason": "unchanged", "name": clean_name}
+
+        cfg = audit_cfg if audit_cfg is not None else load_config()
+        audit_res: Optional[Dict[str, Any]] = None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if audit_skill_content is not None:
+            audit_res = await audit_skill_content(
+                sanitize_for_storage(raw_skill), clean_name, config=cfg
+            )
+            if not audit_res.get("ok"):
+                return {
+                    "ok": False,
+                    "rejected_reason": "skillspector_rejected",
+                    "audit": audit_res,
+                    "error": f"Security policy rejected proposal by SkillSpector: {audit_res.get('reason')}",
+                }
+            meta["audit_scanner"] = sanitize_for_storage(
+                str(audit_res.get("scanner") or "SkillSpector")
+            )
+            meta["audit_verdict"] = sanitize_for_storage(str(audit_res.get("verdict") or "PASS"))
+            meta["audit_risk_score"] = int(audit_res.get("risk_score") or 0)
+            meta["audit_scanned_at"] = sanitize_for_storage(
+                str(audit_res.get("scanned_at") or now_iso)
+            )
+        else:
+            # Explicit unverified marker rather than silent absence of audit metadata.
+            meta["audit_scanner"] = "none"
+            meta["audit_verdict"] = "UNVERIFIED_NO_MODULE"
+            meta["audit_risk_score"] = 0
+            meta["audit_scanned_at"] = now_iso
+
+        final_skill_doc = sanitize_for_storage(_serialize_frontmatter(meta, body.strip())) + "\n"
+
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file.write_text(final_skill_doc, encoding="utf-8", newline="\n")
+
+        recipe_path_str = ""
+        if raw_recipe and recipe_file is not None and recipes_root is not None:
+            recipes_root.mkdir(parents=True, exist_ok=True)
+            recipe_file.write_text(clean_recipe_doc, encoding="utf-8", newline="\n")
+            recipe_path_str = str(recipe_file)
+
+        return {
+            "ok": True,
+            "skipped": False,
+            "name": clean_name,
+            "skill_path": str(skill_file),
+            "recipe_path": recipe_path_str,
+            "audit": audit_res,
+        }
+    except SecurityError as se:
+        return {
+            "ok": False,
+            "rejected_reason": "security_error",
+            "error": coerce_text(mask_secrets(str(se))),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "rejected_reason": "write_error",
+            "error": coerce_text(mask_secrets(str(exc))),
+        }
