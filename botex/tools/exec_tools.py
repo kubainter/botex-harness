@@ -122,7 +122,10 @@ def _pwsh_policy_error(args: List[str]) -> str:
     for tok in args:
         if expect_file_value:
             expect_file_value = False
-            if tok.lower().endswith(".ps1") and ".." not in re.split(r"[\\/]+", tok):
+            # '..' anywhere, not only as a [\\/]-separated segment: POSIX
+            # shlex eats backslashes first ('..\x.ps1' -> '..x.ps1'), so a
+            # segment check alone misses traversal attempts off-Windows.
+            if tok.lower().endswith(".ps1") and ".." not in tok:
                 saw_file = True
                 continue
             return "PowerShell -File requires a '.ps1' script path without '..' traversal."

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import threading
 from pathlib import Path
@@ -340,3 +341,17 @@ def test_pwsh_policy_binary_name_normalization():
     assert command_policy_error(
         "powershell.exe -Command Get-Process", allowlist=_PWSH_ALLOW, deny_args=[]
     )
+
+
+def test_pwsh_policy_denies_traversal_after_posix_tokenization(monkeypatch):
+    """POSIX shlex eats backslashes ('..\\x.ps1' -> '..x.ps1') before the gate
+    sees the token; the '..' guard must still fire under posix=True splitting."""
+    monkeypatch.setattr(os, "name", "posix")
+    for cmd in (
+        r"pwsh -File ..\evil.ps1",
+        r"pwsh -File sub\..\evil.ps1",
+        r"pwsh -File .\..\x.ps1",
+        r'pwsh -File "sub\..\evil.ps1"',
+        r"pwsh -File ../evil.ps1",
+    ):
+        assert command_policy_error(cmd, allowlist=_PWSH_ALLOW, deny_args=[]), cmd
