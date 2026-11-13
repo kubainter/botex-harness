@@ -944,14 +944,17 @@ def save_memory(
             if origin == "botex":
                 origin = legacy_origin
 
-        norm_scope = (
-            "global"
-            if (
-                namespace == "_global"
-                or _VALID_SCOPES_MAP.get(str(scope).strip().lower()) == "global"
-            )
-            else "local"
-        )
+        # CWE-020: normalized via the static map (module literals only).
+        # Fail closed on an unrecognized non-empty scope instead of silently
+        # degrading to 'local'; the static message never echoes caller input.
+        scope_text = str(scope or "").strip()
+        resolved_scope = _VALID_SCOPES_MAP.get(scope_text.lower())
+        if namespace != "_global" and scope_text and resolved_scope not in ("local", "global"):
+            return {
+                "ok": False,
+                "error": "Invalid memory scope; expected 'local' or 'global'.",
+            }
+        norm_scope = "global" if (namespace == "_global" or resolved_scope == "global") else "local"
 
         norm_kind = _VALID_KINDS_MAP.get(str(kind).strip().lower(), "context")
         clean_tags = [sanitize_for_storage(str(t).strip()) for t in (tags or []) if str(t).strip()]

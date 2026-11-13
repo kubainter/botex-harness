@@ -41,6 +41,48 @@
       <button type="button" class="shrink-0 underline hover:text-white min-h-[44px] px-2" @click="tasksStore.fetchTasks()">{{ t('refresh') }}</button>
     </div>
 
+    <!-- Connected Devices Strip -->
+    <div v-if="connectedDevices.length > 0" class="rounded-xl border border-botex-800 bg-botex-900/70 p-3 space-y-2">
+      <div class="flex items-center justify-between text-xs">
+        <span class="font-mono font-semibold uppercase tracking-wider text-slate-300">
+          {{ t('connectedDevices') }} ({{ connectedDevices.length }})
+        </span>
+        <button
+          type="button"
+          class="text-xs text-cyan-400 hover:text-cyan-300 font-mono"
+          @click="refreshConnectedDevices"
+        >
+          {{ t('refresh') }}
+        </button>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+        <div
+          v-for="dev in connectedDevices"
+          :key="`${dev.device_id}:${dev.workspace_id}`"
+          class="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-botex-950 border border-botex-800 text-xs"
+        >
+          <div class="min-w-0">
+            <div class="flex items-center space-x-1.5">
+              <span :class="['w-2 h-2 rounded-full shrink-0', dev.healthy ? 'bg-emerald-400' : 'bg-amber-400']"></span>
+              <span class="font-mono font-semibold text-slate-100 truncate">{{ dev.device_id }}</span>
+              <Badge :variant="dev.healthy ? 'success' : 'warning'">
+                {{ dev.healthy ? t('deviceOnline') : t('deviceStale') }}
+              </Badge>
+            </div>
+            <p class="font-mono text-slate-400 truncate mt-0.5">{{ dev.workspace_id }}</p>
+          </div>
+          <button
+            v-if="dev.can_delegate"
+            type="button"
+            class="shrink-0 min-h-[36px] px-2.5 py-1 rounded bg-botex-800 hover:bg-botex-700 border border-cyan-500/40 text-cyan-300 font-medium transition"
+            @click="openDeviceDelegateModal(dev)"
+          >
+            {{ t('delegateDeviceTitle') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Active Task Banner / Quick Card if any is running -->
     <div v-if="activeRunningTask" class="rounded-xl border border-cyan-500/40 bg-cyan-950/20 p-4 relative overflow-hidden">
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -213,7 +255,7 @@
           <textarea
             v-model="newTask.task"
             rows="4"
-            required
+            :required="selectedExecutorMode !== 'device'"
             :placeholder="t('taskSpecPlaceholder')"
             class="w-full rounded-lg bg-botex-950 border border-botex-700 text-slate-100 placeholder-slate-400 p-2.5 text-base sm:text-xs font-sans focus:outline-none focus:border-cyan-500"
           ></textarea>
@@ -224,23 +266,26 @@
           <div>
             <label class="block font-medium text-slate-200 mb-1">{{ t('executorLabel') }}</label>
             <select
-              v-model="newTask.executor"
+              v-model="selectedExecutorMode"
               class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
             >
               <option value="botex">{{ t('executorBotex') }}</option>
               <option value="devin" :disabled="devinStatus !== null && !devinStatus.available">
                 {{ t('executorDevin') }}{{ devinStatus && !devinStatus.available ? ` (${t('devinOffline')})` : '' }}
               </option>
+              <option value="device">
+                {{ t('executorDevice') }} ({{ connectedDevices.filter((d) => d.can_delegate).length }})
+              </option>
             </select>
             <p
-              v-if="devinStatus && !devinStatus.available"
+              v-if="selectedExecutorMode === 'devin' && devinStatus && !devinStatus.available"
               class="mt-1 text-xs text-amber-400 font-mono"
             >
               {{ t('devinOffline') }}: {{ devinStatus.reason }}
             </p>
           </div>
 
-          <div v-if="newTask.executor === 'devin'">
+          <div v-if="selectedExecutorMode === 'devin'">
             <label class="block font-medium text-slate-200 mb-1">{{ t('agentTypeLabel') }}</label>
             <select
               v-model="newTask.agent_type"
@@ -249,6 +294,23 @@
               <option value="default">Agent (full tools)</option>
               <option value="review">Reviewer (read-only)</option>
               <option value="summarizer">Summarizer (no tools)</option>
+            </select>
+          </div>
+
+          <div v-else-if="selectedExecutorMode === 'device'">
+            <label class="block font-medium text-slate-200 mb-1">{{ t('targetDeviceLabel') }}</label>
+            <select
+              v-model="selectedDeviceKey"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
+            >
+              <option v-if="connectedDevices.length === 0" value="" disabled>{{ t('noDevicesConnected') }}</option>
+              <option
+                v-for="dev in connectedDevices"
+                :key="`${dev.device_id}:${dev.workspace_id}`"
+                :value="`${dev.device_id}:${dev.workspace_id}`"
+              >
+                {{ dev.device_id }} · {{ dev.workspace_id }}{{ dev.can_delegate ? '' : ' (locked)' }}
+              </option>
             </select>
           </div>
 
@@ -270,8 +332,58 @@
           </div>
         </div>
 
+        <!-- Controlled Device Delegation Panel -->
+        <div v-if="selectedExecutorMode === 'device'" class="space-y-3 p-3 bg-botex-950 rounded-lg border border-botex-800">
+          <div v-if="!selectedDevice || !selectedDevice.can_delegate" class="text-xs text-amber-300 font-mono">
+            {{ t('deviceOptInDisabled') }}
+          </div>
+          <template v-else>
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <label class="font-medium text-slate-200">{{ t('deviceSkillLabel') }}</label>
+                <Badge v-if="selectedDeviceSkill" :variant="selectedDeviceSkill.read_only ? 'success' : 'warning'">
+                  {{ selectedDeviceSkill.read_only ? t('deviceReadOnlyBadge') : t('deviceMutationBadge') }}
+                </Badge>
+              </div>
+              <select
+                v-model="deviceDelegateForm.skill"
+                class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-900 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
+              >
+                <option v-if="availableDeviceSkills.length === 0" value="" disabled>{{ t('deviceNoSkills') }}</option>
+                <option v-for="sk in availableDeviceSkills" :key="sk.name" :value="sk.name">
+                  {{ sk.name }}{{ sk.description ? ` — ${sk.description}` : '' }}
+                </option>
+              </select>
+              <p v-if="selectedDeviceSkill" class="mt-1 text-xs font-mono text-slate-400">
+                {{ t('deviceSkillDigest') }}: {{ selectedDeviceSkill.sha256.slice(0, 16) }}…
+              </p>
+            </div>
+
+            <div>
+              <label class="block font-medium text-slate-200 mb-1">{{ t('deviceParamsLabel') }}</label>
+              <textarea
+                v-model="deviceDelegateForm.paramsJson"
+                rows="3"
+                placeholder="{}"
+                class="w-full rounded-lg bg-botex-900 border border-botex-700 text-slate-100 placeholder-slate-500 p-2 text-xs font-mono focus:outline-none focus:border-cyan-500"
+              ></textarea>
+            </div>
+
+            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[36px]">
+              <input
+                v-model="deviceDelegateForm.requireApproval"
+                :disabled="selectedDeviceSkill ? !selectedDeviceSkill.read_only : false"
+                type="checkbox"
+                class="w-4 h-4 rounded bg-botex-900 border-botex-700 text-cyan-500"
+              />
+              <span>{{ t('deviceRequireApproval') }}</span>
+            </label>
+          </template>
+          <p v-if="deviceDelegateError" class="text-xs font-mono text-rose-400">{{ deviceDelegateError }}</p>
+        </div>
+
         <!-- Mode (botex executor only) -->
-        <div v-if="newTask.executor !== 'devin'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div v-if="selectedExecutorMode === 'botex'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block font-medium text-slate-200 mb-1">{{ t('permModeLabel') }}</label>
             <select
@@ -287,7 +399,7 @@
         </div>
 
         <!-- Capability Toggles (botex executor only) -->
-        <div v-if="newTask.executor !== 'devin'" class="p-3 bg-botex-950 rounded-lg border border-botex-800 space-y-2">
+        <div v-if="selectedExecutorMode === 'botex'" class="p-3 bg-botex-950 rounded-lg border border-botex-800 space-y-2">
           <span class="block font-mono text-xs font-semibold text-slate-300 uppercase">
             {{ locale === 'pl' ? 'Uprawnienia wykonawcze' : 'Capabilities & Guards' }}
           </span>
@@ -308,7 +420,7 @@
         </div>
 
         <!-- Budget & Turns (botex executor only — the devin harness runs its own loop) -->
-        <div v-if="newTask.executor !== 'devin'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div v-if="selectedExecutorMode === 'botex'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Input
             v-model="newTask.budget_limit_usd"
             type="number"
@@ -359,8 +471,16 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTasksStore } from '../stores/tasks'
 import { useChatStore } from '../stores/chat'
+import { useApprovalsStore } from '../stores/approvals'
 import { useI18n } from '../i18n'
-import type { CatalogModel, TaskCreateRequest, TaskDetail, TaskSummary } from '../api/types'
+import type {
+  CatalogModel,
+  ConnectedDeviceInfo,
+  ConnectedDeviceSkill,
+  TaskCreateRequest,
+  TaskDetail,
+  TaskSummary
+} from '../api/types'
 import { api } from '../api/client'
 import Modal from '../components/common/Modal.vue'
 import Button from '../components/common/Button.vue'
@@ -379,6 +499,7 @@ import {
 
 const tasksStore = useTasksStore()
 const chatStore = useChatStore()
+const approvalsStore = useApprovalsStore()
 const { tasks, currentTask } = storeToRefs(tasksStore)
 const { locale, t } = useI18n()
 
@@ -411,6 +532,77 @@ const newTask = ref<TaskCreateRequest>({
   agent_type: 'default'
 })
 
+const selectedExecutorMode = ref<'botex' | 'devin' | 'device'>('botex')
+const connectedDevices = ref<ConnectedDeviceInfo[]>([])
+const selectedDeviceKey = ref<string>('')
+const deviceDelegateForm = ref<{ skill: string; paramsJson: string; requireApproval: boolean }>({
+  skill: '',
+  paramsJson: '{}',
+  requireApproval: false
+})
+const deviceDelegateError = ref<string>('')
+
+const selectedDevice = computed<ConnectedDeviceInfo | null>(() => {
+  return (
+    connectedDevices.value.find(
+      (d) => `${d.device_id}:${d.workspace_id}` === selectedDeviceKey.value
+    ) || null
+  )
+})
+
+const availableDeviceSkills = computed<ConnectedDeviceSkill[]>(() => {
+  return selectedDevice.value?.capabilities?.delegation?.skills || []
+})
+
+const selectedDeviceSkill = computed<ConnectedDeviceSkill | null>(() => {
+  return (
+    availableDeviceSkills.value.find((s) => s.name === deviceDelegateForm.value.skill) || null
+  )
+})
+
+watch(selectedDevice, (dev) => {
+  if (!dev) {
+    deviceDelegateForm.value.skill = ''
+    return
+  }
+  const skills = dev.capabilities?.delegation?.skills || []
+  if (skills.length > 0 && !skills.some((s) => s.name === deviceDelegateForm.value.skill)) {
+    deviceDelegateForm.value.skill = skills[0].name
+  }
+})
+
+watch(selectedDeviceSkill, (sk) => {
+  if (sk && !sk.read_only) {
+    deviceDelegateForm.value.requireApproval = true
+  }
+})
+
+watch(selectedExecutorMode, (val) => {
+  if (val === 'botex' || val === 'devin') {
+    newTask.value.executor = val
+  }
+})
+
+async function refreshConnectedDevices() {
+  try {
+    const res = await api.listConnectedDevices()
+    connectedDevices.value = res.devices || []
+    if (!selectedDeviceKey.value && connectedDevices.value.length > 0) {
+      const preferred = connectedDevices.value.find((d) => d.can_delegate) || connectedDevices.value[0]
+      selectedDeviceKey.value = `${preferred.device_id}:${preferred.workspace_id}`
+    }
+  } catch {
+    connectedDevices.value = []
+  }
+}
+
+function openDeviceDelegateModal(dev: ConnectedDeviceInfo) {
+  selectedDeviceKey.value = `${dev.device_id}:${dev.workspace_id}`
+  selectedExecutorMode.value = 'device'
+  deviceDelegateError.value = ''
+  showCreateModal.value = true
+}
+
 const devinStatus = ref<Awaited<ReturnType<typeof api.fetchDevinExecutorStatus>> | null>(null)
 
 async function refreshDevinStatus() {
@@ -430,7 +622,9 @@ async function refreshDevinStatus() {
 
 watch(showCreateModal, (open) => {
   if (open) {
+    deviceDelegateError.value = ''
     refreshDevinStatus()
+    refreshConnectedDevices()
   }
 })
 
@@ -442,6 +636,7 @@ onMounted(() => {
     chatStore.fetchCatalogModels()
   }
   refreshDevinStatus()
+  refreshConnectedDevices()
 
   if (chatStore.pendingTaskDraft) {
     newTask.value.task = chatStore.pendingTaskDraft
@@ -482,6 +677,7 @@ async function cancelTask(id: string) {
 
 function retryTask(task: TaskDetail) {
   if (!task.request) return
+  selectedExecutorMode.value = (task.request.executor as 'botex' | 'devin') || 'botex'
   newTask.value = {
     ...newTask.value,
     ...task.request,
@@ -490,10 +686,86 @@ function retryTask(task: TaskDetail) {
   showCreateModal.value = true
 }
 
+function hasForbiddenCommandKey(obj: unknown, depth = 0): boolean {
+  if (depth > 8 || !obj || typeof obj !== 'object') return false
+  if (Array.isArray(obj)) {
+    return obj.some((item) => hasForbiddenCommandKey(item, depth + 1))
+  }
+  const blocked = new Set([
+    'command',
+    'cmd',
+    'shell',
+    'script',
+    'code',
+    'eval',
+    'exec',
+    'argv',
+    'args',
+    'powershell',
+    'pwsh',
+    'bash'
+  ])
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (blocked.has(k.normalize('NFKC').trim().toLowerCase()) || hasForbiddenCommandKey(v, depth + 1)) {
+      return true
+    }
+  }
+  return false
+}
+
 async function handleCreateTask() {
+  if (selectedExecutorMode.value === 'device') {
+    deviceDelegateError.value = ''
+    const dev = selectedDevice.value
+    const sk = selectedDeviceSkill.value
+    if (!dev || !dev.can_delegate || !sk) {
+      deviceDelegateError.value = t('deviceOptInDisabled')
+      return
+    }
+    let parsedParams: Record<string, unknown> = {}
+    try {
+      const rawText = (deviceDelegateForm.value.paramsJson || '{}').trim() || '{}'
+      const parsed = JSON.parse(rawText)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        deviceDelegateError.value = 'Parameters must be a JSON object.'
+        return
+      }
+      if (hasForbiddenCommandKey(parsed)) {
+        deviceDelegateError.value = 'Forbidden parameter key rejected.'
+        return
+      }
+      parsedParams = parsed as Record<string, unknown>
+    } catch {
+      deviceDelegateError.value = 'Invalid JSON parameters.'
+      return
+    }
+    try {
+      const res = await api.delegateToDevice({
+        device_id: dev.device_id,
+        workspace_id: dev.workspace_id,
+        skill: sk.name,
+        sha256: sk.sha256,
+        params: parsedParams,
+        task: newTask.value.task.trim(),
+        require_approval: deviceDelegateForm.value.requireApproval
+      })
+      showCreateModal.value = false
+      selectedTaskId.value = res.task_id
+      await tasksStore.fetchTasks()
+      await tasksStore.fetchTask(res.task_id)
+      if (res.approval_required) {
+        await approvalsStore.fetchApprovals(res.task_id)
+      }
+    } catch (err: any) {
+      deviceDelegateError.value = err?.detail || err?.message || 'Delegation failed.'
+    }
+    return
+  }
+
   if (!newTask.value.task.trim()) return
   const createdId = await tasksStore.createTask({
     ...newTask.value,
+    executor: selectedExecutorMode.value,
     budget_limit_usd: Number(newTask.value.budget_limit_usd),
     max_turns: Number(newTask.value.max_turns)
   })

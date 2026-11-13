@@ -163,9 +163,19 @@ install -m 0755 "$INSTALL_DIR/deploy/oracle-vps/botex-curator.sh" /usr/local/sbi
 
 systemctl daemon-reload
 
-# 9. Firewall configuration
-log_info "Configuring UFW firewall rules..."
-ufw allow 8000/tcp comment 'BoteX Cloud Gateway & PWA' || true
+# 9. Firewall configuration (keep 8000/tcp bound to loopback behind Caddy TLS)
+log_info "Configuring UFW firewall rules (80/tcp + 443/tcp via Caddy; closing raw 8000/tcp)..."
+ufw allow 80/tcp comment 'Caddy HTTP redirect & ACME' || true
+ufw allow 443/tcp comment 'Caddy HTTPS / WSS TLS' || true
+ufw delete allow 8000/tcp || true
+if command -v iptables &>/dev/null; then
+    while iptables -C INPUT -p tcp --dport 8000 -j ACCEPT 2>/dev/null; do
+        iptables -D INPUT -p tcp --dport 8000 -j ACCEPT || true
+    done
+fi
+if [ -f "$INSTALL_DIR/deploy/oracle-vps/Caddyfile.template" ]; then
+    log_info "Caddy template available at $INSTALL_DIR/deploy/oracle-vps/Caddyfile.template (review and copy to /etc/caddy/Caddyfile)."
+fi
 
 # 10. Enable and start services
 log_info "Enabling and starting BoteX systemd units..."

@@ -423,6 +423,56 @@ def test_sqlite_thread_isolation(tmp_path: Path):
     assert worker_conn is not main_conn
 
 
+def test_save_memory_fails_closed_on_unknown_scope(memory_dirs):
+    """CWE-020: a non-empty unrecognized scope is rejected, never silently
+    degraded to 'local'; namespace='_global' still forces global."""
+    ws_dir, global_dir = memory_dirs
+
+    for bad_scope in ("bogus", "all", "swarm", "both", "global-ish", " workspace "):
+        res = memory.save_memory(
+            workspace_dir=str(ws_dir),
+            title="Scoped Note",
+            content="x",
+            scope=bad_scope,
+        )
+        assert res["ok"] is False, bad_scope
+        # Static message — caller input is never echoed (CWE-117).
+        assert res["error"] == "Invalid memory scope; expected 'local' or 'global'."
+
+    # Nothing leaked into either vault from the rejected saves.
+    local_mem = ws_dir / ".botex" / "memory"
+    leaked = list(local_mem.glob("*.md")) if local_mem.exists() else []
+    assert leaked == []
+    assert list(global_dir.glob("*.md")) == []
+
+    # Empty scope behaves like the default ('local').
+    res_empty = memory.save_memory(
+        workspace_dir=str(ws_dir), title="Empty Scope", content="x", scope=""
+    )
+    assert res_empty["ok"] is True
+    assert res_empty["scope"] == "local"
+
+    # namespace='_global' still forces global even with a bad scope string.
+    res_ns = memory.save_memory(
+        workspace_dir=str(ws_dir),
+        title="NS Override",
+        content="x",
+        namespace="_global",
+        scope="bogus",
+    )
+    assert res_ns["ok"] is True
+    assert res_ns["scope"] == "global"
+    assert (global_dir / f"{res_ns['id']}.md").exists()
+
+    # Case/whitespace variants normalize to the canonical global scope.
+    res_norm = memory.save_memory(
+        workspace_dir=str(ws_dir), title="Norm Scope", content="x", scope=" Global "
+    )
+    assert res_norm["ok"] is True
+    assert res_norm["scope"] == "global"
+    assert (global_dir / f"{res_norm['id']}.md").exists()
+
+
 def test_reset_memory_index_cache(tmp_path: Path):
     """Verify reset_memory_index_cache closes all connections and clears schema cache."""
     mem_dir = tmp_path / "reset_test"

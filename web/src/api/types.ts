@@ -570,3 +570,55 @@ export interface VisionInspectResponse {
   finding: string
   observation_json: string
 }
+
+export interface ConnectedDeviceSkill {
+  name: string
+  sha256: string
+  read_only?: boolean
+  description?: string
+  params_schema?: Record<string, unknown>
+}
+
+export interface ConnectedDeviceInfo {
+  device_id: string
+  workspace_id: string
+  jti: string
+  healthy: boolean
+  can_delegate: boolean
+  connected_at: number
+  last_seen_at: number
+  pending_calls: number
+  protocol_version?: string
+  client_version?: string
+  capabilities?: {
+    allow_exec?: boolean
+    allow_destructive?: boolean
+    max_output_bytes?: number
+    allowed_tools?: string[]
+    delegation?: {
+      enabled?: boolean
+      skills?: ConnectedDeviceSkill[]
+    }
+  }
+}
+
+export interface DeviceDelegateRequest {
+  device_id?: string
+  workspace_id?: string
+  skill: string
+  sha256?: string
+  params?: Record<string, unknown>
+  task?: string
+  require_approval?: boolean
+}
+
+export interface DeviceDelegateResponse {
+  ok: boolean
+  task_id: string
+  status: string
+  device_id: string
+  workspace_id: string
+  skill: string
+  sha256: string
+  approval_required: boolean
+}

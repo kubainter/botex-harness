@@ -1,0 +1,27 @@
+# BoteX Cloud Gateway reverse proxy template for Caddy v2.11+
+# Target: /etc/caddy/Caddyfile on Oracle Cloud VPS
+{
+    servers {
+        timeouts {
+            read_body 30s
+            read_header 10s
+            write 3600s
+            idle 120s
+        }
+    }
+}
+
+{$BOTEX_DOMAIN:botex.jg-webtech.pl} {
+    request_body {
+        max_size 25MB
+    }
+
+    @streaming {
+        path /mcp/sse /mcp/http /mcp/http/* /mcp/messages* /api/chat /api/chat/* /api/tasks/*/events /api/edge/ws
+    }
+    reverse_proxy @streaming 127.0.0.1:8000 {
+        flush_interval -1
+    }
+
+    reverse_proxy 127.0.0.1:8000
+}

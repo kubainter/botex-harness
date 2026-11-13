@@ -28,6 +28,8 @@ LEGACY_MODULE_DOMAINS: Dict[str, str] = {
     "context_inclusion": "core",
     "tracing": "core",
     "meta_harness": "core",
+    "tool_executor": "core",
+    "device_tokens": "core",
     # botex/providers
     "providers": "providers",
     "catalog": "providers",
@@ -65,7 +67,9 @@ LEGACY_MODULE_DOMAINS: Dict[str, str] = {
     "i18n": "server",
 }
 
-DOMAIN_PACKAGES = frozenset({"core", "providers", "tools", "memory", "skills", "server", "ops"})
+DOMAIN_PACKAGES = frozenset(
+    {"core", "providers", "tools", "memory", "skills", "server", "ops", "edge"}
+)
 COLLIDING_DOMAINS = frozenset({"providers", "memory", "skills"})
 
 

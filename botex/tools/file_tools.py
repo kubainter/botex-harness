@@ -8,6 +8,7 @@ Optimized for maximum token savings and precise targeted editing.
 """
 
 import ast
+import hashlib
 import re
 import shutil
 from pathlib import Path
@@ -184,7 +185,9 @@ def read_file_lines(path: str, start: int, end: int, workspace_root: str | Path)
         return {"ok": False, "error": f"File '{path}' does not exist."}
 
     try:
-        content = safe_path.read_text(encoding="utf-8", errors="replace")
+        raw_bytes = safe_path.read_bytes()
+        file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        content = raw_bytes.decode("utf-8", errors="replace")
     except Exception as e:
         return {"ok": False, "error": f"Failed to read file: {e}"}
 
@@ -230,6 +233,7 @@ def read_file_lines(path: str, start: int, end: int, workspace_root: str | Path)
         "start": start_idx,
         "end": end_idx,
         "total_file_lines": total,
+        "file_sha256": file_sha256,
         "content": wrap_untrusted_content(body, tag="untrusted_file_content", path=path),
     }
 
@@ -248,7 +252,9 @@ def read_file(path: str, workspace_root: str | Path) -> Dict[str, Any]:
         return {"ok": False, "error": f"File '{path}' does not exist."}
 
     try:
-        content = safe_path.read_text(encoding="utf-8", errors="replace")
+        raw_bytes = safe_path.read_bytes()
+        file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        content = raw_bytes.decode("utf-8", errors="replace")
     except Exception as e:
         return {"ok": False, "error": f"Failed to read file: {e}"}
 
@@ -269,6 +275,7 @@ def read_file(path: str, workspace_root: str | Path) -> Dict[str, Any]:
         "ok": True,
         "path": path,
         "total_lines": len(lines),
+        "file_sha256": file_sha256,
         "content": wrap_untrusted_content(body, tag="untrusted_file_content", path=path),
     }
 

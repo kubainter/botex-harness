@@ -11,14 +11,18 @@ without losing reasoning progress, even if dirty workspace files are rolled back
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from botex.tools.security import mask_secrets
+    from botex.tools.security import coerce_text, mask_secrets, sanitize_identifier
 except (ImportError, ValueError):
-    from security import mask_secrets
+    from security import coerce_text, mask_secrets, sanitize_identifier
 
 _MAX_SYNTAX_REJECTIONS = 5
 _MAX_ROLLBACK_REASONS = 5
@@ -277,3 +281,99 @@ class InFlightTaskState:
         for r in data.get("rollback_reasons") or []:
             state.record_rollback_reason(str(r))
         return state
+
+
+def _inflight_dir(workspace_dir: str | Path) -> Path:
+    return (Path(workspace_dir).resolve() / ".botex" / "inflight").resolve()
+
+
+def _inflight_path(task_id: str, workspace_dir: str | Path) -> Optional[Path]:
+    clean_id = sanitize_identifier(str(task_id or ""))
+    if not clean_id:
+        return None
+    base_dir = _inflight_dir(workspace_dir)
+    target = (base_dir / f"{clean_id}.json").resolve()
+    if not target.is_relative_to(base_dir):
+        return None
+    return target
+
+
+def _mask_json_value(value: Any) -> Any:
+    """Recursively mask secrets in strings before JSON serialization."""
+    if isinstance(value, str):
+        return coerce_text(mask_secrets(value))
+    if isinstance(value, dict):
+        return {
+            coerce_text(mask_secrets(str(k))) if isinstance(k, str) else k: _mask_json_value(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_mask_json_value(item) for item in value]
+    return value
+
+
+def save_inflight_checkpoint(
+    state: InFlightTaskState,
+    workspace_dir: str | Path,
+) -> Optional[Path]:
+    """Atomically persist lightweight ``InFlightTaskState`` metadata to ``.botex/inflight/``."""
+    target = _inflight_path(state.task_id, workspace_dir)
+    if target is None:
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Mask values before serialization so key=value regexes cannot eat JSON quotes.
+    payload = coerce_text(json.dumps(_mask_json_value(state.to_dict()), ensure_ascii=False))
+    tmp_path: Optional[Path] = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(target.parent),
+            prefix=f".{target.stem}-",
+            suffix=".tmp",
+        )
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, target)
+        tmp_path = None
+        return target
+    except OSError:
+        return None
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def load_inflight_checkpoints(workspace_dir: str | Path) -> List[InFlightTaskState]:
+    """Load all valid ``InFlightTaskState`` checkpoints from ``.botex/inflight/``."""
+    base_dir = _inflight_dir(workspace_dir)
+    if not base_dir.is_dir():
+        return []
+    states: List[InFlightTaskState] = []
+    for entry in sorted(base_dir.glob("*.json")):
+        if not entry.is_file():
+            continue
+        try:
+            raw = entry.read_text(encoding="utf-8")
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                states.append(InFlightTaskState.from_dict(parsed))
+        except Exception:
+            continue
+    return states
+
+
+def clear_inflight_checkpoint(task_id: str, workspace_dir: str | Path) -> bool:
+    """Remove the ``.botex/inflight/<task_id>.json`` checkpoint if present."""
+    target = _inflight_path(task_id, workspace_dir)
+    if target is None or not target.is_file():
+        return False
+    try:
+        target.unlink()
+        return True
+    except OSError:
+        return False

@@ -166,19 +166,43 @@ def _memory_matches_path_prefix(memory: Dict[str, Any], dir_prefixes: List[str])
     return False
 
 
+_SCOPE_TAG_CLEAN_RE = re.compile(r"[^a-z0-9._-]+")
+
+
+def _clean_scope_component(raw: str) -> str:
+    """Normalize an edge/workspace identifier into a tag-safe slug component."""
+    cleaned = mask_secrets(str(raw or "")).strip().lower()
+    return _SCOPE_TAG_CLEAN_RE.sub("-", cleaned).strip("-.")[:64]
+
+
+def _memory_scope_tag_set(memory: Dict[str, Any]) -> set[str]:
+    """Lowercase tag set of a memory row (tags may be list or delimited str)."""
+    if not isinstance(memory, dict):
+        return set()
+    tags = memory.get("tags") or []
+    if isinstance(tags, str):
+        tags = re.split(r"[\s,]+", tags)
+    return {str(t).strip().lower() for t in tags if str(t).strip()}
+
+
 def get_relevant_meta_lessons(
     taxonomy: str,
     workspace_dir: Optional[str | Path] = None,
     max_lessons: int = 3,
     lesson_ids_out: Optional[List[str]] = None,
     files: Optional[List[str]] = None,
+    edge_sub: str = "",
+    workspace_id: str = "",
 ) -> List[str]:
     """Retrieves concise, deduplicated architectural lessons matching the task taxonomy.
 
     When `lesson_ids_out` is a list, the memory IDs of the appended lessons are
     pushed onto it so callers can attribute lessons by exact ID. When `files`
     is given, lessons bound to matching ``path:<dir>`` prefixes rank ahead of
-    generic taxonomy matches.
+    generic taxonomy matches. When `edge_sub`/`workspace_id` are non-empty
+    (remote/edge task context), only lessons carrying the matching
+    ``edge:<sub>``/``ws:<ws>`` binding tags may rank — lessons extracted on a
+    different host or workspace never bleed across the edge boundary.
     """
     norm_tax = _TAXONOMY_MAP.get(str(taxonomy or "").strip().lower(), "general")
     ws = str(workspace_dir or ".")
@@ -196,6 +220,14 @@ def get_relevant_meta_lessons(
         return []
 
     memories = results.get("memories", []) if isinstance(results, dict) else []
+    required_scope_tags: List[str] = []
+    if str(edge_sub or "").strip():
+        required_scope_tags.append(f"edge:{_clean_scope_component(edge_sub)}")
+    if str(workspace_id or "").strip():
+        required_scope_tags.append(f"ws:{_clean_scope_component(workspace_id)}")
+    if required_scope_tags:
+        req_tags = set(required_scope_tags)
+        memories = [m for m in memories if req_tags <= _memory_scope_tag_set(m)]
     if files:
         dir_prefixes = _file_dir_prefixes(files)
         if dir_prefixes:
@@ -272,10 +304,17 @@ def extract_meta_lesson(
     successful_model: str = "",
     failure_kind: Optional[str] = None,
     files_touched: Optional[List[str]] = None,
+    edge_sub: str = "",
+    workspace_id: str = "",
+    origin: str = "botex",
 ) -> Optional[str]:
     """Generates and persists an architectural lesson (kind='lesson') into Memory Vault.
 
     Called when a task succeeds after an initial mutation failure, rollback, or syntax rejection.
+    When ``edge_sub``/``workspace_id`` are non-empty (remote/edge task
+    context) the lesson persists in ``global`` scope under the workspace
+    project slug, bound by ``edge:<sub>``/``ws:<ws>`` tags so recall on a
+    different host or workspace can never surface it.
     """
     if is_infra_failure(failure_kind, str(error_summary or "")):
         # Provider-side noise is not a lesson — retry.py/denylist.py own it.
@@ -289,7 +328,15 @@ def extract_meta_lesson(
     if not clean_err and not clean_strat:
         return None
 
+    remote_ctx = bool(str(edge_sub or "").strip() or str(workspace_id or "").strip())
+    clean_sub = _clean_scope_component(edge_sub)
+    clean_ws = _clean_scope_component(workspace_id)
+
     seed_str = f"{clean_tax}:{clean_err}:{clean_strat}"
+    if remote_ctx:
+        # Edge/workspace identity joins the deterministic seed: the same
+        # recovery on two hosts must never collide on lesson_<hash>.
+        seed_str = f"{seed_str}:{clean_sub}:{clean_ws}"
     lesson_hash = hashlib.sha256(seed_str.encode("utf-8")).hexdigest()[:10]
     lesson_id = f"lesson_{lesson_hash}"
 
@@ -309,6 +356,10 @@ def extract_meta_lesson(
         return None
     ws = str(workspace_dir)
     tags = ["meta-harness", "lesson", clean_tax]
+    if clean_sub:
+        tags.append(f"edge:{clean_sub}")
+    if clean_ws:
+        tags.append(f"ws:{clean_ws}")
     # Path-prefix binding (not blob SHAs): later tasks touching the same
     # directories rank this lesson ahead of generic taxonomy matches.
     for prefix in _file_dir_prefixes(files_touched):
@@ -321,7 +372,9 @@ def extract_meta_lesson(
             kind="lesson",
             tags=tags,
             memory_id=lesson_id,
-            scope="local",
+            origin=str(origin or "botex"),
+            scope="global" if remote_ctx else "local",
+            project=(clean_ws or None) if remote_ctx else None,
             status="candidate",
             confidence=_CANDIDATE_INITIAL_CONFIDENCE,
         )

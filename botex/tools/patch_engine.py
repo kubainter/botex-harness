@@ -23,10 +23,10 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from botex.server.config import snapshot_dir as _default_snapshot_dir
 
-    from .security import SecurityError, resolve_safe_path
+    from .security import SecurityError, resolve_safe_path, wrap_untrusted_content
 except (ImportError, ValueError):
     from config import snapshot_dir as _default_snapshot_dir
-    from security import SecurityError, resolve_safe_path
+    from security import SecurityError, resolve_safe_path, wrap_untrusted_content
 
 
 # ---------------------------------------------------------------------------
@@ -606,10 +606,14 @@ def apply_patch(
     replace_block: str,
     workspace_root: str | Path,
     task_id: str = "default",
+    base_sha256: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Safely applies a search-and-replace patch to a file.
     Includes security checks, snapshotting, fuzzy matching, and pre-write syntax validation.
+    ``base_sha256`` is the optimistic-concurrency digest from a prior
+    read_file/read_file_lines call: a mismatch means the file changed on
+    disk and the patch is rejected as a conflict before any write/snapshot.
     """
     try:
         safe_path = resolve_safe_path(workspace_root, path)
@@ -624,9 +628,28 @@ def apply_patch(
 
     with snapshot_manager.mutation_lock():
         try:
-            content = safe_path.read_text(encoding="utf-8", errors="replace")
+            raw_bytes = safe_path.read_bytes()
         except Exception as e:
             return {"ok": False, "error": f"Failed to read file: {e}"}
+
+        current_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        content = raw_bytes.decode("utf-8", errors="replace")
+
+        if base_sha256 is not None and current_sha256 != str(base_sha256):
+            return {
+                "ok": False,
+                "status": "conflict",
+                "current_sha256": current_sha256,
+                # On-disk bytes are untrusted model-facing content: the same
+                # masked, boundary-tagged wrapper as read_file applies here.
+                "current_content": wrap_untrusted_content(
+                    content[:8000], tag="untrusted_file_content", path=path
+                ),
+                "error": (
+                    f"Conflict: '{path}' changed on disk "
+                    f"(expected {str(base_sha256)[:12]}, got {current_sha256[:12]})."
+                ),
+            }
 
         success, new_content, level = apply_fuzzy_patch(content, search_block, replace_block)
         if not success:
@@ -650,7 +673,9 @@ def apply_patch(
 
         try:
             snapshot_manager.snapshot_file(task_id, safe_path, workspace_root)
-            safe_path.write_text(new_content, encoding="utf-8")
+            # Byte-exact write: the raw-bytes read preserves real newline style
+            # (CRLF/LF), so text-mode writes would double-translate on Windows.
+            safe_path.write_bytes(new_content.encode("utf-8"))
             snapshot_manager.record_expected_state(task_id, safe_path)
         except Exception as e:
             return {"ok": False, "error": f"Failed to write file: {e}"}
@@ -664,6 +689,9 @@ def apply_patch(
     return {
         "ok": True,
         "level_used": level,
+        # Digest of the written bytes — same basis as read_file, so callers
+        # can chain apply_patch calls without re-reading between them.
+        "file_sha256": hashlib.sha256(new_content.encode("utf-8")).hexdigest(),
         "lines_added": lines_added,
         "lines_removed": lines_removed,
         "message": f"Successfully patched '{path}' (Fuzzy level: L{level}, +{lines_added}/-{lines_removed} lines).",

@@ -261,6 +261,61 @@ def test_engine_history_folding():
         assert "pruned" in [m["content"] for m in rmsgs if m["role"] == "tool"][-1]
 
 
+def test_prune_tool_history_preserves_sha256_stub():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (root / "b.py").write_text("y = 2\n", encoding="utf-8")
+
+        # 1. Target mutation pruning preserves file_sha256 in pruned_stub
+        msgs = _tool_exchange(
+            1,
+            "read_file_lines",
+            {"path": "a.py", "start": 1, "end": 5},
+            {
+                "ok": True,
+                "path": "a.py",
+                "start": 1,
+                "end": 5,
+                "total_lines": 5,
+                "content": "x = 1\n",
+                "file_sha256": "deadbeef1234",
+            },
+        )
+        prune_tool_history(msgs, "a.py", root=root)
+        payload = json.loads(msgs[-1]["content"])
+        assert payload["pruned_stub"] == {
+            "path": "a.py",
+            "sha256_at_read": "deadbeef1234",
+            "lines_range": "1-5",
+        }
+        # Re-pruning keeps existing sha256_at_read
+        prune_tool_history(msgs, "a.py", root=root)
+        assert json.loads(msgs[-1]["content"])["pruned_stub"]["sha256_at_read"] == "deadbeef1234"
+
+        # 2. Readonly unique-read pruning preserves sha256_at_read too
+        rmsgs = []
+        for idx in range(6):
+            p = "a.py" if idx == 0 else f"f{idx}.py"
+            (root / p).write_text("x = 1\n", encoding="utf-8")
+            rmsgs += _tool_exchange(
+                10 + idx,
+                "read_file",
+                {"path": p},
+                {
+                    "ok": True,
+                    "path": p,
+                    "content": "CODE" * 20,
+                    "total_lines": 1,
+                    "file_sha256": f"sha-{idx}",
+                },
+            )
+        prune_tool_history(rmsgs, "", root=root, readonly=True)
+        first_stub = json.loads([m["content"] for m in rmsgs if m["role"] == "tool"][0])
+        assert first_stub["pruned_stub"]["sha256_at_read"] == "sha-0"
+        assert first_stub["pruned_stub"]["path"] == "a.py"
+
+
 def test_compact_verification_summary():
     ver = {
         "ok": False,

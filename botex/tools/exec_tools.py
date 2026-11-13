@@ -100,6 +100,51 @@ def _node_inline_eval(args: List[str]) -> bool:
     return False
 
 
+_PWSH_BINARIES = frozenset({"pwsh", "pwsh-preview", "powershell"})
+
+
+def _pwsh_param_name(token: str) -> str:
+    """Normalize a PowerShell parameter token: strip dashes and ':value'/'=value' tails."""
+    return token.lstrip("-").split(":", 1)[0].split("=", 1)[0].lower()
+
+
+def _pwsh_policy_error(args: List[str]) -> str:
+    """PowerShell-family gate: only ``-File <script.ps1>`` execution is permitted.
+
+    Inline command forms (-Command/-EncodedCommand and their unambiguous
+    prefix abbreviations like -c/-co/-en/-ec), bare positional commands, and
+    -File targets that are not clean .ps1 paths are denied. PowerShell
+    resolves any unambiguous parameter prefix, so prefixes must be blocked,
+    not just the full spellings.
+    """
+    saw_file = False
+    expect_file_value = False
+    for tok in args:
+        if expect_file_value:
+            expect_file_value = False
+            # '..' anywhere, not only as a [\\/]-separated segment: POSIX
+            # shlex eats backslashes first ('..\x.ps1' -> '..x.ps1'), so a
+            # segment check alone misses traversal attempts off-Windows.
+            if tok.lower().endswith(".ps1") and ".." not in tok:
+                saw_file = True
+                continue
+            return "PowerShell -File requires a '.ps1' script path without '..' traversal."
+        if tok.startswith("-"):
+            name = _pwsh_param_name(tok)
+            if name and (
+                "command".startswith(name) or "encodedcommand".startswith(name) or name == "ec"
+            ):
+                return "PowerShell inline command execution is denied by exec policy."
+            if name and "file".startswith(name):
+                expect_file_value = True
+            continue
+        if not saw_file:
+            return "PowerShell requires '-File <script.ps1>'; bare positional commands are denied."
+    if expect_file_value or not saw_file:
+        return "PowerShell requires '-File <script.ps1>'."
+    return ""
+
+
 def command_policy_error(command: str, *, allowlist: List[str], deny_args: List[str]) -> str:
     """Return a policy error for a command, or an empty string if allowed."""
     try:
@@ -120,6 +165,10 @@ def command_policy_error(command: str, *, allowlist: List[str], deny_args: List[
         return "Python module execution is denied by exec policy."
     if binary == "node" and _node_inline_eval(tokens[1:]):
         return "Node.js inline evaluation (-e/-p/--eval/--print) is denied by exec policy."
+    if binary in _PWSH_BINARIES:
+        pwsh_err = _pwsh_policy_error(tokens[1:])
+        if pwsh_err:
+            return pwsh_err
     hit = _deny_hit(tokens, deny_args)
     if hit:
         return f"Argument '{hit}' is denied by exec policy."

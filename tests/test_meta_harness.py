@@ -267,6 +267,165 @@ def test_extract_meta_lesson_skips_infra_and_binds_path_prefixes(tmp_path):
     assert "botex/providers" in ranked[0]
 
 
+def test_extract_meta_lesson_remote_edge_isolation(tmp_path):
+    """Remote lessons persist in global scope bound by edge:/ws: tags and never
+    bleed across hosts or workspaces; local extraction stays backward-compatible."""
+    from botex.core.meta_harness import extract_meta_lesson, get_relevant_meta_lessons
+    from botex.memory.memory import read_memory, set_memory_status, update_lesson_confidence
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    g_dir = tmp_path / "global"
+    g_dir.mkdir()
+
+    try:
+        with (
+            patch("botex.memory.get_global_memory_dir", return_value=g_dir),
+            patch("botex.memory.get_swarm_memory_dir", return_value=None),
+        ):
+            id_a = extract_meta_lesson(
+                task_id="edge-a1",
+                taxonomy="bugfix",
+                error_summary="Patch drifted on concurrent edit",
+                recovery_strategy="Re-read file and pass base_sha256",
+                workspace_dir=ws,
+                files_touched=["botex/tools/patch_engine.py"],
+                edge_sub="PC-A",
+                workspace_id="ProjX",
+                origin="antigravity@pc-a",
+            )
+            assert id_a and id_a.startswith("lesson_")
+
+            note_a = read_memory(workspace_dir=str(ws), memory_id=id_a, scope="global")
+            assert note_a["ok"] is True
+            meta = note_a["metadata"]
+            assert meta["scope"] == "global"
+            assert meta["status"] == "candidate"
+            assert meta["project"] == "projx"
+            assert meta["source"] == "antigravity@pc-a"
+            tags_a = {str(t).lower() for t in meta["tags"]}
+            assert {"edge:pc-a", "ws:projx", "path:botex/tools"} <= tags_a
+            assert (g_dir / f"{id_a}.md").exists()
+            # Local vault holds no remote lesson file.
+            assert not (ws / ".botex" / "memory" / f"{id_a}.md").exists()
+
+            # Same failure/recovery on a different edge never collides.
+            id_b = extract_meta_lesson(
+                task_id="edge-b1",
+                taxonomy="bugfix",
+                error_summary="Patch drifted on concurrent edit",
+                recovery_strategy="Re-read file and pass base_sha256",
+                workspace_dir=ws,
+                files_touched=["botex/tools/patch_engine.py"],
+                edge_sub="PC-B",
+                workspace_id="ProjX",
+            )
+            assert id_b and id_b != id_a
+
+            # Re-extracting on the same edge is deterministic (same id).
+            id_a_dup = extract_meta_lesson(
+                task_id="edge-a2",
+                taxonomy="bugfix",
+                error_summary="Patch drifted on concurrent edit",
+                recovery_strategy="Re-read file and pass base_sha256",
+                workspace_dir=ws,
+                files_touched=["botex/tools/patch_engine.py"],
+                edge_sub="pc-a",
+                workspace_id="projx",
+            )
+            assert id_a_dup == id_a
+
+            # A local unscoped lesson coexists — it must not rank under an
+            # edge-scoped query but stays visible under the legacy query.
+            memory.save_memory(
+                workspace_dir=str(ws),
+                title="Local Lesson",
+                content=(
+                    "### Lesson Learned (bugfix)\n"
+                    "- **Effective Resolution:** Local-only fix\n"
+                    "- **Context/Error:** local\n"
+                ),
+                kind="lesson",
+                tags=["meta-harness", "lesson", "bugfix"],
+                memory_id="lesson_local_only",
+                scope="local",
+                status="active",
+                confidence=0.9,
+            )
+
+            # Promote both to active so the recall gate (>=0.6) can see them.
+            assert set_memory_status(str(ws), id_a, "active", scope="global")
+            assert set_memory_status(str(ws), id_b, "active", scope="global")
+            assert update_lesson_confidence(str(ws), id_a, 0.3, scope="global")["ok"]
+            assert update_lesson_confidence(str(ws), id_b, 0.3, scope="global")["ok"]
+
+            # PC-A sees only its own lesson; PC-B's never ranks for it.
+            ids_a: list[str] = []
+            lessons_a = get_relevant_meta_lessons(
+                "bugfix",
+                workspace_dir=ws,
+                max_lessons=5,
+                edge_sub="pc-a",
+                workspace_id="projx",
+                lesson_ids_out=ids_a,
+                files=["botex/tools/retry.py"],
+            )
+            assert ids_a == [id_a]
+            assert lessons_a == ["Re-read file and pass base_sha256"]
+
+            ids_b: list[str] = []
+            get_relevant_meta_lessons(
+                "bugfix",
+                workspace_dir=ws,
+                max_lessons=5,
+                edge_sub="pc-b",
+                workspace_id="projx",
+                lesson_ids_out=ids_b,
+            )
+            assert ids_b == [id_b]
+
+            # Unknown edge or mismatched workspace sees nothing — no bleed.
+            assert (
+                get_relevant_meta_lessons(
+                    "bugfix",
+                    workspace_dir=ws,
+                    edge_sub="pc-c",
+                    workspace_id="projx",
+                )
+                == []
+            )
+            assert (
+                get_relevant_meta_lessons(
+                    "bugfix",
+                    workspace_dir=ws,
+                    edge_sub="pc-a",
+                    workspace_id="other-ws",
+                )
+                == []
+            )
+
+            # Legacy unscoped recall is unchanged: all active lessons rank.
+            unscoped = get_relevant_meta_lessons("bugfix", workspace_dir=ws, max_lessons=5)
+            assert "Re-read file and pass base_sha256" in unscoped
+            assert "Local-only fix" in unscoped
+
+            # No edge context: legacy local-quarantine behavior, no scope tags.
+            id_local = extract_meta_lesson(
+                task_id="loc1",
+                taxonomy="bugfix",
+                error_summary="Local failure",
+                recovery_strategy="Local fix",
+                workspace_dir=ws,
+            )
+            note_local = read_memory(workspace_dir=str(ws), memory_id=id_local, scope="local")
+            assert note_local["ok"] is True
+            assert note_local["metadata"]["scope"] == "local"
+            local_tags = {str(t).lower() for t in note_local["metadata"]["tags"]}
+            assert not any(t.startswith(("edge:", "ws:")) for t in local_tags)
+    finally:
+        memory.reset_memory_index_cache()
+
+
 def test_pack_lessons_within_budget_drops_overflow_and_handles_duplicates(tmp_path):
     """Knapsack packing respects 800 B, never emits overflow pointers, and handles duplicates."""
     from botex.core.meta_harness import pack_lessons_within_budget

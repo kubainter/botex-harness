@@ -113,6 +113,11 @@ from botex.memory import (
 )
 from botex.providers import ProviderRegistry
 
+try:
+    from botex.core.tool_executor import resolve_edge_executor
+except ImportError:
+    resolve_edge_executor = None
+
 mcp = MCPServer("BoteX-Harness")
 atexit.register(close_index_dbs)
 
@@ -612,10 +617,17 @@ async def start_task(
             "message": f"Task queue limit reached ({max_queued}).",
         }
     task_id = uuid.uuid4().hex[:12]
+    edge_exec = None
+    if resolve_edge_executor is not None and workspace_dir and str(workspace_dir).strip():
+        edge_exec = resolve_edge_executor(str(workspace_dir).strip())
     kwargs = {
         "task": task,
         "files": files,
-        "workspace_dir": resolve_workspace(workspace_dir),
+        # Logical edge workspace IDs are not local paths — skip local
+        # containment resolution; run_subagent routes via the executor.
+        "workspace_dir": workspace_dir
+        if edge_exec is not None
+        else resolve_workspace(workspace_dir),
         "model": model,
         "profile": profile,
         "provider": provider,
@@ -900,10 +912,16 @@ async def run_subagent(
                 content=[TextContent(type="text", text=_format_result_text(err_res))],
                 structured_content=err_res,
             )
+    edge_exec = None
+    if resolve_edge_executor is not None and workspace_dir and str(workspace_dir).strip():
+        edge_exec = resolve_edge_executor(str(workspace_dir).strip())
+    # Edge workspaces are logical IDs — local checkpoints/offloads still need
+    # a real dir, so fall back to the default workspace as local scratch.
+    local_scratch = resolve_workspace("") if edge_exec is not None else None
     res = await run_botex_task(
         task=task,
         files=files,
-        workspace_dir=workspace_dir,
+        workspace_dir=local_scratch if local_scratch is not None else workspace_dir,
         model=model,
         profile=profile,
         provider=provider,
@@ -924,10 +942,13 @@ async def run_subagent(
         allow_non_zdr=True if allow_non_zdr else None,
         allow_expensive_model=True if allow_expensive_model else None,
         approval_policy=approval_policy or None,
+        tool_executor=edge_exec,
     )
 
     res = _masked_result(res)
-    res = _offload_report(res, resolve_workspace(workspace_dir))
+    res = _offload_report(
+        res, local_scratch if local_scratch is not None else resolve_workspace(workspace_dir)
+    )
     return CallToolResult(
         content=[TextContent(type="text", text=_format_result_text(res))],
         structured_content=res,
@@ -1581,6 +1602,7 @@ def _print_usage():
   {c("    --provider/--model/--profile/--session-id/--allow-non-zdr")}  {d(t("usage.chat_flags"))}
   {c("botex memory <save|search|read|list>")} {d(t("usage.memory"))}
   {c("botex cloud [--host H] [--port P]")}   {d(t("usage.cloud"))}
+  {c("botex edge [--server WSS] [-w DIR]")}    {d("Outbound WSS edge runner for BoteX Cloud")}
 
 {title(t("usage.examples"))}
   {c('botex run "fix failing tests" -w .')}   {d(t("usage.ex.run"))}
@@ -2413,6 +2435,111 @@ def _cli_cloud(argv: list[str]) -> None:
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level, workers=1)
 
 
+def _cli_edge(argv: list[str]) -> None:
+    """CLI dispatcher for the thin edge runner (outbound WSS bridge)."""
+    import argparse
+    import socket
+
+    from botex.edge import EdgeCapabilities, EdgeRunner
+
+    parser = argparse.ArgumentParser(
+        prog="botex edge",
+        description=(
+            "Run the thin edge runner: an outbound WSS bridge that lets BoteX "
+            "Cloud execute workspace tools on this device (no inbound port)."
+        ),
+    )
+    parser.add_argument(
+        "--server",
+        default=os.environ.get("BOTEX_EDGE_SERVER", "") or "wss://botex.jg-webtech.pl/api/edge/ws",
+        help="Cloud gateway WSS URL (default: BOTEX_EDGE_SERVER env, else wss://botex.jg-webtech.pl/api/edge/ws)",
+    )
+    parser.add_argument(
+        "--workspace",
+        "-w",
+        default=".",
+        help="Workspace dir exposed to the cloud (default: .)",
+    )
+    parser.add_argument(
+        "--workspace-id",
+        default="",
+        help="Logical workspace ID registered on the gateway (default: workspace folder name)",
+    )
+    parser.add_argument(
+        "--device-id",
+        default="",
+        help="Device identifier (default: hostname)",
+    )
+    parser.add_argument(
+        "--token",
+        default="",
+        help="Device bearer token (default: BOTEX_EDGE_TOKEN env; never logged)",
+    )
+    parser.add_argument(
+        "--token-file",
+        default="",
+        help="Read the device token from a 0600 file instead of argv/env (avoids process-list leaks)",
+    )
+    parser.add_argument(
+        "--allow-exec",
+        action="store_true",
+        help="Raise the local ceiling to permit run_command (exec policy from edge_caps.json/config)",
+    )
+    parser.add_argument(
+        "--allow-destructive",
+        action="store_true",
+        help="Raise the local ceiling to permit delete_file/move_file",
+    )
+    args = parser.parse_args(argv)
+
+    token = args.token
+    if not token and args.token_file:
+        try:
+            token = Path(args.token_file).expanduser().read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            print(
+                err(f"Cannot read --token-file: {exc.strerror or exc}"),
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    if not token:
+        token = os.environ.get("BOTEX_EDGE_TOKEN", "")
+    if not token:
+        print(
+            err("Edge token required: pass --token/--token-file or set BOTEX_EDGE_TOKEN."),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    workspace_root = str(Path(args.workspace).expanduser().resolve())
+    caps = EdgeCapabilities.load(workspace_root)
+    if args.allow_exec:
+        caps.allow_exec = True
+        caps.allowed_tools = caps.allowed_tools | {"run_command"}
+    if args.allow_destructive:
+        caps.allow_destructive = True
+        caps.allowed_tools = caps.allowed_tools | {"delete_file", "move_file"}
+
+    runner = EdgeRunner(
+        args.server,
+        token=token,
+        device_id=args.device_id or socket.gethostname(),
+        workspace_id=args.workspace_id or Path(workspace_root).name,
+        workspace_root=workspace_root,
+        caps=caps,
+    )
+    print(
+        title(
+            f"BoteX edge → {args.server} | workspace={workspace_root} "
+            f"(id={runner.workspace_id}) device={runner.device_id}"
+        )
+    )
+    try:
+        asyncio.run(runner.run_forever())
+    except KeyboardInterrupt:
+        runner.stop()
+
+
 def _cli_maintenance(argv: list[str]) -> None:
     """Run L2 maintenance jobs manually — local parity for the VPS
     ``botex-maintenance.timer`` (Windows dev has no systemd)."""
@@ -2769,6 +2896,8 @@ def main():
         _cli_memory(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "cloud":
         _cli_cloud(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "edge":
+        _cli_edge(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "maintenance":
         _cli_maintenance(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] in ("serve", "server", "--serve"):

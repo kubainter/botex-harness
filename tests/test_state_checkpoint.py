@@ -26,7 +26,12 @@ import pytest
 from botex.config import load_config
 import botex.engine as engine
 from botex.events import EventKind
-from botex.state import InFlightTaskState
+from botex.state import (
+    InFlightTaskState,
+    clear_inflight_checkpoint,
+    load_inflight_checkpoints,
+    save_inflight_checkpoint,
+)
 
 
 def _make_response(content: str = "", finish_reason: str = "stop") -> SimpleNamespace:
@@ -525,3 +530,72 @@ async def test_run_botex_task_forwards_contrastive_failures_into_handoff(
     assert "botex/core/foo.py: SyntaxError: invalid syntax" in captured_handoffs[1]
     assert "rollback: no-progress loop (3 consecutive failed mutations)" in captured_handoffs[1]
     mock_extract.assert_called_once()
+
+
+def test_inflight_checkpoint_persistence_masking_and_corrupt_tolerance(tmp_path: Path):
+    state = InFlightTaskState(
+        task_id="task-ckpt-1",
+        goal="Inspect sk-secretkey1234567890abcdef and fix bug",
+        plan_steps=["step 1", "step 2"],
+    )
+    state.add_observation("token=sk-secretkey1234567890abcdef")
+
+    saved_path = save_inflight_checkpoint(state, tmp_path)
+    assert saved_path is not None
+    assert saved_path.is_file()
+    raw = saved_path.read_text(encoding="utf-8")
+    assert "sk-secretkey1234567890abcdef" not in raw
+
+    # Corrupt checkpoint alongside valid one must be tolerated without crashing
+    corrupt_path = tmp_path / ".botex" / "inflight" / "corrupt.json"
+    corrupt_path.write_text("{broken json", encoding="utf-8")
+
+    # Path traversal task_id is rejected
+    evil = InFlightTaskState(task_id="../../outside", goal="bad")
+    assert save_inflight_checkpoint(evil, tmp_path) is None
+    # Empty task_id never produces a checkpoint; missing dir loads empty
+    assert save_inflight_checkpoint(InFlightTaskState(goal="anon"), tmp_path) is None
+    assert load_inflight_checkpoints(tmp_path / "does-not-exist") == []
+
+    loaded = load_inflight_checkpoints(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0].task_id == "task-ckpt-1"
+    assert loaded[0].plan_steps == ["step 1", "step 2"]
+
+    assert clear_inflight_checkpoint("task-ckpt-1", tmp_path) is True
+    assert clear_inflight_checkpoint("task-ckpt-1", tmp_path) is False
+    assert load_inflight_checkpoints(tmp_path) == []
+
+
+@pytest.mark.anyio
+async def test_run_botex_task_clears_inflight_checkpoint_on_completion(tmp_path: Path):
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    mock_client = MockClient([_make_response("STATUS: DONE\nAll good")])
+    seen_saves: List[str] = []
+    real_save = save_inflight_checkpoint
+
+    def spy_save(st: InFlightTaskState, ws: str | Path):
+        seen_saves.append(st.task_id)
+        return real_save(st, ws)
+
+    with (
+        patch.object(engine, "resolve_model_candidates", return_value=["cand-1"]),
+        patch.object(engine, "build_async_client", return_value=mock_client),
+        patch.object(engine, "check_model_price", return_value=(True, "")),
+        patch.object(engine, "check_model_tools", return_value=(True, "")),
+        patch.object(engine, "check_budget_limit", return_value=(False, 0.0)),
+        patch.object(engine, "log_run", return_value={"cost_usd": 0.0}),
+        patch.object(engine, "print_run_summary", return_value=None),
+        patch.object(engine, "save_inflight_checkpoint", side_effect=spy_save),
+    ):
+        res = await engine.run_botex_task(
+            task="Verify app.py",
+            workspace_dir=str(tmp_path),
+            provider="openrouter",
+            api_key="test-or-key",
+            mode="readonly",
+        )
+
+    assert res["status"] == "DONE"
+    assert len(seen_saves) >= 1
+    assert load_inflight_checkpoints(tmp_path) == []

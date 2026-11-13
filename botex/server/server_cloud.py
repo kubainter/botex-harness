@@ -24,9 +24,11 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import unicodedata
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -69,7 +71,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 import server as botex_server
 from botex.analytics import aggregate_stats, load_analytics
-from botex.approval import PendingAction, default_approval_manager
+from botex.approval import PendingAction, TaskAbortedError, default_approval_manager
 from botex.catalog import (
     CACHE_FILE_DEFAULT,
     DEFAULT_TTL_HOURS,
@@ -83,6 +85,16 @@ from botex.config import (
     get_tasks_dir,
     resolve_provider,
     resolve_workspace,
+)
+from botex.core.context_guard import read_scratchpad
+from botex.core.device_tokens import (
+    DeviceTokenRecord,
+    DeviceTokenStore,
+    default_device_token_store,
+)
+from botex.core.tool_executor import (
+    ToolExecutor,
+    register_edge_executor_resolver,
 )
 from botex.engine import run_botex_task
 from botex.events import EventKind, emitter_or_none, get_emitter
@@ -101,6 +113,7 @@ from botex.plugins import PluginVaultManager
 from botex.rate_limiter import get_rate_limiter
 from botex.security import coerce_text, mask_secrets, sanitize_identifier
 from botex.skills import delete_skill, get_skill, install_skill_async, list_skills
+from botex.state import load_inflight_checkpoints
 from botex.wallet import default_wallet_service
 
 logger = logging.getLogger(__name__)
@@ -384,6 +397,91 @@ class VisionInspectRequest(BaseModel):
     workspace_dir: str = "."
 
 
+class EdgeTokenIssueRequest(BaseModel):
+    device_id: str
+    workspace_id: str
+    scopes: Optional[List[str]] = None
+    ttl_s: Optional[int] = None
+    label: str = ""
+
+
+class EdgeDelegateRequest(BaseModel):
+    device_id: str = ""
+    workspace_id: str = ""
+    skill: str
+    sha256: str = ""
+    params: Dict[str, Any] = Field(default_factory=dict)
+    task: str = ""
+    require_approval: Optional[bool] = None
+
+
+_DELEGATE_FORBIDDEN_PARAM_KEYS = frozenset(
+    {
+        "command",
+        "cmd",
+        "shell",
+        "script",
+        "code",
+        "eval",
+        "exec",
+        "argv",
+        "args",
+        "powershell",
+        "pwsh",
+        "bash",
+    }
+)
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _find_forbidden_delegate_key(obj: Any, _depth: int = 0) -> Optional[str]:
+    if _depth > 8:
+        return "nesting_depth_exceeded"
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            norm_k = unicodedata.normalize("NFKC", str(k)).strip().lower()
+            if norm_k in _DELEGATE_FORBIDDEN_PARAM_KEYS:
+                return norm_k
+            nested = _find_forbidden_delegate_key(v, _depth + 1)
+            if nested:
+                return nested
+    elif isinstance(obj, list):
+        for item in obj:
+            nested = _find_forbidden_delegate_key(item, _depth + 1)
+            if nested:
+                return nested
+    return None
+
+
+def _validate_delegate_params_safe(params: Any) -> Dict[str, Any]:
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Delegation params must be a JSON object.",
+        )
+    forbidden = _find_forbidden_delegate_key(params)
+    if forbidden:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Forbidden delegation parameter key '{forbidden}'. Raw shell/command execution is disallowed.",
+        )
+    try:
+        encoded = json.dumps(params, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Delegation params must be JSON-serializable.",
+        )
+    if len(encoded) > 32768:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Delegation params exceed 32 KiB limit.",
+        )
+    return dict(params)
+
+
 from contextlib import asynccontextmanager, suppress
 
 # ---------------------------------------------------------------------------
@@ -392,6 +490,404 @@ from contextlib import asynccontextmanager, suppress
 
 
 _WARMUP_COMPLETED = False
+_MAX_TASK_CACHE_BYTES = 8 * 1024 * 1024
+_EDGE_PING_INTERVAL_S = 30.0
+_TRUSTED_PROXY_HOSTS = frozenset({"127.0.0.1", "::1"})
+_INTERRUPTED_INFLIGHT_TASKS: List[Dict[str, Any]] = []
+
+
+class _GatewayRateLimiter:
+    """Sliding-window per-client HTTP/WSS limiter for the cloud gateway."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._hits: Dict[str, List[float]] = {}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._hits.clear()
+
+    def check_allow(self, client_key: str) -> tuple[bool, float]:
+        raw_rpm = os.environ.get("BOTEX_GATEWAY_RPM", "240").strip()
+        try:
+            limit = int(raw_rpm)
+        except ValueError:
+            limit = 240
+        if limit <= 0:
+            return True, 0.0
+        now = time.monotonic()
+        cutoff = now - 60.0
+        key = (client_key or "unknown")[:64]
+        with self._lock:
+            if len(self._hits) > 4096 and key not in self._hits:
+                stale = [
+                    k for k, ts_list in self._hits.items() if not ts_list or ts_list[-1] < cutoff
+                ]
+                for k in stale[:1024]:
+                    self._hits.pop(k, None)
+                if len(self._hits) > 4096:
+                    self._hits.pop(next(iter(self._hits)), None)
+            timestamps = [t for t in self._hits.get(key, []) if t >= cutoff]
+            if len(timestamps) >= limit:
+                retry_after = max(0.1, 60.0 - (now - timestamps[0]))
+                self._hits[key] = timestamps
+                return False, retry_after
+            timestamps.append(now)
+            self._hits[key] = timestamps
+            return True, 0.0
+
+
+_GATEWAY_RATE_LIMITER = _GatewayRateLimiter()
+
+
+def _extract_client_ip_from_scope(scope: Dict[str, Any]) -> str:
+    """Return peer IP, honoring X-Forwarded-For only from trusted local reverse proxy."""
+    client = scope.get("client")
+    peer_host = str(client[0]) if client and len(client) > 0 else ""
+    if peer_host in _TRUSTED_PROXY_HOSTS:
+        headers = dict(scope.get("headers") or [])
+        xff = headers.get(b"x-forwarded-for", b"").decode("latin1", errors="ignore").strip()
+        if xff:
+            # The rightmost entry is the address our trusted proxy actually
+            # observed (proxies append). The leftmost entries are client-
+            # controlled: trusting them would let one remote client forge a
+            # fresh rate-limit key per request ("spoofed, real" lists).
+            entries = [e.strip() for e in xff.split(",") if e.strip()]
+            if entries:
+                return entries[-1][:64]
+    return peer_host or "unknown"
+
+
+class RemoteWssToolExecutor(ToolExecutor):
+    """Dispatches workspace tool calls over an authenticated outbound edge WebSocket."""
+
+    def __init__(self, session: "_EdgeSession", timeout_s: float = 120.0) -> None:
+        self._session = session
+        self._timeout_s = float(timeout_s)
+        self._cache_lock = threading.RLock()
+        self._task_caches: Dict[str, OrderedDict[str, Dict[str, Any]]] = {}
+        self._task_cache_bytes: Dict[str, int] = {}
+
+    def _cache_key(self, tool_name: str, args: Dict[str, Any]) -> Optional[str]:
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return None
+        if tool_name == "read_file":
+            return f"read_file:{path}"
+        if tool_name == "read_file_lines":
+            return f"read_file_lines:{path}:{args.get('start', 1)}:{args.get('end', 50)}"
+        return None
+
+    def _get_cached(self, task_id: str, key: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not key:
+            return None
+        with self._cache_lock:
+            lru = self._task_caches.get(task_id)
+            if not lru or key not in lru:
+                return None
+            lru.move_to_end(key)
+            return dict(lru[key])
+
+    def _put_cached(self, task_id: str, key: str, sha256: str, result: Dict[str, Any]) -> None:
+        try:
+            size_bytes = len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+        except Exception:
+            return
+        if size_bytes <= 0 or size_bytes > _MAX_TASK_CACHE_BYTES:
+            return
+        with self._cache_lock:
+            lru = self._task_caches.setdefault(task_id, OrderedDict())
+            cur_bytes = self._task_cache_bytes.get(task_id, 0)
+            old = lru.pop(key, None)
+            if old is not None:
+                cur_bytes -= int(old.get("size_bytes") or 0)
+            while lru and (cur_bytes + size_bytes > _MAX_TASK_CACHE_BYTES):
+                _, evicted = lru.popitem(last=False)
+                cur_bytes -= int(evicted.get("size_bytes") or 0)
+            lru[key] = {
+                "sha256": sha256,
+                "result": dict(result),
+                "size_bytes": size_bytes,
+            }
+            self._task_cache_bytes[task_id] = max(0, cur_bytes) + size_bytes
+
+    def _invalidate_path(self, task_id: str, path: str) -> None:
+        clean = str(path or "").strip()
+        if not clean:
+            return
+        with self._cache_lock:
+            lru = self._task_caches.get(task_id)
+            if not lru:
+                return
+            cur_bytes = self._task_cache_bytes.get(task_id, 0)
+            drop_keys = [
+                k
+                for k in lru
+                if k == f"read_file:{clean}" or k.startswith(f"read_file_lines:{clean}:")
+            ]
+            for k in drop_keys:
+                old = lru.pop(k, None)
+                if old is not None:
+                    cur_bytes -= int(old.get("size_bytes") or 0)
+            self._task_cache_bytes[task_id] = max(0, cur_bytes)
+
+    def clear_task_cache(self, task_id: str) -> None:
+        with self._cache_lock:
+            self._task_caches.pop(task_id, None)
+            self._task_cache_bytes.pop(task_id, None)
+
+    async def execute(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        workspace_root: Path,
+        task_id: str = "default",
+        call_id: str = "",
+    ) -> Dict[str, Any]:
+        if tool_name == "read_scratchpad":
+            # The scratchpad vault lives on the cloud host, not on the edge
+            # device — serve it locally so engine offloads keep working.
+            return read_scratchpad(str(args.get("memory_id") or ""), cwd=workspace_root)
+
+        del workspace_root
+        cache_key = self._cache_key(tool_name, args)
+        cached_entry = self._get_cached(task_id, cache_key)
+        cached_sha = str(cached_entry.get("sha256") or "") if cached_entry else None
+
+        res = await self._session.dispatch_tool_call(
+            tool_name=tool_name,
+            args=dict(args or {}),
+            task_id=task_id,
+            call_id=call_id or uuid.uuid4().hex[:12],
+            cached_sha256=cached_sha or None,
+            timeout_s=self._timeout_s,
+        )
+        if not isinstance(res, dict):
+            return {"ok": False, "error": "Invalid response payload from edge device."}
+
+        if res.get("status") == "unchanged" and cached_entry is not None:
+            return dict(cached_entry["result"])
+
+        if cache_key and res.get("ok") and res.get("file_sha256"):
+            self._put_cached(task_id, cache_key, str(res["file_sha256"]), res)
+        elif tool_name in {"apply_patch", "create_file", "delete_file"} and res.get("ok"):
+            self._invalidate_path(task_id, str(args.get("path") or ""))
+        elif tool_name == "move_file" and res.get("ok"):
+            self._invalidate_path(task_id, str(args.get("src_path") or ""))
+            self._invalidate_path(task_id, str(args.get("dst_path") or ""))
+        elif tool_name == "run_command" and res.get("ok"):
+            # A successful command may mutate arbitrary files on the edge —
+            # cached digests can no longer be trusted for "unchanged" replies.
+            self.clear_task_cache(task_id)
+        return res
+
+
+class _EdgeSession:
+    """Active authenticated WebSocket session to a remote edge runner."""
+
+    def __init__(
+        self,
+        *,
+        websocket: WebSocket,
+        token_record: DeviceTokenRecord,
+        device_id: str,
+        workspace_id: str,
+        capabilities: Dict[str, Any],
+        protocol_version: str = "1.0",
+        client_version: str = "",
+    ) -> None:
+        self.websocket = websocket
+        self.token_record = token_record
+        self.device_id = device_id
+        self.workspace_id = workspace_id
+        self.capabilities = dict(capabilities or {})
+        self.protocol_version = protocol_version
+        self.client_version = client_version
+        self.connected_at = time.time()
+        self.last_seen_at = self.connected_at
+        self._send_lock = asyncio.Lock()
+        self._pending: Dict[str, asyncio.Future] = {}
+        self._approval_task_ids: set[str] = set()
+        self.executor = RemoteWssToolExecutor(self)
+
+    @property
+    def session_key(self) -> str:
+        return f"{self.device_id}:{self.workspace_id}"
+
+    async def send_frame(self, payload: Dict[str, Any]) -> None:
+        async with self._send_lock:
+            await self.websocket.send_json(payload)
+
+    async def dispatch_tool_call(
+        self,
+        *,
+        tool_name: str,
+        args: Dict[str, Any],
+        task_id: str,
+        call_id: str,
+        cached_sha256: Optional[str] = None,
+        timeout_s: float = 120.0,
+    ) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending[call_id] = fut
+        frame: Dict[str, Any] = {
+            "type": "tool_call",
+            "call_id": call_id,
+            "task_id": task_id,
+            "tool_name": tool_name,
+            "args": args,
+        }
+        if cached_sha256:
+            frame["cached_sha256"] = cached_sha256
+        try:
+            await self.send_frame(frame)
+            return await asyncio.wait_for(fut, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "error": f"Edge tool '{tool_name}' timed out after {timeout_s:.0f}s.",
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Edge dispatch error: {mask_secrets(str(exc))}"}
+        finally:
+            self._pending.pop(call_id, None)
+
+    async def dispatch_delegation(
+        self,
+        *,
+        skill: str,
+        sha256: str,
+        params: Dict[str, Any],
+        task_id: str,
+        call_id: str = "",
+        timeout_s: float = 120.0,
+    ) -> Dict[str, Any]:
+        cid = call_id or uuid.uuid4().hex[:12]
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending[cid] = fut
+        frame: Dict[str, Any] = {
+            "type": "delegate_skill",
+            "call_id": cid,
+            "task_id": task_id,
+            "skill": skill,
+            "sha256": sha256,
+            "params": params,
+        }
+        try:
+            await self.send_frame(frame)
+            return await asyncio.wait_for(fut, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "error": f"Remote skill '{skill}' timed out after {timeout_s:.0f}s.",
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Edge delegation error: {mask_secrets(str(exc))}"}
+        finally:
+            self._pending.pop(cid, None)
+
+    def resolve_pending(self, call_id: str, result: Dict[str, Any]) -> None:
+        fut = self._pending.get(call_id)
+        if fut is not None and not fut.done():
+            fut.set_result(result)
+
+    def fail_all_pending(self, reason: str) -> None:
+        for cid, fut in list(self._pending.items()):
+            if not fut.done():
+                fut.set_result({"ok": False, "error": reason})
+            self._pending.pop(cid, None)
+        for tid in list(self._approval_task_ids):
+            try:
+                default_approval_manager.abort_task(tid)
+            except Exception:
+                pass
+            self._approval_task_ids.discard(tid)
+
+    def is_live(self) -> bool:
+        return (
+            _EDGE_SESSIONS.get(self.session_key) is self
+            and (time.time() - self.last_seen_at) <= 2.0 * _EDGE_PING_INTERVAL_S
+        )
+
+    def to_public_dict(self) -> Dict[str, Any]:
+        del_caps = self.capabilities.get("delegation")
+        del_enabled = isinstance(del_caps, dict) and bool(del_caps.get("enabled"))
+        can_delegate = bool(
+            self.token_record.has_scope(f"delegate_local:{self.workspace_id}") and del_enabled
+        )
+        return {
+            "device_id": self.device_id,
+            "workspace_id": self.workspace_id,
+            "jti": self.token_record.jti,
+            "capabilities": dict(self.capabilities),
+            "protocol_version": self.protocol_version,
+            "client_version": self.client_version,
+            "connected_at": self.connected_at,
+            "last_seen_at": self.last_seen_at,
+            "pending_calls": len(self._pending),
+            "healthy": self.is_live(),
+            "can_delegate": can_delegate,
+        }
+
+
+_EDGE_SESSIONS: Dict[str, _EdgeSession] = {}
+
+_EDGE_TOKEN_STORE_SINGLETON: Optional[DeviceTokenStore] = None
+
+
+def _edge_token_store() -> DeviceTokenStore:
+    """Process-wide store: REST revocations must be visible to live WSS loops.
+
+    A fresh store per call would leave long-lived websocket sessions pinned to
+    a stale snapshot, so their periodic ``is_revoked`` heartbeat check could
+    never observe a revocation written by another request's store instance.
+    """
+    global _EDGE_TOKEN_STORE_SINGLETON
+    if _EDGE_TOKEN_STORE_SINGLETON is None:
+        _EDGE_TOKEN_STORE_SINGLETON = default_device_token_store(resolve_workspace(""))
+    return _EDGE_TOKEN_STORE_SINGLETON
+
+
+def _resolve_edge_session(workspace_ref: str) -> Optional[_EdgeSession]:
+    raw = str(workspace_ref or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("edge://"):
+        body = raw[len("edge://") :].strip("/")
+        if "/" in body:
+            dev, ws = body.split("/", 1)
+            return _EDGE_SESSIONS.get(f"{dev}:{ws}")
+    if raw.startswith("edge:") and raw.count(":") >= 2:
+        _, dev, ws = raw.split(":", 2)
+        return _EDGE_SESSIONS.get(f"{dev}:{ws}")
+    if raw in _EDGE_SESSIONS:
+        return _EDGE_SESSIONS[raw]
+    matches = [s for s in _EDGE_SESSIONS.values() if s.workspace_id == raw]
+    if not matches:
+        return None
+    matches.sort(key=lambda s: s.connected_at, reverse=True)
+    return matches[0]
+
+
+def _resolve_active_edge_executor(workspace_ref: str) -> Optional[ToolExecutor]:
+    sess = _resolve_edge_session(workspace_ref)
+    return sess.executor if sess is not None else None
+
+
+async def _close_sessions_for_jti(jti: str) -> int:
+    closed = 0
+    for key, sess in list(_EDGE_SESSIONS.items()):
+        if sess.token_record.jti == jti:
+            sess.fail_all_pending("Device token revoked")
+            with suppress(Exception):
+                await sess.websocket.close(
+                    code=status.WS_1008_POLICY_VIOLATION, reason="Token revoked"
+                )
+            _EDGE_SESSIONS.pop(key, None)
+            closed += 1
+    return closed
 
 
 async def _warmup_caches() -> None:
@@ -668,40 +1164,65 @@ async def _analytics_digest_loop() -> None:
 
 @asynccontextmanager
 async def _base_lifespan(app: FastAPI):
+    register_edge_executor_resolver(_resolve_active_edge_executor)
+    _INTERRUPTED_INFLIGHT_TASKS.clear()
+    try:
+        checkpoints = load_inflight_checkpoints(resolve_workspace(""))
+        for ckpt in checkpoints:
+            _INTERRUPTED_INFLIGHT_TASKS.append(
+                {
+                    "task_id": ckpt.task_id,
+                    "goal": coerce_text(mask_secrets(ckpt.goal))[:160],
+                    "created_at": ckpt.created_at,
+                    "failed_attempts": len(ckpt.failed_attempts),
+                    "recovery_status": "interrupted_on_restart",
+                }
+            )
+        if _INTERRUPTED_INFLIGHT_TASKS:
+            logger.info(
+                "Detected %d interrupted in-flight checkpoint(s) on startup.",
+                len(_INTERRUPTED_INFLIGHT_TASKS),
+            )
+    except Exception:
+        logger.debug("Inflight checkpoint scan skipped during startup", exc_info=True)
+    app.state.interrupted_tasks = list(_INTERRUPTED_INFLIGHT_TASKS)
     # Non-blocking background warmup
     warmup_task = asyncio.create_task(_warmup_caches())
     digest_task: Optional[asyncio.Task] = None
     if analytics_setting("digest_enabled"):
         digest_task = asyncio.create_task(_analytics_digest_loop())
     prober_task = asyncio.create_task(_breaker_prober_loop())
-    yield
-    if not warmup_task.done():
-        try:
-            # Allow a short grace period for in-flight tasks to finish safely
-            await asyncio.wait_for(asyncio.shield(warmup_task), timeout=1.5)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-            warmup_task.cancel()
-    with suppress(asyncio.CancelledError, Exception):
-        await warmup_task
-    if digest_task is not None:
-        digest_task.cancel()
+    try:
+        yield
+    finally:
+        register_edge_executor_resolver(None)
+        if not warmup_task.done():
+            try:
+                # Allow a short grace period for in-flight tasks to finish safely
+                await asyncio.wait_for(asyncio.shield(warmup_task), timeout=1.5)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                warmup_task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await warmup_task
+        if digest_task is not None:
+            digest_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await digest_task
+        prober_task.cancel()
         with suppress(asyncio.CancelledError):
-            await digest_task
-    prober_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await prober_task
-    try:
-        from botex.providers.http_pool import close_http_pool
+            await prober_task
+        try:
+            from botex.providers.http_pool import close_http_pool
 
-        await close_http_pool()
-    except Exception:
-        logger.exception("Failed closing http pool on shutdown")
-    try:
-        from botex.memory.memory import close_index_dbs
+            await close_http_pool()
+        except Exception:
+            logger.exception("Failed closing http pool on shutdown")
+        try:
+            from botex.memory.memory import close_index_dbs
 
-        close_index_dbs()
-    except Exception:
-        logger.exception("Failed closing memory index dbs on shutdown")
+            close_index_dbs()
+        except Exception:
+            logger.exception("Failed closing memory index dbs on shutdown")
 
 
 def _build_mcp_http_app() -> Any:
@@ -920,6 +1441,18 @@ class CloudAuthMiddleware:
         # Health probes and public web PWA assets bypass authentication
         if path == "/api/health" or (not path.startswith("/api") and not path.startswith("/mcp")):
             await self.app(scope, receive, send)
+            return
+
+        allowed, retry_after = _GATEWAY_RATE_LIMITER.check_allow(
+            _extract_client_ip_from_scope(scope)
+        )
+        if not allowed:
+            resp = JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Rate limit exceeded. Slow down and retry."},
+                headers={"Retry-After": str(max(1, int(retry_after) + 1))},
+            )
+            await resp(scope, receive, send)
             return
 
         # Normalize /mcp/messages and /mcp/http to prevent Starlette Mount 307/404 on POST
@@ -1458,6 +1991,8 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
     executor = (getattr(req, "executor", "") or "botex").lower()
     entry["executor"] = executor
     provider_name = ""
+    edge_exec: Optional[ToolExecutor] = None
+    persist_ws = req.workspace_dir
     try:
         # Provider admission throttle: wait on the provider's RPM budget
         # BEFORE taking a concurrency slot — a task parked on a provider
@@ -1482,6 +2017,11 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
                     provider_name,
                 )
         # Bounded concurrency: enforce engine semaphore
+        edge_exec = _resolve_active_edge_executor(req.workspace_dir)
+        effective_ws = (
+            resolve_workspace("") if edge_exec is not None else resolve_workspace(req.workspace_dir)
+        )
+        persist_ws = "" if edge_exec is not None else req.workspace_dir
         async with botex_server._TASK_SEMAPHORE:
             entry["status"] = "RUNNING"
             em.emit(EventKind.TASK_STATE, state="RUNNING", executor=executor)
@@ -1491,7 +2031,7 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
                 res = await run_botex_task(
                     task=req.task,
                     files=req.files or None,
-                    workspace_dir=resolve_workspace(req.workspace_dir),
+                    workspace_dir=effective_ws,
                     model=req.model,
                     profile=req.profile,
                     provider=req.provider,
@@ -1512,6 +2052,7 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
                     allow_expensive_model=True if req.allow_expensive_model else None,
                     approval_policy=req.approval_policy or None,
                     progress_cb=lambda kind, **data: em.emit(kind, **data),
+                    tool_executor=edge_exec,
                 )
             entry["result_data"] = botex_server.mask_secrets_recursive(res)
             entry["result"] = mask_secrets(res.get("summary") or res.get("message") or "")
@@ -1548,9 +2089,11 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
         entry["result"] = f"Task execution failed: {masked_err}"
         entry["result_data"] = {"ok": False, "status": "ERROR", "error": masked_err}
     finally:
+        if isinstance(edge_exec, RemoteWssToolExecutor):
+            edge_exec.clear_task_cache(task_id)
         entry["finished_at"] = time.time()
         em.emit(EventKind.TASK_STATE, state=entry.get("status") or "DONE")
-        await asyncio.to_thread(_save_task_persistent, task_id, entry, req.workspace_dir)
+        await asyncio.to_thread(_save_task_persistent, task_id, entry, persist_ws)
         # Let the pump deliver the final task_state frame before teardown.
         await asyncio.sleep(0.1)
         pump.cancel()
@@ -1639,7 +2182,10 @@ async def create_task(
         "async_task": None,
     }
     _TASKS[task_id] = entry
-    await asyncio.to_thread(_save_task_persistent, task_id, entry, req.workspace_dir)
+    persist_ws = (
+        "" if _resolve_active_edge_executor(req.workspace_dir) is not None else req.workspace_dir
+    )
+    await asyncio.to_thread(_save_task_persistent, task_id, entry, persist_ws)
     worker = asyncio.create_task(_run_task_worker(task_id, req))
     entry["async_task"] = worker
     res_dict = {"task_id": task_id, "status": "QUEUED"}
@@ -2671,6 +3217,473 @@ async def vision_inspect_endpoint(body: VisionInspectRequest) -> Dict[str, Any]:
             res.setdefault("task_id", clean_tid)
         return botex_server.mask_secrets_recursive(res)
     return {"ok": True, "result": coerce_text(mask_secrets(str(res)))}
+
+
+# ---------------------------------------------------------------------------
+# Edge Bridge: Device Tokens & Outbound Compressed WSS Tunnel
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/edge/tokens", status_code=status.HTTP_201_CREATED)
+async def issue_edge_token(body: EdgeTokenIssueRequest) -> Dict[str, Any]:
+    """Issue a scoped per-device bearer token; only the SHA-256 hash is persisted."""
+    store = _edge_token_store()
+    try:
+        ttl_val = body.ttl_s if body.ttl_s is not None else 30 * 24 * 3600
+        raw_credential, rec = store.issue_token(
+            body.device_id,
+            body.workspace_id,
+            scopes=body.scopes,
+            ttl_s=ttl_val,
+            label=body.label,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=coerce_text(mask_secrets(str(exc))),
+        )
+    return {
+        "ok": True,
+        "token": raw_credential,
+        "record": rec.to_public_dict(),
+    }
+
+
+@app.get("/api/edge/tokens")
+async def list_edge_tokens(include_revoked: bool = Query(default=True)) -> Dict[str, Any]:
+    """List per-device tokens without exposing hashes or secrets."""
+    store = _edge_token_store()
+    return {"ok": True, "tokens": store.list_tokens(include_revoked=include_revoked)}
+
+
+@app.delete("/api/edge/tokens/{jti}")
+async def revoke_edge_token(jti: str) -> Dict[str, Any]:
+    """Revoke a device token by JTI and disconnect matching active WSS edge sessions."""
+    clean_jti = sanitize_identifier(jti)
+    if not clean_jti:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid token jti format.",
+        )
+    store = _edge_token_store()
+    existed = store.revoke_token(clean_jti)
+    disconnected = await _close_sessions_for_jti(clean_jti)
+    return {
+        "ok": True,
+        "jti": clean_jti,
+        "revoked": True,
+        "existed": existed,
+        "disconnected_sessions": disconnected,
+    }
+
+
+@app.get("/api/edge/devices")
+async def list_edge_devices() -> Dict[str, Any]:
+    """Return active edge devices and any interrupted checkpoints detected at startup."""
+    return {
+        "ok": True,
+        "devices": [sess.to_public_dict() for sess in _EDGE_SESSIONS.values()],
+        "interrupted_tasks": list(_INTERRUPTED_INFLIGHT_TASKS),
+    }
+
+
+def _resolve_target_edge_session(device_id: str, workspace_id: str) -> Optional[_EdgeSession]:
+    dev = coerce_text(mask_secrets(str(device_id or ""))).strip()
+    ws = coerce_text(mask_secrets(str(workspace_id or ""))).strip()
+    if dev and ws:
+        return _EDGE_SESSIONS.get(f"{dev}:{ws}")
+    if ws:
+        return _resolve_edge_session(ws)
+    if dev:
+        matches = [s for s in _EDGE_SESSIONS.values() if s.device_id == dev]
+        matches.sort(key=lambda s: s.last_seen_at, reverse=True)
+        return matches[0] if matches else None
+    return None
+
+
+async def _run_edge_delegate_worker(
+    task_id: str,
+    sess: _EdgeSession,
+    skill_name: str,
+    expected_sha: str,
+    params: Dict[str, Any],
+    needs_approval: bool,
+    human_task: str,
+) -> None:
+    entry = _TASKS[task_id]
+    em = get_emitter(task_id)
+    pump = asyncio.create_task(_task_event_pump(task_id, em))
+    try:
+        if needs_approval:
+            entry["status"] = "RUNNING"
+            em.emit(
+                EventKind.TASK_STATE,
+                state="WAITING",
+                waiting_for="approval",
+                skill=skill_name,
+                device_id=sess.device_id,
+            )
+            masked_params = botex_server.mask_secrets_recursive(params)
+            preview = (
+                f"Remote Skill: {skill_name}\n"
+                f"Device: {sess.device_id} ({sess.workspace_id})\n"
+                f"Digest: {expected_sha[:16]}...\n"
+                f"Params: {json.dumps(masked_params, ensure_ascii=False)}"
+            )
+            if human_task:
+                preview = f"{coerce_text(mask_secrets(human_task))}\n\n{preview}"
+            sess._approval_task_ids.add(task_id)
+            try:
+                approved = await default_approval_manager.request_approval(
+                    task_id=task_id,
+                    tool_name=f"edge_delegate:{skill_name}",
+                    params={
+                        "device_id": sess.device_id,
+                        "workspace_id": sess.workspace_id,
+                        "skill": skill_name,
+                        "sha256": expected_sha,
+                        "params": masked_params,
+                    },
+                    preview=preview,
+                    require_explicit=True,
+                    timeout=300.0,
+                )
+            finally:
+                sess._approval_task_ids.discard(task_id)
+            if not approved:
+                entry["status"] = "FAILED"
+                entry["result"] = "Remote skill delegation rejected or timed out."
+                entry["result_data"] = {
+                    "ok": False,
+                    "status": "REJECTED",
+                    "error": entry["result"],
+                }
+                return
+
+        if not sess.is_live() or _edge_token_store().is_revoked(sess.token_record.jti):
+            entry["status"] = "FAILED"
+            entry["result"] = "Edge device disconnected or liveness lease expired."
+            entry["result_data"] = {"ok": False, "status": "FAILED", "error": entry["result"]}
+            return
+
+        entry["status"] = "RUNNING"
+        em.emit(
+            EventKind.TASK_STATE,
+            state="RUNNING",
+            executor="edge_delegate",
+            skill=skill_name,
+            device_id=sess.device_id,
+        )
+        res = await sess.dispatch_delegation(
+            skill=skill_name,
+            sha256=expected_sha,
+            params=params,
+            task_id=task_id,
+        )
+        masked_res = (
+            botex_server.mask_secrets_recursive(res)
+            if isinstance(res, dict)
+            else {"ok": False, "error": "Invalid response from edge device."}
+        )
+        entry["result_data"] = masked_res
+        if masked_res.get("ok"):
+            entry["status"] = "DONE"
+            entry["result"] = coerce_text(
+                mask_secrets(
+                    str(
+                        masked_res.get("summary")
+                        or masked_res.get("output")
+                        or masked_res.get("content")
+                        or "Remote skill completed."
+                    )
+                )
+            )
+        else:
+            entry["status"] = "FAILED"
+            entry["result"] = coerce_text(
+                mask_secrets(str(masked_res.get("error") or "Remote skill failed."))
+            )
+    except TaskAbortedError:
+        entry["status"] = "CANCELLED"
+        entry["result"] = "Remote delegation aborted by operator."
+        entry["result_data"] = {"ok": False, "status": "CANCELLED", "error": entry["result"]}
+    except asyncio.CancelledError:
+        entry["status"] = "CANCELLED"
+        entry["result"] = "Remote delegation cancelled."
+        entry["result_data"] = {"ok": False, "status": "CANCELLED", "error": entry["result"]}
+        raise
+    except Exception as exc:
+        masked_err = coerce_text(mask_secrets(str(exc)))
+        entry["status"] = "FAILED"
+        entry["result"] = f"Remote delegation failed: {masked_err}"
+        entry["result_data"] = {"ok": False, "status": "FAILED", "error": masked_err}
+    finally:
+        entry["finished_at"] = time.time()
+        em.emit(EventKind.TASK_STATE, state=entry.get("status") or "DONE")
+        await asyncio.to_thread(_save_task_persistent, task_id, entry, "")
+        await asyncio.sleep(0.05)
+        pump.cancel()
+
+
+@app.post("/api/edge/delegate", status_code=status.HTTP_202_ACCEPTED)
+async def delegate_to_edge_device(body: EdgeDelegateRequest) -> Dict[str, Any]:
+    """Queue a digest-pinned, scope-checked skill delegation to a live edge device."""
+    botex_server._cleanup_tasks()
+    max_queued = int(botex_server.load_config().get("engine", {}).get("max_queued_tasks", 32))
+    active_count = sum(entry.get("status") in {"QUEUED", "RUNNING"} for entry in _TASKS.values())
+    if active_count >= max_queued:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Task queue limit reached ({max_queued}).",
+        )
+
+    clean_skill = sanitize_identifier(body.skill)
+    if not clean_skill:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid skill identifier.",
+        )
+    safe_params = _validate_delegate_params_safe(body.params)
+
+    sess = _resolve_target_edge_session(body.device_id, body.workspace_id)
+    if sess is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target edge device session not connected.",
+        )
+    if not sess.is_live() or _edge_token_store().is_revoked(sess.token_record.jti):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Target edge device liveness lease expired or disconnected.",
+        )
+    if not sess.token_record.has_scope(f"delegate_local:{sess.workspace_id}"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Device token lacks 'delegate_local:{sess.workspace_id}' scope.",
+        )
+
+    del_caps = sess.capabilities.get("delegation")
+    if not isinstance(del_caps, dict) or not del_caps.get("enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Remote skill delegation is disabled on target device (opt-in required).",
+        )
+
+    skill_meta: Optional[Dict[str, Any]] = None
+    for candidate in del_caps.get("skills") or []:
+        if isinstance(candidate, dict) and candidate.get("name") == clean_skill:
+            skill_meta = candidate
+            break
+    if skill_meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Skill '{clean_skill}' is not in target device's digest allowlist.",
+        )
+
+    policy_sha = str(skill_meta.get("sha256") or "").strip().lower()
+    if not _SHA256_HEX_RE.match(policy_sha):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Skill '{clean_skill}' lacks a valid SHA-256 digest pin.",
+        )
+    req_sha = str(body.sha256 or "").strip().lower()
+    # Malformed (incl. non-ASCII) digests must fail as mismatches, not crash
+    # compare_digest with TypeError -> 500.
+    if req_sha and (
+        not _SHA256_HEX_RE.fullmatch(req_sha) or not hmac.compare_digest(req_sha, policy_sha)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Skill SHA-256 digest does not match target device allowlist.",
+        )
+
+    # Fail-closed default: require operator approval unless explicitly marked read_only=True
+    is_read_only = bool(skill_meta.get("read_only") is True)
+    needs_approval = (not is_read_only) or (body.require_approval is True)
+
+    task_id = uuid.uuid4().hex[:12]
+    prompt_label = coerce_text(
+        mask_secrets(body.task.strip() or f"Delegate '{clean_skill}' to {sess.device_id}")
+    )
+    entry: Dict[str, Any] = {
+        "task_id": task_id,
+        "task": prompt_label,
+        "executor": "edge_delegate",
+        "device_id": sess.device_id,
+        "workspace_id": sess.workspace_id,
+        "skill": clean_skill,
+        "sha256": policy_sha,
+        "request": botex_server.mask_secrets_recursive(body.model_dump(exclude_none=True)),
+        "status": "QUEUED",
+        "created_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "result_data": None,
+        "async_task": None,
+    }
+    _TASKS[task_id] = entry
+    await asyncio.to_thread(_save_task_persistent, task_id, entry, "")
+    worker = asyncio.create_task(
+        _run_edge_delegate_worker(
+            task_id=task_id,
+            sess=sess,
+            skill_name=clean_skill,
+            expected_sha=policy_sha,
+            params=safe_params,
+            needs_approval=needs_approval,
+            human_task=body.task.strip(),
+        )
+    )
+    entry["async_task"] = worker
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "status": "QUEUED",
+        "device_id": sess.device_id,
+        "workspace_id": sess.workspace_id,
+        "skill": clean_skill,
+        "sha256": policy_sha,
+        "approval_required": needs_approval,
+    }
+
+
+@app.websocket("/api/edge/ws")
+async def edge_bridge_websocket(websocket: WebSocket) -> None:
+    """Bidirectional compressed WSS channel connecting outbound ``botex edge`` runners."""
+    allowed, _ = _GATEWAY_RATE_LIMITER.check_allow(_extract_client_ip_from_scope(websocket.scope))
+    if not allowed:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limit exceeded")
+        return
+
+    await websocket.accept()
+    store = _edge_token_store()
+
+    # Extract Bearer token from the Authorization header or the initial auth frame.
+    # (No query-string fallback: tokens in URLs leak into proxy access logs.)
+    auth_header = websocket.headers.get("authorization", "")
+    raw_cred = ""
+    if auth_header.startswith("Bearer "):
+        raw_cred = auth_header[7:].strip()
+    if not raw_cred:
+        try:
+            first_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+            if isinstance(first_msg, dict) and first_msg.get("type") == "auth":
+                raw_cred = str(first_msg.get("token") or "").strip()
+        except Exception:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized")
+            return
+
+    rec = store.verify_token(raw_cred)
+    if rec is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized")
+        return
+
+    # Require explicit handshake declaring device_id, workspace_id, and capability ceilings.
+    try:
+        hello = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+    except Exception:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Handshake timeout")
+        return
+    if not isinstance(hello, dict) or hello.get("type") != "hello":
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Expected hello frame")
+        return
+
+    hello_dev = coerce_text(mask_secrets(str(hello.get("device_id") or ""))).strip()[:96]
+    hello_ws = coerce_text(mask_secrets(str(hello.get("workspace_id") or ""))).strip()[:160]
+    if not hello_dev or not hello_ws:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing identity")
+        return
+    if rec.device_id != "*" and hello_dev != rec.device_id:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Device mismatch")
+        return
+    if not (rec.has_scope(f"task_pull:{hello_ws}") and rec.has_scope(f"result_push:{hello_ws}")):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Insufficient scope")
+        return
+
+    session = _EdgeSession(
+        websocket=websocket,
+        token_record=rec,
+        device_id=hello_dev,
+        workspace_id=hello_ws,
+        capabilities=dict(hello.get("capabilities") or {}),
+        protocol_version=str(hello.get("protocol_version") or "1.0")[:16],
+        client_version=str(hello.get("client_version") or "")[:32],
+    )
+    prev = _EDGE_SESSIONS.get(session.session_key)
+    if prev is not None and prev is not session:
+        prev.fail_all_pending("Superseded by newer edge connection")
+        with suppress(Exception):
+            await prev.websocket.close(code=1000, reason="Superseded")
+    _EDGE_SESSIONS[session.session_key] = session
+
+    try:
+        await session.send_frame(
+            {
+                "type": "hello_ack",
+                "device_id": session.device_id,
+                "workspace_id": session.workspace_id,
+                "server_version": "2.1.0",
+                "min_client_version": "2.1.0",
+                "heartbeat_s": int(_EDGE_PING_INTERVAL_S),
+            }
+        )
+        while True:
+            if store.is_revoked(rec.jti):
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Token revoked")
+                break
+            try:
+                frame = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=_EDGE_PING_INTERVAL_S
+                )
+            except asyncio.TimeoutError:
+                # Liveness deadline: a silent-but-open connection (suspended
+                # laptop, half-dead TCP) must not hold a session slot forever.
+                # 1001 (not 1008) so a resuming edge reconnects instead of
+                # treating this as a permanent token failure.
+                if time.time() - session.last_seen_at > 2 * _EDGE_PING_INTERVAL_S:
+                    await websocket.close(
+                        code=status.WS_1001_GOING_AWAY, reason="Heartbeat timeout"
+                    )
+                    break
+                if store.is_revoked(rec.jti):
+                    await websocket.close(
+                        code=status.WS_1008_POLICY_VIOLATION, reason="Token revoked"
+                    )
+                    break
+                await session.send_frame({"type": "ping", "ts": time.time()})
+                continue
+
+            session.last_seen_at = time.time()
+            if not isinstance(frame, dict):
+                continue
+            ftype = frame.get("type")
+            if ftype == "ping":
+                await session.send_frame({"type": "pong", "ts": frame.get("ts") or time.time()})
+            elif ftype == "pong":
+                continue
+            elif ftype in ("tool_result", "delegate_result"):
+                cid = str(frame.get("call_id") or "")
+                res_obj = frame.get("result")
+                if cid:
+                    session.resolve_pending(
+                        cid,
+                        res_obj
+                        if isinstance(res_obj, dict)
+                        else {"ok": False, "error": "Bad payload"},
+                    )
+            elif ftype in ("tool_error", "delegate_error"):
+                cid = str(frame.get("call_id") or "")
+                err_msg = coerce_text(mask_secrets(str(frame.get("error") or "Edge tool failed")))
+                if cid:
+                    session.resolve_pending(cid, {"ok": False, "error": err_msg})
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.debug("Edge websocket disconnected unexpectedly", exc_info=True)
+    finally:
+        session.fail_all_pending("Edge connection closed")
+        if _EDGE_SESSIONS.get(session.session_key) is session:
+            _EDGE_SESSIONS.pop(session.session_key, None)
 
 
 # ---------------------------------------------------------------------------
