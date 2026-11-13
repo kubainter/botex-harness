@@ -223,9 +223,9 @@ class EdgeDelegationPolicy:
                 data = json.loads(candidate.read_text(encoding="utf-8"))
             except Exception as exc:
                 _LOG.warning(
-                    "ignoring unreadable %s: %s",
+                    "ignoring unreadable %s (%s)",
                     candidate.name,
-                    mask_secrets(str(exc))[:120],
+                    type(exc).__name__,
                 )
                 return cls()
             return cls._from_document(data)

@@ -208,9 +208,9 @@ class EdgeCapabilities:
                     return cls.from_dict(json.loads(candidate.read_text(encoding="utf-8")))
             except Exception as exc:
                 _LOG.warning(
-                    "ignoring unreadable %s: %s",
+                    "ignoring unreadable %s (%s)",
                     candidate.name,
-                    mask_secrets(str(exc))[:120],
+                    type(exc).__name__,
                 )
         return cls()
 
@@ -615,7 +615,7 @@ class EdgeRunner:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._log.warning("edge connection failed: %s", mask_secrets(str(exc))[:200])
+                self._log.warning("edge connection failed (%s)", type(exc).__name__)
                 status = "error"
             if status == "unauthorized":
                 self._log.error(
