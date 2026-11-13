@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -72,6 +73,8 @@ class CuratorResult:
     links_applied: int = 0
     batches_processed: int = 0
     truth_clusters_compiled: int = 0
+    lessons_promoted: int = 0
+    lessons_promoted_global: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1662,6 +1665,363 @@ class CuratorService:
             "skipped": skipped_records,
         }
 
+    def _lesson_confirmation_counts(self) -> Dict[str, set]:
+        """Count distinct confirming task_ids per lesson from the analytics ledger.
+
+        A run confirms a lesson only when it is DONE, cited the lesson in
+        ``applied_lessons``, and finished with zero rollbacks. Malformed or
+        missing ledger lines are skipped safely.
+        """
+        confirmations: Dict[str, set] = {}
+        for ledger in self._analytics_ledger_paths():
+            try:
+                with ledger.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(entry, dict):
+                            continue
+                        if str(entry.get("status") or "") != "DONE":
+                            continue
+                        rb = entry.get("rollback_count")
+                        if isinstance(rb, bool):
+                            continue
+                        try:
+                            rb_count = int(rb or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if rb_count != 0:
+                            continue
+                        task_id = str(entry.get("task_id") or "").strip()
+                        if not task_id:
+                            continue
+                        applied = entry.get("applied_lessons")
+                        if not isinstance(applied, list):
+                            continue
+                        for raw_lesson in applied:
+                            lesson_id = str(raw_lesson or "").strip()
+                            if lesson_id:
+                                confirmations.setdefault(lesson_id, set()).add(task_id)
+            except OSError as exc:
+                logger.debug("Analytics ledger unreadable for lesson promotion: %s", exc)
+        return confirmations
+
+    def _analytics_ledger_paths(self) -> List[Path]:
+        """Resolve analytics ledger candidates: workspace default plus any
+        ``BOTEX_ANALYTICS_FILE``-configured ledger (or root ledger when the
+        workspace IS the configured root), keeping tmp_path tests isolated."""
+        paths: List[Path] = []
+        ws_ledger = self.ws_path / ".agent_analytics.jsonl"
+        if ws_ledger.is_file():
+            paths.append(ws_ledger)
+        try:
+            from botex.providers.analytics import _ledger_jsonl
+
+            cfg_ledger = _ledger_jsonl()
+        except Exception:
+            return paths
+        if cfg_ledger is None or not cfg_ledger.is_file():
+            return paths
+        try:
+            same_root = cfg_ledger.parent.resolve() == self.ws_path.resolve()
+        except OSError:
+            same_root = False
+        env_set = bool(os.environ.get("BOTEX_ANALYTICS_FILE"))
+        if same_root or env_set:
+            try:
+                resolved = cfg_ledger.resolve()
+            except OSError:
+                resolved = cfg_ledger
+            if resolved not in {p.resolve() for p in paths}:
+                paths.append(cfg_ledger)
+        return paths
+
+    def promote_candidate_lessons(
+        self,
+        min_confidence: float = 0.8,
+        min_confirmations: int = 2,
+        promote_to_global: bool = False,
+    ) -> Dict[str, Any]:
+        """Deterministically promote verified candidate lessons to active status.
+
+        Gate: confidence >= min_confidence AND >= min_confirmations distinct
+        DONE/zero-rollback analytics task_ids citing the lesson. Human-curated
+        or frozen notes are never mutated. With ``promote_to_global=True``,
+        already-verified active lessons are additionally copied into the
+        global swarm vault (opt-in; off by default).
+        """
+        from botex.tools.security import mask_secrets
+
+        # NaN/inf bypass the "< min_confidence" gate, so parameters and note
+        # confidence values are hard-validated before any promotion decision.
+        if (
+            isinstance(min_confidence, bool)
+            or not isinstance(min_confidence, (int, float))
+            or not math.isfinite(float(min_confidence))
+            or not 0.0 <= float(min_confidence) <= 1.0
+        ):
+            raise ValueError("min_confidence must be a finite number in [0.0, 1.0]")
+        if (
+            isinstance(min_confirmations, bool)
+            or not isinstance(min_confirmations, int)
+            or min_confirmations < 1
+        ):
+            raise ValueError("min_confirmations must be an int >= 1")
+
+        def _note_origin(meta: Dict[str, Any]) -> str:
+            # Frontmatter stores provenance as `source` (legacy) or `origin`.
+            return (
+                str((meta or {}).get("origin") or (meta or {}).get("source") or "").strip().lower()
+            )
+
+        def _entry_confidence(entry: Dict[str, Any]) -> Optional[float]:
+            conf_raw = entry.get("confidence")
+            if isinstance(conf_raw, bool) or conf_raw is None:
+                return None
+            try:
+                conf = float(conf_raw)
+            except (TypeError, ValueError):
+                return None
+            return conf if math.isfinite(conf) else None
+
+        try:
+            candidates_res = memory.search_memory(
+                workspace_dir=str(self.ws_path),
+                query="",
+                kind="lesson",
+                status="candidate",
+                scope="local",
+            )
+        except Exception as exc:
+            logger.warning("Lesson promotion: candidate search failed: %s", exc)
+            return {"candidates": 0, "promoted": 0, "promoted_global": 0}
+
+        candidates = candidates_res.get("memories", []) if isinstance(candidates_res, dict) else []
+        confirmations = self._lesson_confirmation_counts()
+        stats: Dict[str, Any] = {
+            "candidates": len(candidates),
+            "promoted": 0,
+            "promoted_global": 0,
+            "skipped_human": 0,
+            "promoted_ids": [],
+            "promoted_global_ids": [],
+        }
+
+        for entry in candidates:
+            if not isinstance(entry, dict):
+                continue
+            lesson_id = str(entry.get("id") or "").strip()
+            if not lesson_id:
+                continue
+            # Defensive kind gate: only lessons are ever lifecycle-managed here.
+            if str(entry.get("kind") or "lesson").strip().lower() != "lesson":
+                continue
+            tags = entry.get("tags") or []
+            if isinstance(tags, str):
+                tags = re.split(r"[\s,]+", tags)
+            tag_lows = {str(t).strip().lower() for t in tags if str(t).strip()}
+            # Human/frozen guard: never mutate or downgrade curated notes.
+            if "human-curated" in tag_lows or "frozen" in tag_lows:
+                stats["skipped_human"] += 1
+                continue
+            origin = ""
+            try:
+                full = memory.read_memory(
+                    workspace_dir=str(self.ws_path), memory_id=lesson_id, scope="local"
+                )
+                if full.get("ok"):
+                    origin = _note_origin(full.get("metadata", {}))
+            except Exception:
+                origin = ""
+            if origin == "human":
+                stats["skipped_human"] += 1
+                continue
+
+            confidence = _entry_confidence(entry)
+            if confidence is None:
+                continue
+            confirms = len(confirmations.get(lesson_id, set()))
+            if confidence < min_confidence or confirms < min_confirmations:
+                continue
+
+            promoted = memory.set_memory_status(
+                str(self.ws_path), lesson_id, "active", scope="local"
+            )
+            if not promoted:
+                logger.warning("Lesson promotion: status flip failed for %s", lesson_id)
+                continue
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            audit_line = (
+                f"- {today_str}: Curator promoted candidate -> active "
+                f"(confirmations: {confirms}, confidence: {confidence:.2f})."
+            )
+            try:
+                memory.patch_memory_section(
+                    workspace_dir=str(self.ws_path),
+                    memory_id=lesson_id,
+                    section="Timeline",
+                    new_content=audit_line,
+                    append=True,
+                    scope="local",
+                )
+            except Exception as exc:
+                logger.debug("Lesson promotion: Timeline audit append failed: %s", exc)
+            stats["promoted"] += 1
+            stats["promoted_ids"].append(lesson_id)
+            logger.info(
+                "Lesson promotion: %s -> active (confirms=%d, conf=%.2f)",
+                lesson_id,
+                confirms,
+                confidence,
+            )
+
+        if promote_to_global:
+            try:
+                actives_res = memory.search_memory(
+                    workspace_dir=str(self.ws_path),
+                    query="",
+                    kind="lesson",
+                    status="active",
+                    scope="local",
+                )
+            except Exception as exc:
+                logger.warning("Lesson promotion: active search failed: %s", exc)
+                actives_res = {}
+            actives = actives_res.get("memories", []) if isinstance(actives_res, dict) else []
+            # Unwrapped global lesson entries (search_memory content is raw,
+            # unlike read_memory's <untrusted_memory_content> wrapper) for
+            # reliable duplicate detection.
+            try:
+                global_res = memory.search_memory(
+                    workspace_dir=str(self.ws_path),
+                    query="",
+                    kind="lesson",
+                    status="all",
+                    scope="global",
+                )
+                global_entries = {
+                    str(g.get("id") or "").strip(): g
+                    for g in (
+                        global_res.get("memories", []) if isinstance(global_res, dict) else []
+                    )
+                    if isinstance(g, dict) and str(g.get("id") or "").strip()
+                }
+            except Exception as exc:
+                logger.warning("Lesson promotion: global search failed: %s", exc)
+                global_entries = {}
+            for entry in actives:
+                if not isinstance(entry, dict):
+                    continue
+                lesson_id = str(entry.get("id") or "").strip()
+                if not lesson_id:
+                    continue
+                if str(entry.get("kind") or "lesson").strip().lower() != "lesson":
+                    continue
+                confidence = _entry_confidence(entry)
+                if confidence is None:
+                    continue
+                confirms = len(confirmations.get(lesson_id, set()))
+                if confidence < min_confidence or confirms < min_confirmations:
+                    continue
+
+                tags = entry.get("tags") or []
+                if isinstance(tags, str):
+                    tags = re.split(r"[\s,]+", tags)
+                tag_lows = {str(t).strip().lower() for t in tags if str(t).strip()}
+                # Local human/frozen guard: curated notes never leave the
+                # workspace vault via automated escalation.
+                local_origin = ""
+                try:
+                    local_full = memory.read_memory(
+                        workspace_dir=str(self.ws_path), memory_id=lesson_id, scope="local"
+                    )
+                    if local_full.get("ok"):
+                        local_origin = _note_origin(local_full.get("metadata", {}))
+                except Exception:
+                    local_origin = ""
+                if local_origin == "human" or "human-curated" in tag_lows or "frozen" in tag_lows:
+                    stats["skipped_human"] += 1
+                    continue
+
+                raw_title = str(entry.get("title") or "")
+                raw_content = str(entry.get("content") or "")
+                # Secret guard: escalating a masked artifact to the shared
+                # swarm vault would publish a [REDACTED] stub, not knowledge.
+                if mask_secrets(raw_title) != raw_title or mask_secrets(raw_content) != raw_content:
+                    logger.warning(
+                        "Lesson promotion: %s skipped for global escalation (secret patterns detected)",
+                        lesson_id,
+                    )
+                    continue
+
+                existing = global_entries.get(lesson_id)
+                if existing is not None:
+                    ex_meta: Dict[str, Any] = {}
+                    try:
+                        gfull = memory.read_memory(
+                            workspace_dir=str(self.ws_path), memory_id=lesson_id, scope="global"
+                        )
+                        if gfull.get("ok"):
+                            ex_meta = gfull.get("metadata", {})
+                    except Exception:
+                        ex_meta = {}
+                    ex_origin = _note_origin(ex_meta)
+                    ex_tags_lows = {
+                        str(t).strip().lower()
+                        for t in (ex_meta.get("tags") or [])
+                        if str(t).strip()
+                    }
+                    # Never overwrite human/frozen notes or duplicate content.
+                    if (
+                        ex_origin == "human"
+                        or "human-curated" in ex_tags_lows
+                        or "frozen" in ex_tags_lows
+                    ):
+                        continue
+                    if (
+                        str(existing.get("title") or "").strip() == raw_title.strip()
+                        and str(existing.get("content") or "").strip() == raw_content.strip()
+                    ):
+                        continue
+
+                try:
+                    save_res = memory.save_memory(
+                        workspace_dir=str(self.ws_path),
+                        memory_id=lesson_id,
+                        title=mask_secrets(raw_title)[:120],
+                        content=mask_secrets(raw_content),
+                        kind="lesson",
+                        tags=[mask_secrets(str(t)) for t in tags if str(t).strip()],
+                        origin="curator",
+                        scope="global",
+                        project="swarm",
+                        status="active",
+                        confidence=confidence,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Lesson promotion: global save failed for %s: %s", lesson_id, exc
+                    )
+                    continue
+                if isinstance(save_res, dict) and save_res.get("ok"):
+                    stats["promoted_global"] += 1
+                    stats["promoted_global_ids"].append(lesson_id)
+                    logger.info("Lesson promotion: %s copied to global swarm vault", lesson_id)
+
+        if stats["promoted"] or stats["promoted_global"]:
+            logger.info(
+                "Lesson promotion summary: %d/%d candidates promoted, %d promoted to global.",
+                stats["promoted"],
+                stats["candidates"],
+                stats["promoted_global"],
+            )
+        return stats
+
     async def run(
         self,
         scope: str = "all",
@@ -1675,6 +2035,7 @@ class CuratorService:
         max_links: int = DEFAULT_MAX_LINKS_PER_RUN,
         apply_truth: Optional[bool] = None,
         max_clusters: int = 3,
+        promote_to_global: bool = False,
     ) -> CuratorResult:
         """Execute a full curation cycle."""
         start_time = time.time()
@@ -1766,9 +2127,9 @@ class CuratorService:
                     query="",
                     workspace_dir=str(self.ws_path),
                     scope=scope,
-                    limit=40,
                 )
-                recent_nodes = search_res.get("memories", [])
+                # search_memory has no `limit` kwarg; cap locally instead.
+                recent_nodes = search_res.get("memories", [])[:40]
             except Exception:
                 pass
 
@@ -1867,6 +2228,16 @@ class CuratorService:
             except Exception as exc:
                 logger.debug("dead-link reconciliation notice: %s", exc)
 
+            # 6d. Safe Lesson Promotion (candidate -> active, deterministic gate)
+            try:
+                promotion_stats = self.promote_candidate_lessons(
+                    promote_to_global=promote_to_global,
+                )
+            except Exception as exc:
+                logger.warning("Lesson promotion cycle notice: %s", exc)
+                promotion_stats = {"promoted": 0, "promoted_global": 0}
+            analysis["lesson_promotion"] = promotion_stats
+
             assess = _compute_health_assessment(health)
             duration = time.time() - start_time
 
@@ -1945,6 +2316,8 @@ class CuratorService:
                 "links_applied": links_applied,
                 "truth_clusters_compiled": truth_clusters_compiled,
                 "batches_processed": batches_processed,
+                "lessons_promoted": int(promotion_stats.get("promoted", 0)),
+                "lessons_promoted_global": int(promotion_stats.get("promoted_global", 0)),
                 "tier_used": tier_used,
                 "duration_seconds": round(duration, 3),
                 "lock_active": False,
@@ -1978,6 +2351,8 @@ class CuratorService:
                 links_applied=links_applied,
                 batches_processed=batches_processed,
                 truth_clusters_compiled=truth_clusters_compiled,
+                lessons_promoted=int(promotion_stats.get("promoted", 0)),
+                lessons_promoted_global=int(promotion_stats.get("promoted_global", 0)),
             )
 
         except Exception as exc:

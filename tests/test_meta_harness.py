@@ -16,7 +16,6 @@ import pytest
 from botex import memory
 from botex.catalog import FREE_TIER_FAILOVER_CHAIN, get_free_tier_failover_candidates
 from botex.meta_harness import (
-    InMemoryProposeProbe,
     classify_task_taxonomy,
     extract_meta_lesson,
     get_relevant_meta_lessons,
@@ -31,58 +30,6 @@ def test_classify_task_taxonomy():
     assert classify_task_taxonomy("Review and audit the code architecture") == "analysis"
     assert classify_task_taxonomy("Add a new feature for billing export") == "feature"
     assert classify_task_taxonomy("Random unspecified task") == "general"
-
-
-def test_in_memory_propose_probe_success():
-    orig = "def add(a, b):\n    return a + b\n"
-    search = "return a + b"
-    replace = "return int(a) + int(b)"
-
-    ok, new_code, err, lvl = InMemoryProposeProbe.probe_patch(
-        original_content=orig,
-        search_block=search,
-        replace_block=replace,
-        file_path="math_ops.py",
-    )
-    assert ok is True
-    assert err is None
-    assert "return int(a) + int(b)" in new_code
-    assert lvl > 0
-
-
-def test_in_memory_propose_probe_syntax_rejection():
-    orig = "def add(a, b):\n    return a + b\n"
-    # Introducing invalid syntax
-    search = "return a + b"
-    replace = "return int(a) + +"
-
-    ok, new_code, err, lvl = InMemoryProposeProbe.probe_patch(
-        original_content=orig,
-        search_block=search,
-        replace_block=replace,
-        file_path="math_ops.py",
-    )
-    assert ok is False
-    assert err is not None
-    assert "syntax error" in err.lower()
-    assert new_code == orig
-
-
-def test_in_memory_propose_probe_mismatch():
-    orig = "def add(a, b):\n    return a + b\n"
-    search = "def subtract(a, b):"
-    replace = "def sub(a, b):"
-
-    ok, new_code, err, lvl = InMemoryProposeProbe.probe_patch(
-        original_content=orig,
-        search_block=search,
-        replace_block=replace,
-        file_path="math_ops.py",
-    )
-    assert ok is False
-    assert err is not None
-    assert "could not be located" in err.lower()
-    assert new_code == orig
 
 
 def test_meta_lessons_extract_and_retrieve():

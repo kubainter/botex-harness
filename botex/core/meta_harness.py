@@ -3,11 +3,11 @@
 """
 BoteX Meta-Harness (Harness² Runtime Supervisor & Experience Store)
 ===================================================================
-Implements Google Harness² dual-level recursion:
-1. Task-Level Recursion: In-Memory Propose-Probe evaluation for syntax validation
-   and dry-run patch verification before committing disk changes.
-2. Harnessing-Level Recursion: Extraction and persistent injection of architectural
-   and model lessons (kind="lesson") across tasks via the BoteX Memory Vault.
+Implements Google Harness² harnessing-level recursion: extraction and
+persistent injection of architectural and model lessons (kind="lesson")
+across tasks via the BoteX Memory Vault. Task-level in-RAM patch probing
+(fuzzy apply + syntax validation before disk writes) is owned by
+botex.tools.patch_engine, not duplicated here.
 """
 
 from __future__ import annotations
@@ -16,15 +16,13 @@ import hashlib
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 try:
     from botex.memory.memory import read_memory, save_memory, search_memory
-    from botex.tools.patch_engine import apply_fuzzy_patch, validate_syntax
     from botex.tools.security import mask_secrets
 except (ImportError, ValueError):
     from memory import read_memory, save_memory, search_memory
-    from patch_engine import apply_fuzzy_patch, validate_syntax
     from security import mask_secrets
 
 
@@ -69,46 +67,6 @@ def classify_task_taxonomy(task: str, files: Optional[List[str]] = None) -> str:
         return _TAXONOMY_MAP["feature"]
 
     return _TAXONOMY_MAP["general"]
-
-
-class InMemoryProposeProbe:
-    """Task-level contrastive Propose-Probe evaluator running in RAM.
-
-    Evaluates proposed file patches against in-memory source copies before
-    allowing disk mutations, severing syntax errors at zero disk-rollback cost.
-    """
-
-    @staticmethod
-    def probe_patch(
-        original_content: str,
-        search_block: str,
-        replace_block: str,
-        file_path: str | Path,
-    ) -> Tuple[bool, str, Optional[str], int]:
-        """Probes a patch entirely in RAM.
-
-        Returns:
-            (success: bool, new_content: str, error_message: Optional[str], fuzzy_level: int)
-        """
-        success, patched_content, level = apply_fuzzy_patch(
-            original_content, search_block, replace_block
-        )
-        if not success:
-            err = (
-                f"Probe failed: search block could not be located in '{file_path}'. "
-                "Ensure search block exactly matches current code."
-            )
-            return False, original_content, err, 0
-
-        is_valid, syntax_err = validate_syntax(patched_content, Path(file_path))
-        if not is_valid:
-            err = (
-                f"Probe failed: syntax error detected in proposed changes ({syntax_err}). "
-                "Changes were rejected in RAM without touching disk."
-            )
-            return False, original_content, err, level
-
-        return True, patched_content, None, level
 
 
 # Lesson lifecycle confidences: candidates start low, recall only surfaces

@@ -10,6 +10,8 @@ Covers:
 4. Zero Memory Vault Bloat Invariant: Single living beacon note (curator_health_status.md).
 5. Persistence of run records (.botex/curator/runs/) and status (.botex/curator/status.json).
 6. Cloud Gateway API endpoints: GET /api/curator/status and POST /api/curator/run.
+7. Deterministic candidate lesson promotion (confidence + distinct-confirmation gates),
+   human/frozen protection, opt-in global escalation, and search limit regression.
 """
 
 from __future__ import annotations
@@ -661,3 +663,427 @@ def test_local_llm_inference_resolves_router_model_alias(tmp_path, monkeypatch):
     assert captured["extra_body"] == {
         "chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}
     }
+
+
+# ---------------------------------------------------------------------------
+# 7. Candidate Lesson Promotion & Global Escalation Gates (PR 3)
+# ---------------------------------------------------------------------------
+
+
+def _write_analytics_entry(
+    ws: Path,
+    task_id: str,
+    *,
+    status: str = "DONE",
+    rollback_count=0,
+    applied=(),
+) -> None:
+    """Append one run record to the workspace .agent_analytics.jsonl ledger."""
+    entry = {
+        "task_id": task_id,
+        "timestamp": "2026-11-13T00:00:00+00:00",
+        "model": "test/model",
+        "status": status,
+        "applied_lessons": list(applied),
+    }
+    if rollback_count is not None:
+        entry["rollback_count"] = rollback_count
+    with (ws / ".agent_analytics.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+
+def _seed_lesson(ws: Path, memory_id: str, *, status: str = "candidate", confidence=0.9, **over):
+    kw = {
+        "workspace_dir": str(ws),
+        "memory_id": memory_id,
+        "title": f"Lesson {memory_id}",
+        "content": f"Body of {memory_id}.",
+        "kind": "lesson",
+        "status": status,
+        "confidence": confidence,
+    }
+    kw.update(over)
+    res = save_memory(**kw)
+    assert res["ok"] is True
+
+
+def _write_raw_lesson(ws: Path, memory_id: str, frontmatter: str, body: str) -> None:
+    """Plant a vault note bypassing save_memory sanitization (manual-edit simulation)."""
+    mem_dir = ws / ".botex" / "memory"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / f"{memory_id}.md").write_text(
+        f"---\n{frontmatter}\n---\n\n{body}\n", encoding="utf-8"
+    )
+
+
+def _clear_llm_env(monkeypatch) -> None:
+    for var in (
+        "NVIDIA_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_API_FREE_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "LOCAL_LLM_URL",
+        "TELEGRAM_BOT_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_promote_candidate_lessons_threshold_gating(tmp_path):
+    """Promotion requires confidence >= 0.8 AND >= 2 distinct DONE/zero-rollback
+    task_ids in the analytics ledger — duplicates, failures, rollbacks and
+    boolean rollback_count never confirm."""
+    ws = tmp_path / "ws_gate"
+    ws.mkdir(parents=True)
+
+    # Same task_id logged 3x -> only 1 distinct confirmation -> stays candidate.
+    _seed_lesson(ws, "lesson_dup")
+    for _ in range(3):
+        _write_analytics_entry(ws, "task_same", applied=("lesson_dup",))
+
+    # Failed / rolled-back runs never confirm.
+    _seed_lesson(ws, "lesson_failed")
+    _write_analytics_entry(ws, "task_f1", applied=("lesson_failed",))
+    _write_analytics_entry(ws, "task_f2", status="FAILED", applied=("lesson_failed",))
+    _write_analytics_entry(ws, "task_f3", rollback_count=2, applied=("lesson_failed",))
+
+    # Boolean rollback_count is rejected outright (falsy-bool edge case).
+    _seed_lesson(ws, "lesson_boolrb")
+    _write_analytics_entry(ws, "task_b1", applied=("lesson_boolrb",))
+    _write_analytics_entry(ws, "task_b2", rollback_count=True, applied=("lesson_boolrb",))
+
+    # Two distinct confirmations but confidence below the 0.8 gate.
+    _seed_lesson(ws, "lesson_lowconf", confidence=0.5)
+    _write_analytics_entry(ws, "task_c1", applied=("lesson_lowconf",))
+    _write_analytics_entry(ws, "task_c2", applied=("lesson_lowconf",))
+
+    # Fully eligible control: 2 distinct DONE runs (rollback_count omitted on one).
+    _seed_lesson(ws, "lesson_ok")
+    _write_analytics_entry(ws, "task_d1", applied=("lesson_ok",))
+    _write_analytics_entry(ws, "task_d2", rollback_count=None, applied=("lesson_ok",))
+
+    service = CuratorService(workspace_dir=str(ws))
+    stats = service.promote_candidate_lessons()
+
+    assert stats["candidates"] == 5
+    assert stats["promoted"] == 1
+    assert stats["promoted_ids"] == ["lesson_ok"]
+    assert stats["skipped_human"] == 0
+
+    for mid in ("lesson_dup", "lesson_failed", "lesson_boolrb", "lesson_lowconf"):
+        note = read_memory(workspace_dir=str(ws), memory_id=mid, scope="local")
+        assert note["ok"] is True
+        assert note["metadata"]["status"] == "candidate"
+
+    promoted = read_memory(workspace_dir=str(ws), memory_id="lesson_ok", scope="local")
+    assert promoted["metadata"]["status"] == "active"
+    raw = (ws / ".botex" / "memory" / "lesson_ok.md").read_text(encoding="utf-8")
+    assert "## Timeline" in raw
+    assert "Curator promoted candidate -> active" in raw
+
+
+def test_promote_candidate_lessons_param_validation(tmp_path):
+    """min_confidence / min_confirmations are hard-validated before any mutation:
+    bool, NaN, non-finite, out-of-range and non-int values raise ValueError."""
+    service = CuratorService(workspace_dir=str(tmp_path))
+    for bad_conf in (True, float("nan"), float("inf"), -0.1, 1.5, "0.9"):
+        with pytest.raises(ValueError):
+            service.promote_candidate_lessons(min_confidence=bad_conf)
+    for bad_n in (True, 0, -1, 1.5, "2"):
+        with pytest.raises(ValueError):
+            service.promote_candidate_lessons(min_confirmations=bad_n)
+
+    # Boundaries stay valid on an empty vault.
+    assert service.promote_candidate_lessons(min_confidence=0, min_confirmations=1)["promoted"] == 0
+    assert service.promote_candidate_lessons(min_confidence=1, min_confirmations=2)["promoted"] == 0
+
+
+def test_promote_candidate_lessons_nonfinite_confidence(tmp_path, monkeypatch):
+    """NaN/inf confidence on the note itself never promotes — NaN would bypass a
+    naive ``< min_confidence`` comparison, so it is rejected explicitly."""
+    from botex.ops.curator import curator_service as cs
+
+    ws = tmp_path / "ws_nan"
+    ws.mkdir(parents=True)
+    _seed_lesson(ws, "lesson_real", confidence=0.9)
+    for lid in ("lesson_real", "lesson_nan", "lesson_inf"):
+        _write_analytics_entry(ws, f"task_{lid}_a", applied=(lid,))
+        _write_analytics_entry(ws, f"task_{lid}_b", applied=(lid,))
+
+    fake_candidates = {
+        "memories": [
+            {"id": "lesson_real", "kind": "lesson", "confidence": 0.9, "tags": []},
+            {"id": "lesson_nan", "kind": "lesson", "confidence": float("nan"), "tags": []},
+            {"id": "lesson_inf", "kind": "lesson", "confidence": float("inf"), "tags": []},
+        ]
+    }
+    monkeypatch.setattr(cs.memory, "search_memory", lambda *a, **k: dict(fake_candidates))
+
+    service = CuratorService(workspace_dir=str(ws))
+    stats = service.promote_candidate_lessons()
+    assert stats["promoted"] == 1
+    assert stats["promoted_ids"] == ["lesson_real"]
+
+    note = read_memory(workspace_dir=str(ws), memory_id="lesson_real", scope="local")
+    assert note["metadata"]["status"] == "active"
+
+
+def test_promote_candidate_lessons_human_frozen_protection(tmp_path):
+    """human / human-curated / frozen candidates are never mutated by promotion."""
+    ws = tmp_path / "ws_human"
+    ws.mkdir(parents=True)
+
+    _seed_lesson(ws, "lesson_src_human", origin="human", confidence=0.95)
+    _seed_lesson(ws, "lesson_tag_human", tags=["human-curated"], confidence=0.95)
+    _seed_lesson(ws, "lesson_frozen", tags=["frozen"], confidence=0.95)
+    _write_raw_lesson(
+        ws,
+        "lesson_meta_human",
+        "title: Meta Human\nkind: lesson\nstatus: candidate\nconfidence: 0.95\n"
+        "origin: human\nsource: botex\ntimestamp: 2026-11-13T00:00:00+00:00",
+        "Body of lesson_meta_human.",
+    )
+    _seed_lesson(ws, "lesson_clean", confidence=0.9)
+
+    for lid in (
+        "lesson_src_human",
+        "lesson_tag_human",
+        "lesson_frozen",
+        "lesson_meta_human",
+        "lesson_clean",
+    ):
+        _write_analytics_entry(ws, f"task_{lid}_a", applied=(lid,))
+        _write_analytics_entry(ws, f"task_{lid}_b", applied=(lid,))
+
+    service = CuratorService(workspace_dir=str(ws))
+    stats = service.promote_candidate_lessons()
+
+    assert stats["candidates"] == 5
+    assert stats["promoted"] == 1
+    assert stats["promoted_ids"] == ["lesson_clean"]
+    assert stats["skipped_human"] == 4
+
+    for mid in ("lesson_src_human", "lesson_tag_human", "lesson_frozen", "lesson_meta_human"):
+        note = read_memory(workspace_dir=str(ws), memory_id=mid, scope="local")
+        assert note["metadata"]["status"] == "candidate"
+
+
+def test_promote_to_global_optin_dedup_and_secret_skip(tmp_path):
+    """promote_to_global=True escalates verified actives into scope=global /
+    project=swarm / origin=curator. Exact-duplicate global content is not
+    re-saved, and lessons containing secret patterns are never copied."""
+    ws = tmp_path / "ws_global"
+    ws.mkdir(parents=True)
+
+    _seed_lesson(ws, "lesson_cand", confidence=0.9)
+    for t in ("task_g1", "task_g2"):
+        _write_analytics_entry(ws, t, applied=("lesson_cand",))
+
+    # Pre-existing ACTIVE lesson with an unmasked secret in its body must never
+    # reach the shared swarm vault.
+    _write_raw_lesson(
+        ws,
+        "lesson_secret",
+        "title: Secret\nkind: lesson\nstatus: active\nconfidence: 0.9\nsource: botex\n"
+        "timestamp: 2026-11-13T00:00:00+00:00\ntags:\n  - test",
+        "Send sk-abcdefghij0123456789 upstream.",
+    )
+    for t in ("task_s1", "task_s2"):
+        _write_analytics_entry(ws, t, applied=("lesson_secret",))
+
+    service = CuratorService(workspace_dir=str(ws))
+    stats = service.promote_candidate_lessons(promote_to_global=True)
+
+    assert stats["promoted"] == 1
+    assert stats["promoted_ids"] == ["lesson_cand"]
+    assert stats["promoted_global"] == 1
+    assert stats["promoted_global_ids"] == ["lesson_cand"]
+
+    g = read_memory(workspace_dir=str(ws), memory_id="lesson_cand", scope="global")
+    assert g["ok"] is True
+    assert g["metadata"]["source"] == "curator"
+    assert g["metadata"]["project"] == "swarm"
+    assert g["metadata"]["status"] == "active"
+
+    g_secret = read_memory(workspace_dir=str(ws), memory_id="lesson_secret", scope="global")
+    assert g_secret["ok"] is False
+
+    # Second pass: exact-duplicate global content is not re-saved.
+    stats2 = service.promote_candidate_lessons(promote_to_global=True)
+    assert stats2["promoted"] == 0
+    assert stats2["promoted_global"] == 0
+    assert stats2["promoted_global_ids"] == []
+
+
+def test_promote_to_global_never_overwrites_human_note(tmp_path):
+    """Global notes with human/frozen provenance are never overwritten by
+    automated escalation, even when the local lesson meets every gate."""
+    ws = tmp_path / "ws_ghuman"
+    ws.mkdir(parents=True)
+
+    for mid, over in (
+        ("lesson_hum", {"origin": "human"}),
+        ("lesson_froz", {"tags": ["frozen"]}),
+    ):
+        res = save_memory(
+            workspace_dir=str(ws),
+            memory_id=mid,
+            title=f"Human {mid}",
+            content=f"Human curated global body {mid}.",
+            kind="lesson",
+            status="active",
+            confidence=0.9,
+            scope="global",
+            **over,
+        )
+        assert res["ok"] is True
+        _seed_lesson(ws, mid, status="active", confidence=0.95, content=f"Local body {mid}.")
+        _write_analytics_entry(ws, f"task_{mid}_a", applied=(mid,))
+        _write_analytics_entry(ws, f"task_{mid}_b", applied=(mid,))
+
+    service = CuratorService(workspace_dir=str(ws))
+    stats = service.promote_candidate_lessons(promote_to_global=True)
+
+    assert stats["promoted"] == 0  # locals were already active
+    assert stats["promoted_global"] == 0
+    assert stats["promoted_global_ids"] == []
+
+    hum = read_memory(workspace_dir=str(ws), memory_id="lesson_hum", scope="global")
+    assert hum["metadata"]["source"] == "human"
+    assert "Human curated global body" in hum["content"]
+    assert "Local body" not in hum["content"]
+
+    froz = read_memory(workspace_dir=str(ws), memory_id="lesson_froz", scope="global")
+    froz_tags = [str(t).lower() for t in (froz["metadata"].get("tags") or [])]
+    assert "frozen" in froz_tags
+    assert "Human curated global body" in froz["content"]
+    assert "Local body" not in froz["content"]
+
+
+@pytest.mark.anyio
+async def test_curator_run_promotes_candidate_lesson(tmp_path, monkeypatch):
+    """run() promotes eligible candidates and reflects it in CuratorResult;
+    global escalation stays off by default (no global leakage)."""
+    _clear_llm_env(monkeypatch)
+    ws = tmp_path / "ws_run"
+    ws.mkdir(parents=True)
+    _seed_lesson(ws, "lesson_run", confidence=0.9)
+    _write_analytics_entry(ws, "task_r1", applied=("lesson_run",))
+    _write_analytics_entry(ws, "task_r2", applied=("lesson_run",))
+
+    service = CuratorService(workspace_dir=str(ws))
+    res = await service.run(scope="local", force=True)
+
+    assert res.status == "COMPLETED"
+    assert res.lessons_promoted == 1
+    assert res.lessons_promoted_global == 0
+
+    note = read_memory(workspace_dir=str(ws), memory_id="lesson_run", scope="local")
+    assert note["metadata"]["status"] == "active"
+    raw = (ws / ".botex" / "memory" / "lesson_run.md").read_text(encoding="utf-8")
+    assert "## Timeline" in raw
+    assert "Curator promoted candidate -> active" in raw
+
+    g = read_memory(workspace_dir=str(ws), memory_id="lesson_run", scope="global")
+    assert g["ok"] is False
+
+
+@pytest.mark.anyio
+async def test_curator_run_promote_to_global_optin(tmp_path, monkeypatch):
+    """run(promote_to_global=True) escalates verified actives to the global
+    swarm vault; a second pass must not re-save identical content."""
+    _clear_llm_env(monkeypatch)
+    ws = tmp_path / "ws_rung"
+    ws.mkdir(parents=True)
+    _seed_lesson(ws, "lesson_rung", confidence=0.9)
+    _write_analytics_entry(ws, "task_g1", applied=("lesson_rung",))
+    _write_analytics_entry(ws, "task_g2", applied=("lesson_rung",))
+
+    service = CuratorService(workspace_dir=str(ws))
+    res = await service.run(scope="local", force=True, promote_to_global=True)
+    assert res.status == "COMPLETED"
+    assert res.lessons_promoted == 1
+    assert res.lessons_promoted_global == 1
+
+    g = read_memory(workspace_dir=str(ws), memory_id="lesson_rung", scope="global")
+    assert g["ok"] is True
+    assert g["metadata"]["source"] == "curator"
+    assert g["metadata"]["project"] == "swarm"
+
+    res2 = await service.run(scope="local", force=True, promote_to_global=True)
+    assert res2.lessons_promoted == 0
+    assert res2.lessons_promoted_global == 0
+
+
+@pytest.mark.anyio
+async def test_curator_run_search_memory_limit40_regression(tmp_path, monkeypatch):
+    """Regression: run() must not pass ``limit=40`` to search_memory (the kwarg
+    does not exist — TypeError was swallowed into empty recent_nodes). The
+    recent-node sample is capped locally with ``[:40]`` instead."""
+    from botex.ops.curator import curator_service as cs
+
+    _clear_llm_env(monkeypatch)
+    ws = tmp_path / "ws_limit"
+    ws.mkdir(parents=True)
+
+    fake_nodes = [
+        {
+            "id": f"node_{i:02d}",
+            "title": f"Node {i}",
+            "kind": "context",
+            "project": "",
+            "confidence": 1.0,
+            "mtime": 0.0,
+        }
+        for i in range(50)
+    ]
+    search_calls = []
+    real_search = cs.memory.search_memory
+
+    def _spy_search(*args, **kwargs):
+        search_calls.append(dict(kwargs))
+        # Only the run() recent-nodes lookup (bare query="") is faked.
+        if kwargs.get("query") == "" and "kind" not in kwargs and "status" not in kwargs:
+            return {"ok": True, "count": len(fake_nodes), "memories": list(fake_nodes)}
+        return real_search(*args, **kwargs)
+
+    monkeypatch.setattr(cs.memory, "search_memory", _spy_search)
+
+    # Force all_vault_nodes empty so recent_nodes is the visible batch input.
+    monkeypatch.setattr(
+        cs.memory,
+        "find_graph_health",
+        lambda **_: {
+            "total_nodes": 0,
+            "total_edges": 0,
+            "orphans": [],
+            "broken_links": [],
+            "all_nodes": [],
+            "is_healthy": True,
+        },
+    )
+
+    captured = {}
+    real_build = cs._build_project_batches
+
+    def _spy_build(*args, **kwargs):
+        captured["all_nodes"] = kwargs.get("all_nodes")
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(cs, "_build_project_batches", _spy_build)
+
+    service = CuratorService(workspace_dir=str(ws))
+    res = await service.run(scope="local", force=True)
+
+    assert res.status == "COMPLETED"
+    assert search_calls, "run() never called search_memory"
+    assert all("limit" not in c for c in search_calls)
+
+    step5 = [
+        c for c in search_calls if c.get("query") == "" and "kind" not in c and "status" not in c
+    ]
+    assert step5, "recent-nodes lookup never ran"
+    assert all(set(c) <= {"query", "workspace_dir", "scope"} for c in step5)
+
+    assert captured["all_nodes"] is not None
+    assert [n["id"] for n in captured["all_nodes"]] == [n["id"] for n in fake_nodes[:40]]
