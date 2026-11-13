@@ -127,7 +127,8 @@ try:
         is_infra_failure,
         pack_lessons_within_budget,
     )
-    from .state import InFlightTaskState
+    from .state import InFlightTaskState, clear_inflight_checkpoint, save_inflight_checkpoint
+    from .tool_executor import LocalToolExecutor, ToolExecutor
 except (ImportError, ValueError):
     from analytics import (
         calculate_cost_usd,
@@ -225,7 +226,8 @@ except (ImportError, ValueError):
         resolve_safe_path,
         zdr_enforced,
     )
-    from state import InFlightTaskState
+    from state import InFlightTaskState, clear_inflight_checkpoint, save_inflight_checkpoint
+    from tool_executor import LocalToolExecutor, ToolExecutor
 
     from skills import format_skills_prompt_block, triage_skills_for_task
 
@@ -318,6 +320,13 @@ BOTEX_TOOLS = [
                         "description": "Exact lines of code to find and replace.",
                     },
                     "replace_block": {"type": "string", "description": "New replacement code."},
+                    "base_sha256": {
+                        "type": "string",
+                        "description": (
+                            "Optional SHA-256 hex digest of the file from the prior read "
+                            "for optimistic concurrency."
+                        ),
+                    },
                 },
                 "required": ["path", "search_block", "replace_block"],
                 "additionalProperties": False,
@@ -971,8 +980,24 @@ def prune_tool_history(
                         if data_norm != norm_target and str(data.get("path", "")) != target_path:
                             continue
                     lines_range = (
-                        f"{data.get('start', 1)}-{data.get('end', data.get('total_lines', '?'))}"
+                        f"{data.get('start', 1)}-"
+                        f"{data.get('end', data.get('total_lines', data.get('total_file_lines', '?')))}"
                     )
+                    sha_at_read = (
+                        data.get("file_sha256")
+                        or data.get("sha256_at_read")
+                        or (
+                            data.get("pruned_stub", {}).get("sha256_at_read")
+                            if isinstance(data.get("pruned_stub"), dict)
+                            else ""
+                        )
+                        or ""
+                    )
+                    data["pruned_stub"] = {
+                        "path": str(data.get("path") or target_path),
+                        "sha256_at_read": sha_at_read,
+                        "lines_range": lines_range,
+                    }
                     data["content"] = (
                         f"[File content pruned: {target_path} lines {lines_range} — changes already applied]"
                     )
@@ -1040,6 +1065,25 @@ def prune_tool_history(
                 except Exception:
                     continue
                 if isinstance(data, dict) and "content" in data:
+                    lines_range = (
+                        f"{data.get('start', 1)}-"
+                        f"{data.get('end', data.get('total_lines', data.get('total_file_lines', '?')))}"
+                    )
+                    sha_at_read = (
+                        data.get("file_sha256")
+                        or data.get("sha256_at_read")
+                        or (
+                            data.get("pruned_stub", {}).get("sha256_at_read")
+                            if isinstance(data.get("pruned_stub"), dict)
+                            else ""
+                        )
+                        or ""
+                    )
+                    data["pruned_stub"] = {
+                        "path": str(data.get("path") or p),
+                        "sha256_at_read": sha_at_read,
+                        "lines_range": lines_range,
+                    }
                     data["content"] = (
                         f"[File content pruned: {p} — read earlier, folded to preserve "
                         "context window. Re-read with read_file_lines if needed.]"
@@ -1112,6 +1156,7 @@ async def run_botex_task(
     progress_cb: Optional[Callable[[str], None]] = None,
     handoff_context: str = "",
     files_read_out: Optional[set] = None,
+    tool_executor: Optional[ToolExecutor] = None,
 ) -> Dict[str, Any]:
     """Run one task, using configured model failover only before any write."""
     workspace_dir = resolve_workspace(workspace_dir)
@@ -1178,7 +1223,10 @@ async def run_botex_task(
             max_task_duration_s = int(engine_setting("max_duration_s", max_duration_s) or 0)
         except (TypeError, ValueError):
             max_task_duration_s = 0
-    in_flight_state = InFlightTaskState(goal=task)
+    chain_task_id = str(uuid.uuid4())[:8]
+    in_flight_state = InFlightTaskState(task_id=chain_task_id, goal=task)
+    if Path(workspace_dir).is_dir():
+        save_inflight_checkpoint(in_flight_state, workspace_dir)
     handoff_context = ""
     current_prov = _zdr_pname
 
@@ -1242,6 +1290,9 @@ async def run_botex_task(
                     _extra_once_kw["plugin_vault"] = plugin_vault
                     if routed_tier:
                         _extra_once_kw["routed_tier"] = routed_tier
+                    if tool_executor is not None:
+                        _extra_once_kw["tool_executor"] = tool_executor
+                    _extra_once_kw["in_flight_state"] = in_flight_state
                     last_result = await _run_botex_task_once(
                         task=task,
                         files=files,
@@ -1324,6 +1375,8 @@ async def run_botex_task(
                         )
                 if last_result.get("rollback_reason"):
                     in_flight_state.record_rollback_reason(str(last_result["rollback_reason"]))
+                if Path(workspace_dir).is_dir():
+                    save_inflight_checkpoint(in_flight_state, workspace_dir)
                 handoff_context = in_flight_state.format_handoff_context()
 
                 # Fallback policy: a mutated workspace is handed to the next
@@ -1419,6 +1472,8 @@ async def run_botex_task(
                 snapshot_manager.end_task(attempt_task_id)
     finally:
         await plugin_stacks.aclose()
+        if Path(workspace_dir).is_dir():
+            clear_inflight_checkpoint(chain_task_id, workspace_dir)
 
     last_result["attempts"] = attempts
     if routed_tier:
@@ -1670,6 +1725,8 @@ async def _run_botex_task_once_impl(
     plugin_vault: Optional[PluginVaultManager] = None,
     routed_tier: str = "",
     contrastive_out: Optional[Dict[str, Any]] = None,
+    tool_executor: Optional[ToolExecutor] = None,
+    in_flight_state: Optional[InFlightTaskState] = None,
 ) -> Dict[str, Any]:
     """
     Executes an autonomous coding task in workspace_dir using the BoteX engine.
@@ -2227,6 +2284,28 @@ async def _run_botex_task_once_impl(
     net_request_limit = int(net_cfg.get("max_requests_per_task", 5))
     verify_attempts = 0
     verify_passed = not verify_command
+    active_executor: ToolExecutor = tool_executor or LocalToolExecutor(
+        net_policy=effective_net_policy,
+        net_allowed_hosts=net_hosts,
+        net_allowed_urls=net_urls,
+        net_timeout_s=int(net_cfg.get("timeout_s", 20)),
+        net_max_bytes=int(net_cfg.get("max_bytes", 200000)),
+        net_max_redirects=int(net_cfg.get("max_redirects", 3)),
+        exec_allowlist_fn=lambda: load_config().get("exec", {}),
+        handlers={
+            "get_file_outline": get_file_outline,
+            "read_file_lines": read_file_lines,
+            "read_file": read_file,
+            "apply_patch": apply_patch,
+            "create_file": create_file,
+            "delete_file": delete_file,
+            "move_file": move_file,
+            "list_dir": list_dir,
+            "read_url": read_url,
+            "run_command": run_command,
+        },
+    )
+    last_read_sha256: Dict[str, str] = {}
 
     # 4. Construct Initial Messages with Ephemeral Cache Control
     initial_user_prompt = f"TASK: {task}\n"
@@ -3467,6 +3546,9 @@ async def _run_botex_task_once_impl(
         no_tool_strikes = 0
         turn_actions = []
         turn_mutated = False
+
+        # Stage 1: parse & run policy gates; batch consecutive READ_ONLY_TOOLS calls.
+        prepared_calls: List[Dict[str, Any]] = []
         for tc in nresp.tool_calls:
             fn_name = tc.name
             raw_args = tc.arguments
@@ -3478,54 +3560,230 @@ async def _run_botex_task_once_impl(
                 if isinstance(parsed_args, dict):
                     args, args_valid, args_kind = parsed_args, True, ""
                 else:
-                    # Small models often send the bare value ("." or a
-                    # list) instead of the declared object schema.
                     args, args_valid, args_kind = ({}, False, type(parsed_args).__name__)
 
-            # Full-args signature — path-only signatures collapse distinct
-            # actions (every run_command, every move_file, different patch
-            # bodies) into "identical" turns.
             turn_actions.append(fn_name + ":" + json.dumps(args, sort_keys=True, default=str)[:200])
-            tool_result = {"ok": False, "error": "Unknown tool"}
-
-            try:
-                if not args_valid:
-                    bad_tool_calls += 1
-                    if args_kind == "invalid JSON":
-                        # finish_reason="length" can clip tool-call arguments
-                        # mid-JSON — report it explicitly so the model resends
-                        # a smaller call instead of retrying the same payload.
-                        tool_result = {
-                            "ok": False,
-                            "error": (
-                                "Tool arguments are not valid JSON (likely "
-                                f"truncated at max_tokens={effective_max_tokens})."
-                                f" Resend as {_tool_signature(fn_name)}, splitting"
-                                " large payloads into smaller writes."
-                            ),
-                        }
-                    else:
-                        tool_result = {
-                            "ok": False,
-                            "error": (
-                                f"Tool arguments must be a JSON object, e.g. "
-                                f"{_tool_signature(fn_name)} — got "
-                                f"{args_kind}."
-                            ),
-                        }
-                elif fn_name not in _TOOL_ARG_SCHEMAS and fn_name not in dynamic_plugins:
-                    bad_tool_calls += 1
-                    tool_result = {
+            entry: Dict[str, Any] = {
+                "tc": tc,
+                "fn_name": fn_name,
+                "args": args,
+                "preset_result": None,
+                "kind": "preset",
+            }
+            if not args_valid:
+                bad_tool_calls += 1
+                if args_kind == "invalid JSON":
+                    entry["preset_result"] = {
                         "ok": False,
                         "error": (
-                            f"Unknown tool '{fn_name}'. Available tools: {', '.join(tool_names)}."
+                            "Tool arguments are not valid JSON (likely "
+                            f"truncated at max_tokens={effective_max_tokens})."
+                            f" Resend as {_tool_signature(fn_name)}, splitting"
+                            " large payloads into smaller writes."
                         ),
                     }
-                elif fn_name in dynamic_plugins:
-                    # Dynamic plugin invocation — subprocess execution gated by
-                    # CAP_EXEC (fail-closed if the capability is absent). A
-                    # plugin synthesized and agency-approved this run stays
-                    # callable even under confirm-gated exec.
+                else:
+                    entry["preset_result"] = {
+                        "ok": False,
+                        "error": (
+                            f"Tool arguments must be a JSON object, e.g. "
+                            f"{_tool_signature(fn_name)} — got "
+                            f"{args_kind}."
+                        ),
+                    }
+            elif fn_name not in _TOOL_ARG_SCHEMAS and fn_name not in dynamic_plugins:
+                bad_tool_calls += 1
+                entry["preset_result"] = {
+                    "ok": False,
+                    "error": f"Unknown tool '{fn_name}'. Available tools: {', '.join(tool_names)}.",
+                }
+            elif fn_name in dynamic_plugins:
+                entry["kind"] = "dynamic_plugin"
+            else:
+                op_path = (
+                    args.get("path")
+                    or args.get("src_path")
+                    or args.get("command")
+                    or args.get("url")
+                    or ""
+                )
+                try:
+                    agency_error = await async_check_agency_policy(
+                        fn_name,
+                        caps,
+                        confirm_fn,
+                        op_path,
+                        params=args,
+                        task_id=task_id,
+                        approval_policy=effective_approval_policy,
+                    )
+                except TaskAbortedError as abort_exc:
+                    agency_error = f"Operation '{fn_name}' was aborted by operator: {abort_exc}"
+
+                if agency_error:
+                    if "aborted" in agency_error.lower():
+                        rollback_verified = _rollback_attempt(task_id, files_touched)
+                        rollback_count += 1
+                        ct_out["rollback_count"] = rollback_count
+                        ct_out["rollback_reason"] = "rollback: task aborted by operator"
+                        rolled_ok = rollback_verified is not False
+                        duration = time.time() - start_time
+                        summary_text = f"Task aborted by operator during '{fn_name}'. " + (
+                            "Changes were rolled back."
+                            if rolled_ok
+                            else "Rollback could NOT be verified — inspect the workspace."
+                        )
+                        log_entry = log_run(
+                            task_id=task_id,
+                            model=model,
+                            provider=provider_name,
+                            duration_s=duration,
+                            steps=turn,
+                            prompt_tokens=total_prompt_tokens,
+                            completion_tokens=total_completion_tokens,
+                            cached_tokens=total_cached_tokens,
+                            files_touched=list(files_touched),
+                            lines_added=lines_added_total,
+                            lines_removed=lines_removed_total,
+                            status="ABORTED",
+                            summary=summary_text,
+                            **attribution_kw,
+                            syntax_rejections=syntax_rejections,
+                            rollback_count=rollback_count,
+                        )
+                        print_run_summary(log_entry)
+                        return {
+                            "ok": False,
+                            "task_id": task_id,
+                            "status": "ABORTED",
+                            "failure_kind": "task_aborted",
+                            "summary": summary_text,
+                            "message": summary_text,
+                            "files_touched": ([] if rolled_ok else sorted(files_touched)),
+                            "rollback_verified": rollback_verified,
+                            "exec_ran": exec_ran,
+                            "steps": turn,
+                            "duration_s": round(duration, 2),
+                            "cost_usd": log_entry.get("cost_usd", 0.0),
+                        }
+                    entry["preset_result"] = {"ok": False, "error": agency_error}
+                elif fn_name == "read_url":
+                    if net_requests >= net_request_limit:
+                        entry["preset_result"] = {
+                            "ok": False,
+                            "error": f"Network request limit reached ({net_request_limit}).",
+                        }
+                    else:
+                        net_requests += 1
+                        entry["kind"] = "readonly"
+                elif fn_name in READ_ONLY_TOOLS:
+                    entry["kind"] = "readonly"
+                else:
+                    entry["kind"] = "sequential"
+            prepared_calls.append(entry)
+
+        # Stage 2: execute consecutive READ_ONLY_TOOLS in batches and mutations sequentially.
+        def _record_readonly_result(
+            fn_name: str, args: Dict[str, Any], res: Dict[str, Any]
+        ) -> None:
+            if not (isinstance(res, dict) and res.get("ok")):
+                return
+            if fn_name in ("get_file_outline", "read_file_lines", "read_file"):
+                path_arg = args.get("path", "")
+                norm_p = _normalize_track_path(path_arg, root_path)
+                if norm_p:
+                    files_read.add(norm_p)
+                    if res.get("file_sha256"):
+                        last_read_sha256[norm_p] = str(res["file_sha256"])
+
+        def _finalize_tool_result(tc: Any, fn_name: str, tool_result: Dict[str, Any]) -> None:
+            nonlocal ok_tool_calls, turn_mutated, fold_pending
+            if isinstance(tool_result, dict) and tool_result.get("ok"):
+                ok_tool_calls += 1
+                if fn_name not in READ_ONLY_TOOLS and fn_name != "run_command":
+                    turn_mutated = True
+            _emit(
+                progress_cb,
+                EventKind.TOOL_CALL,
+                tool=fn_name,
+                ok=bool(isinstance(tool_result, dict) and tool_result.get("ok")),
+                turn=turn,
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(tool_result, ensure_ascii=False),
+                }
+            )
+            if fn_name in ("run_command", "read_file", "read_file_lines"):
+                prune_tool_history(
+                    messages,
+                    "",
+                    root=root_path,
+                    readonly=(resolved_mode == "readonly"),
+                )
+                fold_pending = True
+
+        idx = 0
+        while idx < len(prepared_calls):
+            item = prepared_calls[idx]
+            if item["kind"] == "readonly":
+                batch_entries: List[Dict[str, Any]] = []
+                while idx < len(prepared_calls) and prepared_calls[idx]["kind"] == "readonly":
+                    batch_entries.append(prepared_calls[idx])
+                    idx += 1
+                batch_payload = [
+                    {
+                        "tool_name": b["fn_name"],
+                        "args": b["args"],
+                        "call_id": b["tc"].id,
+                    }
+                    for b in batch_entries
+                ]
+                try:
+                    batch_results = await active_executor.execute_batch(
+                        batch_payload, root_path, task_id=task_id
+                    )
+                except Exception as e:
+                    bad_tool_calls += len(batch_entries)
+                    batch_results = [
+                        {
+                            "ok": False,
+                            "error": (
+                                f"Tool execution error: {e} "
+                                f"(expected {_tool_signature(b['fn_name'])})"
+                            ),
+                        }
+                        for b in batch_entries
+                    ]
+                # A misbehaving executor must not starve tool_call_ids of
+                # responses — the next provider call would reject the history.
+                batch_results = (
+                    list(batch_results)[: len(batch_entries)]
+                    if isinstance(batch_results, (list, tuple))
+                    else []
+                )
+                if len(batch_results) < len(batch_entries):
+                    bad_tool_calls += len(batch_entries) - len(batch_results)
+                    batch_results += [
+                        {"ok": False, "error": "Tool executor returned a malformed batch result."}
+                    ] * (len(batch_entries) - len(batch_results))
+                for b, res in zip(batch_entries, batch_results):
+                    _record_readonly_result(b["fn_name"], b["args"], res)
+                    _finalize_tool_result(b["tc"], b["fn_name"], res)
+                continue
+
+            idx += 1
+            tc = item["tc"]
+            fn_name = item["fn_name"]
+            args = item["args"]
+            tool_result: Dict[str, Any] = {"ok": False, "error": "Unknown tool"}
+
+            try:
+                if item["kind"] == "preset":
+                    tool_result = item["preset_result"]
+                elif item["kind"] == "dynamic_plugin":
                     _pdef = dynamic_plugins.get(fn_name)
                     _exec_ok = CAP_EXEC in caps or (
                         _pdef is not None
@@ -3547,292 +3805,169 @@ async def _run_botex_task_once_impl(
                             allow_net=CAP_NET in caps,
                             approval_confirmed=CAP_NET in caps,
                         )
-                else:
-                    # Execute Agency Middleware (OWASP LLM03: Excessive Agency)
-                    op_path = (
-                        args.get("path")
-                        or args.get("src_path")
-                        or args.get("command")
-                        or args.get("url")
-                        or ""
+                elif fn_name == "read_scratchpad":
+                    tool_result = await active_executor.execute(
+                        "read_scratchpad", args, root_path, task_id=task_id, call_id=tc.id
                     )
-                    try:
-                        agency_error = await async_check_agency_policy(
-                            fn_name,
-                            caps,
-                            confirm_fn,
-                            op_path,
-                            params=args,
-                            task_id=task_id,
-                            approval_policy=effective_approval_policy,
-                        )
-                    except TaskAbortedError as abort_exc:
-                        agency_error = f"Operation '{fn_name}' was aborted by operator: {abort_exc}"
-
-                    if agency_error:
-                        if "aborted" in agency_error.lower():
-                            rollback_verified = _rollback_attempt(task_id, files_touched)
-                            rollback_count += 1
-                            ct_out["rollback_count"] = rollback_count
-                            ct_out["rollback_reason"] = "rollback: task aborted by operator"
-                            rolled_ok = rollback_verified is not False
-                            duration = time.time() - start_time
-                            summary_text = f"Task aborted by operator during '{fn_name}'. " + (
-                                "Changes were rolled back."
-                                if rolled_ok
-                                else "Rollback could NOT be verified — inspect the workspace."
-                            )
-                            log_entry = log_run(
-                                task_id=task_id,
-                                model=model,
-                                provider=provider_name,
-                                duration_s=duration,
-                                steps=turn,
-                                prompt_tokens=total_prompt_tokens,
-                                completion_tokens=total_completion_tokens,
-                                cached_tokens=total_cached_tokens,
-                                files_touched=list(files_touched),
-                                lines_added=lines_added_total,
-                                lines_removed=lines_removed_total,
-                                status="ABORTED",
-                                summary=summary_text,
-                                **attribution_kw,
-                                syntax_rejections=syntax_rejections,
-                                rollback_count=rollback_count,
-                            )
-                            print_run_summary(log_entry)
-                            return {
-                                "ok": False,
-                                "task_id": task_id,
-                                "status": "ABORTED",
-                                "failure_kind": "task_aborted",
-                                "summary": summary_text,
-                                "message": summary_text,
-                                "files_touched": ([] if rolled_ok else sorted(files_touched)),
-                                "rollback_verified": rollback_verified,
-                                "exec_ran": exec_ran,
-                                "steps": turn,
-                                "duration_s": round(duration, 2),
-                                "cost_usd": log_entry.get("cost_usd", 0.0),
-                            }
-
-                        # Rejected by Agency Middleware
-                        tool_result = {"ok": False, "error": agency_error}
+                elif fn_name == "apply_patch":
+                    target_p = args.get("path", "")
+                    norm_p = _normalize_track_path(target_p, root_path)
+                    if require_read_before_write and (not norm_p or norm_p not in files_read):
+                        tool_result = {
+                            "ok": False,
+                            "error": (
+                                f"apply_patch on '{target_p}' rejected — file not read this task. "
+                                "Call get_file_outline(path) or read_file_lines(path, ...) first."
+                            ),
+                        }
                     else:
-                        if fn_name == "get_file_outline":
-                            path_arg = args.get("path", "")
-                            tool_result = get_file_outline(path_arg, root_path)
-                            if tool_result.get("ok"):
-                                norm_p = _normalize_track_path(path_arg, root_path)
-                                if norm_p:
-                                    files_read.add(norm_p)
-                        elif fn_name == "read_file_lines":
-                            path_arg = args.get("path", "")
-                            tool_result = read_file_lines(
-                                path_arg,
-                                int(args.get("start", 1)),
-                                int(args.get("end", 50)),
-                                root_path,
-                            )
-                            if tool_result.get("ok"):
-                                norm_p = _normalize_track_path(path_arg, root_path)
-                                if norm_p:
-                                    files_read.add(norm_p)
-                        elif fn_name == "read_file":
-                            path_arg = args.get("path", "")
-                            tool_result = read_file(path_arg, root_path)
-                            if tool_result.get("ok"):
-                                norm_p = _normalize_track_path(path_arg, root_path)
-                                if norm_p:
-                                    files_read.add(norm_p)
-                        elif fn_name == "read_scratchpad":
-                            from botex.context_guard import read_scratchpad as _read_pad
-
-                            tool_result = _read_pad(args.get("memory_id", ""), cwd=root_path)
-                        elif fn_name == "apply_patch":
-                            target_p = args.get("path", "")
-                            norm_p = _normalize_track_path(target_p, root_path)
-                            if require_read_before_write and (
-                                not norm_p or norm_p not in files_read
+                        patch_args = dict(args)
+                        if patch_args.get("base_sha256") is None and norm_p in last_read_sha256:
+                            patch_args["base_sha256"] = last_read_sha256[norm_p]
+                        tool_result = await active_executor.execute(
+                            "apply_patch", patch_args, root_path, task_id=task_id, call_id=tc.id
+                        )
+                        for _retry in range(3):
+                            if not (
+                                isinstance(tool_result, dict)
+                                and tool_result.get("status") == "conflict"
                             ):
-                                tool_result = {
-                                    "ok": False,
-                                    "error": (
-                                        f"apply_patch on '{target_p}' rejected — file not read this task. "
-                                        "Call get_file_outline(path) or read_file_lines(path, ...) first."
-                                    ),
-                                }
-                            else:
-                                tool_result = apply_patch(
-                                    target_p,
-                                    args.get("search_block", ""),
-                                    args.get("replace_block", ""),
-                                    root_path,
-                                    task_id=task_id,
+                                break
+                            await asyncio.sleep(0.02 * (2**_retry))
+                            cur_sha = tool_result.get("current_sha256")
+                            if cur_sha:
+                                patch_args["base_sha256"] = cur_sha
+                                if norm_p:
+                                    last_read_sha256[norm_p] = str(cur_sha)
+                            tool_result = await active_executor.execute(
+                                "apply_patch",
+                                patch_args,
+                                root_path,
+                                task_id=task_id,
+                                call_id=tc.id,
+                            )
+                        if tool_result.get("ok"):
+                            files_touched.add(target_p)
+                            if norm_p:
+                                files_read.add(norm_p)
+                                new_sha = tool_result.get("file_sha256") or tool_result.get(
+                                    "new_sha256"
                                 )
-                                if tool_result.get("ok"):
-                                    files_touched.add(target_p)
-                                    if norm_p:
-                                        files_read.add(norm_p)
-                                    lines_added_total += tool_result.get("lines_added", 0)
-                                    lines_removed_total += tool_result.get("lines_removed", 0)
-                                    # Context Pruning: prune verbose reads for this file
-                                    prune_tool_history(messages, target_p)
-                                    fold_pending = True
+                                if new_sha:
+                                    last_read_sha256[norm_p] = str(new_sha)
                                 else:
-                                    err_str = str(tool_result.get("error", ""))
-                                    if "syntax" in err_str.lower() or "rejected" in err_str.lower():
-                                        syntax_rejections += 1
-                                        last_syntax_error = err_str[:150]
-                                        sr_detail = ct_out.setdefault(
-                                            "syntax_rejections_detail", []
-                                        )
-                                        if len(sr_detail) < 5:
-                                            sr_detail.append(
-                                                {
-                                                    "file": str(target_p or ""),
-                                                    "error": last_syntax_error,
-                                                }
-                                            )
-                        elif fn_name == "create_file":
-                            target_p = args.get("path", "")
-                            norm_p = _normalize_track_path(target_p, root_path)
-                            try:
-                                target_exists = resolve_safe_path(root_path, target_p).is_file()
-                            except Exception:
-                                target_exists = False
-                            if (
-                                require_read_before_write
-                                and target_exists
-                                and (not norm_p or norm_p not in files_read)
-                            ):
-                                tool_result = {
-                                    "ok": False,
-                                    "error": (
-                                        f"create_file on '{target_p}' rejected — file not read this task. "
-                                        "Call get_file_outline(path) or read_file_lines(path, ...) first."
-                                    ),
-                                }
-                            else:
-                                tool_result = create_file(
-                                    target_p, args.get("content", ""), root_path, task_id=task_id
-                                )
-                                if tool_result.get("ok"):
-                                    files_touched.add(target_p)
-                                    if norm_p:
-                                        files_read.add(norm_p)
-                                    lines_added_total += tool_result.get("lines_written", 0)
-                                    prune_tool_history(messages, target_p)
-                                    fold_pending = True
-                        elif fn_name in ("delete_file", "move_file"):
-                            op_path = args.get("path") or args.get("src_path", "")
-                            if fn_name == "delete_file":
-                                tool_result = delete_file(op_path, root_path, task_id=task_id)
-                                if tool_result.get("ok"):
-                                    files_touched.add(op_path)
-                            else:
-                                src_p = args.get("src_path", "")
-                                dst_p = args.get("dst_path", "")
-                                tool_result = move_file(src_p, dst_p, root_path, task_id=task_id)
-                                if tool_result.get("ok"):
-                                    files_touched.update([src_p, dst_p])
-                                    norm_dst = _normalize_track_path(dst_p, root_path)
-                                    if norm_dst:
-                                        files_read.add(norm_dst)
-                        elif fn_name == "read_url":
-                            if net_requests >= net_request_limit:
-                                tool_result = {
-                                    "ok": False,
-                                    "error": (
-                                        f"Network request limit reached ({net_request_limit})."
-                                    ),
-                                }
-                            else:
-                                net_requests += 1
-                                requested_max = int(
-                                    args.get("max_bytes", net_cfg.get("max_bytes", 200000))
-                                )
-                                tool_result = await read_url(
-                                    args.get("url", ""),
-                                    policy=effective_net_policy,
-                                    allowed_hosts=net_hosts,
-                                    allowed_urls=net_urls,
-                                    timeout_s=int(net_cfg.get("timeout_s", 20)),
-                                    max_bytes=max(
-                                        1, min(requested_max, int(net_cfg.get("max_bytes", 200000)))
-                                    ),
-                                    max_redirects=int(net_cfg.get("max_redirects", 3)),
-                                )
-                        elif fn_name == "run_command":
-                            cmd = args.get("command", "")
-                            exec_cfg = load_config().get("exec", {})
-                            exec_ran = True
-                            tool_result = await run_command(
-                                cmd,
-                                root_path,
-                                allowlist=exec_cfg.get("allowlist", []),
-                                deny_args=exec_cfg.get("deny_args", []),
-                                timeout_s=int(exec_cfg.get("timeout_s", 120)),
-                                max_output_bytes=int(exec_cfg.get("max_output_bytes", 20000)),
-                            )
-                        elif fn_name == "synthesize_plugin":
-                            exec_ran = True
-                            tool_result, _new_pdef = await _synthesize_plugin_tool(
-                                args,
-                                plugin_registry=plugin_registry,
-                                plugin_vault=plugin_vault,
-                                runner=plugin_runner,
-                                allow_net=CAP_NET in caps,
-                                approval_confirmed=CAP_NET in caps,
-                            )
-                            if _new_pdef is not None:
-                                dynamic_plugins[_new_pdef.name] = _new_pdef
-                                _new_decl = _new_pdef.to_openai_tool()
-                                if _new_decl["function"]["name"] not in _TOOL_ARG_SCHEMAS:
-                                    active_tools.append(_new_decl)
-                                    tool_names.append(_new_pdef.name)
-                        elif fn_name == "list_dir":
-                            tool_result = list_dir(args.get("path", "."), root_path)
+                                    last_read_sha256.pop(norm_p, None)
+                            lines_added_total += tool_result.get("lines_added", 0)
+                            lines_removed_total += tool_result.get("lines_removed", 0)
+                            prune_tool_history(messages, target_p, root=root_path)
+                            fold_pending = True
+                        else:
+                            err_str = str(tool_result.get("error", ""))
+                            if "syntax" in err_str.lower() or "rejected" in err_str.lower():
+                                syntax_rejections += 1
+                                last_syntax_error = err_str[:150]
+                                sr_detail = ct_out.setdefault("syntax_rejections_detail", [])
+                                if len(sr_detail) < 5:
+                                    sr_detail.append(
+                                        {
+                                            "file": str(target_p or ""),
+                                            "error": last_syntax_error,
+                                        }
+                                    )
+                elif fn_name == "create_file":
+                    target_p = args.get("path", "")
+                    norm_p = _normalize_track_path(target_p, root_path)
+                    try:
+                        target_exists = resolve_safe_path(root_path, target_p).is_file()
+                    except Exception:
+                        target_exists = False
+                    if (
+                        require_read_before_write
+                        and target_exists
+                        and (not norm_p or norm_p not in files_read)
+                    ):
+                        tool_result = {
+                            "ok": False,
+                            "error": (
+                                f"create_file on '{target_p}' rejected — file not read this task. "
+                                "Call get_file_outline(path) or read_file_lines(path, ...) first."
+                            ),
+                        }
+                    else:
+                        tool_result = await active_executor.execute(
+                            "create_file", args, root_path, task_id=task_id, call_id=tc.id
+                        )
+                        if tool_result.get("ok"):
+                            files_touched.add(target_p)
+                            if norm_p:
+                                files_read.add(norm_p)
+                                last_read_sha256.pop(norm_p, None)
+                            lines_added_total += tool_result.get("lines_written", 0)
+                            prune_tool_history(messages, target_p, root=root_path)
+                            fold_pending = True
+                elif fn_name == "delete_file":
+                    op_path = args.get("path", "")
+                    tool_result = await active_executor.execute(
+                        "delete_file", args, root_path, task_id=task_id, call_id=tc.id
+                    )
+                    if tool_result.get("ok"):
+                        files_touched.add(op_path)
+                        norm_p = _normalize_track_path(op_path, root_path)
+                        if norm_p:
+                            last_read_sha256.pop(norm_p, None)
+                elif fn_name == "move_file":
+                    src_p = args.get("src_path", "")
+                    dst_p = args.get("dst_path", "")
+                    tool_result = await active_executor.execute(
+                        "move_file", args, root_path, task_id=task_id, call_id=tc.id
+                    )
+                    if tool_result.get("ok"):
+                        files_touched.update([src_p, dst_p])
+                        norm_src = _normalize_track_path(src_p, root_path)
+                        norm_dst = _normalize_track_path(dst_p, root_path)
+                        if norm_src:
+                            last_read_sha256.pop(norm_src, None)
+                        if norm_dst:
+                            files_read.add(norm_dst)
+                            last_read_sha256.pop(norm_dst, None)
+                elif fn_name == "run_command":
+                    exec_ran = True
+                    tool_result = await active_executor.execute(
+                        "run_command", args, root_path, task_id=task_id, call_id=tc.id
+                    )
+                elif fn_name == "synthesize_plugin":
+                    exec_ran = True
+                    tool_result, _new_pdef = await _synthesize_plugin_tool(
+                        args,
+                        plugin_registry=plugin_registry,
+                        plugin_vault=plugin_vault,
+                        runner=plugin_runner,
+                        allow_net=CAP_NET in caps,
+                        approval_confirmed=CAP_NET in caps,
+                    )
+                    if _new_pdef is not None:
+                        dynamic_plugins[_new_pdef.name] = _new_pdef
+                        _new_decl = _new_pdef.to_openai_tool()
+                        if _new_decl["function"]["name"] not in _TOOL_ARG_SCHEMAS:
+                            active_tools.append(_new_decl)
+                            tool_names.append(_new_pdef.name)
             except Exception as e:
-                # A malformed tool call must not crash the whole run — the
-                # error goes back to the model so it can correct itself.
-                # The signature echo tells it the expected arg shape; a bare
-                # exception like "'str' object has no attribute 'get'" reads
-                # as "the tool is broken" to small models.
                 bad_tool_calls += 1
                 tool_result = {
                     "ok": False,
-                    "error": (f"Tool execution error: {e} (expected {_tool_signature(fn_name)})"),
+                    "error": f"Tool execution error: {e} (expected {_tool_signature(fn_name)})",
                 }
 
-            if isinstance(tool_result, dict) and tool_result.get("ok"):
-                ok_tool_calls += 1
-                if fn_name not in READ_ONLY_TOOLS and fn_name != "run_command":
-                    turn_mutated = True
+            _finalize_tool_result(tc, fn_name, tool_result)
 
-            _emit(
-                progress_cb,
-                EventKind.TOOL_CALL,
-                tool=fn_name,
-                ok=bool(isinstance(tool_result, dict) and tool_result.get("ok")),
-                turn=turn,
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": json.dumps(tool_result, ensure_ascii=False),
-                }
-            )
-            # Context-Guard: fold older command output / (readonly) old reads
-            if fn_name in ("run_command", "read_file", "read_file_lines"):
-                prune_tool_history(
-                    messages,
-                    "",
-                    root=root_path,
-                    readonly=(resolved_mode == "readonly"),
-                )
-                fold_pending = True
+        if in_flight_state is not None and turn % 3 == 0 and root_path.is_dir():
+            for fp in sorted(files_read):
+                in_flight_state.add_inspected_file(fp)
+            for fp in sorted(files_touched):
+                cleaned_fp = str(fp).replace("\\", "/").strip()
+                if cleaned_fp and cleaned_fp not in in_flight_state.mutated_files:
+                    in_flight_state.mutated_files.append(cleaned_fp)
+            save_inflight_checkpoint(in_flight_state, root_path)
 
         # OWASP LLM06: Unbounded Consumption: Loop / Stagnation Detection
         # Prevent the model from burning API budget by retrying failing mutations
