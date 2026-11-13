@@ -32,6 +32,7 @@ try:
     from botex.providers.analytics import (
         calculate_cost_usd,
         check_budget_limit,
+        get_shadow_routing_advice,
         is_free_model,
         log_run,
         print_run_summary,
@@ -131,6 +132,7 @@ except (ImportError, ValueError):
     from analytics import (
         calculate_cost_usd,
         check_budget_limit,
+        get_shadow_routing_advice,
         is_free_model,
         log_run,
         print_run_summary,
@@ -2284,6 +2286,30 @@ async def _run_botex_task_once_impl(
         attribution_kw["applied_skills"] = applied_skills
     if applied_lesson_ids:
         attribution_kw["applied_lessons"] = applied_lesson_ids
+    # Layer C (Shadow Meta-Routing): log best historical model per (recipe, taxonomy)
+    # purely as advisory telemetry without overriding active model selection.
+    try:
+        shadow_advice = await asyncio.to_thread(
+            get_shadow_routing_advice,
+            recipe=recipe or "",
+            taxonomy=tax,
+            actual_model=model,
+        )
+        if shadow_advice:
+            attribution_kw["shadow_recommended_model"] = shadow_advice["recommended_model"]
+            _emit(
+                progress_cb,
+                EventKind.SHADOW_ROUTING,
+                recipe=shadow_advice["recipe"],
+                taxonomy=shadow_advice["taxonomy"],
+                recommended_model=shadow_advice["recommended_model"],
+                actual_model=shadow_advice["actual_model"],
+                diverged=shadow_advice["diverged"],
+                sample_count=shadow_advice["sample_count"],
+                shadow_only=True,
+            )
+    except Exception:
+        pass
     if CAP_NET in caps:
         if effective_net_policy == "public" and not (net_hosts or net_urls):
             access_note = (

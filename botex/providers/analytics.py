@@ -10,10 +10,11 @@ Provides rich CLI reporting and snapshot storage inspection.
 import gzip
 import hashlib
 import json
+import math
 import os
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -319,6 +320,7 @@ def log_run(
     applied_lessons: Optional[List[str]] = None,
     syntax_rejections: int = 0,
     rollback_count: int = 0,
+    shadow_recommended_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record a completed BoteX run into the ledger.
 
@@ -393,6 +395,8 @@ def log_run(
         entry["syntax_rejections"] = int(syntax_rejections)
     if rollback_count and not isinstance(rollback_count, bool):
         entry["rollback_count"] = int(rollback_count)
+    if shadow_recommended_model:
+        entry["shadow_recommended_model"] = _attr_text(shadow_recommended_model)
 
     _append_ledger(entry)
     return entry
@@ -402,13 +406,20 @@ def _effective_record_cost_usd(
     record: Dict[str, Any],
     prov_cfgs: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> float:
-    """Return a record's USD cost, clamping free-tier models/providers to 0.0."""
+    """Return a record's USD cost, clamping free-tier and malformed costs to 0.0."""
     m = str(record.get("model") or "")
     pname = (record.get("provider") or "").strip().lower()
     pcfg = (prov_cfgs or {}).get(pname) if pname and isinstance(prov_cfgs, dict) else None
     if is_free_model(m, pcfg, pname):
         return 0.0
-    return float(record.get("cost_usd", 0.0) or 0.0)
+    raw = record.get("cost_usd", 0.0)
+    if isinstance(raw, bool) or raw is None:
+        return 0.0
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    return val if math.isfinite(val) and val >= 0.0 else 0.0
 
 
 def check_budget_limit(daily_limit_usd: float) -> tuple[bool, float]:
@@ -436,17 +447,11 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
     than ``now - days``. Returns JSON-serializable totals, per-model breakdown,
     daily time series, and the most recent runs.
     """
-    cutoff = datetime.now() - timedelta(days=days) if days and days > 0 else None
-    filtered: List[Dict[str, Any]] = []
-    for r in records:
-        if cutoff is None:
-            filtered.append(r)
-            continue
-        try:
-            if datetime.fromisoformat(r.get("timestamp", "")) >= cutoff:
-                filtered.append(r)
-        except (TypeError, ValueError):
-            continue
+    cutoff_naive = datetime.now() - timedelta(days=days) if days and days > 0 else None
+    cutoff_utc = datetime.now(timezone.utc) - timedelta(days=days) if days and days > 0 else None
+    filtered: List[Dict[str, Any]] = [
+        r for r in records if _within_days(r.get("timestamp"), cutoff_naive, cutoff_utc)
+    ]
 
     by_model: Dict[str, Dict[str, Any]] = {}
     daily: Dict[str, Dict[str, Any]] = {}
@@ -571,6 +576,204 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
         "daily": [daily[k] for k in sorted(daily)],
         "recent": recent_out,
     }
+
+
+_SHADOW_COST_FLOOR_USD = 0.0001
+
+_SHADOW_TAXONOMY_MAP: Dict[str, str] = {
+    "bugfix": "bugfix",
+    "refactor": "refactor",
+    "test": "test",
+    "infra": "infra",
+    "analysis": "analysis",
+    "feature": "feature",
+    "general": "general",
+    "security": "security",
+    "memory": "memory",
+}
+
+
+def _norm_shadow_recipe(recipe: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9_.-]+", "", str(recipe or "").strip().lower())[:64]
+
+
+def _within_days(
+    ts_raw: Any, cutoff_naive: Optional[datetime], cutoff_utc: Optional[datetime]
+) -> bool:
+    if cutoff_naive is None or cutoff_utc is None:
+        return True
+    try:
+        parsed = datetime.fromisoformat(str(ts_raw or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc) >= cutoff_utc
+    return parsed >= cutoff_naive
+
+
+def recommend_shadow_model(
+    records: List[Dict[str, Any]],
+    *,
+    recipe: str = "",
+    taxonomy: str = "general",
+    min_samples: int = 10,
+    days: Optional[int] = 30,
+) -> Optional[Dict[str, Any]]:
+    """Compute an advisory-only model recommendation per ``(recipe, taxonomy)``.
+
+    Layer C guarantees:
+    - Shadow-only: never mutates or overrides active routing decisions.
+    - Respects a positive cost floor (``_SHADOW_COST_FLOOR_USD``) for ``:free``
+      or zero-cost providers so cost weighting stays finite and reliability dominates.
+    - Zero hard-ban: poor performers remain rankable and are never denylisted.
+    """
+    if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 1:
+        raise ValueError("min_samples must be an int >= 1")
+
+    target_recipe = _norm_shadow_recipe(recipe)
+    target_tax = _SHADOW_TAXONOMY_MAP.get(str(taxonomy or "").strip().lower(), "general")
+
+    cutoff_naive = None
+    cutoff_utc = None
+    if (
+        days is not None
+        and not isinstance(days, bool)
+        and isinstance(days, (int, float))
+        and days > 0
+    ):
+        cutoff_naive = datetime.now() - timedelta(days=float(days))
+        cutoff_utc = datetime.now(timezone.utc) - timedelta(days=float(days))
+
+    matched: List[Dict[str, Any]] = []
+    for r in records or []:
+        if not isinstance(r, dict):
+            continue
+        if not _within_days(r.get("timestamp"), cutoff_naive, cutoff_utc):
+            continue
+        r_tax = _SHADOW_TAXONOMY_MAP.get(
+            str(r.get("taxonomy") or "general").strip().lower(), "general"
+        )
+        r_rec = _norm_shadow_recipe(r.get("recipe"))
+        if r_tax == target_tax and r_rec == target_recipe:
+            if str(r.get("model") or "").strip():
+                matched.append(r)
+
+    if len(matched) < min_samples:
+        return None
+
+    prov_cfgs: Dict[str, Dict[str, Any]] = {}
+    per_model: Dict[str, Dict[str, Any]] = {}
+    for r in matched:
+        m = str(r.get("model") or "").strip()
+        pname = str(r.get("provider") or "").strip().lower()
+        if pname and pname not in prov_cfgs:
+            try:
+                _pn, pcfg = _resolve_provider(pname)
+                prov_cfgs[pname] = pcfg if isinstance(pcfg, dict) else {}
+            except Exception:
+                prov_cfgs[pname] = {}
+        cost = _effective_record_cost_usd(r, prov_cfgs)
+        st = str(r.get("status") or "").strip().upper()
+        rb = r.get("rollback_count")
+        sr = r.get("syntax_rejections")
+        rb_val = int(rb) if isinstance(rb, int) and not isinstance(rb, bool) and rb > 0 else 0
+        sr_val = int(sr) if isinstance(sr, int) and not isinstance(sr, bool) and sr > 0 else 0
+
+        agg = per_model.setdefault(
+            m,
+            {
+                "model": m,
+                "runs": 0,
+                "done_runs": 0,
+                "total_cost_usd": 0.0,
+                "rollbacks": 0,
+                "syntax_rejections": 0,
+                "is_free": is_free_model(m, prov_cfgs.get(pname) if pname else None, pname),
+            },
+        )
+        agg["runs"] += 1
+        if st == "DONE":
+            agg["done_runs"] += 1
+        agg["total_cost_usd"] += max(0.0, float(cost))
+        agg["rollbacks"] += rb_val
+        agg["syntax_rejections"] += sr_val
+
+    if not per_model:
+        return None
+
+    scored: List[Dict[str, Any]] = []
+    for agg in per_model.values():
+        runs = agg["runs"]
+        done_runs = agg["done_runs"]
+        smoothed_success = (done_runs + 1.0) / (runs + 2.0)
+        avg_cost = agg["total_cost_usd"] / runs
+        floored_cost = max(avg_cost, _SHADOW_COST_FLOOR_USD)
+        quality_penalty = min(
+            0.25,
+            0.05 * (agg["rollbacks"] / runs) + 0.01 * (agg["syntax_rejections"] / runs),
+        )
+        cost_bonus = 0.05 * (_SHADOW_COST_FLOOR_USD / floored_cost)
+        score = round(smoothed_success - quality_penalty + cost_bonus, 6)
+        scored.append(
+            {
+                "model": agg["model"],
+                "runs": runs,
+                "done_runs": done_runs,
+                "done_rate": round(done_runs / runs, 4),
+                "avg_cost_usd": round(avg_cost, 6),
+                "floored_cost_usd": round(floored_cost, 6),
+                "is_free": agg["is_free"],
+                "score": score,
+            }
+        )
+
+    scored.sort(key=lambda item: (-item["score"], -item["done_runs"], -item["runs"], item["model"]))
+    best = scored[0]
+    return {
+        "shadow_only": True,
+        "actual_override": False,
+        "recipe": target_recipe,
+        "taxonomy": target_tax,
+        "recommended_model": best["model"],
+        "score": best["score"],
+        "done_rate": best["done_rate"],
+        "avg_cost_usd": best["avg_cost_usd"],
+        "cost_floor_usd": _SHADOW_COST_FLOOR_USD,
+        "is_free": best["is_free"],
+        "sample_count": len(matched),
+        "model_samples": best["runs"],
+        "candidates_considered": len(scored),
+        "candidates": scored[:5],
+        "hard_banned_models": [],
+    }
+
+
+def get_shadow_routing_advice(
+    recipe: str = "",
+    taxonomy: str = "general",
+    *,
+    actual_model: str = "",
+    records: Optional[List[Dict[str, Any]]] = None,
+    min_samples: int = 10,
+    days: Optional[int] = 30,
+) -> Optional[Dict[str, Any]]:
+    """Evaluate shadow meta-routing recommendation from the ledger without altering routing."""
+    source_records = load_analytics() if records is None else records
+    rec = recommend_shadow_model(
+        source_records,
+        recipe=recipe,
+        taxonomy=taxonomy,
+        min_samples=min_samples,
+        days=days,
+    )
+    if rec is None:
+        return None
+    clean_actual = coerce_text(
+        mask_secrets(re.sub(r"[\r\n]+", " ", str(actual_model or "").strip()))
+    )[:64]
+    rec["actual_model"] = clean_actual
+    rec["diverged"] = bool(clean_actual and rec["recommended_model"] != clean_actual)
+    return rec
 
 
 # ---------------------------------------------------------------------------

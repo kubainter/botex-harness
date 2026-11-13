@@ -33,6 +33,7 @@ class EventKind:
     DEVIN_UPDATE = "devin_update"
     WAITING_FOR_INPUT = "waiting_for_input"
     TASK_STATE = "task_state"
+    SHADOW_ROUTING = "shadow_routing"
     ERROR = "error"
 
 

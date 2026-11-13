@@ -75,6 +75,7 @@ class CuratorResult:
     truth_clusters_compiled: int = 0
     lessons_promoted: int = 0
     lessons_promoted_global: int = 0
+    proposals_generated: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -2022,6 +2023,318 @@ class CuratorService:
             )
         return stats
 
+    async def crystallize_skill_proposals(
+        self,
+        min_cluster_size: int = 5,
+        max_proposals: int = 3,
+    ) -> Dict[str, Any]:
+        """Draft PR-only SKILL.md + recipe proposals from recurring active lessons.
+
+        Never edits live ``skills/`` or ``botex/skills/recipes/`` directories.
+        Drafts are written solely into ``<ws>/.botex/proposals/`` after passing
+        secret detection, prompt-injection checks, and SkillSpector gating.
+        """
+        from botex.memory.memory import _serialize_frontmatter
+        from botex.skills.skills import (
+            _sanitize_skill_name,
+            has_injection_pattern,
+            write_skill_proposal_draft,
+        )
+        from botex.tools.security import mask_secrets
+
+        if (
+            isinstance(min_cluster_size, bool)
+            or not isinstance(min_cluster_size, int)
+            or min_cluster_size < 5
+        ):
+            raise ValueError("min_cluster_size must be an int >= 5")
+        if (
+            isinstance(max_proposals, bool)
+            or not isinstance(max_proposals, int)
+            or max_proposals < 1
+        ):
+            raise ValueError("max_proposals must be an int >= 1")
+
+        tax_map: Dict[str, str] = {
+            "bugfix": "bugfix",
+            "refactor": "refactor",
+            "test": "test",
+            "infra": "infra",
+            "analysis": "analysis",
+            "feature": "feature",
+            "general": "general",
+            "security": "security",
+            "memory": "memory",
+        }
+        generic_tags = {
+            "lesson",
+            "meta-lesson",
+            "meta_lesson",
+            "status:active",
+            "status:candidate",
+            "status:deprecated",
+            "human-curated",
+            "frozen",
+        }
+        stopwords = {
+            "that",
+            "this",
+            "with",
+            "from",
+            "into",
+            "when",
+            "then",
+            "than",
+            "have",
+            "were",
+            "been",
+            "being",
+            "will",
+            "would",
+            "could",
+            "should",
+            "before",
+            "after",
+            "only",
+            "must",
+            "never",
+            "always",
+            "file",
+            "files",
+            "code",
+            "line",
+            "lines",
+            "using",
+            "used",
+            "ensure",
+            "check",
+            "avoid",
+            "lesson",
+            "task",
+            "botex",
+            "effective",
+            "resolution",
+            "trigger",
+            "outcome",
+        }
+
+        stats: Dict[str, Any] = {
+            "active_lessons": 0,
+            "clusters_found": 0,
+            "generated": 0,
+            "skipped": 0,
+            "rejected": 0,
+            "proposal_paths": [],
+            "rejected_reasons": [],
+        }
+
+        def _record_rejection(reason: str) -> None:
+            stats["rejected"] += 1
+            if len(stats["rejected_reasons"]) < 20:
+                stats["rejected_reasons"].append(reason)
+
+        try:
+            search_res = memory.search_memory(
+                workspace_dir=str(self.ws_path),
+                query="",
+                kind="lesson",
+                status="active",
+                scope="local",
+            )
+        except Exception as exc:
+            logger.warning("Skill crystallization: active lesson search failed: %s", exc)
+            return stats
+
+        raw_lessons = search_res.get("memories", []) if isinstance(search_res, dict) else []
+        stats["active_lessons"] = len(raw_lessons)
+
+        def _parse_tags(raw: Any) -> List[str]:
+            if isinstance(raw, str):
+                return [t.strip().lower() for t in re.split(r"[\s,]+", raw) if t.strip()]
+            if isinstance(raw, list):
+                return [str(t).strip().lower() for t in raw if str(t).strip()]
+            return []
+
+        def _slug(val: str) -> str:
+            cleaned = re.sub(r"[^a-z0-9]+", "-", val.lower()).strip("-")
+            if not cleaned:
+                return "pattern"
+            if len(cleaned) <= 28:
+                return cleaned
+            digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:4]
+            return f"{cleaned[:23]}-{digest}"
+
+        tagged_buckets: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        bucket_seen_ids: Dict[Tuple[str, str], set[str]] = {}
+        untagged_by_tax: Dict[str, List[Dict[str, Any]]] = {}
+
+        def _add_to_bucket(key: Tuple[str, str], item: Dict[str, Any], lid: str) -> None:
+            seen = bucket_seen_ids.setdefault(key, set())
+            if lid not in seen:
+                seen.add(lid)
+                tagged_buckets.setdefault(key, []).append(item)
+
+        for entry in raw_lessons:
+            if not isinstance(entry, dict):
+                continue
+            lid = str(entry.get("id") or "").strip()
+            if not lid or str(entry.get("kind") or "lesson").strip().lower() != "lesson":
+                continue
+            title = str(entry.get("title") or "").strip()
+            content = str(entry.get("content") or "").strip()
+            combined = f"{title}\n{content}".strip()
+            if not combined:
+                continue
+            if mask_secrets(combined) != combined or has_injection_pattern(combined):
+                _record_rejection("lesson_security_filtered")
+                continue
+
+            tags = _parse_tags(entry.get("tags"))
+            tax = "general"
+            for t in tags:
+                if t in tax_map:
+                    tax = tax_map[t]
+                    break
+
+            path_topics = sorted(
+                {t[5:].strip() for t in tags if t.startswith("path:") and t[5:].strip()}
+            )
+            domain_topics = sorted(
+                {
+                    t
+                    for t in tags
+                    if t not in generic_tags and t not in tax_map and not t.startswith("path:")
+                }
+            )
+            topics = path_topics + domain_topics
+            if topics:
+                for raw_topic in topics:
+                    _add_to_bucket((tax, _slug(raw_topic)), entry, lid)
+            else:
+                untagged_by_tax.setdefault(tax, []).append(entry)
+
+        # Fallback clustering requires >=2 co-occurring significant tokens to avoid
+        # collapsing unrelated lessons that happen to share one generic word.
+        for tax, items in untagged_by_tax.items():
+            if len(items) < min_cluster_size:
+                continue
+            doc_token_sets: List[Tuple[str, Dict[str, Any], set[str]]] = []
+            token_freq: Dict[str, int] = {}
+            for entry in items:
+                text = f"{entry.get('title') or ''} {entry.get('content') or ''}".lower()
+                doc_tokens = {
+                    tok
+                    for tok in re.findall(r"\b[a-z][a-z0-9_]{3,}\b", text)
+                    if tok not in stopwords
+                }
+                doc_token_sets.append((str(entry.get("id") or ""), entry, doc_tokens))
+                for tok in doc_tokens:
+                    token_freq[tok] = token_freq.get(tok, 0) + 1
+
+            frequent_tokens = sorted(
+                (t for t, c in token_freq.items() if c >= min_cluster_size),
+                key=lambda t: (-token_freq[t], t),
+            )
+            assigned_ids: set[str] = set()
+            for idx, tok1 in enumerate(frequent_tokens):
+                for tok2 in frequent_tokens[idx + 1 :]:
+                    pair_docs = [
+                        (lid, d)
+                        for lid, d, dset in doc_token_sets
+                        if lid not in assigned_ids and tok1 in dset and tok2 in dset
+                    ]
+                    if len(pair_docs) >= min_cluster_size:
+                        bkey = (tax, _slug(f"{tok1}-{tok2}"))
+                        for lid, d in pair_docs:
+                            _add_to_bucket(bkey, d, lid)
+                            assigned_ids.add(lid)
+
+        qualifying = [
+            (tax, topic, members)
+            for (tax, topic), members in tagged_buckets.items()
+            if len(members) >= min_cluster_size
+        ]
+        qualifying.sort(key=lambda item: (-len(item[2]), item[0], item[1]))
+        stats["clusters_found"] = len(qualifying)
+
+        res_re = re.compile(r"^\s*[-*]\s*\*\*Effective Resolution:?\*\*:?\s*(.+)$", re.MULTILINE)
+        for tax, topic, members in qualifying[:max_proposals]:
+            skill_name = _sanitize_skill_name(f"learned-{tax}-{topic}")
+            recipe_name = _sanitize_skill_name(f"learned-{tax}-{topic}")
+            lesson_ids = [
+                re.sub(r"[^a-zA-Z0-9_.-]+", "", str(m.get("id") or "").strip())[:64]
+                for m in members
+                if m.get("id")
+            ]
+            lesson_ids = [lid for lid in lesson_ids if lid][:12]
+
+            guidance_lines: List[str] = []
+            for m in members[:8]:
+                m_content = str(m.get("content") or "")
+                res_match = res_re.search(m_content)
+                snippet = (
+                    res_match.group(1).strip() if res_match else str(m.get("title") or "").strip()
+                )
+                snippet_clean = re.sub(r"\s+", " ", mask_secrets(snippet)).strip()[:220]
+                snippet_clean = snippet_clean.replace("---", "- - -")
+                if snippet_clean and snippet_clean not in guidance_lines:
+                    guidance_lines.append(snippet_clean)
+
+            bullets = (
+                "\n".join(f"- {line}" for line in guidance_lines) or "- Follow verified pattern."
+            )
+            desc = f"PR-only draft distilled from {len(members)} active {tax} lessons on '{topic}'."
+            meta_dict: Dict[str, Any] = {
+                "name": skill_name,
+                "version": "0.1.0",
+                "description": desc,
+                "taxonomy": [tax],
+                "botex_recipe": recipe_name,
+                "author": "botex-curator",
+                "proposal_only": True,
+                "tags": [tax, "proposal", "botex-curator"],
+                "source_lessons": lesson_ids,
+            }
+            skill_body = (
+                f"# Learned {tax.title()} Pattern: {topic}\n\n"
+                "## Distilled Rules (Review Before Promoting via PR)\n\n"
+                f"{bullets}\n\n"
+                "## Promotion Checklist\n\n"
+                f"- Move reviewed draft to `skills/{skill_name}/SKILL.md`.\n"
+                f"- Pair with `botex/skills/recipes/{recipe_name}.md`.\n"
+            )
+            skill_md = _serialize_frontmatter(meta_dict, skill_body)
+            recipe_md = (
+                f"# Recipe: Learned {tax.title()} ({topic})\n"
+                f"Role: Domain Specialist ({tax})\n\n"
+                "## Review & Execution Guidelines\n"
+                f"{bullets}\n"
+            )
+
+            res = await write_skill_proposal_draft(
+                skill_name,
+                skill_md,
+                recipe_md,
+                proposals_dir=self.ws_path / ".botex" / "proposals",
+                recipe_name=recipe_name,
+                workspace_dir=self.ws_path,
+            )
+            if not res.get("ok"):
+                _record_rejection(str(res.get("rejected_reason") or "rejected"))
+                logger.warning(
+                    "Skill crystallization rejected proposal %s: %s",
+                    skill_name,
+                    res.get("error"),
+                )
+            elif res.get("skipped"):
+                stats["skipped"] += 1
+            else:
+                stats["generated"] += 1
+                if res.get("skill_path"):
+                    stats["proposal_paths"].append(res["skill_path"])
+
+        return stats
+
     async def run(
         self,
         scope: str = "all",
@@ -2036,6 +2349,7 @@ class CuratorService:
         apply_truth: Optional[bool] = None,
         max_clusters: int = 3,
         promote_to_global: bool = False,
+        propose_skills: bool = True,
     ) -> CuratorResult:
         """Execute a full curation cycle."""
         start_time = time.time()
@@ -2238,6 +2552,15 @@ class CuratorService:
                 promotion_stats = {"promoted": 0, "promoted_global": 0}
             analysis["lesson_promotion"] = promotion_stats
 
+            # 6e. PR-only Skill Crystallization (Layer B — proposals/.botex only)
+            proposal_stats: Dict[str, Any] = {"generated": 0, "clusters_found": 0}
+            if propose_skills and (deadline is None or time.time() < deadline):
+                try:
+                    proposal_stats = await self.crystallize_skill_proposals()
+                except Exception as exc:
+                    logger.warning("Skill crystallization cycle notice: %s", exc)
+            analysis["skill_proposals"] = proposal_stats
+
             assess = _compute_health_assessment(health)
             duration = time.time() - start_time
 
@@ -2318,6 +2641,7 @@ class CuratorService:
                 "batches_processed": batches_processed,
                 "lessons_promoted": int(promotion_stats.get("promoted", 0)),
                 "lessons_promoted_global": int(promotion_stats.get("promoted_global", 0)),
+                "proposals_generated": int(proposal_stats.get("generated", 0)),
                 "tier_used": tier_used,
                 "duration_seconds": round(duration, 3),
                 "lock_active": False,
@@ -2353,6 +2677,7 @@ class CuratorService:
                 truth_clusters_compiled=truth_clusters_compiled,
                 lessons_promoted=int(promotion_stats.get("promoted", 0)),
                 lessons_promoted_global=int(promotion_stats.get("promoted_global", 0)),
+                proposals_generated=int(proposal_stats.get("generated", 0)),
             )
 
         except Exception as exc:
