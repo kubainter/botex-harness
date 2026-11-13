@@ -21,7 +21,7 @@ Environment="PATH=/opt/botex/bin:/opt/botex/.venv/bin:/usr/local/bin:/usr/bin:/b
 
 # Single worker is a hard invariant: task registry, idempotency cache and the
 # SSE replay buffer are per-process (see botex/server_cloud.py).
-ExecStart=/opt/botex/.venv/bin/uvicorn botex.server_cloud:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info
+ExecStart=/opt/botex/.venv/bin/uvicorn botex.server_cloud:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --ws websockets --log-level info
 
 Restart=on-failure
 RestartSec=5

@@ -88,7 +88,7 @@ LEGACY_MODULE_DOMAINS = {
     "i18n": "server",
 }
 
-DOMAIN_PACKAGES = frozenset(LEGACY_MODULE_DOMAINS.values()) | {"ops"}
+DOMAIN_PACKAGES = frozenset(LEGACY_MODULE_DOMAINS.values()) | {"ops", "edge"}
 
 # One representative public attribute per domain for patch() resolution checks.
 PATCH_TARGETS = [

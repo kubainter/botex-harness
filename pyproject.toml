@@ -69,5 +69,6 @@ packages = [
     "botex.tools",
     "botex.ops",
     "botex.ops.curator",
+    "botex.edge",
 ]
 

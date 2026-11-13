@@ -62,6 +62,28 @@ def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
     return False
 
 
+_EDGE_EXECUTOR_RESOLVER: Optional[Callable[[str], Optional[ToolExecutor]]] = None
+
+
+def register_edge_executor_resolver(
+    resolver: Optional[Callable[[str], Optional[ToolExecutor]]],
+) -> None:
+    """Register (or clear) the cloud edge-bridge resolver for logical edge workspaces."""
+    global _EDGE_EXECUTOR_RESOLVER
+    _EDGE_EXECUTOR_RESOLVER = resolver
+
+
+def resolve_edge_executor(workspace_id: str) -> Optional[ToolExecutor]:
+    """Return an active remote ``ToolExecutor`` for ``workspace_id`` if one is registered."""
+    fn = _EDGE_EXECUTOR_RESOLVER
+    if fn is None or not str(workspace_id or "").strip():
+        return None
+    try:
+        return fn(str(workspace_id).strip())
+    except Exception:
+        return None
+
+
 class ToolExecutor(ABC):
     """Abstract interface for executing workspace tools on behalf of the engine."""
 
