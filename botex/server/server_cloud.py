@@ -1959,6 +1959,30 @@ def _record_devin_turn(entry: Dict[str, Any], prompt: str, res: Dict[str, Any]) 
     )
 
 
+_RETRY_HINT_RE = re.compile(r"retry in ([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
+
+def _extract_retry_hint_s(res: Dict[str, Any]) -> Optional[float]:
+    """Pull the provider's own retry hint out of a finished task result.
+
+    The ``Retry-After`` header dies inside the retry layer, but providers
+    also embed "Please retry in Xs" in the error text that survives into
+    ``res["message"]`` / ``attempts[].message``. The hint is clamped to
+    300s so a malformed body cannot park the provider for an hour.
+    """
+    texts = [res.get("message") or ""]
+    for att in res.get("attempts") or []:
+        if isinstance(att, dict):
+            texts.append(str(att.get("message") or att.get("error") or ""))
+    best: Optional[float] = None
+    for text in texts:
+        m = _RETRY_HINT_RE.search(str(text))
+        if m:
+            val = float(m.group(1))
+            best = val if best is None else max(best, val)
+    return None if best is None else min(best, 300.0)
+
+
 def _note_provider_result(provider_name: str, res: Dict[str, Any]) -> None:
     """Feed a finished task's failure telemetry back into the rate limiter.
 
@@ -1973,7 +1997,9 @@ def _note_provider_result(provider_name: str, res: Dict[str, Any]) -> None:
         if isinstance(att, dict):
             kinds.add(att.get("failure_kind"))
     if "provider_rate_limited" in kinds:
-        cooldown_s = get_rate_limiter().report_limited(provider_name)
+        cooldown_s = get_rate_limiter().report_limited(
+            provider_name, retry_after_s=_extract_retry_hint_s(res)
+        )
         if cooldown_s > 0:
             logger.info(
                 "provider '%s' reported rate-limited; %.1fs cooldown applied",
