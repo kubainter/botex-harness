@@ -100,9 +100,7 @@ def isolate_botex_test_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
             # Test hosts may lack the SkillSpector binary (CI does); install-
             # level tests must not depend on host scanner presence. Gate
             # semantics stay covered by test_skills_security.py.
-            cfg.setdefault("skills", {}).setdefault("audit", {})[
-                "allow_unverified"
-            ] = True
+            cfg.setdefault("skills", {}).setdefault("audit", {})["allow_unverified"] = True
             return cfg
 
         monkeypatch.setattr(_srv_cfg, "load_config", _load_config_with_test_roots)
