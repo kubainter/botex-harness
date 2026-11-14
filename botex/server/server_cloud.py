@@ -49,7 +49,7 @@ except Exception:
 if _root_dir not in sys.path:
     sys.path.insert(0, _root_dir)
 
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import (
     FastAPI,
@@ -1412,6 +1412,38 @@ def _sanitize_mcp_client_origin(raw: str) -> str:
     return "cloud_api"
 
 
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _security_allowed_origins() -> List[str]:
+    """``security.allowed_origins`` normalized for exact-match comparison."""
+    raw = botex_server.load_config().get("security", {}).get("allowed_origins", [])
+    if isinstance(raw, str):
+        raw = [p.strip() for p in raw.split(",") if p.strip()]
+    return [str(v).strip().rstrip("/").lower() for v in raw if str(v).strip()]
+
+
+def _is_allowed_origin(origin: str, host: str) -> bool:
+    """Same-host/allowlist gate applied only when an Origin header is present.
+
+    Browsers always send Origin on cross-origin mutations and WebSocket
+    handshakes; headless clients (curl/agents) omit it. Allowed when the
+    Origin exactly matches a ``security.allowed_origins`` entry (``["*"]``
+    disables the check) or when the Origin host equals the request Host
+    host — the PWA served by this gateway or a same-host dev server on a
+    different port. Missing or malformed hosts fail closed.
+    """
+    allowed = _security_allowed_origins()
+    if "*" in allowed or origin.strip().rstrip("/").lower() in allowed:
+        return True
+    try:
+        origin_host = (urlparse(origin.strip()).hostname or "").lower()
+        host_host = (urlparse(f"//{host.strip()}").hostname or "").lower()
+    except ValueError:
+        return False
+    return bool(origin_host) and bool(host_host) and origin_host == host_host
+
+
 class CloudAuthMiddleware:
     """ASGI Authentication middleware supporting Zero Friction Local and Strict Cloud modes.
 
@@ -1480,6 +1512,19 @@ class CloudAuthMiddleware:
             )
             await resp(scope, receive, send)
             return
+
+        # Browser drive-by guard: a present Origin header means a web page
+        # issued this mutation; require same-host or an allowlisted origin.
+        if method in _MUTATING_METHODS and path.startswith("/api") and b"origin" in headers:
+            origin = headers[b"origin"].decode("latin1", errors="ignore")
+            host = headers.get(b"host", b"").decode("latin1", errors="ignore")
+            if not _is_allowed_origin(origin, host):
+                resp = JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Forbidden: cross-origin request"},
+                )
+                await resp(scope, receive, send)
+                return
 
         if not _is_auth_configured():
             # Check strict auth env or non-loopback remote origin
@@ -2989,6 +3034,14 @@ async def post_chat(
 async def chat_websocket(websocket: WebSocket) -> None:
     """Bidirectional WebSocket chat endpoint with 15s ping heartbeat and auth support."""
     await websocket.accept()
+
+    ws_origin = websocket.headers.get("origin", "")
+    if ws_origin.strip() and not _is_allowed_origin(ws_origin, websocket.headers.get("host", "")):
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Forbidden: cross-origin request",
+        )
+        return
 
     if not _is_auth_configured():
         client_host = websocket.client.host if websocket.client else ""

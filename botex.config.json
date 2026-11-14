@@ -244,6 +244,9 @@
   "cloud": {
     "allowed_workspaces": []
   },
+  "security": {
+    "allowed_origins": []
+  },
   "skills": {
     "audit": {
       "enabled": true,
