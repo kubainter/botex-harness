@@ -41,7 +41,7 @@ Device tokens are issued via `POST /api/edge/tokens` (authenticated with the Clo
 
 - **Default scopes** (when `scopes` is omitted): `["task_pull:<ws>", "result_push:<ws>"]`.
 - **Default TTL:** 30 days (`2592000` seconds).
-- **One-time secret:** The raw `btxd_...` token is returned once at creation. Store it in a protected file and pass it via `--token-file` (preferred over `--token` to avoid process-list exposure).
+- **One-time secret:** The raw `btxd_...` token is returned once at creation. Store it in a protected `.env` file (`BOTEX_EDGE_TOKEN=...`, e.g., `~/.ai/botex_mcp/.env` or `BOTEX_ENV_FILE`) rather than a plain `.txt` file so agent DLP/file-access guards protect it.
 - **Inspect / Revoke:**
   - `GET /api/edge/tokens` — list issued tokens (hashes are never returned).
   - `DELETE /api/edge/tokens/{jti}` — revoke by JTI and immediately disconnect matching active WSS sessions.
@@ -49,15 +49,26 @@ Device tokens are issued via `POST /api/edge/tokens` (authenticated with the Clo
 
 ## 3. Running the Local Edge Runner
 
-From the target workspace directory:
+From the target workspace directory, after setting `BOTEX_EDGE_TOKEN` (and optional `BOTEX_EDGE_SERVER`, `BOTEX_EDGE_DEVICE_ID`, `BOTEX_EDGE_WORKSPACE_ID`) in your `.env`:
+
+```sh
+./bin/botex-edge.sh
+```
+
+Or in PowerShell:
+
+```powershell
+.\bin\botex-edge.ps1
+```
+
+`botex edge` automatically loads `.env` from `BOTEX_ENV_FILE`, `./.env`, the repo `.env`, or `~/.ai/botex_mcp/.env` (without overriding variables already set in the environment). You can also pass explicit flags:
 
 ```powershell
 python server.py edge `
   --server wss://<cloud-domain>/api/edge/ws `
   -w . `
   --workspace-id <workspace_id> `
-  --device-id <device_id> `
-  --token-file <path-to-token-file>
+  --device-id <device_id>
 ```
 
 Optional local capability flags:

@@ -78,7 +78,7 @@ jobs:
         mkdir -p botex-release
         # Product artifact only: no tests/ (packaging hygiene — the suite
         # has already gated this build two steps above).
-        cp -r botex docs skills botex.cmd botex.sh server.py pyproject.toml requirements.txt README.md ROADMAP.md AGENTS.md LICENSE NOTICE glama.json botex-release/
+        cp -r botex bin docs skills server.py pyproject.toml requirements.txt README.md ROADMAP.md AGENTS.md LICENSE NOTICE glama.json botex-release/
         # Sanitized default config — never ship a maintainer-specific
         # botex.config.json (local paths, machine-specific settings).
         cp botex.config.example.json botex-release/botex.config.json

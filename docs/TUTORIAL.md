@@ -113,7 +113,7 @@ Since v2.1.0 the package is organized into domain subpackages; legacy flat impor
 │   └── TELEGRAM_NOTIFICATIONS.md  curator alert setup guide
 ├── deploy/oracle-vps/     systemd units & one-click installer for Oracle A1.Flex ARM64
 ├── skills/botex/SKILL.md  agent-facing usage contract
-├── botex.cmd / botex.sh   zero-install execution launchers
+├── bin/                   zero-install launchers (`botex.cmd`, `botex.sh`, `botex-edge.*`)
 ├── pyproject.toml         package configuration & scripts
 ├── requirements.txt       runtime dependencies
 ├── ROADMAP.md             deferred features with rationale

@@ -13,7 +13,7 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
 *   **Root files:**
     *   `server.py` - Main MCP server entry point and CLI dispatcher.
     *   `botex.config.json` - Committed default configuration.
-    *   `botex.cmd` / `botex.sh` - Zero-install execution launchers.
+    *   `bin/botex.cmd` / `bin/botex.sh` - Zero-install execution launchers (`bin/botex-edge.*` for the WSS edge bridge).
     *   `pyproject.toml` / `requirements.txt` - Project packaging and dependencies.
     *   `ROADMAP.md` - Technical roadmap, deferred features, and architecture rationale.
 *   **`botex/core/`** - Engine internals.

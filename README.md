@@ -65,13 +65,13 @@ OPENROUTER_API_KEY=sk-or-v1-...
 You can run BoteX as a local stdio process or as a remote service over SSE.
 
 #### Option A: Local Process (stdio)
-Register BoteX using the included zero-install launchers (`botex.cmd` on Windows, `botex.sh` on Linux/macOS) or directly with Python:
+Register BoteX using the included zero-install launchers (`bin/botex.cmd` on Windows, `bin/botex.sh` on Linux/macOS) or directly with Python:
 
 ```json
 {
   "mcpServers": {
     "botex": {
-      "command": "C:/path/to/harness/botex.cmd"
+      "command": "C:/path/to/harness/bin/botex.cmd"
     }
   }
 }
@@ -466,7 +466,7 @@ botex serve                # Force MCP stdio server mode explicitly
 
 ```
 server.py              MCP server entry point & CLI dispatcher
-botex.cmd / botex.sh   Zero-install launchers (auto-detects python environment)
+bin/                   Zero-install launchers (`botex.cmd`, `botex.sh`, `botex-edge.*`)
 pyproject.toml         Package configuration (exposes `botex` CLI command)
 requirements.txt       Runtime dependencies
 botex.config.json      Committed defaults (providers, engine limits, exec/net policy)

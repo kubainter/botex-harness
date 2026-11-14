@@ -2435,12 +2435,45 @@ def _cli_cloud(argv: list[str]) -> None:
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level, workers=1)
 
 
+def _load_edge_env_files() -> None:
+    """Load BOTEX_EDGE_* defaults from .env files without overriding explicit env vars."""
+    if os.environ.get("BOTEX_DISABLE_DOTENV", "").strip() in ("1", "true", "yes"):
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    candidates: list[Path] = []
+    explicit_env = os.environ.get("BOTEX_ENV_FILE", "").strip()
+    if explicit_env:
+        candidates.append(Path(explicit_env).expanduser())
+    candidates.extend(
+        [
+            Path.cwd() / ".env",
+            Path(__file__).resolve().parent / ".env",
+            Path.home() / ".ai" / "botex_mcp" / ".env",
+        ]
+    )
+    seen: set[Path] = set()
+    for path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        load_dotenv(resolved, override=False)
+
+
 def _cli_edge(argv: list[str]) -> None:
     """CLI dispatcher for the thin edge runner (outbound WSS bridge)."""
     import argparse
     import socket
 
     from botex.edge import EdgeCapabilities, EdgeRunner
+
+    _load_edge_env_files()
 
     parser = argparse.ArgumentParser(
         prog="botex edge",
@@ -2462,18 +2495,18 @@ def _cli_edge(argv: list[str]) -> None:
     )
     parser.add_argument(
         "--workspace-id",
-        default="",
-        help="Logical workspace ID registered on the gateway (default: workspace folder name)",
+        default=os.environ.get("BOTEX_EDGE_WORKSPACE_ID", ""),
+        help="Logical workspace ID registered on the gateway (default: BOTEX_EDGE_WORKSPACE_ID or folder name)",
     )
     parser.add_argument(
         "--device-id",
-        default="",
-        help="Device identifier (default: hostname)",
+        default=os.environ.get("BOTEX_EDGE_DEVICE_ID", ""),
+        help="Device identifier (default: BOTEX_EDGE_DEVICE_ID or hostname)",
     )
     parser.add_argument(
         "--token",
         default="",
-        help="Device bearer token (default: BOTEX_EDGE_TOKEN env; never logged)",
+        help="Device bearer token (default: BOTEX_EDGE_TOKEN from env/.env; never logged)",
     )
     parser.add_argument(
         "--token-file",
