@@ -26,7 +26,7 @@ import uuid
 
 from botex.core.contracts import parse_structured_completion
 from botex.core.events import EventKind, emitter_or_none
-from botex.tools.security import mask_secrets
+from botex.tools.security import SecurityError, mask_secrets, resolve_safe_path
 
 RUNS_DIR = os.path.join(tempfile.gettempdir(), "devin-delegate-runs")
 DEFAULT_MODEL = "swe-2-max"
@@ -165,24 +165,60 @@ def _attach_kill_on_close(proc) -> object:
         return None
 
 
-def _fs_read(params: dict) -> str:
+# Rule 0 (Zero Secret Leakage): devin.exe receives only these parent vars —
+# inheriting os.environ whole would hand it every provider *_API_KEY.
+_DEVIN_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "TEMP",
+        "TMP",
+        "WINDSURF_API_KEY",
+        "DEVIN_ACP_EXE",
+        "DEVIN_API_KEY",
+    }
+)
+
+
+def _devin_env() -> dict:
+    """Allowlist-built child env, mirroring plugins.py's scrubbed runner."""
+    return {k: os.environ[k] for k in _DEVIN_ENV_KEYS if k in os.environ}
+
+
+def _fs_read(root: str, params: dict) -> str:
     path = params.get("path") or ""
-    text = open(path, encoding="utf-8", errors="replace").read()
+    if not path:
+        return "missing path"
+    try:
+        target = resolve_safe_path(root, path)
+    except SecurityError as e:
+        return f"read denied: {e}"
+    text = open(target, encoding="utf-8", errors="replace").read()
     line, limit = params.get("line"), params.get("limit")
     if line is not None or limit is not None:
         lines = text.splitlines(keepends=True)
         start = max(int(line or 1) - 1, 0)
         end = None if limit is None else start + int(limit)
         text = "".join(lines[start:end])
-    return text
+    return mask_secrets(text)
 
 
-def _fs_write(params: dict):
+def _fs_write(root: str, params: dict):
     path = params.get("path") or ""
     if not path:
         return "missing path"
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        target = resolve_safe_path(root, path)
+    except SecurityError as e:
+        return str(e)
+    try:
+        with open(target, "w", encoding="utf-8") as f:
             f.write(params.get("content") or "")
         return None
     except OSError as e:
@@ -207,18 +243,27 @@ def _pick_allow(params: dict) -> str:
 class DevinRun:
     """One ``devin.exe acp`` process + reader thread + event emission."""
 
-    def __init__(self, run_id: str, agent_type: str, task_id: str = "", model: str = ""):
+    def __init__(
+        self, run_id: str, agent_type: str, task_id: str = "", model: str = "", cwd: str = ""
+    ):
         self.run_id = run_id
         self.task_id = task_id
         self.model = (model or "").strip() or PINNED_MODEL
+        # ACP fs/* jail root — the session workspace, never caller-free-form.
+        self.workspace = cwd or os.getcwd()
         self.dir = os.path.join(RUNS_DIR, run_id)
         os.makedirs(self.dir, exist_ok=True)
         exe = resolve_devin_exe()
         args = [exe, "acp", "--model", self.model]
         if agent_type and agent_type != "default":
             args += ["--agent-type", agent_type]
+        env = _devin_env()
+        key = _api_key()
+        if key:
+            env.setdefault("WINDSURF_API_KEY", key)
         self.proc = subprocess.Popen(
             args,
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -323,9 +368,15 @@ class DevinRun:
         rid, method, params = obj["id"], obj["method"], obj.get("params") or {}
         try:
             if method == "fs/read_text_file":
-                self.send({"jsonrpc": "2.0", "id": rid, "result": {"content": _fs_read(params)}})
+                self.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "result": {"content": _fs_read(self.workspace, params)},
+                    }
+                )
             elif method == "fs/write_text_file":
-                err = _fs_write(params)
+                err = _fs_write(self.workspace, params)
                 if err:
                     self.send(
                         {"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": err}}
@@ -362,7 +413,7 @@ class DevinRun:
     def _write_raw(self, line: str):
         try:
             with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+                f.write(mask_secrets(line) + "\n")
         except OSError:
             pass
 
@@ -446,7 +497,7 @@ class CliResumeRun:
         self.dir = os.path.join(RUNS_DIR, run_id)
         os.makedirs(self.dir, exist_ok=True)
         exe = resolve_devin_exe()
-        env = dict(os.environ)
+        env = _devin_env()
         key = _api_key()
         if key:
             env.setdefault("WINDSURF_API_KEY", key)
@@ -518,7 +569,7 @@ class CliResumeRun:
         text = (out or b"").decode("utf-8", "replace")
         try:
             with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(text)
+                f.write(mask_secrets(text))
         except OSError:
             pass
         if self.proc.returncode:
@@ -618,7 +669,7 @@ def delegate_run(
     cfg = _delegation_cfg()
     idle_s = int(cfg.get("idle_timeout_s") or 90)
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    run = DevinRun(run_id, agent_type or "default", task_id=task_id, model=model)
+    run = DevinRun(run_id, agent_type or "default", task_id=task_id, model=model, cwd=cwd)
     em = emitter_or_none(task_id)
     with _ACTIVE_LOCK:
         _ACTIVE_RUNS[task_id] = run

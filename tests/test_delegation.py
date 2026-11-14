@@ -556,3 +556,109 @@ def test_followup_endpoint_404(cloud_client):
     client, server_cloud = cloud_client
     resp = client.post("/api/tasks/nope12345/followup", json={"prompt": "hi"})
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# ACP fs bridge jail + scrubbed child env
+# ---------------------------------------------------------------------------
+
+
+def test_fs_read_rejects_traversal(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (tmp_path / "outside.txt").write_text("outside-secret")
+    res = delegation._fs_read(str(ws), {"path": "../outside.txt"})
+    assert "outside-secret" not in res
+    assert "outside workspace" in res
+    res = delegation._fs_read(str(ws), {"path": str(tmp_path / "outside.txt")})
+    assert "outside-secret" not in res
+    assert "outside workspace" in res
+
+
+def test_fs_read_rejects_blocked_pattern(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / ".env").write_text("TOKEN=zzz")
+    res = delegation._fs_read(str(ws), {"path": ".env"})
+    assert "TOKEN=zzz" not in res
+    assert "blocked" in res.lower()
+
+
+def test_fs_read_masks_secrets(tmp_path):
+    (tmp_path / "cfg.txt").write_text('api_key = "sk-livekey-1234567890"')
+    res = delegation._fs_read(str(tmp_path), {"path": "cfg.txt"})
+    assert "sk-livekey-1234567890" not in res
+    assert "[REDACTED]" in res
+
+
+def test_fs_write_jailed_to_workspace(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    err = delegation._fs_write(str(ws), {"path": "../evil.txt", "content": "x"})
+    assert err is not None
+    assert not (tmp_path / "evil.txt").exists()
+    err = delegation._fs_write(str(ws), {"path": ".env", "content": "x"})
+    assert err is not None
+    assert not (ws / ".env").exists()
+    err = delegation._fs_write(str(ws), {"path": "ok.txt", "content": "hi"})
+    assert err is None
+    assert (ws / "ok.txt").read_text() == "hi"
+
+
+def test_devin_env_allowlist_drops_provider_keys(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-secret")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-secret")
+    monkeypatch.setenv("DEVIN_API_KEY", "devin-key")
+    monkeypatch.setenv("WINDSURF_API_KEY", "ws-key")
+    env = delegation._devin_env()
+    assert "OPENROUTER_API_KEY" not in env
+    assert "NVIDIA_API_KEY" not in env
+    assert env["DEVIN_API_KEY"] == "devin-key"
+    assert env["WINDSURF_API_KEY"] == "ws-key"
+    assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_devin_run_fs_handlers_scoped_to_workspace(monkeypatch, tmp_path):
+    """_handle_agent_request jails fs/* calls in the run's session workspace."""
+
+    class _Stdin:
+        def write(self, data):
+            pass
+
+        def flush(self):
+            pass
+
+    class _Proc:
+        pid = 4242
+        stdin = _Stdin()
+        stdout = []
+
+    monkeypatch.setattr(delegation, "RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(delegation, "resolve_devin_exe", lambda: "C:/devin/devin.exe")
+    monkeypatch.setattr(delegation, "_attach_kill_on_close", lambda p: None)
+    monkeypatch.setattr(delegation.subprocess, "Popen", lambda *a, **kw: _Proc())
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "ok.txt").write_text('token = "ghp_secretsecret99"')
+    run = delegation.DevinRun("r1", "default", task_id="t", cwd=str(ws))
+    sent = []
+    run.send = sent.append
+    run._handle_agent_request(
+        {"id": 1, "method": "fs/read_text_file", "params": {"path": "ok.txt"}}
+    )
+    run._handle_agent_request(
+        {"id": 2, "method": "fs/read_text_file", "params": {"path": "../outside.txt"}}
+    )
+    run._handle_agent_request(
+        {
+            "id": 3,
+            "method": "fs/write_text_file",
+            "params": {"path": "../evil.txt", "content": "x"},
+        }
+    )
+    read_ok = sent[0]["result"]["content"]
+    assert "ghp_secretsecret99" not in read_ok
+    assert "[REDACTED]" in read_ok
+    assert "outside workspace" in sent[1]["result"]["content"]
+    assert sent[2]["error"]["code"] == -32603
+    assert not (tmp_path / "evil.txt").exists()

@@ -74,7 +74,7 @@ _IGNORED_DIRS_LOWER = frozenset(d.lower() for d in IGNORED_DIRS)
 # Path segments that are never traversable at all — VCS internals can
 # carry credentials (remote URLs, hooks) and the snapshot registry is our
 # own rollback state, not task content.
-BLOCKED_DIR_SEGMENTS = {".git", ".svn", ".hg", ".snapshots"}
+BLOCKED_DIR_SEGMENTS = {".git", ".svn", ".hg", ".snapshots", ".botex"}
 
 # ---------------------------------------------------------------------------
 # Secret masking regexes — applied to any text before returning to the model
