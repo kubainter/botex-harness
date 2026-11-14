@@ -248,7 +248,8 @@
       "enabled": true,
       "risk_threshold": 30,
       "timeout_s": 90,
-      "binary_path": "skillspector"
+      "binary_path": "skillspector",
+      "allow_unverified": false
     }
   }
 }

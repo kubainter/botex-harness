@@ -592,6 +592,15 @@ DEFAULTS: Dict[str, Any] = {
             "idle_timeout_s": 90,
         },
     },
+    # SkillSpector pre-flight audit (botex/skills/skillspector_gate.py).
+    # allow_unverified=False fails CLOSED when no scanner binary exists
+    # (verdict BLOCKED_NO_SCANNER); True restores the legacy fail-open
+    # UNVERIFIED_NO_SCANNER verdict for hosts accepting unaudited skills.
+    "skills": {
+        "audit": {
+            "allow_unverified": False,
+        },
+    },
 }
 
 APP_NAME = "BoteX"
@@ -634,6 +643,7 @@ _ENV_MAP = {
     "BOTEX_SWARM_MEMORY_DIR": ("paths", "swarm_memory_dir"),
     "BOTEX_CHAT_SESSIONS_DIR": ("paths", "chat_sessions_dir"),
     "BOTEX_BENCHMARKS_CACHE_FILE": ("benchmarks", "cache_file"),
+    "BOTEX_SKILLS_AUDIT_ALLOW_UNVERIFIED": ("skills", "audit", "allow_unverified"),
 }
 
 _config_cache: Optional[Dict[str, Any]] = None
@@ -687,11 +697,15 @@ def load_config(reload: bool = False) -> Dict[str, Any]:
     cfg = _deep_merge(DEFAULTS, _load_json(CONFIG_FILE))
     cfg = _deep_merge(cfg, _load_json(LOCAL_CONFIG_FILE))
 
-    for env_name, (section, key) in _ENV_MAP.items():
+    # _ENV_MAP values are key paths of arbitrary depth (e.g. ("skills", "audit",
+    # "allow_unverified")); two-element tuples keep the original section/key shape.
+    for env_name, path in _ENV_MAP.items():
         raw = os.environ.get(env_name)
         if raw is None or raw == "":
             continue
-        default_val = DEFAULTS[section][key]
+        default_val: Any = DEFAULTS
+        for part in path:
+            default_val = default_val[part]
         try:
             if isinstance(default_val, bool):
                 value: Any = raw.lower() in ("1", "true", "yes")
@@ -713,7 +727,10 @@ def load_config(reload: bool = False) -> Dict[str, Any]:
                 value = raw
         except (ValueError, Exception):
             continue
-        cfg.setdefault(section, {})[key] = value
+        node = cfg
+        for part in path[:-1]:
+            node = node.setdefault(part, {})
+        node[path[-1]] = value
 
     _config_cache = cfg
     _config_sig = sig
