@@ -38,7 +38,6 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
     *   `rate_limiter.py` - Token-bucket rate limiting (RPM/TPM) and cooldown tracking for free and cloud providers.
     *   `retry.py` - Shared transient-failure backoff layer for provider calls (429, connection errors, provider-blessed overloads); when active the SDK client is built with `max_retries=0`.
     *   `wallet.py` - Credit balance, key budget status (`get_key_status`), and low-budget warnings.
-    *   `delegation.py` - Delegation bridge to external specialized agents (e.g. Devin).
     *   `http_pool.py` - Pooled httpx clients; `prompt_cache.py` - prompt-cache policy gating; `adapters/zai.py` - Z.ai GLM adapter.
 *   **`botex/tools/`** - Worker tool implementations.
     *   `patch_engine.py` - Fuzzy patch mechanism, in-memory syntax validation, and snapshot management.

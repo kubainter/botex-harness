@@ -442,7 +442,7 @@ botex cloud --host 0.0.0.0 --port 8000
 ```
 *Zero-Friction Local mode runs unauthenticated when `BOTEX_ACCESS_TOKEN` is unset. Set `BOTEX_ACCESS_TOKEN` in `.env` to enforce Bearer token verification on all protected endpoints.*
 
-REST surface (all under `/api/`): `health`, `wallet`, `key/status`, `analytics` (+`POST analytics/digest`), `models`, `models/recommended`, `recipes`, `skills` (+`/{name}`), `tasks` (+`/{id}`, `/{id}/cancel`, `/{id}/followup`, `/{id}/events` SSE), `approvals` (+`/{id}/decide`), `memory` (+`/graph`, `/backlinks`), `curator/status`, `curator/run`, `rate_limits`, `delegation/devin`, `chat` (+`/abort`, `/sessions`, `/sessions/{id}`, `/sessions/{id}/save_to_memory`), and WebSocket `/api/chat/ws`. `/api/health` and the PWA shell stay public; `/api/delegation/devin` requires Bearer authentication like all other `/api/*` routes.
+REST surface (all under `/api/`): `health`, `wallet`, `key/status`, `analytics` (+`POST analytics/digest`), `models`, `models/recommended`, `recipes`, `skills` (+`/{name}`), `tasks` (+`/{id}`, `/{id}/cancel`, `/{id}/events` SSE), `approvals` (+`/{id}/decide`), `memory` (+`/graph`, `/backlinks`), `curator/status`, `curator/run`, `rate_limits`, `chat` (+`/abort`, `/sessions`, `/sessions/{id}`, `/sessions/{id}/save_to_memory`), and WebSocket `/api/chat/ws`. `/api/health` and the PWA shell stay public; all other `/api/*` routes require Bearer authentication.
 
 ### Maintenance & Observability
 
@@ -499,7 +499,6 @@ botex/                 Domain subpackages (legacy flat imports like `botex.engin
     rate_limiter.py      Token-bucket RPM/TPM limiter & cooldowns
     retry.py             Shared transient-failure backoff & circuit breaker
     wallet.py            Credit balance & key budget status
-    delegation.py        Devin ACP delegation bridge
     http_pool.py         Pooled httpx clients
     prompt_cache.py      Prompt-cache policy gating
     adapters/zai.py      Z.ai GLM Coding Plan adapter
