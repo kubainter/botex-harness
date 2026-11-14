@@ -549,6 +549,10 @@ DEFAULTS: Dict[str, Any] = {
         # "deny" requires an explicit priced model.
         "on_unknown": "allow",
         "cache_ttl_hours": 24,
+        # Strictest gate: reject every non-free model up front unless it is
+        # allowlisted here or the run carries allow_expensive_model consent.
+        "paid_consent_required": False,
+        "paid_allowlist": [],
     },
     "catalog": {
         "enabled": True,
@@ -619,6 +623,8 @@ _ENV_MAP = {
     "BOTEX_LANG": ("ui", "language"),
     "BOTEX_PRICE_MAX_INPUT": ("pricing", "max_input_per_mtok"),
     "BOTEX_PRICE_MAX_OUTPUT": ("pricing", "max_output_per_mtok"),
+    "BOTEX_PRICE_PAID_CONSENT_REQUIRED": ("pricing", "paid_consent_required"),
+    "BOTEX_PRICE_PAID_ALLOWLIST": ("pricing", "paid_allowlist"),
     "BOTEX_CATALOG_ENABLED": ("catalog", "enabled"),
     "BOTEX_CATALOG_CACHE_FILE": ("catalog", "cache_file"),
     "BOTEX_CATALOG_TTL_HOURS": ("catalog", "ttl_hours"),

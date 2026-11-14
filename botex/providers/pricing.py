@@ -197,6 +197,30 @@ def check_model_tools(
     return True, ""
 
 
+def _paid_allowlisted(model: str, pricing_cfg: Dict[str, Any]) -> bool:
+    """Whether the slug matches ``pricing.paid_allowlist`` (exact/glob/regex
+    patterns, same syntax as the model denylist) — the operator's standing
+    consent for specific paid models."""
+    patterns = pricing_cfg.get("paid_allowlist") or []
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    if not patterns:
+        return False
+    try:
+        try:
+            from botex.providers.denylist import matches_pattern
+        except (ImportError, ValueError):
+            from denylist import matches_pattern  # type: ignore[no-redef]
+        bare = (model or "").strip().removeprefix("models/")
+        return any(
+            matches_pattern(model, p) or matches_pattern(bare, p)
+            for p in patterns
+            if isinstance(p, str) and p.strip()
+        )
+    except Exception:
+        return False
+
+
 def check_model_price(
     model: str,
     provider_cfg: Dict[str, Any],
@@ -213,6 +237,12 @@ def check_model_price(
     (``nvidia``, ``google`` / ``gemini``, ``openrouter-free``, ``ollama``)
     bypass the price gate.
 
+    ``pricing.paid_consent_required`` tightens the gate from "under the cap"
+    to "provably free": any non-free model with a positive price — or with no
+    published price at all — is rejected unless it matches
+    ``pricing.paid_allowlist``. The engine's ``allow_expensive_model`` flag is
+    the per-run consent that overrides this block, same as for cap breaches.
+
     Returns (allowed, message). Message is a warning for unknown/dynamic
     pricing or the rejection reason when disallowed.
     """
@@ -221,6 +251,10 @@ def check_model_price(
 
     if is_free_model(model, provider_cfg, provider_name):
         return True, ""
+
+    needs_paid_consent = bool(pricing_cfg.get("paid_consent_required")) and not (
+        _paid_allowlisted(model, pricing_cfg)
+    )
 
     base_url = provider_cfg.get("base_url", "")
     if not base_url:
@@ -248,6 +282,14 @@ def check_model_price(
             price = model_price(catalog, bare_model)
 
     if price is None:
+        if needs_paid_consent:
+            return False, (
+                f"[PRICE BLOCK] Model '{model}' is not a verified-free model "
+                f"(no published price) and pricing.paid_consent_required is "
+                f"enabled. To confirm and run anyway, set "
+                f"allow_expensive_model=True or add the model to "
+                f"pricing.paid_allowlist."
+            )
         on_unknown = pricing_cfg.get("on_unknown", "allow")
         note = (
             f"Model '{model}' has no fixed public price (router/dynamic or "
@@ -261,6 +303,14 @@ def check_model_price(
         return True, f"[BoteX] {note}"
 
     pin, pout = price
+    if needs_paid_consent and (pin > 0 or pout > 0):
+        return False, (
+            f"[PRICE BLOCK] Model '{model}' is a paid (non-free) model "
+            f"(${pin:.2f}/${pout:.2f} per 1M tokens) and "
+            f"pricing.paid_consent_required is enabled. To confirm and run "
+            f"anyway, set allow_expensive_model=True or add the model to "
+            f"pricing.paid_allowlist."
+        )
     max_in = float(pricing_cfg.get("max_input_per_mtok", 0.0) or 0.0)
     max_out = float(pricing_cfg.get("max_output_per_mtok", 0.0) or 0.0)
     breaches = []

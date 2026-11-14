@@ -509,6 +509,72 @@ def test_pricing_guardrail():
     print("[PASS] Pricing Guardrail Tests")
 
 
+def test_paid_consent_required_gate():
+    """pricing.paid_consent_required rejects non-free models unless allowlisted."""
+    fake_catalog = {
+        "vendor/cheap-model": {"input": 0.10, "output": 0.50},
+        "vendor/free-priced": {"input": 0.0, "output": 0.0},
+        "vendor/router": {"input": None, "output": None},
+    }
+    orig_loader = pricing.load_catalog
+    pricing.load_catalog = lambda *a, **k: fake_catalog
+    try:
+        pcfg = {"base_url": "https://api.example/v1"}
+        consent_caps = {
+            "enabled": True,
+            "max_input_per_mtok": 99.0,
+            "max_output_per_mtok": 99.0,
+            "paid_consent_required": True,
+        }
+
+        # 1. Under-cap but paid model is blocked — consent is about paid vs free.
+        ok, msg = pricing.check_model_price(
+            "vendor/cheap-model", pcfg, consent_caps, provider_name="openrouter"
+        )
+        assert not ok and "paid_consent_required" in msg and "allow_expensive_model" in msg
+
+        # 2. paid_allowlist is the standing operator consent.
+        ok, _ = pricing.check_model_price(
+            "vendor/cheap-model",
+            pcfg,
+            {**consent_caps, "paid_allowlist": ["vendor/cheap-*"]},
+            provider_name="openrouter",
+        )
+        assert ok
+
+        # 3. Provably $0-priced model is free in practice — passes.
+        ok, _ = pricing.check_model_price(
+            "vendor/free-priced", pcfg, consent_caps, provider_name="openrouter"
+        )
+        assert ok
+
+        # 4. Unknown/dynamic price cannot prove free — consent required.
+        ok, msg = pricing.check_model_price(
+            "vendor/router", pcfg, consent_caps, provider_name="openrouter"
+        )
+        assert not ok and "paid_consent_required" in msg
+
+        # 5. Free models and free providers bypass the consent gate entirely.
+        ok, _ = pricing.check_model_price(
+            "vendor/cheap-model:free", pcfg, consent_caps, provider_name="openrouter"
+        )
+        assert ok
+        ok, _ = pricing.check_model_price(
+            "vendor/cheap-model", pcfg, consent_caps, provider_name="openrouter-free"
+        )
+        assert ok
+
+        # 6. Flag off preserves legacy behavior (cap-only gate).
+        off_caps = {k: v for k, v in consent_caps.items() if k != "paid_consent_required"}
+        ok, _ = pricing.check_model_price(
+            "vendor/cheap-model", pcfg, off_caps, provider_name="openrouter"
+        )
+        assert ok
+    finally:
+        pricing.load_catalog = orig_loader
+    print("[PASS] Paid Consent Gate Tests")
+
+
 def test_net_guards_and_created_file_rollback():
     import tempfile
     from botex.patch_engine import SnapshotManager

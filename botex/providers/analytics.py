@@ -90,13 +90,19 @@ def is_free_model(
     providers (``nvidia``, ``google`` / ``gemini`` / ``aistudio``, ``ollama``,
     ``openrouter-free``), and providers that cannot bill per request —
     ``local: true``, ``free_tier: true``, or static ``api_key_fallback``.
+
+    Namespace prefixes (``nvidia/``, ``ollama/``, ``gemini-`` ...) only mark a
+    model free while no billable provider is resolved: the same slug hosted on
+    a paid provider (e.g. ``nvidia/*`` on OpenRouter) is priced per token.
     """
     slug = (model or "").strip().lower()
     if any(marker in slug for marker in _FREE_MODEL_MARKERS):
         return True
-    if slug.startswith(_FREE_MODEL_PREFIXES):
-        return True
-    if (provider_name or "").strip().lower() in _FREE_PROVIDER_NAMES:
+    pname = (provider_name or "").strip().lower()
+    if not pname or pname in _FREE_PROVIDER_NAMES:
+        if slug.startswith(_FREE_MODEL_PREFIXES):
+            return True
+    if pname in _FREE_PROVIDER_NAMES:
         return True
     cfg = provider_cfg if isinstance(provider_cfg, dict) else {}
     return bool(cfg.get("local") or cfg.get("free_tier") or cfg.get("api_key_fallback"))

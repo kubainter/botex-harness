@@ -51,6 +51,22 @@ def test_is_free_model_slug_markers():
         assert is_free_model(slug) is False, slug
 
 
+def test_is_free_model_namespace_prefix_requires_free_provider():
+    """nvidia//ollama//gemini- prefixes mark free endpoints only while no
+    billable provider is resolved — the same slug on a paid provider is priced."""
+    # Resolved paid provider: namespace prefixes no longer apply.
+    assert is_free_model("nvidia/nemotron-3-super-120b-a12b", {}, "openrouter") is False
+    assert is_free_model("ollama/some-model", {}, "openrouter") is False
+    assert is_free_model("gemini-2.5-pro", {}, "openrouter") is False
+    # :free marker stays universal regardless of provider.
+    assert is_free_model("nvidia/nemotron-3-ultra-550b-a55b:free", {}, "openrouter") is True
+    # Free/quota providers and unresolved provider keep prefix heuristics.
+    assert is_free_model("nvidia/anything", {}, "nvidia") is True
+    assert is_free_model("nvidia/anything", {}, "openrouter-free") is True
+    assert is_free_model("nvidia/anything") is True
+    assert is_free_model("nvidia/anything", {}, "") is True
+
+
 def test_is_free_model_provider_flags():
     """Local endpoints, package/quota providers (google, nvidia), and static api_key_fallback providers cannot bill per request."""
     assert is_free_model("any/model", {"local": True}) is True

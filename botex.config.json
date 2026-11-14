@@ -164,7 +164,10 @@
   },
   "pricing": {
     "max_input_per_mtok": 2,
-    "max_output_per_mtok": 4
+    "max_output_per_mtok": 4,
+    "paid_consent_required": false,
+    "paid_allowlist": [],
+	"paid_consent_required": true
   },
   "rate_limits": {
     "openrouter-free": {
