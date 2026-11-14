@@ -662,3 +662,83 @@ def test_devin_run_fs_handlers_scoped_to_workspace(monkeypatch, tmp_path):
     assert "outside workspace" in sent[1]["result"]["content"]
     assert sent[2]["error"]["code"] == -32603
     assert not (tmp_path / "evil.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# updates.jsonl secret masking (delegated output must not persist keys)
+# ---------------------------------------------------------------------------
+
+
+def _make_devin_run(monkeypatch, tmp_path):
+    """DevinRun over a dead-pipe fake proc; RUNS_DIR jailed to tmp_path."""
+
+    class _Stdin:
+        def write(self, data):
+            pass
+
+        def flush(self):
+            pass
+
+    class _Proc:
+        pid = 4242
+        stdin = _Stdin()
+        stdout = []
+
+    monkeypatch.setattr(delegation, "RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(delegation, "resolve_devin_exe", lambda: "C:/devin/devin.exe")
+    monkeypatch.setattr(delegation, "_api_key", lambda: "")
+    monkeypatch.setattr(delegation, "_attach_kill_on_close", lambda p: None)
+    monkeypatch.setattr(delegation.subprocess, "Popen", lambda *a, **kw: _Proc())
+    return delegation.DevinRun("r1", "default", task_id="t", cwd=str(tmp_path))
+
+
+def test_devin_run_write_raw_masks_secrets(monkeypatch, tmp_path):
+    """_write_raw redacts secrets before they hit updates.jsonl."""
+    run = _make_devin_run(monkeypatch, tmp_path)
+    secret = "sk-or-v1-" + "a1b2c3d4e5f6a7b8c9d0"
+    run._write_raw('{"method":"session/update","note":"key is ' + secret + '"}')
+    run._write_raw("plain control line")
+    logged = (tmp_path / "runs" / "r1" / "updates.jsonl").read_text()
+    assert secret not in logged
+    assert "[REDACTED]" in logged
+    assert "plain control line" in logged
+
+
+def test_devin_run_next_json_masks_queued_output(monkeypatch, tmp_path):
+    """Wire lines replayed through _next_json land masked in updates.jsonl."""
+    run = _make_devin_run(monkeypatch, tmp_path)
+    run.q.get(timeout=5)  # drain the reader thread's None sentinel
+    secret = "ghp_" + "deadbeefcafe99"
+    run.q.put('{"id": 7, "result": {"marker": "control-ok", "token": "' + secret + '"}}')
+    obj = run._next_json(timeout=5)
+    assert obj["id"] == 7
+    logged = (tmp_path / "runs" / "r1" / "updates.jsonl").read_text()
+    assert secret not in logged
+    assert "[REDACTED]" in logged
+    assert "control-ok" in logged
+
+
+def test_cli_resume_run_wait_masks_secrets(monkeypatch, tmp_path):
+    """CliResumeRun.wait redacts secrets in stdout before updates.jsonl."""
+    secret = "ghp_" + "deadbeefcafe99"
+
+    class FakeProc:
+        pid = 4242
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            out = "OPENROUTER_API_KEY=" + secret + "\ndone line\n"
+            return (out.encode(), b"")
+
+    monkeypatch.setattr(delegation, "RUNS_DIR", str(tmp_path))
+    monkeypatch.setattr(delegation, "resolve_devin_exe", lambda: "C:/devin/devin.exe")
+    monkeypatch.setattr(delegation, "_api_key", lambda: "")
+    monkeypatch.setattr(delegation, "_attach_kill_on_close", lambda p: None)
+    monkeypatch.setattr(delegation.subprocess, "Popen", lambda *a, **kw: FakeProc())
+    run = delegation.CliResumeRun("r1", "t1", "sess-9", "C:/ws", "fix it")
+    text, err = run.wait(5)
+    assert err is None
+    logged = (tmp_path / "r1" / "updates.jsonl").read_text()
+    assert secret not in logged
+    assert "[REDACTED]" in logged
+    assert "done line" in logged
