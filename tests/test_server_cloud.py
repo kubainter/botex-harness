@@ -940,6 +940,68 @@ def test_access_token_in_botex_access_token_auto_detected_as_sha256(monkeypatch)
     assert res_err.status_code == 401
 
 
+def test_stored_token_hash_is_not_a_bearer_credential(monkeypatch):
+    """The at-rest BOTEX_ACCESS_TOKEN_HASH value itself must be rejected as bearer."""
+    import hashlib
+
+    raw_token = "btx_live_test_secret_12345"
+    hex_digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    token_hash = f"sha256:{hex_digest}"
+
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN_HASH", token_hash)
+    monkeypatch.setenv("BOTEX_STRICT_AUTH", "1")
+
+    client = TestClient(app)
+
+    # Stored hash presented literally is rejected, in both prefixed and bare-hex form
+    res_prefixed = client.get("/api/wallet", headers={"Authorization": f"Bearer {token_hash}"})
+    assert res_prefixed.status_code == 401
+    res_hex = client.get("/api/wallet", headers={"Authorization": f"Bearer {hex_digest}"})
+    assert res_hex.status_code == 401
+
+    # Hash-only deployment still verifies the real token
+    res_ok = client.get("/api/wallet", headers={"Authorization": f"Bearer {raw_token}"})
+    assert res_ok.status_code == 200
+
+
+def test_hash_in_access_token_var_is_not_a_bearer_credential(monkeypatch):
+    """sha256:... value placed in BOTEX_ACCESS_TOKEN is a verifier, not a credential."""
+    import hashlib
+
+    raw_token = "btx_live_test_direct_hash_987"
+    token_hash = "sha256:" + hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN_HASH", raising=False)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", token_hash)
+    monkeypatch.setenv("BOTEX_STRICT_AUTH", "1")
+
+    client = TestClient(app)
+
+    res_literal = client.get("/api/wallet", headers={"Authorization": f"Bearer {token_hash}"})
+    assert res_literal.status_code == 401
+
+    res_ok = client.get("/api/wallet", headers={"Authorization": f"Bearer {raw_token}"})
+    assert res_ok.status_code == 200
+
+
+def test_access_token_plaintext_compare_is_case_sensitive(monkeypatch):
+    """Plain bearer comparison is byte-exact; a case-mutated token is rejected."""
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN_HASH", raising=False)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "Super-Secret-Key-ABC")
+    monkeypatch.setenv("BOTEX_STRICT_AUTH", "1")
+
+    client = TestClient(app)
+
+    res_mutated = client.get(
+        "/api/wallet", headers={"Authorization": "Bearer super-secret-key-abc"}
+    )
+    assert res_mutated.status_code == 401
+
+    res_ok = client.get("/api/wallet", headers={"Authorization": "Bearer Super-Secret-Key-ABC"})
+    assert res_ok.status_code == 200
+
+
 def test_security_masks_btx_tokens_and_blocks_env():
     """Verify security layer redacts btx_ tokens and blocks .env variations."""
     from botex.tools.security import mask_secrets, resolve_safe_path, SecurityError
