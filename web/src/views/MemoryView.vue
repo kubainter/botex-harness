@@ -361,8 +361,8 @@
               v-model="newEntry.scope"
               class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100 font-mono"
             >
-              <option value="local">Local (.botex/memory/)</option>
-              <option value="global">Global (~/.botex/memory/)</option>
+              <option value="local">Local (project)</option>
+              <option value="global">Global (user)</option>
             </select>
           </div>
         </div>

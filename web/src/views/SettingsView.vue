@@ -49,7 +49,7 @@
       <!-- Master Bearer Token Input -->
       <div>
         <label class="block text-xs font-medium text-slate-200 mb-1 flex items-center justify-between">
-          <span>Bearer Token (BOTEX_ACCESS_TOKEN)</span>
+          <span>Bearer Access Token</span>
           <span class="text-slate-300 font-normal">
             {{ locale === 'pl' ? 'Opcjonalny w trybie lokalnym' : 'Optional on localhost' }}
           </span>
@@ -781,7 +781,7 @@ async function testConnection() {
     testResult.value = {
       ok: false,
       title: locale.value === 'pl' ? 'Błąd połączenia' : 'Connection Failed',
-      detail: err?.message || 'Server did not respond to /api/health.'
+      detail: err?.message || 'Server did not respond to the health check.'
     }
   } finally {
     testingConnection.value = false

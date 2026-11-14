@@ -98,7 +98,7 @@
             <HistoryIcon class="w-8 h-8 text-slate-400 mx-auto" />
             <p>{{ t('chat.history.empty') }}</p>
             <p class="text-xs text-slate-400">
-              New chat sessions are automatically persisted to <code class="font-mono text-sky-300">.botex/chat_sessions/</code>.
+              New chat sessions are saved automatically.
             </p>
           </div>
 
