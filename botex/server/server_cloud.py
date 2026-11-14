@@ -111,7 +111,14 @@ from botex.memory import (
 )
 from botex.plugins import PluginVaultManager
 from botex.rate_limiter import get_rate_limiter
-from botex.security import coerce_text, mask_secrets, sanitize_identifier
+from botex.security import (
+    RESERVED_ORIGIN_AGENTS,
+    coerce_text,
+    filter_reserved_tags,
+    mask_secrets,
+    sanitize_identifier,
+    sanitize_origin_claim,
+)
 from botex.skills import delete_skill, get_skill, install_skill_async, list_skills
 from botex.state import load_inflight_checkpoints
 from botex.wallet import default_wallet_service
@@ -1383,7 +1390,8 @@ def _extract_mcp_origin_from_headers(headers: dict[bytes, bytes]) -> str:
 
 # Identity claims that must never be accepted from client-controlled
 # headers/payloads: they freeze or impersonate privileged vault provenance.
-_RESERVED_ORIGIN_AGENTS = frozenset({"human", "human-curated", "operator", "curator"})
+# Canonical vocabulary lives in botex.tools.security (shared with server.py).
+_RESERVED_ORIGIN_AGENTS = RESERVED_ORIGIN_AGENTS
 
 
 def _normalize_origin_claim(raw: str) -> str:
@@ -1401,19 +1409,7 @@ def _sanitize_mcp_client_origin(raw: str) -> str:
     """Guard reserved identity claims in client-supplied provenance."""
     if not raw:
         return ""
-    norm = unicodedata.normalize("NFKC", str(raw)).strip()
-    parts = norm.split("@", 1)
-    agent = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[0])[:32]
-    host = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[1])[:32] if len(parts) > 1 else ""
-    if agent.lower() in _RESERVED_ORIGIN_AGENTS:
-        return "cloud_api"
-    if agent and host:
-        return f"{agent}@{host}"
-    if agent:
-        return agent
-    if host:
-        return f"botex@{host}"
-    return "cloud_api"
+    return sanitize_origin_claim(raw) or "cloud_api"
 
 
 class CloudAuthMiddleware:
@@ -2589,7 +2585,7 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
         title=body.title,
         content=body.content,
         kind=body.kind,
-        tags=body.tags,
+        tags=filter_reserved_tags(body.tags),
         memory_id=clean_mid,
         origin=origin,
         scope=body.scope,
@@ -2936,7 +2932,7 @@ async def save_chat_session_to_memory(
         kind=body.kind,
         scope=body.scope,
         content=body.content,
-        tags=body.tags,
+        tags=filter_reserved_tags(body.tags),
     )
     if not res.get("ok"):
         logger.warning("Save chat to memory failed.")

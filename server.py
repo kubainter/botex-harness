@@ -65,8 +65,10 @@ from botex.patch_engine import snapshot_manager
 from botex.pricing import load_catalog, model_price
 from botex.security import (
     coerce_text,
+    filter_reserved_tags,
     mask_secrets,
     sanitize_identifier,
+    sanitize_origin_claim,
     wrap_untrusted_content,
     zdr_enforced,
 )
@@ -994,8 +996,9 @@ async def save_memory(
         confidence: Certainty score in [0.0, 1.0] for belief/heuristic-style entries. Default 1.0.
         project: Optional project slug (e.g. 'botex', 'tw3se', 'swarm') for logical partitioning.
         origin: Optional provenance identifier '<agent>@<host>'. Falls back to X-Agent-Id@X-Host session header or 'botex'.
+               Reserved identity claims ('human', 'human-curated', 'operator', 'curator') are rejected.
     """
-    effective_origin = str(origin or "").strip() or get_mcp_client_origin("botex")
+    effective_origin = sanitize_origin_claim(origin or "") or get_mcp_client_origin("botex")
     ws = (
         "."
         if str(scope).strip().lower() == "global" and is_cross_host_windows_path(workspace_dir)
@@ -1006,7 +1009,7 @@ async def save_memory(
         title=title,
         content=content,
         kind=kind,
-        tags=tags,
+        tags=filter_reserved_tags(tags),
         memory_id=memory_id or None,
         origin=effective_origin,
         scope=scope,
@@ -2296,7 +2299,7 @@ def _cli_memory(argv: list[str]) -> None:
             title=args.title,
             content=args.content,
             kind=args.kind,
-            tags=tags_list,
+            tags=filter_reserved_tags(tags_list),
             memory_id=args.id or None,
             scope=args.scope,
         )
