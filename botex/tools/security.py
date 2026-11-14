@@ -10,6 +10,7 @@ Cross-platform: Windows 10+, Windows 11, Linux, macOS.
 import fnmatch
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -190,6 +191,60 @@ def wrap_untrusted_content(content: str, tag: str = "untrusted_content", **attrs
     closing_tag_pattern = re.compile(rf"</\s*{re.escape(tag)}\s*>", re.IGNORECASE)
     safe_masked = closing_tag_pattern.sub(f"<\\/{tag}>", masked)
     return f"<{tag}{attr_str}>\n{safe_masked}\n</{tag}>"
+
+
+# ---------------------------------------------------------------------------
+# Provenance claim guard — caller-supplied origin/tag identity filtering
+# ---------------------------------------------------------------------------
+# Identity claims that must never be accepted from client-controlled inputs:
+# they freeze or impersonate privileged vault provenance (Curator Human Freeze
+# Gate). ``RESERVED_TAGS`` additionally covers ``frozen``.
+RESERVED_ORIGIN_AGENTS = frozenset({"human", "human-curated", "operator", "curator"})
+RESERVED_TAGS = frozenset({"human", "human-curated", "frozen", "operator", "curator"})
+
+_ORIGIN_DISALLOWED = re.compile(r"[^a-zA-Z0-9_.-]")
+
+
+def sanitize_origin_claim(raw: str) -> str:
+    """NFKC-fold + allowlist-strip a caller-supplied provenance agent claim.
+
+    Returns a sanitized ``agent`` or ``agent@host`` string. Reserved identity
+    claims (human/operator/curator — incl. homoglyph/case spoofs) become ``""``
+    so callers fall back to real session provenance instead of a fallback
+    constant being baked in here.
+    """
+    if not raw:
+        return ""
+    norm = unicodedata.normalize("NFKC", str(raw)).strip()
+    parts = norm.split("@", 1)
+    agent = _ORIGIN_DISALLOWED.sub("", parts[0])[:32]
+    host = _ORIGIN_DISALLOWED.sub("", parts[1])[:32] if len(parts) > 1 else ""
+    if agent.lower() in RESERVED_ORIGIN_AGENTS:
+        return ""
+    if agent and host:
+        return f"{agent}@{host}"
+    if agent:
+        return agent
+    if host:
+        return f"botex@{host}"
+    return ""
+
+
+def filter_reserved_tags(tags):
+    """Drop reserved identity tags a caller cannot legitimately set.
+
+    The comparison NFKC-folds, lowercases and strips a leading ``#`` — the same
+    normalization the Curator Freeze Gate applies — so homoglyph, case and
+    hashtag spoofs die too. Non-reserved tags pass through unmodified;
+    ``None`` in -> ``None`` out.
+    """
+    if tags is None:
+        return None
+    return [
+        t
+        for t in tags
+        if unicodedata.normalize("NFKC", str(t)).strip().lower().lstrip("#") not in RESERVED_TAGS
+    ]
 
 
 # ---------------------------------------------------------------------------
