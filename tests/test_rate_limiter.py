@@ -481,25 +481,6 @@ def test_worker_rate_limited_result_opens_cooldown(client):
     lim.report_limited.assert_called_once_with("openrouter-free", retry_after_s=None)
 
 
-def test_worker_devin_executor_bypasses_limiter(client):
-    """The devin executor never touches the provider rate limiter."""
-    lim = _mock_limiter()
-    with (
-        patch("botex.server_cloud.get_rate_limiter", return_value=lim),
-        patch(
-            "botex.server_cloud._run_devin_task",
-            new=AsyncMock(return_value={"ok": True, "status": "DONE", "summary": "s"}),
-        ),
-    ):
-        resp = client.post(
-            "/api/tasks",
-            json={"task": "t", "mode": "readonly", "executor": "devin"},
-        )
-        assert _wait_terminal(client, resp.json()["task_id"]) == "DONE"
-    lim.acquire.assert_not_called()
-    lim.wait_estimate.assert_not_called()
-
-
 def test_worker_successful_result_no_cooldown(client):
     """A clean run must not open a cooldown window."""
     lim = _mock_limiter()

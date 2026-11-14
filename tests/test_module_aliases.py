@@ -53,7 +53,7 @@ LEGACY_MODULE_DOMAINS = {
     "context_inclusion": "core",
     "tracing": "core",
     "meta_harness": "core",
-    # botex/providers — adapters, catalog, quota/billing, delegation bridge
+    # botex/providers — adapters, catalog, quota/billing
     "providers": "providers",
     "catalog": "providers",
     "pricing": "providers",
@@ -63,7 +63,6 @@ LEGACY_MODULE_DOMAINS = {
     "retry": "providers",
     "benchmarks": "providers",
     "denylist": "providers",
-    "delegation": "providers",
     # botex/tools — filesystem/exec/net tool surface, patch engine, security
     "file_tools": "tools",
     "exec_tools": "tools",

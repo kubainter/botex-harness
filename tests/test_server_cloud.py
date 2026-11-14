@@ -130,16 +130,6 @@ def test_auth_strict_cloud_rejects_query_token_everywhere(client, monkeypatch):
     assert chat_resp.status_code == 401
 
 
-def test_devin_status_requires_auth_in_strict_mode(client, monkeypatch):
-    """/api/delegation/devin leaks run metadata, so it is no longer an unauthenticated probe."""
-    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
-    assert client.get("/api/delegation/devin").status_code == 401
-    ok = client.get(
-        "/api/delegation/devin", headers={"Authorization": "Bearer super-secret-key-12345"}
-    )
-    assert ok.status_code == 200
-
-
 def test_auth_strict_cloud_allows_health_unauthenticated(client, monkeypatch):
     """Health probes bypass authentication even in strict cloud mode."""
     monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
@@ -1028,26 +1018,6 @@ def test_oversized_chat_system_prompt_rejected_with_400(client: TestClient):
     assert "System prompt exceeds maximum allowed length" in resp.json()["detail"]
 
 
-def test_oversized_task_followup_prompt_rejected_with_400(client: TestClient):
-    """Follow-up prompt exceeding 65536 characters is rejected with 400."""
-    from botex.server_cloud import _TASKS
-
-    fake_tid = "fake_devin_task"
-    _TASKS[fake_tid] = {
-        "task_id": fake_tid,
-        "executor": "devin",
-        "status": "DONE",
-        "session_id": "ses_123",
-    }
-    try:
-        huge_prompt = "f" * 70000
-        resp = client.post(f"/api/tasks/{fake_tid}/followup", json={"prompt": huge_prompt})
-        assert resp.status_code == 400
-        assert "exceeds maximum allowed length" in resp.json()["detail"]
-    finally:
-        _TASKS.pop(fake_tid, None)
-
-
 def test_mask_stream_chunk_boundary_secrets():
     """Verify mask_stream_chunk redacts secrets split across consecutive streaming chunks."""
     from server import mask_stream_chunk
@@ -1392,12 +1362,6 @@ def test_resolve_local_llm_base_url_probe_failure_degrades():
         out = _resolve_local_llm_base_url("ollama", cfg)
     assert out is cfg
     _LOCAL_LLM_BASE_URL_RESOLVED.clear()
-
-
-def test_devin_status_endpoint_requires_token(client, monkeypatch):
-    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
-    assert client.get("/api/delegation/devin").status_code == 401
-    assert client.get("/api/health").status_code == 200
 
 
 def test_streamable_http_mcp_requires_token(client, monkeypatch):

@@ -346,10 +346,6 @@ class ApprovalDecisionRequest(BaseModel):
     remember: bool = False
 
 
-class TaskFollowupRequest(BaseModel):
-    prompt: str
-
-
 class MemorySaveRequest(BaseModel):
     title: str
     content: str
@@ -1750,16 +1746,6 @@ async def get_health() -> Dict[str, Any]:
     }
 
 
-@app.get("/api/delegation/devin")
-async def get_devin_executor_status() -> Dict[str, Any]:
-    """Availability probe for the `devin` task executor (exe + credential)."""
-    from botex.delegation import devin_auth_status, list_runs
-
-    st = devin_auth_status()
-    st["runs"] = list_runs(limit=10) if st["enabled"] else []
-    return st
-
-
 @app.get("/api/wallet")
 async def get_wallet(
     provider: str = Query(default="openrouter"),
@@ -1933,7 +1919,7 @@ def _update_task_progress(task_id: str, ev: Dict[str, Any]) -> None:
         prog["waiting_for"] = "approval"
     elif kind == EventKind.WAITING_FOR_INPUT:
         prog["waiting_for"] = "input"
-    elif kind in (EventKind.ATTEMPT_START, EventKind.DEVIN_UPDATE):
+    elif kind == EventKind.ATTEMPT_START:
         prog["waiting_for"] = "model"
     elif kind in (
         EventKind.ATTEMPT_END,
@@ -1964,56 +1950,6 @@ async def _task_event_pump(task_id: str, em) -> None:
         pass
     finally:
         em.unsubscribe(q)
-
-
-async def _run_devin_task(
-    task_id: str, req: TaskCreateRequest, session_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """Execute the task through the direct-ACP Devin executor."""
-    from botex.delegation import delegate_run, devin_auth_status
-
-    auth = devin_auth_status()
-    if not auth["available"]:
-        return {
-            "ok": False,
-            "status": "CONFIG_ERROR",
-            "failure_kind": "capability_missing",
-            "message": f"Devin executor unavailable: {auth['reason']}",
-        }
-    receipt = await asyncio.to_thread(
-        delegate_run,
-        task_id,
-        req.task,
-        resolve_workspace(req.workspace_dir),
-        req.agent_type or "default",
-        session_id=session_id or "",
-    )
-    ok = bool(receipt.pop("ok", False))
-    receipt["ok"] = ok
-    receipt["status"] = "DONE" if ok else "FAILED"
-    receipt["executor"] = "devin"
-    if not ok:
-        receipt["failure_kind"] = "provider_error"
-        receipt["summary"] = receipt.get("summary") or receipt.get("error") or ""
-    return receipt
-
-
-def _record_devin_turn(entry: Dict[str, Any], prompt: str, res: Dict[str, Any]) -> None:
-    """Append one user->agent exchange to the task's persisted turn history."""
-    turns = entry.setdefault("turns", [])
-    turns.append(
-        {
-            "turn": len(turns) + 1,
-            "prompt": mask_secrets(prompt),
-            "summary": res.get("summary") or res.get("message") or "",
-            "ok": bool(res.get("ok")),
-            "run_id": res.get("run_id"),
-            "session_id": res.get("session_id"),
-            "resumed": res.get("resumed"),
-            "resume_mode": res.get("resume_mode"),
-            "ts": time.time(),
-        }
-    )
 
 
 _RETRY_HINT_RE = re.compile(r"retry in ([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
@@ -2080,25 +2016,24 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
         # Provider admission throttle: wait on the provider's RPM budget
         # BEFORE taking a concurrency slot — a task parked on a provider
         # cooldown must not starve other providers' queue slots.
-        if executor != "devin":
-            provider_name, _ = resolve_provider(req.provider or "")
-            limiter = get_rate_limiter()
-            est_wait = limiter.wait_estimate(provider_name)
-            if est_wait > 0:
-                em.emit(
-                    EventKind.RETRY_WAIT,
-                    delay_s=round(est_wait, 2),
-                    reason="provider_rate_limit",
-                    provider=provider_name,
-                )
-            waited_s = await limiter.acquire(provider_name)
-            if waited_s > 0:
-                logger.info(
-                    "task %s waited %.2fs on provider '%s' rate budget",
-                    task_id,
-                    waited_s,
-                    provider_name,
-                )
+        provider_name, _ = resolve_provider(req.provider or "")
+        limiter = get_rate_limiter()
+        est_wait = limiter.wait_estimate(provider_name)
+        if est_wait > 0:
+            em.emit(
+                EventKind.RETRY_WAIT,
+                delay_s=round(est_wait, 2),
+                reason="provider_rate_limit",
+                provider=provider_name,
+            )
+        waited_s = await limiter.acquire(provider_name)
+        if waited_s > 0:
+            logger.info(
+                "task %s waited %.2fs on provider '%s' rate budget",
+                task_id,
+                waited_s,
+                provider_name,
+            )
         # Bounded concurrency: enforce engine semaphore
         edge_exec = _resolve_active_edge_executor(req.workspace_dir)
         effective_ws = (
@@ -2108,55 +2043,38 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
         async with botex_server._TASK_SEMAPHORE:
             entry["status"] = "RUNNING"
             em.emit(EventKind.TASK_STATE, state="RUNNING", executor=executor)
-            if executor == "devin":
-                res = await _run_devin_task(task_id, req)
-            else:
-                res = await run_botex_task(
-                    task=req.task,
-                    files=req.files or None,
-                    workspace_dir=effective_ws,
-                    model=req.model,
-                    profile=req.profile,
-                    provider=req.provider,
-                    mode=req.mode,
-                    max_turns=req.max_turns or None,
-                    max_tokens=req.max_tokens or None,
-                    max_duration_s=req.max_duration_s or None,
-                    budget_limit_usd=req.budget_limit_usd if req.budget_limit_usd >= 0 else None,
-                    allow_destructive=True if req.allow_destructive else None,
-                    allow_exec=True if req.allow_exec else None,
-                    allow_net=True if req.allow_net else None,
-                    net_allowed_hosts=req.net_allowed_hosts or None,
-                    net_allowed_urls=req.net_allowed_urls or None,
-                    output_path=req.output_path,
-                    verify_command=req.verify_command,
-                    recipe=req.recipe,
-                    allow_non_zdr=True if req.allow_non_zdr else None,
-                    allow_expensive_model=True if req.allow_expensive_model else None,
-                    approval_policy=req.approval_policy or None,
-                    progress_cb=lambda kind, **data: em.emit(kind, **data),
-                    tool_executor=edge_exec,
-                )
+            res = await run_botex_task(
+                task=req.task,
+                files=req.files or None,
+                workspace_dir=effective_ws,
+                model=req.model,
+                profile=req.profile,
+                provider=req.provider,
+                mode=req.mode,
+                max_turns=req.max_turns or None,
+                max_tokens=req.max_tokens or None,
+                max_duration_s=req.max_duration_s or None,
+                budget_limit_usd=req.budget_limit_usd if req.budget_limit_usd >= 0 else None,
+                allow_destructive=True if req.allow_destructive else None,
+                allow_exec=True if req.allow_exec else None,
+                allow_net=True if req.allow_net else None,
+                net_allowed_hosts=req.net_allowed_hosts or None,
+                net_allowed_urls=req.net_allowed_urls or None,
+                output_path=req.output_path,
+                verify_command=req.verify_command,
+                recipe=req.recipe,
+                allow_non_zdr=True if req.allow_non_zdr else None,
+                allow_expensive_model=True if req.allow_expensive_model else None,
+                approval_policy=req.approval_policy or None,
+                progress_cb=lambda kind, **data: em.emit(kind, **data),
+                tool_executor=edge_exec,
+            )
             entry["result_data"] = botex_server.mask_secrets_recursive(res)
             entry["result"] = mask_secrets(res.get("summary") or res.get("message") or "")
             entry["status"] = "DONE" if res.get("ok") else res.get("status", "FAILED")
             _note_provider_result(provider_name, res)
-            if executor == "devin":
-                # Persist the ACP session so follow-up turns can resume it
-                # (multi-turn continuation / prompt-cache reuse).
-                if res.get("session_id"):
-                    entry["session_id"] = res["session_id"]
-                if not entry.get("turns"):
-                    _record_devin_turn(entry, req.task, res)
     except asyncio.CancelledError:
         entry["status"] = "CANCELLED"
-        if executor == "devin":
-            try:
-                from botex.delegation import cancel_run_for_task
-
-                cancel_run_for_task(task_id)
-            except Exception:
-                pass
         if not entry.get("result"):
             entry["result"] = "Task cancelled by operator."
         if not entry.get("result_data"):
@@ -2217,29 +2135,27 @@ async def create_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Task prompt exceeds maximum allowed length (65536 characters).",
         )
-    executor = (getattr(req, "executor", "") or "botex").lower()
-    if executor != "devin":
-        has_model = bool(req.model and req.model.strip())
-        has_provider = bool(req.provider and req.provider.strip())
-        env_prov = os.environ.get("BOTEX_PROVIDER", "").strip()
-        if has_model and not has_provider and not env_prov:
+    has_model = bool(req.model and req.model.strip())
+    has_provider = bool(req.provider and req.provider.strip())
+    env_prov = os.environ.get("BOTEX_PROVIDER", "").strip()
+    if has_model and not has_provider and not env_prov:
+        avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Explicit 'provider' is required when 'model' ('{req.model.strip()}') is specified. "
+                f"Specify one of: {avail_provs}."
+            ),
+        )
+    if has_provider:
+        resolved_prov, prov_cfg = resolve_provider(req.provider)
+        if not prov_cfg:
             avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Explicit 'provider' is required when 'model' ('{req.model.strip()}') is specified. "
-                    f"Specify one of: {avail_provs}."
-                ),
+                detail=f"Unknown provider '{req.provider}'. Available providers: {avail_provs}.",
             )
-        if has_provider:
-            resolved_prov, prov_cfg = resolve_provider(req.provider)
-            if not prov_cfg:
-                avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unknown provider '{req.provider}'. Available providers: {avail_provs}.",
-                )
-            req.provider = resolved_prov
+        req.provider = resolved_prov
     if req.max_turns and req.max_turns > 100:
         req.max_turns = 100
     if req.max_tokens and req.max_tokens > 32768:
@@ -2281,103 +2197,6 @@ async def create_task(
                 "response": res_dict,
             }
     return res_dict
-
-
-async def _run_followup_worker(task_id: str, prompt: str, session_id: str) -> None:
-    """Background worker driving a follow-up turn inside the persisted Devin session."""
-    entry = _TASKS[task_id]
-    em = get_emitter(task_id)
-    pump = asyncio.create_task(_task_event_pump(task_id, em))
-    req_data = entry.get("request") or {}
-    try:
-        async with botex_server._TASK_SEMAPHORE:
-            entry["status"] = "RUNNING"
-            em.emit(EventKind.TASK_STATE, state="RUNNING", executor="devin", followup=True)
-            req_kwargs = {k: v for k, v in req_data.items() if k in TaskCreateRequest.model_fields}
-            req = TaskCreateRequest(**req_kwargs)
-            req.task = prompt
-            res = await _run_devin_task(task_id, req, session_id=session_id)
-            entry["result_data"] = botex_server.mask_secrets_recursive(res)
-            entry["result"] = mask_secrets(res.get("summary") or res.get("message") or "")
-            entry["status"] = "DONE" if res.get("ok") else res.get("status", "FAILED")
-            if res.get("session_id"):
-                entry["session_id"] = res["session_id"]
-            _record_devin_turn(entry, prompt, res)
-    except asyncio.CancelledError:
-        entry["status"] = "CANCELLED"
-        try:
-            from botex.delegation import cancel_run_for_task
-
-            cancel_run_for_task(task_id)
-        except Exception:
-            pass
-        if not entry.get("result"):
-            entry["result"] = "Follow-up cancelled by operator."
-        raise
-    except Exception as exc:
-        masked_err = mask_secrets(str(exc))
-        entry["status"] = "FAILED"
-        entry["result"] = f"Follow-up execution failed: {masked_err}"
-    finally:
-        entry["finished_at"] = time.time()
-        em.emit(EventKind.TASK_STATE, state=entry.get("status") or "DONE")
-        await asyncio.to_thread(
-            _save_task_persistent, task_id, entry, req_data.get("workspace_dir") or ""
-        )
-        # Let the pump deliver the final task_state frame before teardown.
-        await asyncio.sleep(0.1)
-        pump.cancel()
-
-
-@app.post("/api/tasks/{task_id}/followup", status_code=status.HTTP_202_ACCEPTED)
-async def create_task_followup(task_id: str, body: TaskFollowupRequest) -> Dict[str, Any]:
-    """Send a follow-up turn to the Devin session persisted on the task receipt.
-
-    Resumes the stored ACP session (or ``devin -r`` when the ACP server cannot
-    ``session/load``) so multi-turn continuation reuses the prompt cache instead
-    of starting a clean slate.
-    """
-    _load_tasks_persistent()
-    clean_tid = sanitize_identifier(task_id)
-    if not clean_tid or clean_tid not in _TASKS:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    entry = _TASKS[clean_tid]
-    if entry.get("executor") != "devin":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Follow-up turns are only supported for devin-executor tasks.",
-        )
-    prompt = (body.prompt or "").strip()
-    if not prompt:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="prompt must not be empty"
-        )
-    if len(prompt) > 65536:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Follow-up prompt exceeds maximum allowed length (65536 characters).",
-        )
-    session_id = entry.get("session_id") or (entry.get("result_data") or {}).get("session_id")
-    if not session_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Task has no resumable Devin session_id.",
-        )
-    if entry.get("status") in {"QUEUED", "RUNNING"}:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Task is still running - wait for it to finish before sending a follow-up.",
-        )
-    entry["status"] = "QUEUED"
-    entry["finished_at"] = None
-    worker = asyncio.create_task(_run_followup_worker(clean_tid, prompt, str(session_id)))
-    entry["async_task"] = worker
-    return {
-        "ok": True,
-        "task_id": clean_tid,
-        "status": "QUEUED",
-        "session_id": session_id,
-    }
 
 
 @app.get("/api/tasks")
@@ -2452,18 +2271,6 @@ async def cancel_task(task_id: str) -> Dict[str, Any]:
 
     # Abort pending approval actions for this task
     default_approval_manager.abort_task(clean_tid, reason="Task cancelled via API")
-
-    # Devin executor: terminate the ACP run tree (cross-process safe — the
-    # kill validates image name + start time before taskkill).
-    if entry.get("executor") == "devin":
-        try:
-            from botex.delegation import kill_run, list_runs
-
-            for r in list_runs():
-                if r.get("task_id") == clean_tid and r.get("live"):
-                    kill_run(r["run_id"])
-        except Exception as exc:
-            logger.warning(f"devin run kill for task {clean_tid} failed: {exc}")
 
     # Cancel background worker task if active
     worker = entry.get("async_task")

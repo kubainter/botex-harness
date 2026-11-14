@@ -8,7 +8,6 @@ import type {
   TaskSummary,
   TaskDetail,
   TaskEventsResponse,
-  TaskFollowupResponse,
   PendingAction,
   ApprovalDecisionRequest,
   MemoryEntry,
@@ -235,14 +234,6 @@ export const api = {
     )
   },
 
-  // 3c. Multi-turn follow-up: resumes the Devin ACP session stored on the task.
-  async sendTaskFollowup(taskId: string, prompt: string): Promise<TaskFollowupResponse> {
-    return request<TaskFollowupResponse>(
-      `/api/tasks/${encodeURIComponent(taskId)}/followup`,
-      { method: 'POST', body: JSON.stringify({ prompt }) }
-    )
-  },
-
   // 3a. Live Task Event Stream (buffered tail + incremental `since` cursor)
   async fetchTaskEvents(taskId: string, since?: number): Promise<TaskEventsResponse> {
     const params = new URLSearchParams()
@@ -253,18 +244,6 @@ export const api = {
     return request<TaskEventsResponse>(
       `/api/tasks/${encodeURIComponent(taskId)}/events${qs ? '?' + qs : ''}`
     )
-  },
-
-  // 3b. Devin executor availability probe (exe + credential resolved server-side)
-  async fetchDevinExecutorStatus(): Promise<{
-    enabled: boolean
-    available: boolean
-    exe_resolved: boolean
-    credential_resolved: boolean
-    reason: string
-    runs?: Array<Record<string, unknown>>
-  }> {
-    return request('/api/delegation/devin')
   },
 
   // 4. Approvals

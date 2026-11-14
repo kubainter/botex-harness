@@ -605,17 +605,6 @@ DEFAULTS: Dict[str, Any] = {
         "openrouter_api_key": "",
         "google_api_key": "",
     },
-    # Direct-ACP delegation to the Devin CLI (executor="devin"). exe_path is a
-    # validated executable path (must exist and be named devin.exe/devin) —
-    # never a free-form command. Empty = executor reports unavailable.
-    "delegation": {
-        "devin": {
-            "enabled": True,
-            "exe_path": "",
-            "poll_interval_s": 3,
-            "idle_timeout_s": 90,
-        },
-    },
     # SkillSpector pre-flight audit (botex/skills/skillspector_gate.py).
     # allow_unverified=False fails CLOSED when no scanner binary exists
     # (verdict BLOCKED_NO_SCANNER); True restores the legacy fail-open

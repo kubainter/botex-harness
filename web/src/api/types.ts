@@ -85,7 +85,7 @@ export interface TaskCreateRequest {
   recipe?: string
   allow_non_zdr?: boolean
   approval_policy?: string
-  executor?: 'botex' | 'devin'
+  executor?: 'botex'
   agent_type?: string
 }
 
@@ -114,17 +114,9 @@ export interface TaskDetail extends TaskSummary {
   task?: string | null
   request?: TaskCreateRequest | null
   progress?: TaskProgress | null
-  executor?: 'botex' | 'devin' | string | null
+  executor?: 'botex' | string | null
   session_id?: string | null
   turns?: TaskTurn[]
-}
-
-export interface TaskFollowupResponse {
-  ok: boolean
-  task_id: string
-  status: string
-  session_id?: string | null
-  detail?: string
 }
 
 // ---------------------------------------------------------------------------

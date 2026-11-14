@@ -10,7 +10,6 @@ export const useTasksStore = defineStore('tasks', () => {
   const currentTask = ref<TaskDetail | null>(null)
   const isLoading = ref<boolean>(false)
   const isCreating = ref<boolean>(false)
-  const isSendingFollowup = ref<boolean>(false)
   const errorMessage = ref<string | null>(null)
   let pollInterval: any = null
 
@@ -59,29 +58,6 @@ export const useTasksStore = defineStore('tasks', () => {
       return null
     } finally {
       isCreating.value = false
-    }
-  }
-
-  async function sendFollowup(taskId: string, prompt: string): Promise<boolean> {
-    if (!prompt.trim()) return false
-    isSendingFollowup.value = true
-    errorMessage.value = null
-    try {
-      const res = await api.sendTaskFollowup(taskId, prompt)
-      if (res.ok) {
-        if (currentTask.value?.task_id === taskId) {
-          await fetchTask(taskId)
-        }
-        startPolling()
-        return true
-      }
-      errorMessage.value = res.detail || 'Follow-up rejected'
-      return false
-    } catch (err: any) {
-      errorMessage.value = err?.message || 'Failed to send follow-up'
-      return false
-    } finally {
-      isSendingFollowup.value = false
     }
   }
 
@@ -224,8 +200,6 @@ export const useTasksStore = defineStore('tasks', () => {
     fetchTask,
     createTask,
     cancelTask,
-    sendFollowup,
-    isSendingFollowup,
     startPolling,
     stopPolling,
     taskEvents,
