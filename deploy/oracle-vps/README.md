@@ -53,7 +53,7 @@ sudo chown -R botex:botex /opt/botex /opt/bielik /var/log/botex
 sudo -u botex git clone <your-repo-url> /opt/botex        # or rsync the tree
 cd /opt/botex
 sudo -u botex python3 -m venv .venv
-sudo -u botex .venv/bin/pip install -r requirements.txt   # or: pip install -e .
+sudo -u botex .venv/bin/pip install -r requirements.lock  # fallback: -r requirements.txt or pip install -e .
 ```
 
 Create `/opt/botex/.env` (mode 600, owner botex) with at least:

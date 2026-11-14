@@ -195,7 +195,7 @@ External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge,
     1.  Public contract layer: `skills/<skill_name>/SKILL.md` (read by external orchestrators like Antigravity, Devin, Codex).
     2.  Kernel execution layer: `botex/skills/recipes/<recipe_name>.md` (injected directly into BoteX model prompts).
 *   **Mandatory Synchronization:** Whenever engineering checklists, linting requirements, or runtime targets are updated, both layers must be updated in tandem. Parity is enforced by automated tests in `tests/test_skills_parity.py`.
-*   **Dependencies Parity:** `requirements.txt` (the sole install source for CI and the VPS deploy) and `pyproject.toml` `[project.dependencies]` must list identical core dependencies with identical specifiers. Drift is enforced by `tests/test_deps_parity.py`.
+*   **Dependencies Parity:** `requirements.txt` (the loose `>=` floor for CI/dev installs) and `pyproject.toml` `[project.dependencies]` must list identical core dependencies with identical specifiers. `requirements.lock` is the pinned closure installed on the VPS — regenerate it via `uv pip compile pyproject.toml --universal --python-version 3.13 -o requirements.lock` whenever deps change. Drift is enforced by `tests/test_deps_parity.py`.
 
 ### 7.3. Cloud Brain vs. Local Workspace Delegation (Edge Bridge)
 *   **NEVER delegate local/unpushed file work to BoteX Cloud using a local host path (`C:\Users\...`):** On the remote Linux VPS, `resolve_workspace()` treats cross-host Windows paths as invalid for the server filesystem and falls back to the server's own checkout (`/opt/botex`, i.e., deployed `main`), silently missing unpushed branch edits or local files.
