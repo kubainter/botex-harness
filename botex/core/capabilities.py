@@ -69,8 +69,8 @@ TOOL_REGISTRY = {
     ),
     "synthesize_plugin": ToolPolicy(
         required_scopes=[CAP_WRITE, CAP_EXEC],
-        risk=RiskLevel.MEDIUM,
-        approval_required=False,
+        risk=RiskLevel.HIGH,
+        approval_required=True,
     ),
     "read_url": ToolPolicy(required_scopes=[CAP_NET], risk=RiskLevel.MEDIUM),
 }

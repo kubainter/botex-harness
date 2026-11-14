@@ -22,6 +22,7 @@ from botex.capabilities import (
     CAP_NET,
     CAP_READ,
     CAP_WRITE,
+    TOOL_REGISTRY,
     async_check_agency_policy,
 )
 from botex.contracts import STATUS_FAILURE_KIND
@@ -44,6 +45,7 @@ def test_approval_policy_tool_map():
         "delete_file",
         "move_file",
         "run_command",
+        "synthesize_plugin",
     }
     assert POLICY_TOOL_MAP[ApprovalPolicy.MUTATIONS] == {
         "create_file",
@@ -51,6 +53,7 @@ def test_approval_policy_tool_map():
         "delete_file",
         "move_file",
         "run_command",
+        "synthesize_plugin",
     }
     assert POLICY_TOOL_MAP[ApprovalPolicy.ALL_RISKY] == {
         "create_file",
@@ -58,6 +61,7 @@ def test_approval_policy_tool_map():
         "delete_file",
         "move_file",
         "run_command",
+        "synthesize_plugin",
         "read_url",
     }
     # Read-only tools should never be gated by approval policies
@@ -66,6 +70,18 @@ def test_approval_policy_tool_map():
         assert "read_file_lines" not in tools
         assert "read_file" not in tools
         assert "list_dir" not in tools
+
+
+def test_policy_tool_map_covers_all_approval_required_tools():
+    """Every approval_required tool must appear in each non-NONE tier — otherwise
+    the task_id pre-approval check in check_agency_policy silently clears the gate
+    because is_action_requiring_approval returns False for unmapped tools."""
+    gated = {name for name, policy in TOOL_REGISTRY.items() if policy.approval_required}
+    assert "synthesize_plugin" in gated
+    for policy, tools in POLICY_TOOL_MAP.items():
+        if policy is ApprovalPolicy.NONE:
+            continue
+        assert gated <= tools, f"{policy.value} missing gated tools: {sorted(gated - tools)}"
 
 
 def test_status_failure_kind_aborted():
@@ -144,6 +160,7 @@ def test_approval_manager_policy_checks():
     # High risk operations require approval
     assert mgr.is_action_requiring_approval("delete_file")
     assert mgr.is_action_requiring_approval("run_command")
+    assert mgr.is_action_requiring_approval("synthesize_plugin")
 
     # Mutations not in HIGH_RISK do not require approval under HIGH_RISK
     assert not mgr.is_action_requiring_approval("create_file")
@@ -438,6 +455,76 @@ def test_async_check_agency_policy_aborted():
         err = await check_task
         assert "aborted by the operator" in err
         assert "Emergency abort" in err
+
+    asyncio.run(run())
+
+
+def test_synthesize_plugin_requires_operator_approval():
+    """synthesize_plugin writes AND smoke-executes generated code — with a task_id
+    present it must queue an approval action like run_command, not silently pass."""
+
+    async def run():
+        caps = {CAP_READ, CAP_WRITE, CAP_EXEC}
+        mgr = ApprovalManager(default_policy=ApprovalPolicy.HIGH_RISK)
+
+        # Operator rejection blocks execution
+        check_task = asyncio.create_task(
+            async_check_agency_policy(
+                "synthesize_plugin",
+                caps,
+                confirm_fn=mgr,
+                params={"name": "p1", "code": "def run():\n    return 1"},
+                task_id="task_plugin_rej",
+                approval_policy=ApprovalPolicy.HIGH_RISK,
+            )
+        )
+        await asyncio.sleep(0.01)
+
+        pending = mgr.get_pending_actions("task_plugin_rej")
+        assert len(pending) == 1
+        assert pending[0]["tool_name"] == "synthesize_plugin"
+        mgr.resolve(pending[0]["action_id"], approved=False)
+
+        err = await check_task
+        assert "was not confirmed by the operator" in err
+
+        # Operator approval permits execution
+        check_task2 = asyncio.create_task(
+            async_check_agency_policy(
+                "synthesize_plugin",
+                caps,
+                confirm_fn=mgr,
+                params={"name": "p1", "code": "def run():\n    return 1"},
+                task_id="task_plugin_ok",
+                approval_policy=ApprovalPolicy.HIGH_RISK,
+            )
+        )
+        await asyncio.sleep(0.01)
+
+        pending2 = mgr.get_pending_actions("task_plugin_ok")
+        assert len(pending2) == 1
+        mgr.resolve(pending2[0]["action_id"], approved=True)
+
+        assert await check_task2 == ""
+
+    asyncio.run(run())
+
+
+def test_synthesize_plugin_headless_fails_closed():
+    """Non-interactive runs return the 'requires confirmation' string, never execute."""
+
+    async def run():
+        caps = {CAP_READ, CAP_WRITE, CAP_EXEC}
+        err = await async_check_agency_policy(
+            "synthesize_plugin",
+            caps,
+            confirm_fn=None,
+            params={"name": "p1"},
+            task_id="task_plugin_headless",
+            approval_policy=ApprovalPolicy.HIGH_RISK,
+        )
+        assert "requires operator confirmation under policy 'high_risk'" in err
+        assert "none is available" in err
 
     asyncio.run(run())
 
