@@ -2,10 +2,14 @@
 """Regression tests for the pre-release security hardening (bind host, event masking,
 child env sanitization, node inline-eval policy)."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 import server as botex_server
 from botex import exec_tools
+from botex.config import DEFAULTS
 from botex.events import TaskEventEmitter, _mask_data
 
 SECRET = "sk-or-v1-" + "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4"
@@ -107,6 +111,65 @@ def test_node_script_with_script_args_allowed():
         "node build.js -e production", allowlist=["node"], deny_args=[]
     )
     assert err == ""
+
+
+_EXEC_POLICY = {
+    "allowlist": [*DEFAULTS["exec"]["allowlist"], "cd", "ls", "dir"],
+    "deny_args": DEFAULTS["exec"]["deny_args"],
+}
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "git -C /tmp status",
+        "git -C /tmp commit -m x",
+        "git --git-dir /x status",
+        "git --git-dir=/x/.git status",
+        "git --work-tree /x status",
+        "git --work-tree=/x status",
+        "git worktree add /tmp/wt",
+        "git checkout-index -a --prefix=/tmp/x/",
+        "git archive HEAD -o /tmp/x.zip",
+        "git show HEAD:file",
+        "git remote -v",
+        "git remote add upstream https://example.org/x.git",
+        "npm install express",
+        "npm ci",
+        "pip wheel requests",
+        "cd ..",
+        "ls ..",
+    ],
+)
+def test_exec_deny_args_block_path_redirects_and_installs(cmd):
+    err = exec_tools.command_policy_error(cmd, **_EXEC_POLICY)
+    assert "denied" in err
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "git status",
+        "git log",
+        "git diff",
+        "git log main..feature",
+        "git diff main...feature",
+        "ls",
+        "dir",
+        "ls foo..bar",
+        "pytest tests/",
+    ],
+)
+def test_exec_deny_args_allow_readonly_and_dotdot_lookalikes(cmd):
+    err = exec_tools.command_policy_error(cmd, **_EXEC_POLICY)
+    assert err == ""
+
+
+def test_committed_configs_mirror_default_deny_args():
+    root = Path(__file__).resolve().parent.parent
+    for name in ("botex.config.json", "botex.config.example.json"):
+        data = json.loads((root / name).read_text(encoding="utf-8-sig"))
+        assert data["exec"]["deny_args"] == DEFAULTS["exec"]["deny_args"], name
 
 
 def test_wikilink_redos_resilience():
