@@ -532,6 +532,16 @@ DEFAULTS: Dict[str, Any] = {
         # unrestricted (local MCP sessions keep today's semantics).
         "allowed_workspaces": []
     },
+    "security": {
+        # Browser drive-by guard on mutating /api/* routes and /api/chat/ws.
+        # Browsers always send an Origin header on cross-origin writes and WS
+        # handshakes; headless clients (curl/agents) omit it, so the check
+        # activates only when Origin is present. [] = the Origin host must
+        # equal the request Host host (same-origin PWA; the Vite dev server
+        # on a different port of the same host still passes). Exact origin
+        # entries allow additional cross-origin PWAs. ["*"] = opt-out.
+        "allowed_origins": [],
+    },
     "ui": {
         # CLI language for human-facing output: "auto" (OS locale), "en", "pl".
         # MCP tool responses always stay English — they are an agent-facing API.
@@ -644,6 +654,7 @@ _ENV_MAP = {
     "BOTEX_CHAT_SESSIONS_DIR": ("paths", "chat_sessions_dir"),
     "BOTEX_BENCHMARKS_CACHE_FILE": ("benchmarks", "cache_file"),
     "BOTEX_SKILLS_AUDIT_ALLOW_UNVERIFIED": ("skills", "audit", "allow_unverified"),
+    "BOTEX_ALLOWED_ORIGINS": ("security", "allowed_origins"),
 }
 
 _config_cache: Optional[Dict[str, Any]] = None

@@ -172,6 +172,79 @@ def test_auth_strict_cloud_allows_cors_preflight(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 2b. Origin Guard (same-host drive-by protection on mutations)
+# ---------------------------------------------------------------------------
+
+
+def test_origin_guard_rejects_cross_origin_mutation(client):
+    """POST /api/* carrying a foreign Origin header is rejected with 403."""
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "drive-by write", "mode": "readonly"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+    assert "cross-origin" in resp.json()["detail"]
+
+
+def test_origin_guard_allows_same_origin(client):
+    """An Origin whose host matches the request Host passes through to auth."""
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "same origin", "mode": "readonly"},
+        headers={"Origin": "http://testserver"},
+    )
+    assert resp.status_code != 403
+
+
+def test_origin_guard_ignores_missing_origin(client):
+    """Requests without an Origin header (curl/agents) are unaffected."""
+    resp = client.post("/api/tasks", json={"task": "no origin", "mode": "readonly"})
+    assert resp.status_code != 403
+
+
+def test_origin_guard_wildcard_opt_out(client, monkeypatch):
+    """security.allowed_origins=['*'] disables the check (explicit opt-out)."""
+    monkeypatch.setattr("botex.server_cloud._security_allowed_origins", lambda: ["*"])
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "opted out", "mode": "readonly"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code != 403
+
+
+def test_origin_guard_allowlisted_origin(client, monkeypatch):
+    """An exact security.allowed_origins entry permits a cross-origin PWA only."""
+    monkeypatch.setattr(
+        "botex.server_cloud._security_allowed_origins",
+        lambda: ["https://pwa.example.com"],
+    )
+    ok = client.post(
+        "/api/tasks",
+        json={"task": "allowlisted pwa", "mode": "readonly"},
+        headers={"Origin": "https://pwa.example.com"},
+    )
+    assert ok.status_code != 403
+    blocked = client.post(
+        "/api/tasks",
+        json={"task": "still blocked", "mode": "readonly"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert blocked.status_code == 403
+
+
+def test_origin_guard_websocket_foreign_origin(client):
+    """/api/chat/ws upgrades from a foreign Origin are closed with 1008."""
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect(
+            "/api/chat/ws", headers={"origin": "http://evil.example"}
+        ) as ws:
+            ws.receive_json()
+    assert excinfo.value.code == 1008
+
+
+# ---------------------------------------------------------------------------
 # 3. Wallet / Credits Endpoint
 # ---------------------------------------------------------------------------
 

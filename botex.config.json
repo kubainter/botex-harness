@@ -245,6 +245,9 @@
     "_comment": "allowed_workspaces: empty list = restrict workspace_dir to engine.default_workspace (process cwd when unset); list workspace roots explicitly to widen.",
     "allowed_workspaces": []
   },
+  "security": {
+    "allowed_origins": []
+  },
   "skills": {
     "audit": {
       "enabled": true,
