@@ -39,21 +39,27 @@ class TaskAbortedError(Exception):
 
 class ApprovalPolicy(str, Enum):
     NONE = "none"  # Auto-allow all permitted by capability mode
-    HIGH_RISK = "high_risk"  # delete_file, move_file, run_command
-    MUTATIONS = "mutations"  # create_file, apply_patch, delete_file, move_file, run_command
+    HIGH_RISK = "high_risk"  # delete_file, move_file, run_command, synthesize_plugin
+    MUTATIONS = "mutations"  # HIGH_RISK + create_file, apply_patch
     ALL_RISKY = "all_risky"  # mutations + run_command + read_url
 
 
 # Mapping of policy levels to tool sets requiring approval
 POLICY_TOOL_MAP: Dict[ApprovalPolicy, Set[str]] = {
     ApprovalPolicy.NONE: set(),
-    ApprovalPolicy.HIGH_RISK: {"delete_file", "move_file", "run_command"},
+    ApprovalPolicy.HIGH_RISK: {
+        "delete_file",
+        "move_file",
+        "run_command",
+        "synthesize_plugin",
+    },
     ApprovalPolicy.MUTATIONS: {
         "create_file",
         "apply_patch",
         "delete_file",
         "move_file",
         "run_command",
+        "synthesize_plugin",
     },
     ApprovalPolicy.ALL_RISKY: {
         "create_file",
@@ -61,6 +67,7 @@ POLICY_TOOL_MAP: Dict[ApprovalPolicy, Set[str]] = {
         "delete_file",
         "move_file",
         "run_command",
+        "synthesize_plugin",
         "read_url",
     },
 }
