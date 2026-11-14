@@ -63,7 +63,7 @@ jobs:
           BOTEX_DISABLE_DOTENV: "1"
           PYTHONPATH: "."
         # Ratchet: 75 after the partitioning merge (clean-main baseline was
-        # 78.52% at 73); target is 85 via closing delegation/analytics gaps.
+        # 78.52% at 73); target is 85 via closing analytics/coverage gaps.
         run: >
           python -m pytest tests/
           --cov=botex

@@ -2008,6 +2008,10 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
     em = get_emitter(task_id)
     pump = asyncio.create_task(_task_event_pump(task_id, em))
     executor = (getattr(req, "executor", "") or "botex").lower()
+    if executor == "devin":
+        # Retired executor (removed with the ACP bridge): clamp to the botex
+        # engine so audit telemetry doesn't claim a devin run that never ran.
+        executor = "botex"
     entry["executor"] = executor
     provider_name = ""
     edge_exec: Optional[ToolExecutor] = None
