@@ -766,3 +766,59 @@ def test_run_subagent_local_path_no_executor(monkeypatch):
     monkeypatch.setattr(server, "run_botex_task", fake_engine)
     asyncio.run(server.run_subagent(task="t", workspace_dir=""))
     assert captured["tool_executor"] is None
+
+
+def test_cli_edge_loads_botex_env_file(tmp_path, monkeypatch):
+    import server
+    from botex import edge as edge_pkg
+
+    env_file = tmp_path / "mcp.env"
+    env_file.write_text(
+        "BOTEX_EDGE_TOKEN=btxd_envtest.secret\n"
+        "BOTEX_EDGE_DEVICE_ID=env-device\n"
+        "BOTEX_EDGE_WORKSPACE_ID=env-ws\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("BOTEX_DISABLE_DOTENV", raising=False)
+    monkeypatch.delenv("BOTEX_EDGE_TOKEN", raising=False)
+    monkeypatch.delenv("BOTEX_EDGE_DEVICE_ID", raising=False)
+    monkeypatch.delenv("BOTEX_EDGE_WORKSPACE_ID", raising=False)
+    monkeypatch.setenv("BOTEX_ENV_FILE", str(env_file))
+
+    captured: dict = {}
+
+    class DummyRunner:
+        def __init__(self, server_url, *, token, device_id, workspace_id, workspace_root, caps):
+            captured["server_url"] = server_url
+            captured["token"] = token
+            captured["device_id"] = device_id
+            captured["workspace_id"] = workspace_id
+            captured["workspace_root"] = workspace_root
+            self.device_id = device_id
+            self.workspace_id = workspace_id
+
+        async def run_forever(self):
+            return None
+
+    monkeypatch.setattr(edge_pkg, "EdgeRunner", DummyRunner)
+    server._cli_edge(["-w", str(tmp_path)])
+
+    assert captured["token"] == "btxd_envtest.secret"
+    assert captured["device_id"] == "env-device"
+    assert captured["workspace_id"] == "env-ws"
+
+
+def test_cli_edge_respects_disable_dotenv(tmp_path, monkeypatch):
+    import pytest
+
+    import server
+
+    env_file = tmp_path / "mcp.env"
+    env_file.write_text("BOTEX_EDGE_TOKEN=btxd_should_not_load\n", encoding="utf-8")
+    monkeypatch.setenv("BOTEX_DISABLE_DOTENV", "1")
+    monkeypatch.setenv("BOTEX_ENV_FILE", str(env_file))
+    monkeypatch.delenv("BOTEX_EDGE_TOKEN", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        server._cli_edge(["-w", str(tmp_path)])
+    assert exc.value.code == 2

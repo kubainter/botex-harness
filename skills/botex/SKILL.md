@@ -17,7 +17,9 @@ Define the normative caller-facing contract for AI orchestrators delegating boun
 ## Prerequisites
 
 - BoteX MCP server running and reachable (`check_health()` returns ready).
-- Target `workspace_dir` exists on the **BoteX server host** (for remote SSE `botex cloud`, paths refer to the server filesystem, not the local caller).
+- Target `workspace_dir` is reachable by the **BoteX server host**:
+  - For **remote BoteX Cloud** (`https://.../mcp/sse`), NEVER pass a local workstation path (`C:\Users\...` or unpushed local repo path) — the server falls back to its own VPS checkout (`/opt/botex`, deployed `main`).
+  - To inspect or edit local/unpushed workstation files from BoteX Cloud, an outbound `botex edge` runner must be connected (`docs/EDGE_BRIDGE.md`) and `workspace_dir` MUST be set to `"edge://<device_id>/<workspace_id>"` (or `"<workspace_id>"`). If no edge runner is online, do not delegate local-file work to Cloud.
 - Explicit capability flags when required: `exec.enabled=true` on server for `mode="full"` / `allow_exec=true`.
 
 ## Limitations
