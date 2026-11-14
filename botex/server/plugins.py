@@ -20,6 +20,10 @@ Security model (Zero Trust):
   tokens from the parent environment are never propagated;
 - ``requires_net`` plugins are refused unless network access was granted
   *and* operator-approved for this run;
+- non-approved children additionally receive dead-end ``*_PROXY``
+  variables so proxy-honoring HTTP clients fail fast on egress attempts
+  — best-effort hardening only, raw sockets bypass env proxies entirely
+  (no OS-level sandbox);
 - execution is hard-capped by a timeout and all output passes through
   ``mask_secrets`` before it reaches the model context.
 
@@ -196,12 +200,36 @@ class ZeroTrustSubprocessRunner:
         self.workspace_dir = Path(workspace_dir).resolve() if workspace_dir else Path.cwd()
         self.timeout_s = float(timeout_s) if timeout_s else self.DEFAULT_TIMEOUT_S
 
+    # Best-effort egress denial for non-approved runs: point every
+    # conventional proxy variable at the discard port (127.0.0.1:9) so
+    # proxy-honoring HTTP clients (requests/httpx/urllib) fail fast.
+    _DEAD_END_PROXY_ENV: Dict[str, str] = {
+        "HTTP_PROXY": "http://127.0.0.1:9",
+        "HTTPS_PROXY": "http://127.0.0.1:9",
+        "http_proxy": "http://127.0.0.1:9",
+        "https_proxy": "http://127.0.0.1:9",
+        # Empty NO_PROXY — localhost must not be exempted.
+        "NO_PROXY": "",
+        "no_proxy": "",
+        "ALL_PROXY": "http://127.0.0.1:9",
+        "all_proxy": "http://127.0.0.1:9",
+    }
+
     def build_env(self, net_allowed: bool = False) -> Dict[str, str]:
-        """Construct the scrubbed child environment — no secrets can leak."""
+        """
+        Construct the scrubbed child environment — no secrets can leak.
+
+        When ``net_allowed`` is False the dead-end proxy map is injected so
+        proxy-honoring HTTP clients fail fast on egress attempts. This is
+        best-effort only: raw sockets ignore proxy env vars, so true egress
+        enforcement would require OS-level sandboxing (job objects/netpol).
+        """
         env = {k: os.environ[k] for k in self._SAFE_ENV_KEYS if k in os.environ}
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["BOTEX_WORKSPACE_DIR"] = str(self.workspace_dir)
         env["BOTEX_NET_ALLOWED"] = "1" if net_allowed else "0"
+        if not net_allowed:
+            env.update(self._DEAD_END_PROXY_ENV)
         return env
 
     async def run(

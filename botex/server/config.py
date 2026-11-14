@@ -409,8 +409,11 @@ DEFAULTS: Dict[str, Any] = {
             "node -p",
             "npm exec",
             "npx",
+            "npm install",
+            "npm ci",
             "pip install",
             "pip uninstall",
+            "pip wheel",
             "git push",
             "git commit",
             "git clean",
@@ -430,6 +433,16 @@ DEFAULTS: Dict[str, Any] = {
             "git tag",
             "git branch -d",
             "git branch -D",
+            "git -C",
+            "git --git-dir",
+            "git --work-tree",
+            "--git-dir",
+            "--work-tree",
+            "git worktree",
+            "git checkout-index",
+            "git archive",
+            "git show",
+            "git remote",
             "sudo",
             "rm",
             "del",
@@ -440,6 +453,7 @@ DEFAULTS: Dict[str, Any] = {
             "wget",
             "iex",
             "invoke-expression",
+            "..",
         ],
         "timeout_s": 120,
         "max_output_bytes": 20000,
@@ -532,6 +546,16 @@ DEFAULTS: Dict[str, Any] = {
         # unrestricted (local MCP sessions keep today's semantics).
         "allowed_workspaces": []
     },
+    "security": {
+        # Browser drive-by guard on mutating /api/* routes and /api/chat/ws.
+        # Browsers always send an Origin header on cross-origin writes and WS
+        # handshakes; headless clients (curl/agents) omit it, so the check
+        # activates only when Origin is present. [] = the Origin host must
+        # equal the request Host host (same-origin PWA; the Vite dev server
+        # on a different port of the same host still passes). Exact origin
+        # entries allow additional cross-origin PWAs. ["*"] = opt-out.
+        "allowed_origins": [],
+    },
     "ui": {
         # CLI language for human-facing output: "auto" (OS locale), "en", "pl".
         # MCP tool responses always stay English — they are an agent-facing API.
@@ -581,15 +605,13 @@ DEFAULTS: Dict[str, Any] = {
         "openrouter_api_key": "",
         "google_api_key": "",
     },
-    # Direct-ACP delegation to the Devin CLI (executor="devin"). exe_path is a
-    # validated executable path (must exist and be named devin.exe/devin) —
-    # never a free-form command. Empty = executor reports unavailable.
-    "delegation": {
-        "devin": {
-            "enabled": True,
-            "exe_path": "",
-            "poll_interval_s": 3,
-            "idle_timeout_s": 90,
+    # SkillSpector pre-flight audit (botex/skills/skillspector_gate.py).
+    # allow_unverified=False fails CLOSED when no scanner binary exists
+    # (verdict BLOCKED_NO_SCANNER); True restores the legacy fail-open
+    # UNVERIFIED_NO_SCANNER verdict for hosts accepting unaudited skills.
+    "skills": {
+        "audit": {
+            "allow_unverified": False,
         },
     },
 }
@@ -634,6 +656,8 @@ _ENV_MAP = {
     "BOTEX_SWARM_MEMORY_DIR": ("paths", "swarm_memory_dir"),
     "BOTEX_CHAT_SESSIONS_DIR": ("paths", "chat_sessions_dir"),
     "BOTEX_BENCHMARKS_CACHE_FILE": ("benchmarks", "cache_file"),
+    "BOTEX_SKILLS_AUDIT_ALLOW_UNVERIFIED": ("skills", "audit", "allow_unverified"),
+    "BOTEX_ALLOWED_ORIGINS": ("security", "allowed_origins"),
 }
 
 _config_cache: Optional[Dict[str, Any]] = None
@@ -687,11 +711,15 @@ def load_config(reload: bool = False) -> Dict[str, Any]:
     cfg = _deep_merge(DEFAULTS, _load_json(CONFIG_FILE))
     cfg = _deep_merge(cfg, _load_json(LOCAL_CONFIG_FILE))
 
-    for env_name, (section, key) in _ENV_MAP.items():
+    # _ENV_MAP values are key paths of arbitrary depth (e.g. ("skills", "audit",
+    # "allow_unverified")); two-element tuples keep the original section/key shape.
+    for env_name, path in _ENV_MAP.items():
         raw = os.environ.get(env_name)
         if raw is None or raw == "":
             continue
-        default_val = DEFAULTS[section][key]
+        default_val: Any = DEFAULTS
+        for part in path:
+            default_val = default_val[part]
         try:
             if isinstance(default_val, bool):
                 value: Any = raw.lower() in ("1", "true", "yes")
@@ -713,7 +741,10 @@ def load_config(reload: bool = False) -> Dict[str, Any]:
                 value = raw
         except (ValueError, Exception):
             continue
-        cfg.setdefault(section, {})[key] = value
+        node = cfg
+        for part in path[:-1]:
+            node = node.setdefault(part, {})
+        node[path[-1]] = value
 
     _config_cache = cfg
     _config_sig = sig
@@ -1037,9 +1068,10 @@ class WorkspaceOutOfBounds(ValueError):
 def allowed_workspaces() -> list[str]:
     """Realpath-normalized entries of ``cloud.allowed_workspaces``.
 
-    Empty/missing key = containment feature off (local/dev semantics
-    unchanged). Each entry is expanded (``~``) and realpath-resolved so
-    later comparisons close both ``..`` traversal and symlink escapes.
+    Each entry is expanded (``~``) and realpath-resolved so later
+    comparisons close both ``..`` traversal and symlink escapes. Empty
+    does NOT disable containment — ``_enforce_workspace_containment``
+    substitutes the default-workspace root instead (fail-closed).
     """
     raw = (load_config().get("cloud", {}) or {}).get("allowed_workspaces")
     if raw is None:
@@ -1056,17 +1088,30 @@ def allowed_workspaces() -> list[str]:
     return roots
 
 
+def _default_workspace_root() -> str:
+    """Realpath of the fallback workspace used for an empty ``workspace_dir``.
+
+    Shares ``resolve_workspace_source``'s chain so the empty-allowlist
+    root cannot drift from what ``resolve_workspace`` itself resolves.
+    """
+    return os.path.realpath(os.path.abspath(resolve_workspace_source("")[0]))
+
+
 def _enforce_workspace_containment(real_path: str) -> None:
     """Fail-closed containment for ``cloud.allowed_workspaces``.
 
-    Non-empty allowlist: the resolved path must be equal to or under one
-    of the allowed roots. Runs BEFORE any ``mkdir`` side-effect in
-    ``get_tasks_dir``/``get_chat_sessions_dir``, so out-of-bounds paths
-    never materialize on disk (arena v2.1.0 merge-blocker B1).
+    Empty allowlist = default-workspace-only: the resolved path must be
+    equal to or under ``engine.default_workspace`` (process cwd when that
+    is unset/not a directory — the same fallback ``resolve_workspace``
+    uses for an empty ``workspace_dir``). Non-empty allowlist: equal to
+    or under one of the allowed roots. Runs BEFORE any ``mkdir``
+    side-effect in ``get_tasks_dir``/``get_chat_sessions_dir``, so
+    out-of-bounds paths never materialize on disk (arena v2.1.0
+    merge-blocker B1).
     """
     roots = allowed_workspaces()
     if not roots:
-        return
+        roots = [_default_workspace_root()]
     candidate = os.path.normcase(real_path)
     for root in roots:
         norm_root = os.path.normcase(root)

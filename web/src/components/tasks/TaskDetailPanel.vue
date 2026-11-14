@@ -54,65 +54,6 @@
       </div>
     </div>
 
-    <!-- Devin session: conversation stream (turn history) -->
-    <div v-if="isDevin && (sessionId || turns.length)" class="space-y-1.5">
-      <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
-        {{ t('devinSessionTitle') }}
-      </label>
-      <div
-        v-if="sessionId"
-        class="px-2.5 py-1.5 rounded-lg bg-botex-950 border border-botex-800 text-xs font-mono text-teal-300 truncate"
-        :title="sessionId"
-      >
-        {{ sessionId }}
-      </div>
-      <div
-        v-if="turns.length"
-        class="rounded-lg bg-botex-950 border border-botex-800 max-h-64 overflow-y-auto divide-y divide-botex-800/60"
-      >
-        <div v-for="turn in turns" :key="turn.turn" class="p-2.5 space-y-1.5">
-          <div class="flex items-center space-x-2">
-            <span class="text-xs font-mono font-semibold text-cyan-300">#{{ turn.turn }}</span>
-            <span
-              :class="['w-1.5 h-1.5 rounded-full', turn.ok ? 'bg-emerald-400' : 'bg-rose-400']"
-            ></span>
-            <span v-if="turn.resumed" class="text-xs font-mono text-teal-400">{{ t('devinSessionResumed') }}</span>
-            <span v-if="turn.ts" class="text-xs font-mono text-slate-500 ml-auto">{{ formatTs(turn.ts) }}</span>
-          </div>
-          <p class="text-xs text-slate-200 whitespace-pre-wrap break-words font-sans">{{ turn.prompt }}</p>
-          <p
-            v-if="turn.summary"
-            class="text-xs text-slate-400 whitespace-pre-wrap break-words font-sans border-l-2 border-botex-700 pl-2"
-          >{{ turn.summary }}</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- Devin follow-up prompt (multi-turn continuation in the same session) -->
-    <div v-if="isDevin && sessionId" class="space-y-1.5">
-      <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
-        {{ t('followupLabel') }}
-      </label>
-      <textarea
-        v-model="followupText"
-        rows="3"
-        :disabled="!canFollowup"
-        :placeholder="canFollowup ? t('followupPlaceholder') : t('followupRunning')"
-        class="w-full rounded-lg bg-botex-950 border border-botex-700 text-slate-100 placeholder-slate-400 p-2.5 text-base sm:text-xs font-sans focus:outline-none focus:border-cyan-500 disabled:opacity-50"
-        @keydown.enter.exact.prevent="submitFollowup"
-      ></textarea>
-      <Button
-        variant="primary"
-        size="sm"
-        class="w-full"
-        :loading="tasksStore.isSendingFollowup"
-        :disabled="!canFollowup || !followupText.trim()"
-        @click="submitFollowup"
-      >
-        {{ t('followupSend') }}
-      </Button>
-    </div>
-
     <!-- Structured Result -->
     <div v-if="task.result" class="space-y-1.5">
       <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
@@ -201,7 +142,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import type { TaskDetail, TaskEvent } from '../../api/types'
 import { useI18n } from '../../i18n'
@@ -223,22 +164,6 @@ const { locale, t } = useI18n()
 const tasksStore = useTasksStore()
 const { taskEvents, taskEventMeta } = storeToRefs(tasksStore)
 
-const followupText = ref('')
-const isDevin = computed(
-  () => props.task.executor === 'devin' || props.task.request?.executor === 'devin'
-)
-const sessionId = computed(
-  () => props.task.session_id || props.task.result_data?.session_id || ''
-)
-const turns = computed(() => props.task.turns || [])
-const canFollowup = computed(
-  () =>
-    isDevin.value &&
-    !!sessionId.value &&
-    props.task.status !== 'RUNNING' &&
-    props.task.status !== 'QUEUED'
-)
-
 const inFlight = computed<Record<string, any>>(() => props.task.result_data?.in_flight_state || {})
 const synthesizedPlugins = computed<string[]>(() => {
   const tp = inFlight.value.task_plugins || props.task.result_data?.task_plugins
@@ -259,13 +184,6 @@ const stepSnapshotsList = computed<any[]>(() => {
   }
   return []
 })
-
-async function submitFollowup() {
-  const text = followupText.value.trim()
-  if (!text || !canFollowup.value) return
-  const ok = await tasksStore.sendFollowup(props.task.task_id, text)
-  if (ok) followupText.value = ''
-}
 
 let unsubscribe: (() => void) | null = null
 

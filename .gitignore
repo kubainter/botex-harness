@@ -63,6 +63,8 @@ botex.config.local.json
 
 # Runtime state (ledger & task history)
 .agent_analytics.json
+.agent_analytics.jsonl
+.botex/
 .model_pricing.json
 
 # Logs
@@ -88,6 +90,7 @@ yarn-error.log*
 
 # Archives and temporary storage
 archive/
+analytics-archive/
 temp/
 tmp/
 

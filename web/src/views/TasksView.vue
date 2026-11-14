@@ -270,34 +270,13 @@
               class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
             >
               <option value="botex">{{ t('executorBotex') }}</option>
-              <option value="devin" :disabled="devinStatus !== null && !devinStatus.available">
-                {{ t('executorDevin') }}{{ devinStatus && !devinStatus.available ? ` (${t('devinOffline')})` : '' }}
-              </option>
               <option value="device">
                 {{ t('executorDevice') }} ({{ connectedDevices.filter((d) => d.can_delegate).length }})
               </option>
             </select>
-            <p
-              v-if="selectedExecutorMode === 'devin' && devinStatus && !devinStatus.available"
-              class="mt-1 text-xs text-amber-400 font-mono"
-            >
-              {{ t('devinOffline') }}: {{ devinStatus.reason }}
-            </p>
           </div>
 
-          <div v-if="selectedExecutorMode === 'devin'">
-            <label class="block font-medium text-slate-200 mb-1">{{ t('agentTypeLabel') }}</label>
-            <select
-              v-model="newTask.agent_type"
-              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
-            >
-              <option value="default">Agent (full tools)</option>
-              <option value="review">Reviewer (read-only)</option>
-              <option value="summarizer">Summarizer (no tools)</option>
-            </select>
-          </div>
-
-          <div v-else-if="selectedExecutorMode === 'device'">
+          <div v-if="selectedExecutorMode === 'device'">
             <label class="block font-medium text-slate-200 mb-1">{{ t('targetDeviceLabel') }}</label>
             <select
               v-model="selectedDeviceKey"
@@ -419,7 +398,7 @@
           </div>
         </div>
 
-        <!-- Budget & Turns (botex executor only — the devin harness runs its own loop) -->
+        <!-- Budget & Turns (botex executor only) -->
         <div v-if="selectedExecutorMode === 'botex'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Input
             v-model="newTask.budget_limit_usd"
@@ -532,7 +511,7 @@ const newTask = ref<TaskCreateRequest>({
   agent_type: 'default'
 })
 
-const selectedExecutorMode = ref<'botex' | 'devin' | 'device'>('botex')
+const selectedExecutorMode = ref<'botex' | 'device'>('botex')
 const connectedDevices = ref<ConnectedDeviceInfo[]>([])
 const selectedDeviceKey = ref<string>('')
 const deviceDelegateForm = ref<{ skill: string; paramsJson: string; requireApproval: boolean }>({
@@ -578,7 +557,7 @@ watch(selectedDeviceSkill, (sk) => {
 })
 
 watch(selectedExecutorMode, (val) => {
-  if (val === 'botex' || val === 'devin') {
+  if (val === 'botex') {
     newTask.value.executor = val
   }
 })
@@ -603,27 +582,9 @@ function openDeviceDelegateModal(dev: ConnectedDeviceInfo) {
   showCreateModal.value = true
 }
 
-const devinStatus = ref<Awaited<ReturnType<typeof api.fetchDevinExecutorStatus>> | null>(null)
-
-async function refreshDevinStatus() {
-  try {
-    const s = await api.fetchDevinExecutorStatus()
-    devinStatus.value = s
-  } catch (err: any) {
-    devinStatus.value = {
-      enabled: false,
-      available: false,
-      exe_resolved: false,
-      credential_resolved: false,
-      reason: err?.detail || err?.message || 'probe_failed'
-    }
-  }
-}
-
 watch(showCreateModal, (open) => {
   if (open) {
     deviceDelegateError.value = ''
-    refreshDevinStatus()
     refreshConnectedDevices()
   }
 })
@@ -635,7 +596,6 @@ onMounted(() => {
   if (chatStore.catalogModels.length === 0) {
     chatStore.fetchCatalogModels()
   }
-  refreshDevinStatus()
   refreshConnectedDevices()
 
   if (chatStore.pendingTaskDraft) {
@@ -677,7 +637,7 @@ async function cancelTask(id: string) {
 
 function retryTask(task: TaskDetail) {
   if (!task.request) return
-  selectedExecutorMode.value = (task.request.executor as 'botex' | 'devin') || 'botex'
+  selectedExecutorMode.value = 'botex'
   newTask.value = {
     ...newTask.value,
     ...task.request,
@@ -765,7 +725,7 @@ async function handleCreateTask() {
   if (!newTask.value.task.trim()) return
   const createdId = await tasksStore.createTask({
     ...newTask.value,
-    executor: selectedExecutorMode.value,
+    executor: 'botex',
     budget_limit_usd: Number(newTask.value.budget_limit_usd),
     max_turns: Number(newTask.value.max_turns)
   })

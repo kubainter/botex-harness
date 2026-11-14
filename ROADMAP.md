@@ -459,11 +459,7 @@ rest.
   the engine/provider request path — treat as foundation code, not shipped
   behavior.
 - Task event emitters (`botex/core/events.py`): per-task `TaskEventEmitter` ring
-  feeding live `GET /api/tasks/{id}/events` SSE streams and
-  `POST /api/tasks/{id}/followup` continuation on the Cloud Gateway
-- Devin ACP delegation bridge (`botex/providers/delegation.py`): spawn/monitor/cancel
-  external `devin` executor runs with a public `/api/delegation/devin`
-  availability probe (`delegation.devin` config)
+  feeding live `GET /api/tasks/{id}/events` SSE streams on the Cloud Gateway
 - Knowledge-Graph curator daemon (`botex/ops/curator/` + `botex/memory/curator.py`
   facade): scheduled vault synthesis, `GET /api/curator/status`,
   `POST /api/curator/run`, CLI `python -m botex.ops.curator.curator_service`,

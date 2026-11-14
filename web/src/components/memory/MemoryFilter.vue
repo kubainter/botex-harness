@@ -110,7 +110,7 @@
             ]"
             @click="$emit('update:scope', 'local')"
           >
-            {{ locale === 'pl' ? 'Lokalne (.botex)' : 'Local (.botex)' }}
+            {{ locale === 'pl' ? 'Lokalne (projekt)' : 'Local (project)' }}
           </button>
           <button
             type="button"
@@ -121,7 +121,7 @@
             ]"
             @click="$emit('update:scope', 'global')"
           >
-            {{ locale === 'pl' ? 'Globalne (~/.botex)' : 'Global (~/.botex)' }}
+            {{ locale === 'pl' ? 'Globalne (użytkownik)' : 'Global (user)' }}
           </button>
           <button
             type="button"

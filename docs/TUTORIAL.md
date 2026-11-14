@@ -34,7 +34,6 @@ Since v2.1.0 the package is organized into domain subpackages; legacy flat impor
 │   │   ├── rate_limiter.py    asynchronous token-bucket rate limiter & cooldowns
 │   │   ├── retry.py           shared transient-failure backoff for provider calls (429/conn/overload)
 │   │   ├── wallet.py          credit balance, usage, and limit checker
-│   │   ├── delegation.py      Devin ACP delegation bridge
 │   │   ├── http_pool.py       pooled httpx clients
 │   │   ├── prompt_cache.py    prompt-cache policy gating
 │   │   └── adapters/zai.py    Z.ai GLM Coding Plan adapter
@@ -83,7 +82,6 @@ Since v2.1.0 the package is organized into domain subpackages; legacy flat impor
 │   ├── test_rate_limiter.py   token-bucket rate limiter and cooldown tests
 │   ├── test_state_checkpoint.py in-flight state carryover across fallbacks
 │   ├── test_curator.py        knowledge-graph curator and Telegram dispatch tests
-│   ├── test_delegation.py     Devin ACP delegation bridge tests
 │   ├── test_events.py         task event emitter taxonomy tests
 │   ├── test_circuit_breaker.py provider circuit breaker tests
 │   ├── test_tracing.py        tracing span and secret-sanitization tests

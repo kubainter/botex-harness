@@ -144,10 +144,10 @@ jobs:
           sudo -u botex git fetch origin main
           sudo -u botex git reset --hard origin/main
 
-          # Install new dependencies if requirements.txt changed
-          if ! sudo -u botex git diff --quiet "$PREV_SHA" HEAD -- requirements.txt; then
-              echo "requirements.txt modified - updating virtual environment dependencies..."
-              sudo -u botex "$DEPLOY_PATH/.venv/bin/pip" install -r requirements.txt
+          # Install new dependencies if the pinned lockfile (or its floor) changed
+          if ! sudo -u botex git diff --quiet "$PREV_SHA" HEAD -- requirements.lock requirements.txt; then
+              echo "requirements.lock modified - updating virtual environment dependencies..."
+              sudo -u botex "$DEPLOY_PATH/.venv/bin/pip" install -r requirements.lock
           fi
 
           # Update PWA static assets

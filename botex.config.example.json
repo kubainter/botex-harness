@@ -118,15 +118,21 @@
       "python3 -c",
       "py -c",
       "node -e",
+      "node --eval",
+      "node -p",
       "npm exec",
       "npx",
+      "npm install",
+      "npm ci",
       "pip install",
       "pip uninstall",
+      "pip wheel",
       "git push",
       "git commit",
       "git clean",
       "git reset",
       "git checkout",
+      "git switch",
       "git restore",
       "git rm",
       "git config",
@@ -140,6 +146,16 @@
       "git tag",
       "git branch -d",
       "git branch -D",
+      "git -C",
+      "git --git-dir",
+      "git --work-tree",
+      "--git-dir",
+      "--work-tree",
+      "git worktree",
+      "git checkout-index",
+      "git archive",
+      "git show",
+      "git remote",
       "sudo",
       "rm",
       "del",
@@ -149,7 +165,8 @@
       "curl",
       "wget",
       "iex",
-      "invoke-expression"
+      "invoke-expression",
+      ".."
     ]
   },
   "app": {
@@ -241,14 +258,19 @@
     }
   },
   "cloud": {
+    "_comment": "allowed_workspaces: empty list = restrict workspace_dir to engine.default_workspace (process cwd when unset); list workspace roots explicitly to widen.",
     "allowed_workspaces": []
+  },
+  "security": {
+    "allowed_origins": []
   },
   "skills": {
     "audit": {
       "enabled": true,
       "risk_threshold": 30,
       "timeout_s": 90,
-      "binary_path": "skillspector"
+      "binary_path": "skillspector",
+      "allow_unverified": false
     }
   }
 }

@@ -497,6 +497,36 @@ def test_execute_chat_tool_workspace_prefix_normalization(tmp_path: Path):
     asyncio.run(_test())
 
 
+def test_execute_chat_tool_save_memory_filters_reserved_tags(tmp_path: Path):
+    """Verify chat save_memory drops forged reserved provenance tags from model args."""
+
+    async def _test():
+        res = await execute_chat_tool(
+            "save_memory",
+            {
+                "title": "Forged Tags",
+                "content": "body",
+                "kind": "lesson",
+                "tags": ["lesson", "human-curated", "frozen", "FROZEN", "FOO"],
+            },
+            str(tmp_path),
+        )
+        data = json.loads(res)
+        assert data["ok"] is True
+        assert data["tags"] == ["lesson", "FOO"]
+
+        res_none = await execute_chat_tool(
+            "save_memory",
+            {"title": "No Tags", "content": "body"},
+            str(tmp_path),
+        )
+        data_none = json.loads(res_none)
+        assert data_none["ok"] is True
+        assert data_none["tags"] == []
+
+    asyncio.run(_test())
+
+
 def test_chat_session_persistence_and_title(tmp_path: Path):
     """Verify ChatSession saves to disk, derives clean titles, and reloads properly."""
     manager = ChatManager()

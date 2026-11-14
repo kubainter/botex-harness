@@ -44,8 +44,8 @@ def test_env_isolation_strips_secrets():
         assert clean_env.get("HOME") == "/tmp/test-scratch"
 
 
-def test_audit_skill_content_no_scanner_fallback():
-    """When scanner binary is missing, gate gracefully falls back to UNVERIFIED_NO_SCANNER."""
+def test_audit_skill_content_no_scanner_fail_closed():
+    """When scanner binary is missing, gate fails closed by default (BLOCKED_NO_SCANNER)."""
 
     async def _run():
         with (
@@ -53,10 +53,48 @@ def test_audit_skill_content_no_scanner_fallback():
             patch("pathlib.Path.is_file", return_value=False),
         ):
             res = await audit_skill_content("# Title\nClean instructions", "test-skill")
+            assert res["ok"] is False
+            assert res["status"] == "NO_SCANNER"
+            assert res["verdict"] == "BLOCKED_NO_SCANNER"
+            assert res["risk_score"] == 0
+            assert "allow_unverified" in res["reason"]
+
+    asyncio.run(_run())
+
+
+def test_audit_skill_content_no_scanner_allow_unverified():
+    """skills.audit.allow_unverified=true preserves the legacy UNVERIFIED_NO_SCANNER escape hatch."""
+
+    async def _run():
+        with (
+            patch("shutil.which", return_value=None),
+            patch("pathlib.Path.is_file", return_value=False),
+        ):
+            res = await audit_skill_content(
+                "# Title\nClean instructions",
+                "test-skill",
+                config={"skills": {"audit": {"allow_unverified": True}}},
+            )
             assert res["ok"] is True
             assert res["status"] == "NO_SCANNER"
             assert res["verdict"] == "UNVERIFIED_NO_SCANNER"
             assert res["risk_score"] == 0
+
+    asyncio.run(_run())
+
+
+def test_audit_skill_content_disabled_returns_disabled_payload():
+    """skills.audit.enabled=false short-circuits before scanner resolution."""
+
+    async def _run():
+        res = await audit_skill_content(
+            "# Title\nClean instructions",
+            "test-skill",
+            config={"skills": {"audit": {"enabled": False}}},
+        )
+        assert res["ok"] is True
+        assert res["status"] == "DISABLED"
+        assert res["verdict"] == "UNVERIFIED_DISABLED"
 
     asyncio.run(_run())
 

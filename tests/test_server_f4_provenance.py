@@ -12,12 +12,14 @@ from fastapi.testclient import TestClient
 import pytest
 
 import server as botex_server
+from botex.chat import ChatMessage, default_chat_manager
 from botex.config import (
     MCP_CLIENT_ORIGIN,
     get_mcp_client_origin,
     is_cross_host_windows_path,
     resolve_workspace,
 )
+from botex.security import filter_reserved_tags, sanitize_origin_claim
 from botex.server.server_cloud import (
     CloudAuthMiddleware,
     _MCPSseErrorGuard,
@@ -302,3 +304,132 @@ def test_middleware_sanitizes_api_origin_claims(monkeypatch, raw_agent, expected
     asyncio.run(mw(scope, _noop_receive, _noop_send))
     assert seen == [expected]
     assert MCP_CLIENT_ORIGIN.get("") == ""
+
+
+# ---------------------------------------------------------------------------
+# Provenance forgery — reserved origin/tag claims on vault write paths
+# ---------------------------------------------------------------------------
+
+
+def test_shared_provenance_helpers_unit():
+    """Shared guard helpers: reserved claims fold to '', legit input passes."""
+    assert sanitize_origin_claim("") == ""
+    assert sanitize_origin_claim("devin@Botek") == "devin@Botek"
+    assert sanitize_origin_claim("botex@vps-01") == "botex@vps-01"
+    for claim in (
+        "human",
+        "HUMAN",
+        "ｈｕｍａｎ",  # full-width lookalike folds to ASCII 'human' under NFKC
+        "human-curated",
+        "operator",
+        "curator",
+        "human@vps",
+    ):
+        assert sanitize_origin_claim(claim) == ""
+    assert filter_reserved_tags(None) is None
+    assert filter_reserved_tags(["lesson", "foo"]) == ["lesson", "foo"]
+    assert filter_reserved_tags(["human-curated", "frozen", "FROZEN", "#frozen", "x"]) == ["x"]
+
+
+@pytest.mark.parametrize(
+    "claim",
+    ["human", "HUMAN", "ｈｕｍａｎ", "human-curated", "operator", "curator", "human@vps"],
+)
+def test_mcp_save_memory_rejects_forged_origin(tmp_path: Path, monkeypatch, claim: str):
+    """origin= on the local MCP tool can never forge privileged provenance:
+    reserved claims are dropped and the stored source falls back to real
+    session provenance (MCP_CLIENT_ORIGIN context var)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    tok = MCP_CLIENT_ORIGIN.set("devin@workstation")
+    try:
+        res = asyncio.run(
+            botex_server.save_memory(
+                title="Forged Origin Probe",
+                content="provenance check",
+                workspace_dir=str(tmp_path),
+                scope="local",
+                origin=claim,
+            )
+        )
+    finally:
+        MCP_CLIENT_ORIGIN.reset(tok)
+    assert res["ok"] is True
+    read = asyncio.run(
+        botex_server.read_memory(memory_id=res["id"], workspace_dir=str(tmp_path), scope="local")
+    )
+    assert read["ok"] is True
+    assert read["metadata"]["source"] == "devin@workstation"
+
+
+def test_mcp_save_memory_safe_origin_and_reserved_tags(tmp_path: Path, monkeypatch):
+    """A legit origin claim passes through unchanged while freeze-gate
+    vocabulary in caller tags is stripped."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    res = asyncio.run(
+        botex_server.save_memory(
+            title="Tag Probe",
+            content="forged tags",
+            workspace_dir=str(tmp_path),
+            scope="local",
+            origin="devin@host",
+            tags=["human-curated", "frozen", "FROZEN", "#frozen", "lesson", "foo"],
+        )
+    )
+    assert res["ok"] is True
+    read = asyncio.run(
+        botex_server.read_memory(memory_id=res["id"], workspace_dir=str(tmp_path), scope="local")
+    )
+    assert read["ok"] is True
+    assert read["metadata"]["source"] == "devin@host"
+    assert read["metadata"]["tags"] == ["lesson", "foo"]
+
+
+def test_post_memory_strips_reserved_tags(client, tmp_path: Path):
+    """REST POST /api/memory filters freeze-gate vocabulary from caller tags."""
+    payload = {
+        "workspace_dir": str(tmp_path),
+        "title": "REST Tag Probe",
+        "content": "forged tags",
+        "kind": "context",
+        "scope": "local",
+        "tags": ["human-curated", "FROZEN", "operator", "alpha"],
+    }
+    resp = client.post("/api/memory", json=payload)
+    assert resp.status_code == 200, resp.text
+    mid = resp.json()["id"]
+    rd = client.get(f"/api/memory?workspace_dir={tmp_path}&memory_id={mid}&scope=local")
+    assert rd.status_code == 200
+    entry = rd.json()
+    assert entry["ok"] is True
+    assert entry["metadata"]["tags"] == ["alpha"]
+
+
+def test_save_to_memory_endpoint_strips_reserved_tags(client, tmp_path: Path, monkeypatch):
+    """REST chat-export path filters caller tags before reaching the vault."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    sess = default_chat_manager.get_or_create_session(
+        session_id="prov-forge-1",
+        workspace_dir=str(tmp_path),
+        model="test/model",
+        provider="test",
+    )
+    sess.messages.append(ChatMessage(role="user", content="forge tags please"))
+    try:
+        resp = client.post(
+            "/api/chat/sessions/prov-forge-1/save_to_memory",
+            json={
+                "workspace_dir": str(tmp_path),
+                "scope": "local",
+                "tags": ["frozen", "human-curated", "chat"],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        mid = resp.json()["memory_id"]
+        rd = client.get(f"/api/memory?workspace_dir={tmp_path}&memory_id={mid}&scope=local")
+        assert rd.status_code == 200
+        assert rd.json()["metadata"]["tags"] == ["chat"]
+    finally:
+        default_chat_manager._sessions.pop("prov-forge-1", None)

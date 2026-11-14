@@ -49,7 +49,7 @@ except Exception:
 if _root_dir not in sys.path:
     sys.path.insert(0, _root_dir)
 
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import (
     FastAPI,
@@ -111,7 +111,14 @@ from botex.memory import (
 )
 from botex.plugins import PluginVaultManager
 from botex.rate_limiter import get_rate_limiter
-from botex.security import coerce_text, mask_secrets, sanitize_identifier
+from botex.security import (
+    RESERVED_ORIGIN_AGENTS,
+    coerce_text,
+    filter_reserved_tags,
+    mask_secrets,
+    sanitize_identifier,
+    sanitize_origin_claim,
+)
 from botex.skills import delete_skill, get_skill, install_skill_async, list_skills
 from botex.state import load_inflight_checkpoints
 from botex.wallet import default_wallet_service
@@ -176,6 +183,16 @@ _IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SSE_REPLAY_BUFFER: Dict[str, List[Dict[str, Any]]] = {}
 _MAX_REPLAY_EVENTS_PER_SESSION: int = 100
 _IDEMPOTENCY_TTL_SECONDS: float = 86400.0
+# Remote MCP SSE: the first /mcp/messages post binds session_id to its client IP,
+# so a session id lifted from logs cannot be driven from a different peer.
+_SSE_SESSION_BINDINGS: Dict[str, Dict[str, Any]] = {}
+_SSE_SESSION_BINDINGS_CAP: int = 10_000
+
+
+def _bind_sse_session(session_id: str, client_ip: str) -> None:
+    while len(_SSE_SESSION_BINDINGS) >= _SSE_SESSION_BINDINGS_CAP:
+        _SSE_SESSION_BINDINGS.pop(next(iter(_SSE_SESSION_BINDINGS)), None)
+    _SSE_SESSION_BINDINGS[session_id] = {"ip": client_ip, "created": time.time()}
 
 
 def _cleanup_idempotency_cache() -> None:
@@ -327,10 +344,6 @@ class ApprovalDecisionRequest(BaseModel):
     approved: bool
     reason: str = ""
     remember: bool = False
-
-
-class TaskFollowupRequest(BaseModel):
-    prompt: str
 
 
 class MemorySaveRequest(BaseModel):
@@ -1333,9 +1346,6 @@ def _verify_access_token(candidate_token: Optional[str]) -> bool:
     expected_hash = os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip().strip('"').strip("'")
     if expected_hash:
         target_hash = expected_hash.lower()
-        # Direct match if candidate is already the hash itself (e.g. client configured with sha256:...)
-        if hmac.compare_digest(candidate_token.strip().lower(), target_hash):
-            return True
         if target_hash.startswith("sha256:"):
             if hmac.compare_digest(prefixed_hash, target_hash):
                 return True
@@ -1346,17 +1356,14 @@ def _verify_access_token(candidate_token: Optional[str]) -> bool:
     expected_token = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip().strip('"').strip("'")
     if expected_token:
         target_token = expected_token.lower()
-        # Direct match if candidate is already the hash itself
-        if hmac.compare_digest(candidate_token.strip().lower(), target_token):
-            return True
         if target_token.startswith("sha256:"):
             if hmac.compare_digest(prefixed_hash, target_token):
                 return True
         elif len(target_token) == 64 and all(c in "0123456789abcdef" for c in target_token):
             if hmac.compare_digest(raw_hash, target_token):
                 return True
-        # Plain token comparison
-        if hmac.compare_digest(candidate_bytes, expected_token.encode("utf-8")):
+        # Plain token comparison (skipped when configured value is hash-shaped)
+        elif hmac.compare_digest(candidate_bytes, expected_token.encode("utf-8")):
             return True
 
     return False
@@ -1379,7 +1386,8 @@ def _extract_mcp_origin_from_headers(headers: dict[bytes, bytes]) -> str:
 
 # Identity claims that must never be accepted from client-controlled
 # headers/payloads: they freeze or impersonate privileged vault provenance.
-_RESERVED_ORIGIN_AGENTS = frozenset({"human", "human-curated", "operator", "curator"})
+# Canonical vocabulary lives in botex.tools.security (shared with server.py).
+_RESERVED_ORIGIN_AGENTS = RESERVED_ORIGIN_AGENTS
 
 
 def _normalize_origin_claim(raw: str) -> str:
@@ -1397,19 +1405,39 @@ def _sanitize_mcp_client_origin(raw: str) -> str:
     """Guard reserved identity claims in client-supplied provenance."""
     if not raw:
         return ""
-    norm = unicodedata.normalize("NFKC", str(raw)).strip()
-    parts = norm.split("@", 1)
-    agent = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[0])[:32]
-    host = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[1])[:32] if len(parts) > 1 else ""
-    if agent.lower() in _RESERVED_ORIGIN_AGENTS:
-        return "cloud_api"
-    if agent and host:
-        return f"{agent}@{host}"
-    if agent:
-        return agent
-    if host:
-        return f"botex@{host}"
-    return "cloud_api"
+    return sanitize_origin_claim(raw) or "cloud_api"
+
+
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _security_allowed_origins() -> List[str]:
+    """``security.allowed_origins`` normalized for exact-match comparison."""
+    raw = botex_server.load_config().get("security", {}).get("allowed_origins", [])
+    if isinstance(raw, str):
+        raw = [p.strip() for p in raw.split(",") if p.strip()]
+    return [str(v).strip().rstrip("/").lower() for v in raw if str(v).strip()]
+
+
+def _is_allowed_origin(origin: str, host: str) -> bool:
+    """Same-host/allowlist gate applied only when an Origin header is present.
+
+    Browsers always send Origin on cross-origin mutations and WebSocket
+    handshakes; headless clients (curl/agents) omit it. Allowed when the
+    Origin exactly matches a ``security.allowed_origins`` entry (``["*"]``
+    disables the check) or when the Origin host equals the request Host
+    host — the PWA served by this gateway or a same-host dev server on a
+    different port. Missing or malformed hosts fail closed.
+    """
+    allowed = _security_allowed_origins()
+    if "*" in allowed or origin.strip().rstrip("/").lower() in allowed:
+        return True
+    try:
+        origin_host = (urlparse(origin.strip()).hostname or "").lower()
+        host_host = (urlparse(f"//{host.strip()}").hostname or "").lower()
+    except ValueError:
+        return False
+    return bool(origin_host) and bool(host_host) and origin_host == host_host
 
 
 class CloudAuthMiddleware:
@@ -1481,6 +1509,19 @@ class CloudAuthMiddleware:
             await resp(scope, receive, send)
             return
 
+        # Browser drive-by guard: a present Origin header means a web page
+        # issued this mutation; require same-host or an allowlisted origin.
+        if method in _MUTATING_METHODS and path.startswith("/api") and b"origin" in headers:
+            origin = headers[b"origin"].decode("latin1", errors="ignore")
+            host = headers.get(b"host", b"").decode("latin1", errors="ignore")
+            if not _is_allowed_origin(origin, host):
+                resp = JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Forbidden: cross-origin request"},
+                )
+                await resp(scope, receive, send)
+                return
+
         if not _is_auth_configured():
             # Check strict auth env or non-loopback remote origin
             client = scope.get("client")
@@ -1516,18 +1557,14 @@ class CloudAuthMiddleware:
                     MCP_CLIENT_ORIGIN.reset(tok)
             return
 
-        # Extract token from Authorization header or query parameter
+        # Extract token from the Authorization header only: query-string
+        # credentials are persisted by access/proxy logs, so no route may
+        # accept them.
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode("latin1", errors="ignore")
         token: Optional[str] = None
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
-        elif method == "GET" and path == "/mcp/sse":
-            # Query-string token is only tolerated for the EventSource handshake (browsers
-            # cannot set headers there); every other route requires the Bearer header.
-            qs = parse_qs(scope.get("query_string", b"").decode("latin1", errors="ignore"))
-            if "token" in qs and qs["token"]:
-                token = qs["token"][0].strip()
 
         # Session-aware MCP authentication: if session was established on authenticated /mcp/sse
         if not token and path.startswith("/mcp/messages") and _mcp_transport is not None:
@@ -1537,7 +1574,23 @@ class CloudAuthMiddleware:
                 active_sessions = {
                     sid.hex for sid in getattr(_mcp_transport, "_read_stream_writers", {}).keys()
                 }
+                # Sweep bindings of closed streams: dead session ids can never
+                # authenticate, so their bindings must not linger.
+                for dead_sid in [s for s in _SSE_SESSION_BINDINGS if s not in active_sessions]:
+                    _SSE_SESSION_BINDINGS.pop(dead_sid, None)
                 if session_id in active_sessions:
+                    client_ip = _extract_client_ip_from_scope(scope)
+                    binding = _SSE_SESSION_BINDINGS.get(session_id)
+                    if binding is None:
+                        _bind_sse_session(session_id, client_ip)
+                    elif binding["ip"] != client_ip:
+                        resp = JSONResponse(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            content={"detail": "Unauthorized: Invalid or missing bearer token"},
+                            headers={"WWW-Authenticate": "Bearer"},
+                        )
+                        await resp(scope, receive, send)
+                        return
                     tok = MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
                     try:
                         await self.app(scope, receive, send)
@@ -1691,16 +1744,6 @@ async def get_health() -> Dict[str, Any]:
         "uptime_s": round(now - START_TIME, 2),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-
-
-@app.get("/api/delegation/devin")
-async def get_devin_executor_status() -> Dict[str, Any]:
-    """Availability probe for the `devin` task executor (exe + credential)."""
-    from botex.delegation import devin_auth_status, list_runs
-
-    st = devin_auth_status()
-    st["runs"] = list_runs(limit=10) if st["enabled"] else []
-    return st
 
 
 @app.get("/api/wallet")
@@ -1876,7 +1919,7 @@ def _update_task_progress(task_id: str, ev: Dict[str, Any]) -> None:
         prog["waiting_for"] = "approval"
     elif kind == EventKind.WAITING_FOR_INPUT:
         prog["waiting_for"] = "input"
-    elif kind in (EventKind.ATTEMPT_START, EventKind.DEVIN_UPDATE):
+    elif kind == EventKind.ATTEMPT_START:
         prog["waiting_for"] = "model"
     elif kind in (
         EventKind.ATTEMPT_END,
@@ -1909,54 +1952,28 @@ async def _task_event_pump(task_id: str, em) -> None:
         em.unsubscribe(q)
 
 
-async def _run_devin_task(
-    task_id: str, req: TaskCreateRequest, session_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """Execute the task through the direct-ACP Devin executor."""
-    from botex.delegation import delegate_run, devin_auth_status
-
-    auth = devin_auth_status()
-    if not auth["available"]:
-        return {
-            "ok": False,
-            "status": "CONFIG_ERROR",
-            "failure_kind": "capability_missing",
-            "message": f"Devin executor unavailable: {auth['reason']}",
-        }
-    receipt = await asyncio.to_thread(
-        delegate_run,
-        task_id,
-        req.task,
-        resolve_workspace(req.workspace_dir),
-        req.agent_type or "default",
-        session_id=session_id or "",
-    )
-    ok = bool(receipt.pop("ok", False))
-    receipt["ok"] = ok
-    receipt["status"] = "DONE" if ok else "FAILED"
-    receipt["executor"] = "devin"
-    if not ok:
-        receipt["failure_kind"] = "provider_error"
-        receipt["summary"] = receipt.get("summary") or receipt.get("error") or ""
-    return receipt
+_RETRY_HINT_RE = re.compile(r"retry in ([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
 
 
-def _record_devin_turn(entry: Dict[str, Any], prompt: str, res: Dict[str, Any]) -> None:
-    """Append one user->agent exchange to the task's persisted turn history."""
-    turns = entry.setdefault("turns", [])
-    turns.append(
-        {
-            "turn": len(turns) + 1,
-            "prompt": mask_secrets(prompt),
-            "summary": res.get("summary") or res.get("message") or "",
-            "ok": bool(res.get("ok")),
-            "run_id": res.get("run_id"),
-            "session_id": res.get("session_id"),
-            "resumed": res.get("resumed"),
-            "resume_mode": res.get("resume_mode"),
-            "ts": time.time(),
-        }
-    )
+def _extract_retry_hint_s(res: Dict[str, Any]) -> Optional[float]:
+    """Pull the provider's own retry hint out of a finished task result.
+
+    The ``Retry-After`` header dies inside the retry layer, but providers
+    also embed "Please retry in Xs" in the error text that survives into
+    ``res["message"]`` / ``attempts[].message``. The hint is clamped to
+    300s so a malformed body cannot park the provider for an hour.
+    """
+    texts = [res.get("message") or ""]
+    for att in res.get("attempts") or []:
+        if isinstance(att, dict):
+            texts.append(str(att.get("message") or att.get("error") or ""))
+    best: Optional[float] = None
+    for text in texts:
+        m = _RETRY_HINT_RE.search(str(text))
+        if m:
+            val = float(m.group(1))
+            best = val if best is None else max(best, val)
+    return None if best is None else min(best, 300.0)
 
 
 def _note_provider_result(provider_name: str, res: Dict[str, Any]) -> None:
@@ -1973,7 +1990,9 @@ def _note_provider_result(provider_name: str, res: Dict[str, Any]) -> None:
         if isinstance(att, dict):
             kinds.add(att.get("failure_kind"))
     if "provider_rate_limited" in kinds:
-        cooldown_s = get_rate_limiter().report_limited(provider_name)
+        cooldown_s = get_rate_limiter().report_limited(
+            provider_name, retry_after_s=_extract_retry_hint_s(res)
+        )
         if cooldown_s > 0:
             logger.info(
                 "provider '%s' reported rate-limited; %.1fs cooldown applied",
@@ -1989,6 +2008,10 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
     em = get_emitter(task_id)
     pump = asyncio.create_task(_task_event_pump(task_id, em))
     executor = (getattr(req, "executor", "") or "botex").lower()
+    if executor == "devin":
+        # Retired executor (removed with the ACP bridge): clamp to the botex
+        # engine so audit telemetry doesn't claim a devin run that never ran.
+        executor = "botex"
     entry["executor"] = executor
     provider_name = ""
     edge_exec: Optional[ToolExecutor] = None
@@ -1997,25 +2020,24 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
         # Provider admission throttle: wait on the provider's RPM budget
         # BEFORE taking a concurrency slot — a task parked on a provider
         # cooldown must not starve other providers' queue slots.
-        if executor != "devin":
-            provider_name, _ = resolve_provider(req.provider or "")
-            limiter = get_rate_limiter()
-            est_wait = limiter.wait_estimate(provider_name)
-            if est_wait > 0:
-                em.emit(
-                    EventKind.RETRY_WAIT,
-                    delay_s=round(est_wait, 2),
-                    reason="provider_rate_limit",
-                    provider=provider_name,
-                )
-            waited_s = await limiter.acquire(provider_name)
-            if waited_s > 0:
-                logger.info(
-                    "task %s waited %.2fs on provider '%s' rate budget",
-                    task_id,
-                    waited_s,
-                    provider_name,
-                )
+        provider_name, _ = resolve_provider(req.provider or "")
+        limiter = get_rate_limiter()
+        est_wait = limiter.wait_estimate(provider_name)
+        if est_wait > 0:
+            em.emit(
+                EventKind.RETRY_WAIT,
+                delay_s=round(est_wait, 2),
+                reason="provider_rate_limit",
+                provider=provider_name,
+            )
+        waited_s = await limiter.acquire(provider_name)
+        if waited_s > 0:
+            logger.info(
+                "task %s waited %.2fs on provider '%s' rate budget",
+                task_id,
+                waited_s,
+                provider_name,
+            )
         # Bounded concurrency: enforce engine semaphore
         edge_exec = _resolve_active_edge_executor(req.workspace_dir)
         effective_ws = (
@@ -2025,55 +2047,38 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
         async with botex_server._TASK_SEMAPHORE:
             entry["status"] = "RUNNING"
             em.emit(EventKind.TASK_STATE, state="RUNNING", executor=executor)
-            if executor == "devin":
-                res = await _run_devin_task(task_id, req)
-            else:
-                res = await run_botex_task(
-                    task=req.task,
-                    files=req.files or None,
-                    workspace_dir=effective_ws,
-                    model=req.model,
-                    profile=req.profile,
-                    provider=req.provider,
-                    mode=req.mode,
-                    max_turns=req.max_turns or None,
-                    max_tokens=req.max_tokens or None,
-                    max_duration_s=req.max_duration_s or None,
-                    budget_limit_usd=req.budget_limit_usd if req.budget_limit_usd >= 0 else None,
-                    allow_destructive=True if req.allow_destructive else None,
-                    allow_exec=True if req.allow_exec else None,
-                    allow_net=True if req.allow_net else None,
-                    net_allowed_hosts=req.net_allowed_hosts or None,
-                    net_allowed_urls=req.net_allowed_urls or None,
-                    output_path=req.output_path,
-                    verify_command=req.verify_command,
-                    recipe=req.recipe,
-                    allow_non_zdr=True if req.allow_non_zdr else None,
-                    allow_expensive_model=True if req.allow_expensive_model else None,
-                    approval_policy=req.approval_policy or None,
-                    progress_cb=lambda kind, **data: em.emit(kind, **data),
-                    tool_executor=edge_exec,
-                )
+            res = await run_botex_task(
+                task=req.task,
+                files=req.files or None,
+                workspace_dir=effective_ws,
+                model=req.model,
+                profile=req.profile,
+                provider=req.provider,
+                mode=req.mode,
+                max_turns=req.max_turns or None,
+                max_tokens=req.max_tokens or None,
+                max_duration_s=req.max_duration_s or None,
+                budget_limit_usd=req.budget_limit_usd if req.budget_limit_usd >= 0 else None,
+                allow_destructive=True if req.allow_destructive else None,
+                allow_exec=True if req.allow_exec else None,
+                allow_net=True if req.allow_net else None,
+                net_allowed_hosts=req.net_allowed_hosts or None,
+                net_allowed_urls=req.net_allowed_urls or None,
+                output_path=req.output_path,
+                verify_command=req.verify_command,
+                recipe=req.recipe,
+                allow_non_zdr=True if req.allow_non_zdr else None,
+                allow_expensive_model=True if req.allow_expensive_model else None,
+                approval_policy=req.approval_policy or None,
+                progress_cb=lambda kind, **data: em.emit(kind, **data),
+                tool_executor=edge_exec,
+            )
             entry["result_data"] = botex_server.mask_secrets_recursive(res)
             entry["result"] = mask_secrets(res.get("summary") or res.get("message") or "")
             entry["status"] = "DONE" if res.get("ok") else res.get("status", "FAILED")
             _note_provider_result(provider_name, res)
-            if executor == "devin":
-                # Persist the ACP session so follow-up turns can resume it
-                # (multi-turn continuation / prompt-cache reuse).
-                if res.get("session_id"):
-                    entry["session_id"] = res["session_id"]
-                if not entry.get("turns"):
-                    _record_devin_turn(entry, req.task, res)
     except asyncio.CancelledError:
         entry["status"] = "CANCELLED"
-        if executor == "devin":
-            try:
-                from botex.delegation import cancel_run_for_task
-
-                cancel_run_for_task(task_id)
-            except Exception:
-                pass
         if not entry.get("result"):
             entry["result"] = "Task cancelled by operator."
         if not entry.get("result_data"):
@@ -2134,29 +2139,27 @@ async def create_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Task prompt exceeds maximum allowed length (65536 characters).",
         )
-    executor = (getattr(req, "executor", "") or "botex").lower()
-    if executor != "devin":
-        has_model = bool(req.model and req.model.strip())
-        has_provider = bool(req.provider and req.provider.strip())
-        env_prov = os.environ.get("BOTEX_PROVIDER", "").strip()
-        if has_model and not has_provider and not env_prov:
+    has_model = bool(req.model and req.model.strip())
+    has_provider = bool(req.provider and req.provider.strip())
+    env_prov = os.environ.get("BOTEX_PROVIDER", "").strip()
+    if has_model and not has_provider and not env_prov:
+        avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Explicit 'provider' is required when 'model' ('{req.model.strip()}') is specified. "
+                f"Specify one of: {avail_provs}."
+            ),
+        )
+    if has_provider:
+        resolved_prov, prov_cfg = resolve_provider(req.provider)
+        if not prov_cfg:
             avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Explicit 'provider' is required when 'model' ('{req.model.strip()}') is specified. "
-                    f"Specify one of: {avail_provs}."
-                ),
+                detail=f"Unknown provider '{req.provider}'. Available providers: {avail_provs}.",
             )
-        if has_provider:
-            resolved_prov, prov_cfg = resolve_provider(req.provider)
-            if not prov_cfg:
-                avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unknown provider '{req.provider}'. Available providers: {avail_provs}.",
-                )
-            req.provider = resolved_prov
+        req.provider = resolved_prov
     if req.max_turns and req.max_turns > 100:
         req.max_turns = 100
     if req.max_tokens and req.max_tokens > 32768:
@@ -2198,103 +2201,6 @@ async def create_task(
                 "response": res_dict,
             }
     return res_dict
-
-
-async def _run_followup_worker(task_id: str, prompt: str, session_id: str) -> None:
-    """Background worker driving a follow-up turn inside the persisted Devin session."""
-    entry = _TASKS[task_id]
-    em = get_emitter(task_id)
-    pump = asyncio.create_task(_task_event_pump(task_id, em))
-    req_data = entry.get("request") or {}
-    try:
-        async with botex_server._TASK_SEMAPHORE:
-            entry["status"] = "RUNNING"
-            em.emit(EventKind.TASK_STATE, state="RUNNING", executor="devin", followup=True)
-            req_kwargs = {k: v for k, v in req_data.items() if k in TaskCreateRequest.model_fields}
-            req = TaskCreateRequest(**req_kwargs)
-            req.task = prompt
-            res = await _run_devin_task(task_id, req, session_id=session_id)
-            entry["result_data"] = botex_server.mask_secrets_recursive(res)
-            entry["result"] = mask_secrets(res.get("summary") or res.get("message") or "")
-            entry["status"] = "DONE" if res.get("ok") else res.get("status", "FAILED")
-            if res.get("session_id"):
-                entry["session_id"] = res["session_id"]
-            _record_devin_turn(entry, prompt, res)
-    except asyncio.CancelledError:
-        entry["status"] = "CANCELLED"
-        try:
-            from botex.delegation import cancel_run_for_task
-
-            cancel_run_for_task(task_id)
-        except Exception:
-            pass
-        if not entry.get("result"):
-            entry["result"] = "Follow-up cancelled by operator."
-        raise
-    except Exception as exc:
-        masked_err = mask_secrets(str(exc))
-        entry["status"] = "FAILED"
-        entry["result"] = f"Follow-up execution failed: {masked_err}"
-    finally:
-        entry["finished_at"] = time.time()
-        em.emit(EventKind.TASK_STATE, state=entry.get("status") or "DONE")
-        await asyncio.to_thread(
-            _save_task_persistent, task_id, entry, req_data.get("workspace_dir") or ""
-        )
-        # Let the pump deliver the final task_state frame before teardown.
-        await asyncio.sleep(0.1)
-        pump.cancel()
-
-
-@app.post("/api/tasks/{task_id}/followup", status_code=status.HTTP_202_ACCEPTED)
-async def create_task_followup(task_id: str, body: TaskFollowupRequest) -> Dict[str, Any]:
-    """Send a follow-up turn to the Devin session persisted on the task receipt.
-
-    Resumes the stored ACP session (or ``devin -r`` when the ACP server cannot
-    ``session/load``) so multi-turn continuation reuses the prompt cache instead
-    of starting a clean slate.
-    """
-    _load_tasks_persistent()
-    clean_tid = sanitize_identifier(task_id)
-    if not clean_tid or clean_tid not in _TASKS:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    entry = _TASKS[clean_tid]
-    if entry.get("executor") != "devin":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Follow-up turns are only supported for devin-executor tasks.",
-        )
-    prompt = (body.prompt or "").strip()
-    if not prompt:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="prompt must not be empty"
-        )
-    if len(prompt) > 65536:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Follow-up prompt exceeds maximum allowed length (65536 characters).",
-        )
-    session_id = entry.get("session_id") or (entry.get("result_data") or {}).get("session_id")
-    if not session_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Task has no resumable Devin session_id.",
-        )
-    if entry.get("status") in {"QUEUED", "RUNNING"}:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Task is still running - wait for it to finish before sending a follow-up.",
-        )
-    entry["status"] = "QUEUED"
-    entry["finished_at"] = None
-    worker = asyncio.create_task(_run_followup_worker(clean_tid, prompt, str(session_id)))
-    entry["async_task"] = worker
-    return {
-        "ok": True,
-        "task_id": clean_tid,
-        "status": "QUEUED",
-        "session_id": session_id,
-    }
 
 
 @app.get("/api/tasks")
@@ -2369,18 +2275,6 @@ async def cancel_task(task_id: str) -> Dict[str, Any]:
 
     # Abort pending approval actions for this task
     default_approval_manager.abort_task(clean_tid, reason="Task cancelled via API")
-
-    # Devin executor: terminate the ACP run tree (cross-process safe — the
-    # kill validates image name + start time before taskkill).
-    if entry.get("executor") == "devin":
-        try:
-            from botex.delegation import kill_run, list_runs
-
-            for r in list_runs():
-                if r.get("task_id") == clean_tid and r.get("live"):
-                    kill_run(r["run_id"])
-        except Exception as exc:
-            logger.warning(f"devin run kill for task {clean_tid} failed: {exc}")
 
     # Cancel background worker task if active
     worker = entry.get("async_task")
@@ -2547,7 +2441,7 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
         title=body.title,
         content=body.content,
         kind=body.kind,
-        tags=body.tags,
+        tags=filter_reserved_tags(body.tags),
         memory_id=clean_mid,
         origin=origin,
         scope=body.scope,
@@ -2894,7 +2788,7 @@ async def save_chat_session_to_memory(
         kind=body.kind,
         scope=body.scope,
         content=body.content,
-        tags=body.tags,
+        tags=filter_reserved_tags(body.tags),
     )
     if not res.get("ok"):
         logger.warning("Save chat to memory failed.")
@@ -2990,6 +2884,14 @@ async def chat_websocket(websocket: WebSocket) -> None:
     """Bidirectional WebSocket chat endpoint with 15s ping heartbeat and auth support."""
     await websocket.accept()
 
+    ws_origin = websocket.headers.get("origin", "")
+    if ws_origin.strip() and not _is_allowed_origin(ws_origin, websocket.headers.get("host", "")):
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Forbidden: cross-origin request",
+        )
+        return
+
     if not _is_auth_configured():
         client_host = websocket.client.host if websocket.client else ""
         forwarded_for = websocket.headers.get("x-forwarded-for", "").strip()
@@ -3006,12 +2908,12 @@ async def chat_websocket(websocket: WebSocket) -> None:
             )
             return
     else:
-        # Check token in query parameters or Authorization header
-        token = websocket.query_params.get("token", "").strip()
-        if not token:
-            auth_header = websocket.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:].strip()
+        # Bearer header or first auth frame only: query-string credentials are
+        # persisted by access/proxy logs, so no route may accept them.
+        token = ""
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
 
         authenticated = _verify_access_token(token)
         if not authenticated:

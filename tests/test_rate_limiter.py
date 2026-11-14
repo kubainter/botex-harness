@@ -478,26 +478,7 @@ def test_worker_rate_limited_result_opens_cooldown(client):
             json={"task": "t", "mode": "readonly", "provider": "openrouter-free"},
         )
         assert _wait_terminal(client, resp.json()["task_id"]) == "API_ERROR"
-    lim.report_limited.assert_called_once_with("openrouter-free")
-
-
-def test_worker_devin_executor_bypasses_limiter(client):
-    """The devin executor never touches the provider rate limiter."""
-    lim = _mock_limiter()
-    with (
-        patch("botex.server_cloud.get_rate_limiter", return_value=lim),
-        patch(
-            "botex.server_cloud._run_devin_task",
-            new=AsyncMock(return_value={"ok": True, "status": "DONE", "summary": "s"}),
-        ),
-    ):
-        resp = client.post(
-            "/api/tasks",
-            json={"task": "t", "mode": "readonly", "executor": "devin"},
-        )
-        assert _wait_terminal(client, resp.json()["task_id"]) == "DONE"
-    lim.acquire.assert_not_called()
-    lim.wait_estimate.assert_not_called()
+    lim.report_limited.assert_called_once_with("openrouter-free", retry_after_s=None)
 
 
 def test_worker_successful_result_no_cooldown(client):
@@ -526,7 +507,7 @@ def test_note_provider_result_detects_attempt_level_rate_limit():
         _note_provider_result(
             "prov", {"failure_kind": None, "attempts": [{"failure_kind": "provider_rate_limited"}]}
         )
-    lim.report_limited.assert_called_once_with("prov")
+    lim.report_limited.assert_called_once_with("prov", retry_after_s=None)
 
 
 def test_note_provider_result_ignores_other_failures():
@@ -537,3 +518,62 @@ def test_note_provider_result_ignores_other_failures():
         _note_provider_result("prov", "not-a-dict")
         _note_provider_result("", {"failure_kind": "provider_rate_limited"})
     lim.report_limited.assert_not_called()
+
+
+def test_note_provider_result_forwards_retry_hint():
+    """The provider's own 'retry in Xs' text reaches report_limited."""
+    lim = _mock_limiter()
+    res = {
+        "failure_kind": "provider_rate_limited",
+        "message": "Model call error m: 429 quota exceeded. Please retry in 59.9s",
+        "attempts": [{"failure_kind": "provider_rate_limited"}],
+    }
+    with patch("botex.server_cloud.get_rate_limiter", return_value=lim):
+        _note_provider_result("google", res)
+    lim.report_limited.assert_called_once_with("google", retry_after_s=pytest.approx(59.9))
+
+
+def test_note_provider_result_hint_scans_attempt_errors():
+    """Attempt-level message/error text is scanned for a hint as well."""
+    lim = _mock_limiter()
+    res = {
+        "failure_kind": None,
+        "attempts": [
+            {"failure_kind": "provider_rate_limited", "error": "rate limited, retry in 12s"}
+        ],
+    }
+    with patch("botex.server_cloud.get_rate_limiter", return_value=lim):
+        _note_provider_result("prov", res)
+    lim.report_limited.assert_called_once_with("prov", retry_after_s=pytest.approx(12.0))
+
+
+def test_note_provider_result_hint_opens_stats_cooldown(client):
+    """The hint-driven cooldown surfaces through /api/rate_limits stats."""
+    limiter, _ = _limiter({"google": {"rpm": 60.0, "cooldown_s": 30.0}})
+    res = {
+        "failure_kind": "provider_rate_limited",
+        "message": "429 quota exceeded. Please retry in 59.9s",
+        "attempts": [{"failure_kind": "provider_rate_limited"}],
+    }
+    with patch("botex.server_cloud.get_rate_limiter", return_value=limiter):
+        _note_provider_result("google", res)
+        data = client.get("/api/rate_limits").json()
+    assert data["google"]["cooldown_s"] == pytest.approx(59.9)
+
+
+def test_note_provider_result_hint_free_falls_back_to_config():
+    """A hint-free 429 opens the configured cooldown_s fallback."""
+    limiter, _ = _limiter({"prov": {"rpm": 60.0, "cooldown_s": 30.0}})
+    res = {"failure_kind": "provider_rate_limited", "message": "429 rate limit exceeded"}
+    with patch("botex.server_cloud.get_rate_limiter", return_value=limiter):
+        _note_provider_result("prov", res)
+    assert limiter.cooldown_remaining("prov") == pytest.approx(30.0)
+
+
+def test_note_provider_result_hint_clamped_at_ceiling():
+    """A malformed 'retry in 3600s' body cannot park the provider for an hour."""
+    limiter, _ = _limiter({"prov": {"rpm": 60.0, "cooldown_s": 30.0}})
+    res = {"failure_kind": "provider_rate_limited", "message": "429 — retry in 3600s"}
+    with patch("botex.server_cloud.get_rate_limiter", return_value=limiter):
+        _note_provider_result("prov", res)
+    assert limiter.cooldown_remaining("prov") == pytest.approx(300.0)

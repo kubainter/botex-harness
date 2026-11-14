@@ -17,7 +17,9 @@ Comprehensive unit and integration test suite covering:
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -27,6 +29,8 @@ from starlette.websockets import WebSocketDisconnect
 from botex import __version__
 from botex.approval import ActionStatus, PendingAction, default_approval_manager
 from botex.providers import CreditsInfo
+from botex.server import server_cloud
+from botex.server.server_cloud import CloudAuthMiddleware
 from botex.server_cloud import app
 
 
@@ -103,9 +107,12 @@ def test_auth_strict_cloud_accepts_valid_bearer_token(client, monkeypatch):
     assert "tasks" in resp.json()
 
 
-def test_auth_strict_cloud_accepts_query_token_on_sse_path(client, monkeypatch):
-    """Token passed as query parameter ?token=... is accepted only on the GET /mcp/sse handshake."""
+def test_auth_strict_cloud_rejects_query_token_everywhere(client, monkeypatch):
+    """Query-string ?token= is rejected on every route; credentials must ride the Bearer header."""
     monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
+    # The MCP SSE handshake used to be the sole exception; URL tokens are gone entirely.
+    sse_resp = client.get("/mcp/sse?token=super-secret-key-12345")
+    assert sse_resp.status_code == 401
     # State-changing POSTs must use the Bearer header, never the URL.
     mcp_resp = client.post("/mcp/messages?token=super-secret-key-12345", json={})
     assert mcp_resp.status_code == 401
@@ -121,16 +128,6 @@ def test_auth_strict_cloud_accepts_query_token_on_sse_path(client, monkeypatch):
     # Chat POST must not accept URL tokens either
     chat_resp = client.post("/api/chat?token=super-secret-key-12345", json={})
     assert chat_resp.status_code == 401
-
-
-def test_devin_status_requires_auth_in_strict_mode(client, monkeypatch):
-    """/api/delegation/devin leaks run metadata, so it is no longer an unauthenticated probe."""
-    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
-    assert client.get("/api/delegation/devin").status_code == 401
-    ok = client.get(
-        "/api/delegation/devin", headers={"Authorization": "Bearer super-secret-key-12345"}
-    )
-    assert ok.status_code == 200
 
 
 def test_auth_strict_cloud_allows_health_unauthenticated(client, monkeypatch):
@@ -162,6 +159,79 @@ def test_auth_strict_cloud_allows_cors_preflight(client, monkeypatch):
         },
     )
     assert foreign.headers.get("access-control-allow-origin") is None
+
+
+# ---------------------------------------------------------------------------
+# 2b. Origin Guard (same-host drive-by protection on mutations)
+# ---------------------------------------------------------------------------
+
+
+def test_origin_guard_rejects_cross_origin_mutation(client):
+    """POST /api/* carrying a foreign Origin header is rejected with 403."""
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "drive-by write", "mode": "readonly"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+    assert "cross-origin" in resp.json()["detail"]
+
+
+def test_origin_guard_allows_same_origin(client):
+    """An Origin whose host matches the request Host passes through to auth."""
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "same origin", "mode": "readonly"},
+        headers={"Origin": "http://testserver"},
+    )
+    assert resp.status_code != 403
+
+
+def test_origin_guard_ignores_missing_origin(client):
+    """Requests without an Origin header (curl/agents) are unaffected."""
+    resp = client.post("/api/tasks", json={"task": "no origin", "mode": "readonly"})
+    assert resp.status_code != 403
+
+
+def test_origin_guard_wildcard_opt_out(client, monkeypatch):
+    """security.allowed_origins=['*'] disables the check (explicit opt-out)."""
+    monkeypatch.setattr("botex.server_cloud._security_allowed_origins", lambda: ["*"])
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "opted out", "mode": "readonly"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code != 403
+
+
+def test_origin_guard_allowlisted_origin(client, monkeypatch):
+    """An exact security.allowed_origins entry permits a cross-origin PWA only."""
+    monkeypatch.setattr(
+        "botex.server_cloud._security_allowed_origins",
+        lambda: ["https://pwa.example.com"],
+    )
+    ok = client.post(
+        "/api/tasks",
+        json={"task": "allowlisted pwa", "mode": "readonly"},
+        headers={"Origin": "https://pwa.example.com"},
+    )
+    assert ok.status_code != 403
+    blocked = client.post(
+        "/api/tasks",
+        json={"task": "still blocked", "mode": "readonly"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert blocked.status_code == 403
+
+
+def test_origin_guard_websocket_foreign_origin(client):
+    """/api/chat/ws upgrades from a foreign Origin are closed with 1008."""
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect(
+            "/api/chat/ws", headers={"origin": "http://evil.example"}
+        ) as ws:
+            ws.receive_json()
+    assert excinfo.value.code == 1008
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +599,30 @@ def test_websocket_chat_auth_rejection(client, monkeypatch):
     assert excinfo.value.code == 1008
 
 
+def test_websocket_chat_query_token_not_accepted(client, monkeypatch):
+    """?token= on the chat WebSocket URL is ignored: Bearer header or auth frame only."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "ws-token-pass")
+
+    # A URL token alone no longer authenticates: a non-auth first frame closes 1008.
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect("/api/chat/ws?token=ws-token-pass") as ws:
+            ws.send_json({"type": "ping"})
+            ws.receive_json()
+    assert excinfo.value.code == 1008
+
+    # Bearer header still authenticates even when a bogus URL token is present.
+    with client.websocket_connect(
+        "/api/chat/ws?token=bogus", headers={"authorization": "Bearer ws-token-pass"}
+    ) as ws:
+        ws.send_json({"type": "ping"})
+        assert ws.receive_json()["type"] == "pong"
+
+    # First auth frame still authenticates regardless of the URL token.
+    with client.websocket_connect("/api/chat/ws?token=bogus") as ws:
+        ws.send_json({"type": "auth", "token": "ws-token-pass"})
+        assert ws.receive_json()["type"] == "auth_ok"
+
+
 # ---------------------------------------------------------------------------
 # 9. Remote MCP via SSE Endpoint
 # ---------------------------------------------------------------------------
@@ -574,6 +668,115 @@ def test_sse_keepalive_formatting():
     sse = ServerSentEvent(comment="keepalive")
     wire_bytes = sse.encode()
     assert b": keepalive\r\n\r\n" in wire_bytes or b": keepalive\n\n" in wire_bytes
+
+
+# ---------------------------------------------------------------------------
+# MCP session_id IP binding (CloudAuthMiddleware, ASGI-scope level)
+# ---------------------------------------------------------------------------
+
+
+def _invoke_auth_middleware(scope: dict):
+    """Drive CloudAuthMiddleware over a stub inner app; return (status, reached_app)."""
+    sent = []
+    reached = []
+
+    async def inner(scope, receive, send):
+        reached.append(True)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def _receive():
+        return {"type": "http.request", "body": b""}
+
+    async def _send(msg):
+        sent.append(msg)
+
+    asyncio.run(CloudAuthMiddleware(inner)(scope, _receive, _send))
+    status = next((m["status"] for m in sent if m["type"] == "http.response.start"), None)
+    return status, bool(reached)
+
+
+def _mcp_messages_scope(session_id: str, client_ip: str) -> dict:
+    return {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp/messages",
+        "query_string": f"session_id={session_id}".encode("latin1"),
+        "client": (client_ip, 40000),
+        "headers": [],
+    }
+
+
+@pytest.fixture
+def _live_mcp_transport(monkeypatch):
+    """Install a fake MCP SSE transport with one live session; reset bindings."""
+    session_uuid = uuid.uuid4()
+    monkeypatch.setattr(
+        server_cloud,
+        "_mcp_transport",
+        SimpleNamespace(_read_stream_writers={session_uuid: object()}),
+    )
+    server_cloud._SSE_SESSION_BINDINGS.clear()
+    yield session_uuid
+    server_cloud._SSE_SESSION_BINDINGS.clear()
+
+
+def test_mcp_messages_session_post_binds_to_first_client_ip(monkeypatch, _live_mcp_transport):
+    """First /mcp/messages post binds session_id to its peer IP; same IP stays allowed."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
+    sid = _live_mcp_transport.hex
+
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
+    assert status == 200 and reached
+
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
+    assert status == 200 and reached
+
+
+def test_mcp_messages_session_post_rejects_different_ip(monkeypatch, _live_mcp_transport):
+    """A live session id posted from a different peer IP is rejected with 401."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
+    sid = _live_mcp_transport.hex
+
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
+    assert status == 200 and reached
+
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "198.51.100.7"))
+    assert status == 401 and not reached
+
+
+def test_mcp_messages_unknown_session_id_rejected(monkeypatch, _live_mcp_transport):
+    """session_id not in the transport's active sessions cannot authenticate."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(uuid.uuid4().hex, "203.0.113.10"))
+    assert status == 401 and not reached
+
+
+def test_mcp_sse_bearer_still_accepted_query_token_rejected(monkeypatch):
+    """GET /mcp/sse authenticates via Bearer header only; ?token= is ignored."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
+
+    bearer_scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/mcp/sse",
+        "query_string": b"",
+        "client": ("203.0.113.10", 40000),
+        "headers": [(b"authorization", b"Bearer master-secret")],
+    }
+    status, reached = _invoke_auth_middleware(bearer_scope)
+    assert status == 200 and reached
+
+    query_scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/mcp/sse",
+        "query_string": b"token=master-secret",
+        "client": ("203.0.113.10", 40000),
+        "headers": [],
+    }
+    status, reached = _invoke_auth_middleware(query_scope)
+    assert status == 401 and not reached
 
 
 def test_auth_zero_friction_local_logs_note(client, monkeypatch, caplog):
@@ -815,26 +1018,6 @@ def test_oversized_chat_system_prompt_rejected_with_400(client: TestClient):
     assert "System prompt exceeds maximum allowed length" in resp.json()["detail"]
 
 
-def test_oversized_task_followup_prompt_rejected_with_400(client: TestClient):
-    """Follow-up prompt exceeding 65536 characters is rejected with 400."""
-    from botex.server_cloud import _TASKS
-
-    fake_tid = "fake_devin_task"
-    _TASKS[fake_tid] = {
-        "task_id": fake_tid,
-        "executor": "devin",
-        "status": "DONE",
-        "session_id": "ses_123",
-    }
-    try:
-        huge_prompt = "f" * 70000
-        resp = client.post(f"/api/tasks/{fake_tid}/followup", json={"prompt": huge_prompt})
-        assert resp.status_code == 400
-        assert "exceeds maximum allowed length" in resp.json()["detail"]
-    finally:
-        _TASKS.pop(fake_tid, None)
-
-
 def test_mask_stream_chunk_boundary_secrets():
     """Verify mask_stream_chunk redacts secrets split across consecutive streaming chunks."""
     from server import mask_stream_chunk
@@ -938,6 +1121,68 @@ def test_access_token_in_botex_access_token_auto_detected_as_sha256(monkeypatch)
     # Wrong token rejected
     res_err = client.get("/api/wallet", headers={"Authorization": "Bearer wrong"})
     assert res_err.status_code == 401
+
+
+def test_stored_token_hash_is_not_a_bearer_credential(monkeypatch):
+    """The at-rest BOTEX_ACCESS_TOKEN_HASH value itself must be rejected as bearer."""
+    import hashlib
+
+    raw_token = "btx_live_test_secret_12345"
+    hex_digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    token_hash = f"sha256:{hex_digest}"
+
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN_HASH", token_hash)
+    monkeypatch.setenv("BOTEX_STRICT_AUTH", "1")
+
+    client = TestClient(app)
+
+    # Stored hash presented literally is rejected, in both prefixed and bare-hex form
+    res_prefixed = client.get("/api/wallet", headers={"Authorization": f"Bearer {token_hash}"})
+    assert res_prefixed.status_code == 401
+    res_hex = client.get("/api/wallet", headers={"Authorization": f"Bearer {hex_digest}"})
+    assert res_hex.status_code == 401
+
+    # Hash-only deployment still verifies the real token
+    res_ok = client.get("/api/wallet", headers={"Authorization": f"Bearer {raw_token}"})
+    assert res_ok.status_code == 200
+
+
+def test_hash_in_access_token_var_is_not_a_bearer_credential(monkeypatch):
+    """sha256:... value placed in BOTEX_ACCESS_TOKEN is a verifier, not a credential."""
+    import hashlib
+
+    raw_token = "btx_live_test_direct_hash_987"
+    token_hash = "sha256:" + hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN_HASH", raising=False)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", token_hash)
+    monkeypatch.setenv("BOTEX_STRICT_AUTH", "1")
+
+    client = TestClient(app)
+
+    res_literal = client.get("/api/wallet", headers={"Authorization": f"Bearer {token_hash}"})
+    assert res_literal.status_code == 401
+
+    res_ok = client.get("/api/wallet", headers={"Authorization": f"Bearer {raw_token}"})
+    assert res_ok.status_code == 200
+
+
+def test_access_token_plaintext_compare_is_case_sensitive(monkeypatch):
+    """Plain bearer comparison is byte-exact; a case-mutated token is rejected."""
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN_HASH", raising=False)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "Super-Secret-Key-ABC")
+    monkeypatch.setenv("BOTEX_STRICT_AUTH", "1")
+
+    client = TestClient(app)
+
+    res_mutated = client.get(
+        "/api/wallet", headers={"Authorization": "Bearer super-secret-key-abc"}
+    )
+    assert res_mutated.status_code == 401
+
+    res_ok = client.get("/api/wallet", headers={"Authorization": "Bearer Super-Secret-Key-ABC"})
+    assert res_ok.status_code == 200
 
 
 def test_security_masks_btx_tokens_and_blocks_env():
@@ -1117,12 +1362,6 @@ def test_resolve_local_llm_base_url_probe_failure_degrades():
         out = _resolve_local_llm_base_url("ollama", cfg)
     assert out is cfg
     _LOCAL_LLM_BASE_URL_RESOLVED.clear()
-
-
-def test_devin_status_endpoint_requires_token(client, monkeypatch):
-    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
-    assert client.get("/api/delegation/devin").status_code == 401
-    assert client.get("/api/health").status_code == 200
 
 
 def test_streamable_http_mcp_requires_token(client, monkeypatch):

@@ -10,7 +10,8 @@ Guarantees:
 - Zero .env Access: Clean environment allowlist strips all API keys and secrets.
 - Evasion Resistance: Parses JSON output regardless of exit code (exit 1 on risk_score > 50).
 - Resource Bounded: Serialized via asyncio.Semaphore(1) with strict process timeout.
-- Graceful Fallback: Non-crashing UNVERIFIED_NO_SCANNER verdict when scanner is absent.
+- Fail-Closed Default: missing scanner blocks installs (BLOCKED_NO_SCANNER); the
+  skills.audit.allow_unverified config flag restores the legacy UNVERIFIED_NO_SCANNER fallback.
 """
 
 from __future__ import annotations
@@ -114,20 +115,41 @@ async def audit_skill_content(
             bin_path = str(opt_bin_linux)
 
     if not bin_path:
-        logger.info(
-            "SkillSpector binary '%s' not found on system. Falling back to UNVERIFIED_NO_SCANNER.",
+        if audit_cfg.get("allow_unverified", False):
+            logger.info(
+                "SkillSpector binary '%s' not found on system. Falling back to UNVERIFIED_NO_SCANNER.",
+                binary_name,
+            )
+            return {
+                "ok": True,
+                "status": "NO_SCANNER",
+                "verdict": "UNVERIFIED_NO_SCANNER",
+                "risk_score": 0,
+                "findings": [],
+                "scanner": "SkillSpector",
+                "scanned_at": datetime.now(timezone.utc).isoformat(),
+                "scanner_version": "none",
+                "reason": "SkillSpector binary not installed on host.",
+            }
+        logger.warning(
+            "SkillSpector binary '%s' not found on system. Failing closed "
+            "(skills.audit.allow_unverified=false).",
             binary_name,
         )
         return {
-            "ok": True,
+            "ok": False,
             "status": "NO_SCANNER",
-            "verdict": "UNVERIFIED_NO_SCANNER",
+            "verdict": "BLOCKED_NO_SCANNER",
             "risk_score": 0,
             "findings": [],
             "scanner": "SkillSpector",
             "scanned_at": datetime.now(timezone.utc).isoformat(),
             "scanner_version": "none",
-            "reason": "SkillSpector binary not installed on host.",
+            "reason": (
+                "SkillSpector scanner binary is required to audit remote skill content "
+                "before install. Install the scanner binary, or set "
+                "skills.audit.allow_unverified=true to accept unaudited skills."
+            ),
         }
 
     threshold = int(audit_cfg.get("risk_threshold", DEFAULT_RISK_THRESHOLD))
