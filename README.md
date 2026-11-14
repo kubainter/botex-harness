@@ -468,7 +468,9 @@ botex serve                # Force MCP stdio server mode explicitly
 server.py              MCP server entry point & CLI dispatcher
 bin/                   Zero-install launchers (`botex.cmd`, `botex.sh`, `botex-edge.*`)
 pyproject.toml         Package configuration (exposes `botex` CLI command)
-requirements.txt       Runtime dependencies
+requirements.txt       Runtime dependencies (loose ">=" floor for dev/CI installs)
+requirements.lock      Pinned deploy lockfile — regenerate via
+                       `uv pip compile pyproject.toml --universal --python-version 3.13 -o requirements.lock`
 botex.config.json      Committed defaults (providers, engine limits, exec/net policy)
 ROADMAP.md             Deferred features & technical rationale
 botex/                 Domain subpackages (legacy flat imports like `botex.engine`
