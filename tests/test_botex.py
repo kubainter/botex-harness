@@ -2129,6 +2129,35 @@ def test_review_regressions():
     print("[PASS] Review Regression Tests")
 
 
+def test_botex_dir_blocked():
+    """`.botex` is a blocked path segment like `.git`: the plugin vault,
+    memory vault and proposals dir must stay unreachable via file tools."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / ".botex" / "plugins" / "x").mkdir(parents=True)
+        (root / ".botex" / "plugins" / "x" / "plugin_runner.py").write_text("x", encoding="utf-8")
+        (root / ".botex" / "memory").mkdir(parents=True)
+        (root / ".botex" / "memory" / "evil.md").write_text("x", encoding="utf-8")
+        (root / "a" / ".botex").mkdir(parents=True)
+        (root / "a" / ".botex" / "b.py").write_text("x", encoding="utf-8")
+        for p in (
+            ".botex/plugins/x/plugin_runner.py",
+            "./.botex/plugins/x/plugin_runner.py",
+            ".botex/memory/evil.md",
+            "a/.botex/b.py",
+        ):
+            try:
+                resolve_safe_path(root, p)
+                raise AssertionError(f"{p} must be blocked")
+            except SecurityError:
+                pass
+
+        # Only the exact segment is blocked — lookalikes stay allowed.
+        for p in ("botex/foo.py", "my.botex/x.py"):
+            safe = resolve_safe_path(root, p)
+            assert str(safe).startswith(str(root.resolve()))
+
+
 def test_tool_misuse_and_decisions_guard():
     """Malformed tool calls get schema-echoed feedback; a surrender after
     exclusively failed invocations reports model_tool_misuse (not the
