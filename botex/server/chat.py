@@ -52,6 +52,7 @@ try:
         SecurityError,
         check_model_zdr,
         coerce_text,
+        filter_reserved_tags,
         mask_secrets,
         sanitize_identifier,
     )
@@ -98,6 +99,7 @@ except (ImportError, ValueError):
         SecurityError,
         check_model_zdr,
         coerce_text,
+        filter_reserved_tags,
         mask_secrets,
         sanitize_identifier,
     )
@@ -1335,7 +1337,7 @@ async def execute_chat_tool(name: str, arguments: dict[str, Any], workspace_dir:
                 title=str(arguments.get("title", "Chat Note")),
                 content=str(arguments.get("content", "")),
                 kind=str(arguments.get("kind", "context")),
-                tags=tags_list,
+                tags=filter_reserved_tags(tags_list),
                 scope=str(arguments.get("scope", "local")),
                 origin="chat_tool",
             )
