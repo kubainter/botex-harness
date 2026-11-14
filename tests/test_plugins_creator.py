@@ -5,7 +5,8 @@ Tests for BoteX Creator Mode — Plugin Engine (Worker B domain)
 ================================================================
 Coverage:
 1. Rule 0 (Zero Secret Leakage): the plugin subprocess environment never
-   carries provider API keys from the parent process.
+   carries provider API keys from the parent process; a net-denied run
+   additionally gets dead-end ``*_PROXY`` vars (best-effort egress denial).
 2. Hard timeout: a plugin exceeding its budget is killed and raises
    PluginExecutionTimeout.
 3. Network permission gate: requires_net=True without an explicit grant +
@@ -92,6 +93,41 @@ async def test_rule0_plugin_env_never_sees_provider_keys(tmp_path, monkeypatch):
     assert child_env.get("BOTEX_NET_ALLOWED") == "0"
     assert child_env.get("PYTHONDONTWRITEBYTECODE") == "1"
     assert child_env.get("BOTEX_WORKSPACE_DIR")
+
+
+# --- Egress denial: dead-end proxy injection (best-effort) ------------------
+
+_DEAD_PROXY_URL = "http://127.0.0.1:9"
+_DEAD_PROXY_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+)
+_NO_PROXY_KEYS = ("NO_PROXY", "no_proxy")
+
+
+def test_build_env_denied_net_injects_dead_end_proxy(monkeypatch):
+    """net_allowed=False -> every proxy var points at the discard endpoint."""
+    monkeypatch.setenv("HTTP_PROXY", "http://host-proxy:3128")  # must be overridden
+    env = ZeroTrustSubprocessRunner().build_env(net_allowed=False)
+    assert env["BOTEX_NET_ALLOWED"] == "0"
+    for key in _DEAD_PROXY_KEYS:
+        assert env[key] == _DEAD_PROXY_URL
+    for key in _NO_PROXY_KEYS:
+        assert env[key] == ""
+
+
+def test_build_env_allowed_net_carries_no_proxy_vars(monkeypatch):
+    """net_allowed=True -> no injected proxies and no host proxy leak."""
+    for key in _DEAD_PROXY_KEYS + _NO_PROXY_KEYS:
+        monkeypatch.setenv(key, "http://host-proxy:3128")
+    env = ZeroTrustSubprocessRunner().build_env(net_allowed=True)
+    assert env["BOTEX_NET_ALLOWED"] == "1"
+    for key in _DEAD_PROXY_KEYS + _NO_PROXY_KEYS:
+        assert key not in env
 
 
 # ---------------------------------------------------------------------------
