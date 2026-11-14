@@ -1333,9 +1333,6 @@ def _verify_access_token(candidate_token: Optional[str]) -> bool:
     expected_hash = os.environ.get("BOTEX_ACCESS_TOKEN_HASH", "").strip().strip('"').strip("'")
     if expected_hash:
         target_hash = expected_hash.lower()
-        # Direct match if candidate is already the hash itself (e.g. client configured with sha256:...)
-        if hmac.compare_digest(candidate_token.strip().lower(), target_hash):
-            return True
         if target_hash.startswith("sha256:"):
             if hmac.compare_digest(prefixed_hash, target_hash):
                 return True
@@ -1346,17 +1343,14 @@ def _verify_access_token(candidate_token: Optional[str]) -> bool:
     expected_token = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip().strip('"').strip("'")
     if expected_token:
         target_token = expected_token.lower()
-        # Direct match if candidate is already the hash itself
-        if hmac.compare_digest(candidate_token.strip().lower(), target_token):
-            return True
         if target_token.startswith("sha256:"):
             if hmac.compare_digest(prefixed_hash, target_token):
                 return True
         elif len(target_token) == 64 and all(c in "0123456789abcdef" for c in target_token):
             if hmac.compare_digest(raw_hash, target_token):
                 return True
-        # Plain token comparison
-        if hmac.compare_digest(candidate_bytes, expected_token.encode("utf-8")):
+        # Plain token comparison (skipped when configured value is hash-shaped)
+        elif hmac.compare_digest(candidate_bytes, expected_token.encode("utf-8")):
             return True
 
     return False
