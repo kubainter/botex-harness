@@ -1037,9 +1037,10 @@ class WorkspaceOutOfBounds(ValueError):
 def allowed_workspaces() -> list[str]:
     """Realpath-normalized entries of ``cloud.allowed_workspaces``.
 
-    Empty/missing key = containment feature off (local/dev semantics
-    unchanged). Each entry is expanded (``~``) and realpath-resolved so
-    later comparisons close both ``..`` traversal and symlink escapes.
+    Each entry is expanded (``~``) and realpath-resolved so later
+    comparisons close both ``..`` traversal and symlink escapes. Empty
+    does NOT disable containment — ``_enforce_workspace_containment``
+    substitutes the default-workspace root instead (fail-closed).
     """
     raw = (load_config().get("cloud", {}) or {}).get("allowed_workspaces")
     if raw is None:
@@ -1056,17 +1057,30 @@ def allowed_workspaces() -> list[str]:
     return roots
 
 
+def _default_workspace_root() -> str:
+    """Realpath of the fallback workspace used for an empty ``workspace_dir``.
+
+    Shares ``resolve_workspace_source``'s chain so the empty-allowlist
+    root cannot drift from what ``resolve_workspace`` itself resolves.
+    """
+    return os.path.realpath(os.path.abspath(resolve_workspace_source("")[0]))
+
+
 def _enforce_workspace_containment(real_path: str) -> None:
     """Fail-closed containment for ``cloud.allowed_workspaces``.
 
-    Non-empty allowlist: the resolved path must be equal to or under one
-    of the allowed roots. Runs BEFORE any ``mkdir`` side-effect in
-    ``get_tasks_dir``/``get_chat_sessions_dir``, so out-of-bounds paths
-    never materialize on disk (arena v2.1.0 merge-blocker B1).
+    Empty allowlist = default-workspace-only: the resolved path must be
+    equal to or under ``engine.default_workspace`` (process cwd when that
+    is unset/not a directory — the same fallback ``resolve_workspace``
+    uses for an empty ``workspace_dir``). Non-empty allowlist: equal to
+    or under one of the allowed roots. Runs BEFORE any ``mkdir``
+    side-effect in ``get_tasks_dir``/``get_chat_sessions_dir``, so
+    out-of-bounds paths never materialize on disk (arena v2.1.0
+    merge-blocker B1).
     """
     roots = allowed_workspaces()
     if not roots:
-        return
+        roots = [_default_workspace_root()]
     candidate = os.path.normcase(real_path)
     for root in roots:
         norm_root = os.path.normcase(root)

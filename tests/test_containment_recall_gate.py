@@ -25,10 +25,39 @@ def _config_with_allowlist(roots, tmp_path):
     }
 
 
-def test_containment_disabled_when_allowlist_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(server_config, "load_config", lambda: {"cloud": {"allowed_workspaces": []}})
-    # current semantics: any explicit path resolves freely
-    assert server_config.resolve_workspace(str(tmp_path)) == str(tmp_path.resolve())
+def test_containment_empty_allowlist_means_default_workspace_only(tmp_path, monkeypatch):
+    """Empty allowlist = default-workspace-only (fail-closed), not off."""
+    default = tmp_path / "default_ws"
+    default.mkdir()
+    monkeypatch.setattr(
+        server_config,
+        "load_config",
+        lambda: {
+            "engine": {"default_workspace": str(default)},
+            "cloud": {"allowed_workspaces": []},
+        },
+    )
+    inside = default / "sub" / "deeper"
+    assert server_config.resolve_workspace(str(inside)) == str(inside.resolve())
+    assert server_config.resolve_workspace("") == str(default.resolve())
+    outside = tmp_path / "outside"
+    with pytest.raises(server_config.WorkspaceOutOfBounds):
+        server_config.resolve_workspace(str(outside))
+
+
+def test_containment_empty_allowlist_falls_back_to_cwd(tmp_path, monkeypatch):
+    """No allowlist and no default_workspace: only the process cwd resolves."""
+    monkeypatch.setattr(
+        server_config,
+        "load_config",
+        lambda: {"engine": {}, "cloud": {"allowed_workspaces": []}},
+    )
+    monkeypatch.chdir(tmp_path)
+    assert server_config.resolve_workspace("") == "."
+    inside = tmp_path / "sub"
+    assert server_config.resolve_workspace(str(inside)) == str(inside.resolve())
+    with pytest.raises(server_config.WorkspaceOutOfBounds):
+        server_config.resolve_workspace(str(tmp_path.parent))
 
 
 def test_containment_allows_inside_root(tmp_path, monkeypatch):
