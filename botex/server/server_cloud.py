@@ -176,6 +176,16 @@ _IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SSE_REPLAY_BUFFER: Dict[str, List[Dict[str, Any]]] = {}
 _MAX_REPLAY_EVENTS_PER_SESSION: int = 100
 _IDEMPOTENCY_TTL_SECONDS: float = 86400.0
+# Remote MCP SSE: the first /mcp/messages post binds session_id to its client IP,
+# so a session id lifted from logs cannot be driven from a different peer.
+_SSE_SESSION_BINDINGS: Dict[str, Dict[str, Any]] = {}
+_SSE_SESSION_BINDINGS_CAP: int = 10_000
+
+
+def _bind_sse_session(session_id: str, client_ip: str) -> None:
+    while len(_SSE_SESSION_BINDINGS) >= _SSE_SESSION_BINDINGS_CAP:
+        _SSE_SESSION_BINDINGS.pop(next(iter(_SSE_SESSION_BINDINGS)), None)
+    _SSE_SESSION_BINDINGS[session_id] = {"ip": client_ip, "created": time.time()}
 
 
 def _cleanup_idempotency_cache() -> None:
@@ -1510,18 +1520,14 @@ class CloudAuthMiddleware:
                     MCP_CLIENT_ORIGIN.reset(tok)
             return
 
-        # Extract token from Authorization header or query parameter
+        # Extract token from the Authorization header only: query-string
+        # credentials are persisted by access/proxy logs, so no route may
+        # accept them.
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode("latin1", errors="ignore")
         token: Optional[str] = None
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
-        elif method == "GET" and path == "/mcp/sse":
-            # Query-string token is only tolerated for the EventSource handshake (browsers
-            # cannot set headers there); every other route requires the Bearer header.
-            qs = parse_qs(scope.get("query_string", b"").decode("latin1", errors="ignore"))
-            if "token" in qs and qs["token"]:
-                token = qs["token"][0].strip()
 
         # Session-aware MCP authentication: if session was established on authenticated /mcp/sse
         if not token and path.startswith("/mcp/messages") and _mcp_transport is not None:
@@ -1531,7 +1537,23 @@ class CloudAuthMiddleware:
                 active_sessions = {
                     sid.hex for sid in getattr(_mcp_transport, "_read_stream_writers", {}).keys()
                 }
+                # Sweep bindings of closed streams: dead session ids can never
+                # authenticate, so their bindings must not linger.
+                for dead_sid in [s for s in _SSE_SESSION_BINDINGS if s not in active_sessions]:
+                    _SSE_SESSION_BINDINGS.pop(dead_sid, None)
                 if session_id in active_sessions:
+                    client_ip = _extract_client_ip_from_scope(scope)
+                    binding = _SSE_SESSION_BINDINGS.get(session_id)
+                    if binding is None:
+                        _bind_sse_session(session_id, client_ip)
+                    elif binding["ip"] != client_ip:
+                        resp = JSONResponse(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            content={"detail": "Unauthorized: Invalid or missing bearer token"},
+                            headers={"WWW-Authenticate": "Bearer"},
+                        )
+                        await resp(scope, receive, send)
+                        return
                     tok = MCP_CLIENT_ORIGIN.set(mcp_origin) if mcp_origin else None
                     try:
                         await self.app(scope, receive, send)
@@ -3000,12 +3022,12 @@ async def chat_websocket(websocket: WebSocket) -> None:
             )
             return
     else:
-        # Check token in query parameters or Authorization header
-        token = websocket.query_params.get("token", "").strip()
-        if not token:
-            auth_header = websocket.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:].strip()
+        # Bearer header or first auth frame only: query-string credentials are
+        # persisted by access/proxy logs, so no route may accept them.
+        token = ""
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
 
         authenticated = _verify_access_token(token)
         if not authenticated:

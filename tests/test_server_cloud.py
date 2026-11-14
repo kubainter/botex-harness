@@ -17,7 +17,9 @@ Comprehensive unit and integration test suite covering:
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -27,6 +29,8 @@ from starlette.websockets import WebSocketDisconnect
 from botex import __version__
 from botex.approval import ActionStatus, PendingAction, default_approval_manager
 from botex.providers import CreditsInfo
+from botex.server import server_cloud
+from botex.server.server_cloud import CloudAuthMiddleware
 from botex.server_cloud import app
 
 
@@ -103,9 +107,12 @@ def test_auth_strict_cloud_accepts_valid_bearer_token(client, monkeypatch):
     assert "tasks" in resp.json()
 
 
-def test_auth_strict_cloud_accepts_query_token_on_sse_path(client, monkeypatch):
-    """Token passed as query parameter ?token=... is accepted only on the GET /mcp/sse handshake."""
+def test_auth_strict_cloud_rejects_query_token_everywhere(client, monkeypatch):
+    """Query-string ?token= is rejected on every route; credentials must ride the Bearer header."""
     monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "super-secret-key-12345")
+    # The MCP SSE handshake used to be the sole exception; URL tokens are gone entirely.
+    sse_resp = client.get("/mcp/sse?token=super-secret-key-12345")
+    assert sse_resp.status_code == 401
     # State-changing POSTs must use the Bearer header, never the URL.
     mcp_resp = client.post("/mcp/messages?token=super-secret-key-12345", json={})
     assert mcp_resp.status_code == 401
@@ -529,6 +536,30 @@ def test_websocket_chat_auth_rejection(client, monkeypatch):
     assert excinfo.value.code == 1008
 
 
+def test_websocket_chat_query_token_not_accepted(client, monkeypatch):
+    """?token= on the chat WebSocket URL is ignored: Bearer header or auth frame only."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "ws-token-pass")
+
+    # A URL token alone no longer authenticates: a non-auth first frame closes 1008.
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect("/api/chat/ws?token=ws-token-pass") as ws:
+            ws.send_json({"type": "ping"})
+            ws.receive_json()
+    assert excinfo.value.code == 1008
+
+    # Bearer header still authenticates even when a bogus URL token is present.
+    with client.websocket_connect(
+        "/api/chat/ws?token=bogus", headers={"authorization": "Bearer ws-token-pass"}
+    ) as ws:
+        ws.send_json({"type": "ping"})
+        assert ws.receive_json()["type"] == "pong"
+
+    # First auth frame still authenticates regardless of the URL token.
+    with client.websocket_connect("/api/chat/ws?token=bogus") as ws:
+        ws.send_json({"type": "auth", "token": "ws-token-pass"})
+        assert ws.receive_json()["type"] == "auth_ok"
+
+
 # ---------------------------------------------------------------------------
 # 9. Remote MCP via SSE Endpoint
 # ---------------------------------------------------------------------------
@@ -574,6 +605,115 @@ def test_sse_keepalive_formatting():
     sse = ServerSentEvent(comment="keepalive")
     wire_bytes = sse.encode()
     assert b": keepalive\r\n\r\n" in wire_bytes or b": keepalive\n\n" in wire_bytes
+
+
+# ---------------------------------------------------------------------------
+# MCP session_id IP binding (CloudAuthMiddleware, ASGI-scope level)
+# ---------------------------------------------------------------------------
+
+
+def _invoke_auth_middleware(scope: dict):
+    """Drive CloudAuthMiddleware over a stub inner app; return (status, reached_app)."""
+    sent = []
+    reached = []
+
+    async def inner(scope, receive, send):
+        reached.append(True)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def _receive():
+        return {"type": "http.request", "body": b""}
+
+    async def _send(msg):
+        sent.append(msg)
+
+    asyncio.run(CloudAuthMiddleware(inner)(scope, _receive, _send))
+    status = next((m["status"] for m in sent if m["type"] == "http.response.start"), None)
+    return status, bool(reached)
+
+
+def _mcp_messages_scope(session_id: str, client_ip: str) -> dict:
+    return {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp/messages",
+        "query_string": f"session_id={session_id}".encode("latin1"),
+        "client": (client_ip, 40000),
+        "headers": [],
+    }
+
+
+@pytest.fixture
+def _live_mcp_transport(monkeypatch):
+    """Install a fake MCP SSE transport with one live session; reset bindings."""
+    session_uuid = uuid.uuid4()
+    monkeypatch.setattr(
+        server_cloud,
+        "_mcp_transport",
+        SimpleNamespace(_read_stream_writers={session_uuid: object()}),
+    )
+    server_cloud._SSE_SESSION_BINDINGS.clear()
+    yield session_uuid
+    server_cloud._SSE_SESSION_BINDINGS.clear()
+
+
+def test_mcp_messages_session_post_binds_to_first_client_ip(monkeypatch, _live_mcp_transport):
+    """First /mcp/messages post binds session_id to its peer IP; same IP stays allowed."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
+    sid = _live_mcp_transport.hex
+
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
+    assert status == 200 and reached
+
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
+    assert status == 200 and reached
+
+
+def test_mcp_messages_session_post_rejects_different_ip(monkeypatch, _live_mcp_transport):
+    """A live session id posted from a different peer IP is rejected with 401."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
+    sid = _live_mcp_transport.hex
+
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
+    assert status == 200 and reached
+
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "198.51.100.7"))
+    assert status == 401 and not reached
+
+
+def test_mcp_messages_unknown_session_id_rejected(monkeypatch, _live_mcp_transport):
+    """session_id not in the transport's active sessions cannot authenticate."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
+    status, reached = _invoke_auth_middleware(_mcp_messages_scope(uuid.uuid4().hex, "203.0.113.10"))
+    assert status == 401 and not reached
+
+
+def test_mcp_sse_bearer_still_accepted_query_token_rejected(monkeypatch):
+    """GET /mcp/sse authenticates via Bearer header only; ?token= is ignored."""
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
+
+    bearer_scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/mcp/sse",
+        "query_string": b"",
+        "client": ("203.0.113.10", 40000),
+        "headers": [(b"authorization", b"Bearer master-secret")],
+    }
+    status, reached = _invoke_auth_middleware(bearer_scope)
+    assert status == 200 and reached
+
+    query_scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/mcp/sse",
+        "query_string": b"token=master-secret",
+        "client": ("203.0.113.10", 40000),
+        "headers": [],
+    }
+    status, reached = _invoke_auth_middleware(query_scope)
+    assert status == 401 and not reached
 
 
 def test_auth_zero_friction_local_logs_note(client, monkeypatch, caplog):
