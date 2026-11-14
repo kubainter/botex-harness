@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import socket
+import tempfile
 from typing import Any
 from unittest.mock import patch
 
@@ -80,6 +81,25 @@ def isolate_botex_test_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch):
         import botex.server.config as _srv_cfg
 
         monkeypatch.setattr(_srv_cfg, "swarm_memory_dir", lambda: "")
+
+        # Fail-closed containment (plan 012): empty cloud.allowed_workspaces
+        # now restricts workspaces to the default root, so tests passing tmp
+        # dirs as workspace_dir would bounce. Widen the test allowlist to the
+        # OS temp root plus the caller's cwd — covers pytest tmp_path and
+        # tempfile.mkdtemp trees; tests patching load_config still override.
+        _real_load_config = _srv_cfg.load_config
+
+        def _load_config_with_test_roots(*args: Any, **kwargs: Any) -> Any:
+            cfg = _real_load_config(*args, **kwargs)
+            cloud = cfg.setdefault("cloud", {})
+            if not cloud.get("allowed_workspaces"):
+                cloud["allowed_workspaces"] = [
+                    tempfile.gettempdir(),
+                    os.path.realpath(os.getcwd()),
+                ]
+            return cfg
+
+        monkeypatch.setattr(_srv_cfg, "load_config", _load_config_with_test_roots)
     except Exception:
         pass
 
