@@ -60,8 +60,8 @@
             v-model="formScope"
             class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
           >
-            <option value="local">local (.botex/memory/ in project)</option>
-            <option value="global">global (~/.botex/memory/ user home)</option>
+            <option value="local">local (project)</option>
+            <option value="global">global (user)</option>
           </select>
         </div>
       </div>

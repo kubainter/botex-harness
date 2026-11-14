@@ -61,7 +61,7 @@
         <input
           v-model="rejectionReason"
           type="text"
-          :placeholder="locale === 'pl' ? 'np. Nie zmieniaj testów, popraw logikę w server.py' : 'e.g. Do not modify tests, fix server.py instead'"
+          :placeholder="locale === 'pl' ? 'np. Nie zmieniaj testów, popraw logikę biznesową' : 'e.g. Do not modify tests, fix the logic instead'"
           class="w-full bg-botex-950 border border-rose-500/50 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-rose-500"
         />
       </div>
