@@ -93,9 +93,11 @@ _SECRET_PATTERNS = [
     # AWS
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"(?i)aws[_\-]?secret[_\-]?access[_\-]?key\s*[=:]\s*\S+"),
-    # Generic tokens / passwords in config lines
+    # Generic tokens / passwords in config lines or JSON/dict pairs —
+    # the key name may be wrapped in quotes, so allow one before [=:]
     re.compile(
-        r'(?i)(password|passwd|token|secret|api[_\-]?key|auth[_\-]?key)\s*[=:]\s*["\']?[^\s"\']{6,}["\']?'
+        r"(?i)(password|passwd|token|secret|api[_\-]?key|auth[_\-]?key)"
+        r'\s*["\']?\s*[=:]\s*["\']?[^\s"\',]{6,}["\']?'
     ),
     # Bearer tokens (case-insensitive for HTTP authorization headers and error traces)
     re.compile(r"(?i)bearer\s+[a-zA-Z0-9\-_\.]{20,}"),

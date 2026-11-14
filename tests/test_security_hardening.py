@@ -7,8 +7,41 @@ import pytest
 import server as botex_server
 from botex import exec_tools
 from botex.events import TaskEventEmitter, _mask_data
+from botex.tools.security import mask_secrets
 
 SECRET = "sk-or-v1-" + "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4"
+
+
+def test_mask_secrets_quoted_key_value_pairs():
+    # JSON object and dict-repr forms: quote between key name and separator
+    masked = mask_secrets('{"api_key": "plainsecretvalue"}')
+    assert "plainsecretvalue" not in masked
+    assert "[REDACTED]" in masked
+
+    masked = mask_secrets("{'token': 'abc1234567'}")
+    assert "abc1234567" not in masked
+    assert "[REDACTED]" in masked
+
+    # YAML-ish single-quoted value
+    masked = mask_secrets("api_key: 'val123456'")
+    assert "val123456" not in masked
+
+    # Compact JSON: the following pair must not be swallowed
+    masked = mask_secrets('{"token":"abc123","next":1}')
+    assert "abc123" not in masked
+    assert '"next":1' in masked
+
+    # Existing bare forms keep masking (regression)
+    assert "[REDACTED]" in mask_secrets("token: ghp_xxxx")
+    assert "[REDACTED]" in mask_secrets("api_key=val12345678")
+    assert "[REDACTED]" in mask_secrets('token = "abc123"')
+
+    # Identifier words ending in a key name are not secrets
+    for text in ("token_ring", "tokenizer", "mytokenize"):
+        assert mask_secrets(text) == text
+
+    # Min-length guard still applies inside quotes
+    assert mask_secrets('"token": "short"') == '"token": "short"'
 
 
 def test_cloud_cli_refuses_public_bind_without_token(monkeypatch):
