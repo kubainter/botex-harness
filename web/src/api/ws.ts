@@ -108,11 +108,7 @@ class WebSocketManager {
       const token = getStoredAccessToken()
       const wsProto = baseUrl.startsWith('https:') ? 'wss:' : 'ws:'
       const hostPath = baseUrl.replace(/^https?:\/\//, '')
-      let url = `${wsProto}//${hostPath}/api/chat/ws`
-
-      if (token) {
-        url += `?token=${encodeURIComponent(token)}`
-      }
+      const url = `${wsProto}//${hostPath}/api/chat/ws`
 
       this.ws = new WebSocket(url)
 
