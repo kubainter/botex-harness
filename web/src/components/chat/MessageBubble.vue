@@ -38,8 +38,8 @@
             :title="copied ? t('chat.copied') : t('chat.copy_message')"
             @click="copyContent"
           >
-            <CheckIcon v-if="copied" class="w-3 h-3 text-emerald-400" />
-            <CopyIcon v-else class="w-3 h-3" />
+            <CheckIcon v-if="copied" class="w-3 h-3 text-emerald-400" aria-hidden="true" />
+            <CopyIcon v-else class="w-3 h-3" aria-hidden="true" />
             <span class="text-xs">{{ copied ? t('chat.copied') : t('chat.copy') }}</span>
           </button>
         </div>
@@ -50,10 +50,10 @@
         <details :open="Boolean(message.is_thinking || (!message.content && message.reasoning))" class="bg-botex-950/90 border border-botex-800 rounded-lg p-2 text-xs">
           <summary class="cursor-pointer text-amber-400/90 hover:text-amber-300 font-mono flex items-center justify-between select-none">
             <span class="flex items-center space-x-1.5">
-              <BrainIcon class="w-3.5 h-3.5" :class="{'animate-pulse text-amber-400': message.is_thinking}" />
+              <BrainIcon class="w-3.5 h-3.5" :class="{'animate-pulse text-amber-400': message.is_thinking}" aria-hidden="true" />
               <span class="font-medium">{{ message.is_thinking ? 'Generowanie toku myślenia (Reasoning)...' : 'Tok rozumowania (Reasoning)' }}</span>
             </span>
-            <span v-if="message.is_thinking" class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+            <span v-if="message.is_thinking" class="w-2 h-2 rounded-full bg-amber-400 animate-ping" aria-hidden="true"></span>
           </summary>
           <div class="mt-2 text-slate-300 font-mono text-xs whitespace-pre-wrap max-h-48 overflow-y-auto bg-botex-950 p-2 rounded border border-botex-900 leading-normal select-text">
             {{ message.reasoning }}
@@ -65,13 +65,13 @@
       <div class="text-sm leading-relaxed select-text cursor-text">
         <MarkdownViewer v-if="message.content" :content="message.content" />
         <div v-else-if="message.streaming && !message.reasoning" class="flex items-center space-x-2 text-slate-300 py-1">
-          <span class="inline-block w-2 h-2 rounded-full bg-sky-400 animate-pulse"></span>
-          <span class="text-xs font-mono">{{ t('chat.streaming') }}</span>
+          <span class="inline-block w-2 h-2 rounded-full bg-sky-400 animate-pulse" aria-hidden="true"></span>
+          <span class="text-xs font-mono" role="status">{{ t('chat.streaming') }}</span>
         </div>
       </div>
 
       <!-- Streaming cursor indicator -->
-      <div v-if="message.streaming && message.content" class="mt-1 flex items-center space-x-1 text-sky-400 text-xs">
+      <div v-if="message.streaming && message.content" class="mt-1 flex items-center space-x-1 text-sky-400 text-xs" aria-hidden="true">
         <span class="w-1.5 h-3.5 bg-sky-400 animate-pulse inline-block"></span>
       </div>
     </div>

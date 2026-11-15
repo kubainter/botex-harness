@@ -39,7 +39,7 @@
                   class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
                   @click="onRefresh"
                 >
-                  <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': isLoading }" />
+                  <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': isLoading }" aria-hidden="true" />
                 </button>
                 <button
                   type="button"
@@ -47,7 +47,7 @@
                   class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
                   @click="close"
                 >
-                  <XIcon class="w-4 h-4" />
+                  <XIcon class="w-4 h-4" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -56,12 +56,13 @@
             <template v-if="availableModels.length > 0">
               <!-- Search Input -->
               <div class="relative">
-                <SearchIcon class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <SearchIcon class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" aria-hidden="true" />
                 <input
                   ref="searchInputRef"
                   v-model="searchQuery"
                   type="text"
                   :placeholder="t('models.search.placeholder')"
+                  :aria-label="t('models.search.placeholder')"
                   class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg pl-10 pr-20 py-2 text-base sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-sans"
                 />
                 <button
@@ -147,12 +148,12 @@
             v-if="catalogStale"
             class="mx-3.5 sm:mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-950/60 border border-amber-500/40 flex items-center gap-2 text-xs text-amber-200"
           >
-            <AlertTriangleIcon class="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <AlertTriangleIcon class="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
             <span class="flex-1">{{ t('models.stale') }}</span>
           </div>
 
           <!-- Skeleton Loader when refreshing empty list -->
-          <div v-if="isLoading && models.length === 0" class="p-4 space-y-2.5 overflow-y-auto flex-1">
+          <div v-if="isLoading && models.length === 0" class="p-4 space-y-2.5 overflow-y-auto flex-1" aria-hidden="true">
             <div
               v-for="n in 5"
               :key="n"
@@ -172,7 +173,7 @@
             class="flex-1 p-8 sm:p-12 text-center flex flex-col items-center justify-center space-y-4 my-auto bg-botex-950/60"
           >
             <div class="w-12 h-12 rounded-full bg-botex-900 border border-botex-700 flex items-center justify-center text-slate-300">
-              <LockIcon class="w-6 h-6 text-slate-400" />
+              <LockIcon class="w-6 h-6 text-slate-400" aria-hidden="true" />
             </div>
             <div class="space-y-1.5 max-w-sm">
               <h4 class="text-sm font-semibold text-slate-100">
@@ -190,6 +191,7 @@
             ref="listContainerRef"
             class="flex-1 overflow-y-auto overscroll-contain divide-y divide-botex-800/70 bg-botex-950/60"
             role="listbox"
+            :aria-activedescendant="visibleModels.length > 0 ? `model-opt-${highlightedIndex}` : undefined"
           >
             <div
               v-if="filteredModels.length === 0"
@@ -208,6 +210,7 @@
             <div
               v-for="(item, idx) in visibleModels"
               :key="`${item.provider}:${item.id}`"
+              :id="`model-opt-${idx}`"
               :ref="(el) => setItemRef(el, idx)"
               role="option"
               tabindex="-1"
@@ -232,6 +235,7 @@
                   <CheckIcon
                     v-if="isSelected(item)"
                     class="w-4 h-4 text-emerald-400 shrink-0"
+                    aria-hidden="true"
                   />
                 </div>
                 <div class="font-mono text-xs text-slate-400 truncate mt-0.5">
@@ -277,7 +281,7 @@
                 <button
                   type="button"
                   :class="[
-                    'p-1 rounded transition shrink-0',
+                    'min-h-[36px] min-w-[36px] p-1.5 rounded transition shrink-0 flex items-center justify-center',
                     infoOpenKey === modelKey(item)
                       ? 'text-cyan-300 bg-cyan-500/15'
                       : 'text-slate-400 hover:text-cyan-300 hover:bg-botex-800'
@@ -286,7 +290,7 @@
                   :aria-expanded="infoOpenKey === modelKey(item)"
                   @click.stop.prevent="toggleInfo(item, $event)"
                 >
-                  <InfoIcon class="w-3.5 h-3.5" />
+                  <InfoIcon class="w-3.5 h-3.5" aria-hidden="true" />
                 </button>
               </div>
 

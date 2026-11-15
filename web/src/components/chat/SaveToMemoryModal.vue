@@ -10,6 +10,7 @@
       <!-- Status Toast / Feedback -->
       <div
         v-if="statusFeedback"
+        :role="statusFeedback.type === 'error' ? 'alert' : 'status'"
         :class="[
           'p-3 rounded-lg flex items-center space-x-2 border transition',
           statusFeedback.type === 'success'
@@ -17,17 +18,18 @@
             : 'bg-rose-950/60 border-rose-500/40 text-rose-200'
         ]"
       >
-        <CheckIcon v-if="statusFeedback.type === 'success'" class="w-4 h-4 text-emerald-400 shrink-0" />
-        <AlertCircleIcon v-else class="w-4 h-4 text-rose-400 shrink-0" />
+        <CheckIcon v-if="statusFeedback.type === 'success'" class="w-4 h-4 text-emerald-400 shrink-0" aria-hidden="true" />
+        <AlertCircleIcon v-else class="w-4 h-4 text-rose-400 shrink-0" aria-hidden="true" />
         <span class="text-xs">{{ statusFeedback.message }}</span>
       </div>
 
       <!-- Note Title -->
       <div>
-        <label class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
+        <label for="stm-title" class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
           {{ t('chat.save_memory.note_title') }} *
         </label>
         <input
+          id="stm-title"
           v-model="formTitle"
           type="text"
           placeholder="e.g. WebSocket Streaming and Error Recovery Flow"
@@ -38,10 +40,11 @@
       <!-- Category (Kind) & Scope -->
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <label class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
+          <label for="stm-kind" class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
             {{ t('chat.save_memory.kind') }}
           </label>
           <select
+            id="stm-kind"
             v-model="formKind"
             class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
           >
@@ -53,10 +56,11 @@
         </div>
 
         <div>
-          <label class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
+          <label for="stm-scope" class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
             {{ t('chat.save_memory.scope') }}
           </label>
           <select
+            id="stm-scope"
             v-model="formScope"
             class="w-full bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
           >
@@ -68,10 +72,11 @@
 
       <!-- Tags -->
       <div>
-        <label class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
+        <label for="stm-tags" class="block text-slate-200 font-medium mb-1 font-mono text-xs uppercase tracking-wide">
           {{ t('chat.save_memory.tags') }}
         </label>
         <input
+          id="stm-tags"
           v-model="formTags"
           type="text"
           placeholder="chat, architecture, fastapi"
@@ -82,7 +87,7 @@
       <!-- Content Markdown Preview / Editor -->
       <div>
         <div class="flex items-center justify-between mb-1">
-          <label class="block text-slate-200 font-medium font-mono text-xs uppercase tracking-wide">
+          <label for="stm-content" class="block text-slate-200 font-medium font-mono text-xs uppercase tracking-wide">
             {{ t('chat.save_memory.content') }}
           </label>
           <span class="text-xs font-mono text-slate-400">
@@ -90,6 +95,7 @@
           </span>
         </div>
         <textarea
+          id="stm-content"
           v-model="formContent"
           rows="6"
           placeholder="Conversation transcript or summary notes in Markdown format..."
@@ -114,8 +120,8 @@
           :disabled="!formTitle.trim() || isSubmitting"
           @click="handleSubmit"
         >
-          <Loader2Icon v-if="isSubmitting" class="w-3.5 h-3.5 animate-spin" />
-          <BookmarkPlusIcon v-else class="w-3.5 h-3.5" />
+          <Loader2Icon v-if="isSubmitting" class="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+          <BookmarkPlusIcon v-else class="w-3.5 h-3.5" aria-hidden="true" />
           <span>{{ t('chat.save_memory.submit') }}</span>
         </button>
       </div>

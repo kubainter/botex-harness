@@ -20,6 +20,7 @@
             <span
               class="w-2.5 h-2.5 rounded-full inline-block shadow-sm"
               :class="health?.is_healthy ? 'bg-emerald-400 shadow-emerald-500/50 animate-pulse' : 'bg-amber-400 shadow-amber-500/50'"
+              aria-hidden="true"
             ></span>
             <span class="hidden sm:inline font-semibold">{{ health?.is_healthy ? (locale === 'pl' ? 'Graf Spójny' : 'Graph Healthy') : (locale === 'pl' ? 'Wykryto Uwagi' : 'Graph Issues') }}</span>
           </span>
@@ -40,7 +41,7 @@
         >
           <div class="flex items-center justify-between border-b border-botex-800 pb-1.5">
             <span class="font-semibold text-slate-100">{{ locale === 'pl' ? 'Diagnostyka grafu' : 'Graph Diagnostics' }}</span>
-            <button type="button" class="text-slate-400 hover:text-white px-1 transition" @click="showHealthPopover = false">✕</button>
+            <button type="button" class="text-slate-400 hover:text-white min-w-[32px] min-h-[32px] px-1 transition" :aria-label="locale === 'pl' ? 'Zamknij diagnostykę' : 'Close diagnostics'" @click="showHealthPopover = false">✕</button>
           </div>
 
           <div class="space-y-1.5">
@@ -52,7 +53,7 @@
               </div>
               <div class="flex items-center space-x-1.5 col-span-2">
                 <span class="w-2.5 h-2.5 rounded-full inline-block shrink-0 border border-cyan-300"></span>
-                <span class="text-cyan-300 font-mono text-[11px]">⭐ {{ locale === 'pl' ? 'Skompilowana Prawda (obręcz)' : 'Compiled Truth (orbital ring)' }}</span>
+                <span class="text-cyan-300 font-mono text-[11px]"><span aria-hidden="true">⭐</span> {{ locale === 'pl' ? 'Skompilowana Prawda (obręcz)' : 'Compiled Truth (orbital ring)' }}</span>
               </div>
             </div>
           </div>
@@ -117,8 +118,9 @@
         <button
           v-if="searchQuery"
           type="button"
-          class="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 flex items-center justify-center text-slate-400 hover:text-white transition"
+          class="absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center text-slate-400 hover:text-white transition"
           :title="locale === 'pl' ? 'Wyczyść' : 'Clear'"
+          :aria-label="locale === 'pl' ? 'Wyczyść wyszukiwanie' : 'Clear search'"
           @click="clearSearch"
         >✕</button>
         <div
@@ -150,6 +152,7 @@
           class="w-8 h-8 rounded-lg bg-botex-900/90 hover:bg-botex-800 border border-botex-700/80 text-sm text-slate-200 font-bold transition shadow-lg flex items-center justify-center hover:text-white"
           @click="zoom(1.2)"
           title="Zoom In (+)"
+          aria-label="Zoom in"
         >
           +
         </button>
@@ -158,6 +161,7 @@
           class="w-8 h-8 rounded-lg bg-botex-900/90 hover:bg-botex-800 border border-botex-700/80 text-sm text-slate-200 font-bold transition shadow-lg flex items-center justify-center hover:text-white"
           @click="zoom(0.8)"
           title="Zoom Out (-)"
+          aria-label="Zoom out"
         >
           -
         </button>
@@ -166,8 +170,9 @@
           class="h-8 px-2.5 rounded-lg bg-botex-900/90 hover:bg-botex-800 border border-botex-700/80 text-xs text-slate-200 font-medium transition shadow-lg flex items-center space-x-1.5 hover:text-white"
           @click="resetView"
           :title="locale === 'pl' ? 'Wycentruj cały graf' : 'Center Graph'"
+          :aria-label="locale === 'pl' ? 'Wycentruj cały graf' : 'Center Graph'"
         >
-          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="12" cy="12" r="10" />
             <line x1="12" y1="8" x2="12" y2="16" />
             <line x1="8" y1="12" x2="16" y2="12" />
@@ -179,11 +184,13 @@
           class="w-8 h-8 rounded-lg bg-botex-900/90 hover:bg-botex-800 border border-botex-700/80 text-slate-200 hover:text-white transition shadow-lg flex items-center justify-center"
           @click="toggleFullscreen"
           :title="isFullscreen ? (locale === 'pl' ? 'Zamknij pełny ekran (Esc)' : 'Exit Fullscreen (Esc)') : (locale === 'pl' ? 'Pełny ekran' : 'Fullscreen')"
+          :aria-label="isFullscreen ? (locale === 'pl' ? 'Zamknij pełny ekran' : 'Exit Fullscreen') : (locale === 'pl' ? 'Pełny ekran' : 'Fullscreen')"
+          :aria-pressed="isFullscreen"
         >
-          <svg v-if="!isFullscreen" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg v-if="!isFullscreen" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
           </svg>
-          <svg v-else class="w-4 h-4 text-cyan-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg v-else class="w-4 h-4 text-cyan-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25" />
           </svg>
         </button>
@@ -192,7 +199,12 @@
 
     <!-- Canvas Interactive Viewport -->
     <div ref="containerRef" class="w-full h-full relative cursor-grab active:cursor-grabbing touch-none">
-      <canvas ref="canvasRef" class="block w-full h-full"></canvas>
+      <canvas
+        ref="canvasRef"
+        class="block w-full h-full"
+        role="img"
+        :aria-label="(locale === 'pl' ? 'Interaktywny graf powiązań notatek: ' : 'Interactive memory note link graph: ') + nodes.length + ' nodes, ' + edges.length + ' edges'"
+      ></canvas>
 
       <!-- Hover / Focused Spotlight Tooltip (Viewport-Clamped for Mobile & Desktop) -->
       <div
@@ -200,6 +212,9 @@
         class="absolute z-20 bg-botex-900/95 border border-cyan-500/40 backdrop-blur-md rounded-xl p-3 shadow-2xl text-xs space-y-1.5 w-[min(270px,calc(100vw-24px))] transition-opacity duration-150 ring-1 ring-cyan-500/20"
         :class="focusedNode ? 'pointer-events-auto' : 'pointer-events-none'"
         :style="tooltipStyle"
+        @mousedown.stop
+        @touchstart.stop
+        @dblclick.stop
       >
         <div class="flex items-center justify-between gap-2 border-b border-botex-800 pb-1.5">
           <span class="font-bold text-slate-100 truncate text-sm">{{ tooltipNode.title }}</span>
@@ -216,7 +231,7 @@
           <span>Wyjściowe: <b class="text-white">{{ tooltipNode.out_degree }}</b></span>
         </div>
         <div v-if="tooltipNode.compiled_truth" class="flex items-center space-x-1 text-cyan-300 font-semibold text-[11px]">
-          <span>⭐ Zweryfikowana Prawda (Compiled Truth)</span>
+          <span><span aria-hidden="true">⭐</span> Zweryfikowana Prawda (Compiled Truth)</span>
         </div>
         <div class="text-[10px] text-slate-400 pt-0.5 italic">
           {{ isTooltipFocused
@@ -229,7 +244,7 @@
           class="w-full mt-1 px-2.5 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/50 text-cyan-200 font-semibold text-[11px] hover:bg-cyan-500/35 active:bg-cyan-500/40 transition"
           @click.stop="emitSelectNode(focusedNode)"
         >
-          {{ locale === 'pl' ? '📖 Otwórz szczegóły' : '📖 Open details' }}
+          <span aria-hidden="true">📖</span> {{ locale === 'pl' ? 'Otwórz szczegóły' : 'Open details' }}
         </button>
       </div>
     </div>
@@ -242,9 +257,10 @@
           type="button"
           class="px-2.5 py-1 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 shrink-0"
           :class="activeClusterId === null ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-semibold shadow-sm' : 'text-slate-300 hover:text-white hover:bg-botex-800/80'"
+          :aria-pressed="activeClusterId === null"
           @click="selectCluster(null)"
         >
-          <span>✨</span>
+          <span aria-hidden="true">✨</span>
           <span>{{ locale === 'pl' ? 'Wszystkie' : 'All' }} ({{ nodes.length }})</span>
         </button>
 
@@ -255,9 +271,10 @@
           class="px-2.5 py-1 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 shrink-0"
           :class="activeClusterId === c.id ? 'bg-botex-800 text-white border font-semibold shadow-sm' : 'text-slate-300 hover:text-white hover:bg-botex-800/60'"
           :style="activeClusterId === c.id ? { borderColor: `${c.color}80`, color: c.color } : {}"
+          :aria-pressed="activeClusterId === c.id"
           @click="selectCluster(c.id)"
         >
-          <span class="w-2 h-2 rounded-full inline-block" :style="{ backgroundColor: c.color }"></span>
+          <span class="w-2 h-2 rounded-full inline-block" :style="{ backgroundColor: c.color }" aria-hidden="true"></span>
           <span>{{ c.shortLabel }}</span>
           <span class="text-[10px] opacity-75 font-mono">({{ c.count }})</span>
         </button>
@@ -279,6 +296,9 @@ import { useI18n } from '../../i18n'
 import type { GraphNode, GraphEdge, GraphHealth } from '../../api/types'
 
 const { locale } = useI18n()
+
+const prefersReducedMotion =
+  typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
 const props = defineProps<{
   nodes: GraphNode[]
@@ -964,7 +984,7 @@ function render() {
   }
 
   // 0. Render Deep Space 2.5D Starfield with Parallax
-  const nowSec = performance.now() * 0.001
+  const nowSec = prefersReducedMotion ? 0 : performance.now() * 0.001
   const w = cw
   const h = ch
 
@@ -1443,7 +1463,7 @@ function wakeLoop() {
 }
 
 function startFocusPulse(n: SimNode | null) {
-  if (!n) return
+  if (!n || prefersReducedMotion) return
   pulseNodeId = n.id
   pulseStartedAt = performance.now()
   wakeLoop()
@@ -1492,6 +1512,7 @@ function hitTestNode(x: number, y: number): SimNode | null {
 
 function onMouseDown(evt: MouseEvent) {
   if (evt.button !== 0) return
+  if (evt.target !== canvasRef.value) return
   wakeLoop()
   const pt = getCanvasPoint(evt)
   mouseDownClient = { x: evt.clientX, y: evt.clientY }
@@ -1690,6 +1711,7 @@ function touchMidpoint(a: Touch, b: Touch): { x: number; y: number } {
 }
 
 function onTouchStart(evt: TouchEvent) {
+  if (evt.target !== canvasRef.value) return
   wakeLoop()
   if (evt.touches.length === 1) {
     const t = evt.touches[0]

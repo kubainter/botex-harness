@@ -9,7 +9,7 @@
             v-if="entry.compiled_truth"
             class="text-xs px-1.5 py-0.5 rounded font-bold font-mono tracking-wider bg-cyan-950/80 text-cyan-300 border border-cyan-700/80"
           >
-            ⭐ Compiled
+            <span aria-hidden="true">⭐</span> Compiled
           </span>
           <button
             v-if="entry.project"
@@ -18,7 +18,7 @@
             :title="locale === 'pl' ? 'Filtruj po tym projekcie' : 'Filter by this project'"
             @click="emit('select-project', entry.project)"
           >
-            📁 {{ entry.project }}
+            <span aria-hidden="true">📁</span> {{ entry.project }}
           </button>
           <span
             :class="[
@@ -48,6 +48,7 @@
         <button
           type="button"
           class="min-h-[44px] lg:min-h-[36px] px-2 py-1 text-xs text-slate-300 hover:text-white hover:bg-botex-800 rounded font-medium transition"
+          :aria-expanded="expanded"
           @click="expanded = !expanded"
         >
           {{ expanded ? (locale === 'pl' ? 'Zwiń' : 'Collapse') : (locale === 'pl' ? 'Rozwiń' : 'Expand') }}
@@ -58,8 +59,9 @@
           class="min-h-[44px] lg:min-h-[36px] min-w-[44px] lg:min-w-[36px] px-2 py-1 text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-950/50 rounded font-medium transition border border-rose-900/50 flex items-center justify-center"
           @click="confirmDelete = true"
           :title="locale === 'pl' ? 'Usuń notatkę' : 'Delete note'"
+          :aria-label="locale === 'pl' ? 'Usuń notatkę' : 'Delete note'"
         >
-          <Trash2Icon class="w-3.5 h-3.5" />
+          <Trash2Icon class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
         <template v-else>
           <button

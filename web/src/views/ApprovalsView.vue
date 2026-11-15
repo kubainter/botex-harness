@@ -5,7 +5,7 @@
       <div>
         <div class="flex items-center space-x-3">
           <h2 class="text-xl font-bold text-slate-100 flex items-center space-x-2">
-            <ShieldAlertIcon class="w-5 h-5 text-amber-400" />
+            <ShieldAlertIcon class="w-5 h-5 text-amber-400" aria-hidden="true" />
             <span>{{ t('approvalsTitle') }}</span>
           </h2>
           <Badge v-if="pendingActions.length > 0" variant="warning">
@@ -22,7 +22,7 @@
         class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
         @click="approvalsStore.fetchApprovals()"
       >
-        <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': approvalsStore.isLoading }" />
+        <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': approvalsStore.isLoading }" aria-hidden="true" />
         <span>{{ t('refresh') }}</span>
       </button>
     </div>
@@ -30,6 +30,7 @@
     <!-- Error notice -->
     <div
       v-if="approvalsStore.errorMessage"
+      role="alert"
       class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
     >
       <span class="font-mono truncate">{{ approvalsStore.errorMessage }}</span>
@@ -41,7 +42,7 @@
       v-if="pendingActions.length === 0"
       class="rounded-xl border border-botex-800 bg-botex-900/50 p-10 text-center flex flex-col items-center justify-center space-y-3"
     >
-      <div class="w-11 h-11 rounded-lg bg-emerald-950/60 border border-emerald-700/50 flex items-center justify-center text-emerald-300">
+      <div class="w-11 h-11 rounded-lg bg-emerald-950/60 border border-emerald-700/50 flex items-center justify-center text-emerald-300" aria-hidden="true">
         <CheckCircle2Icon class="w-5 h-5" />
       </div>
       <h3 class="text-base font-semibold text-slate-100">{{ t('noPendingApprovals') }}</h3>

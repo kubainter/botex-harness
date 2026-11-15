@@ -3,9 +3,9 @@
     <!-- Toolbar -->
     <div class="flex items-center justify-between px-3 py-1.5 bg-botex-900 border-b border-botex-800 text-slate-400">
       <div class="flex items-center space-x-2">
-        <span class="w-2.5 h-2.5 rounded-full bg-rose-500/80"></span>
-        <span class="w-2.5 h-2.5 rounded-full bg-amber-500/80"></span>
-        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500/80"></span>
+        <span class="w-2.5 h-2.5 rounded-full bg-rose-500/80" aria-hidden="true"></span>
+        <span class="w-2.5 h-2.5 rounded-full bg-amber-500/80" aria-hidden="true"></span>
+        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500/80" aria-hidden="true"></span>
         <span class="text-xs font-semibold text-slate-300 ml-1.5">{{ title || 'Unified Diff Preview' }}</span>
       </div>
       <div class="flex items-center space-x-2">
@@ -14,7 +14,7 @@
           class="min-h-[44px] lg:min-h-[36px] px-2 py-0.5 rounded text-xs bg-botex-800 hover:bg-botex-700 text-slate-300 transition flex items-center space-x-1"
           @click="copyContent"
         >
-          <CopyIcon class="w-3 h-3" />
+          <CopyIcon class="w-3 h-3" aria-hidden="true" />
           <span>{{ copied ? 'Copied!' : 'Copy' }}</span>
         </button>
       </div>

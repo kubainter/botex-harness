@@ -4,7 +4,7 @@
     <div class="flex flex-wrap items-center justify-between gap-4 border-b border-botex-800 pb-4">
       <div>
         <h2 class="text-xl font-bold text-slate-100 flex items-center space-x-2">
-          <WalletIcon class="w-5 h-5 text-emerald-400" />
+          <WalletIcon class="w-5 h-5 text-emerald-400" aria-hidden="true" />
           <span>{{ t('walletTitle') }}</span>
         </h2>
         <p class="text-xs text-slate-300 mt-1">
@@ -56,7 +56,7 @@
           class="min-h-[44px] lg:min-h-[32px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
           @click="walletStore.fetchWallet(true)"
         >
-          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': walletStore.isLoading }" />
+          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': walletStore.isLoading }" aria-hidden="true" />
           <span>{{ t('forceRefresh') }}</span>
         </button>
       </div>
@@ -90,7 +90,7 @@
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
           <span>{{ t('activeBalance') }}</span>
-          <CreditCardIcon class="w-4 h-4 text-emerald-400" />
+          <CreditCardIcon class="w-4 h-4 text-emerald-400" aria-hidden="true" />
         </div>
         <div class="text-2xl font-bold text-slate-100 font-mono">
           <span v-if="walletInfo?.balance_usd !== null && walletInfo?.balance_usd !== undefined">
@@ -110,7 +110,7 @@
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
           <span>{{ t('totalUsage') }}</span>
-          <TrendingUpIcon class="w-4 h-4 text-cyan-400" />
+          <TrendingUpIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
         </div>
         <div class="text-2xl font-bold text-slate-100 font-mono">
           <span v-if="walletInfo?.usage_usd !== null && walletInfo?.usage_usd !== undefined">
@@ -127,7 +127,7 @@
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
           <span>{{ t('limitCap') }}</span>
-          <ShieldIcon class="w-4 h-4 text-amber-400" />
+          <ShieldIcon class="w-4 h-4 text-amber-400" aria-hidden="true" />
         </div>
         <div class="text-2xl font-bold text-slate-100 font-mono">
           <span v-if="walletInfo?.limit_usd !== null && walletInfo?.limit_usd !== undefined">
@@ -144,7 +144,7 @@
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
           <span>{{ t('remainingQuota') }}</span>
-          <ClockIcon class="w-4 h-4 text-cyan-400" />
+          <ClockIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
         </div>
         <div class="text-2xl font-bold text-slate-100 font-mono">
           <span v-if="walletInfo?.limit_remaining_usd !== null && walletInfo?.limit_remaining_usd !== undefined">
@@ -175,6 +175,7 @@
     <!-- API error notice -->
     <div
       v-if="walletStore.errorMessage"
+      role="alert"
       class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
     >
       <span class="font-mono truncate">{{ walletStore.errorMessage }}</span>
@@ -182,7 +183,7 @@
     </div>
 
     <!-- Error Notice if any -->
-    <div v-if="walletInfo?.error" class="p-3 rounded-xl bg-amber-950/50 border border-amber-700/60 text-xs text-amber-200">
+    <div v-if="walletInfo?.error" role="alert" class="p-3 rounded-xl bg-amber-950/50 border border-amber-700/60 text-xs text-amber-200">
       <strong>Provider Notice:</strong> {{ walletInfo.error }}
     </div>
 
@@ -372,6 +373,7 @@
             v-for="roleName in ['all', 'planner', 'coder', 'chat', 'reviewer'] as const"
             :key="roleName"
             type="button"
+            :aria-pressed="selectedRole === roleName"
             :class="[
               'min-h-[44px] lg:min-h-[36px] min-w-[44px] justify-center px-2.5 py-1 rounded text-xs font-medium capitalize transition',
               selectedRole === roleName

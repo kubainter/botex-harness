@@ -4,7 +4,7 @@
     <div class="flex flex-wrap items-center justify-between gap-4 border-b border-botex-800 pb-4">
       <div>
         <h2 class="text-xl font-bold text-slate-100 flex items-center space-x-2">
-          <DatabaseIcon class="w-5 h-5 text-cyan-400" />
+          <DatabaseIcon class="w-5 h-5 text-cyan-400" aria-hidden="true" />
           <span>{{ t('memoryTitle') }}</span>
         </h2>
         <p class="text-xs text-slate-300 mt-1">
@@ -19,18 +19,20 @@
             type="button"
             class="min-h-[44px] lg:min-h-[36px] px-2.5 sm:px-3 py-1 rounded-md text-xs font-medium transition flex items-center space-x-1"
             :class="viewMode === 'cards' ? 'bg-botex-800 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
+            :aria-pressed="viewMode === 'cards'"
             @click="viewMode = 'cards'"
           >
-            <LayoutGridIcon class="w-3.5 h-3.5" />
+            <LayoutGridIcon class="w-3.5 h-3.5" aria-hidden="true" />
             <span>{{ locale === 'pl' ? 'Karty' : 'Cards' }}</span>
           </button>
           <button
             type="button"
             class="min-h-[44px] lg:min-h-[36px] px-2.5 sm:px-3 py-1 rounded-md text-xs font-medium transition flex items-center space-x-1"
             :class="viewMode === 'graph' ? 'bg-botex-800 text-cyan-400 shadow' : 'text-slate-400 hover:text-slate-200'"
+            :aria-pressed="viewMode === 'graph'"
             @click="switchToGraph"
           >
-            <NetworkIcon class="w-3.5 h-3.5" />
+            <NetworkIcon class="w-3.5 h-3.5" aria-hidden="true" />
             <span>{{ locale === 'pl' ? 'Graf' : 'Graph' }}</span>
           </button>
         </div>
@@ -38,9 +40,10 @@
         <button
           type="button"
           class="min-h-[44px] lg:min-h-[36px] min-w-[44px] justify-center px-2.5 sm:px-3 py-1 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1 shrink-0"
+          :aria-label="t('refresh')"
           @click="refreshCurrentView"
         >
-          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': memoryStore.isLoading || memoryStore.isGraphLoading }" />
+          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': memoryStore.isLoading || memoryStore.isGraphLoading }" aria-hidden="true" />
           <span class="hidden sm:inline">{{ t('refresh') }}</span>
         </button>
 
@@ -49,7 +52,7 @@
           class="min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded-lg bg-brand-blue hover:bg-blue-600 text-xs font-semibold text-white transition flex items-center space-x-1 shrink-0"
           @click="openCreateModal"
         >
-          <PlusIcon class="w-3.5 h-3.5" />
+          <PlusIcon class="w-3.5 h-3.5" aria-hidden="true" />
           <span>{{ t('addMemory') }}</span>
         </button>
       </div>
@@ -58,6 +61,7 @@
     <!-- Error notice -->
     <div
       v-if="memoryStore.errorMessage"
+      role="alert"
       class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
     >
       <span class="font-mono truncate">{{ memoryStore.errorMessage }}</span>
@@ -75,8 +79,8 @@
             class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
             :class="curatorStatus.is_healthy ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/60' : 'bg-amber-950/60 text-amber-400 border border-amber-800/60'"
           >
-            <ShieldCheckIcon v-if="curatorStatus.is_healthy" class="w-4 h-4" />
-            <SparklesIcon v-else class="w-4 h-4" />
+            <ShieldCheckIcon v-if="curatorStatus.is_healthy" class="w-4 h-4" aria-hidden="true" />
+            <SparklesIcon v-else class="w-4 h-4" aria-hidden="true" />
           </div>
           <div>
             <div class="flex items-center space-x-2">
@@ -106,7 +110,7 @@
             class="min-h-[44px] lg:min-h-[32px] px-3 py-1 rounded-lg bg-botex-800 hover:bg-botex-700 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5 disabled:opacity-50"
             @click="handleRunCurator"
           >
-            <RefreshCwIcon class="w-3.5 h-3.5 text-cyan-400" :class="{ 'animate-spin': isCuratorRunning }" />
+            <RefreshCwIcon class="w-3.5 h-3.5 text-cyan-400" :class="{ 'animate-spin': isCuratorRunning }" aria-hidden="true" />
             <span>{{ isCuratorRunning ? (locale === 'pl' ? 'Analiza w toku...' : 'Curating...') : (locale === 'pl' ? 'Uruchom Kuratora' : 'Run Curator') }}</span>
           </button>
         </div>
@@ -156,9 +160,9 @@
 
     <!-- GRAPH VIEW MODE -->
     <div v-if="viewMode === 'graph'" class="space-y-4">
-      <div v-if="memoryStore.isGraphLoading" class="w-full h-[clamp(320px,65dvh,600px)] flex items-center justify-center rounded-xl border border-botex-800 bg-botex-900/40">
+      <div v-if="memoryStore.isGraphLoading" role="status" class="w-full h-[clamp(320px,65dvh,600px)] flex items-center justify-center rounded-xl border border-botex-800 bg-botex-900/40">
         <div class="flex flex-col items-center space-y-3 text-slate-400 text-xs">
-          <RefreshCwIcon class="w-6 h-6 animate-spin text-cyan-400" />
+          <RefreshCwIcon class="w-6 h-6 animate-spin text-cyan-400" aria-hidden="true" />
           <span>{{ locale === 'pl' ? 'Ładowanie topologii grafu...' : 'Loading knowledge graph topology...' }}</span>
         </div>
       </div>
@@ -178,7 +182,7 @@
       </div>
 
       <!-- Skeleton Loader -->
-      <div v-if="memoryStore.isLoading && entries.length === 0" class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div v-if="memoryStore.isLoading && entries.length === 0" class="grid grid-cols-1 lg:grid-cols-2 gap-4" aria-hidden="true">
         <div
           v-for="idx in 4"
           :key="idx"
@@ -203,7 +207,7 @@
           class="inline-flex items-center space-x-1.5 min-h-[44px] px-3.5 py-2 rounded-lg bg-botex-800 hover:bg-botex-700 border border-botex-700 text-xs font-medium text-slate-100 transition"
           @click="openCreateModal"
         >
-          <PlusIcon class="w-3.5 h-3.5 text-cyan-400" />
+          <PlusIcon class="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
           <span>{{ t('addMemory') }}</span>
         </button>
       </div>
@@ -236,7 +240,7 @@
             {{ selectedNode.kind }}
           </span>
           <span v-if="selectedNode.compiled_truth" class="px-2 py-0.5 rounded text-xs font-bold bg-cyan-950 text-cyan-400 border border-cyan-800 flex items-center space-x-1">
-            <span>⭐ Compiled Truth</span>
+            <span><span aria-hidden="true">⭐ </span>Compiled Truth</span>
           </span>
           <span v-for="tag in selectedNode.tags" :key="tag" class="px-2 py-0.5 rounded text-xs bg-botex-900 text-slate-300 border border-botex-800 font-mono">
             #{{ tag }}
@@ -246,7 +250,7 @@
         <!-- Backlinks section -->
         <div class="rounded-lg bg-botex-900 border border-botex-800 p-3 space-y-2">
           <h4 class="font-semibold text-slate-200 text-xs flex items-center space-x-1.5">
-            <Link2Icon class="w-3.5 h-3.5 text-cyan-400" />
+            <Link2Icon class="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
             <span>{{ locale === 'pl' ? 'Przychodzące odnośniki (Backlinks)' : 'Incoming Backlinks' }} ({{ nodeBacklinks.length }})</span>
           </h4>
           <div v-if="nodeBacklinks.length === 0" class="text-slate-400 italic text-xs">
@@ -339,10 +343,11 @@
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block font-medium text-slate-200 mb-1">
+            <label for="mem-entry-kind" class="block font-medium text-slate-200 mb-1">
               {{ locale === 'pl' ? 'Kategoria' : 'Entry Kind' }}
             </label>
             <select
+              id="mem-entry-kind"
               v-model="newEntry.kind"
               class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
             >
@@ -354,10 +359,11 @@
           </div>
 
           <div>
-            <label class="block font-medium text-slate-200 mb-1">
+            <label for="mem-entry-scope" class="block font-medium text-slate-200 mb-1">
               {{ locale === 'pl' ? 'Lokalizacja zapisu' : 'Storage Scope' }}
             </label>
             <select
+              id="mem-entry-scope"
               v-model="newEntry.scope"
               class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100 font-mono"
             >
@@ -369,10 +375,11 @@
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block font-medium text-slate-200 mb-1">
+            <label for="mem-entry-project" class="block font-medium text-slate-200 mb-1">
               {{ locale === 'pl' ? 'Projekt (slug)' : 'Project (slug)' }}
             </label>
             <input
+              id="mem-entry-project"
               v-model="newEntry.project"
               type="text"
               list="botex-project-suggestions"
@@ -385,10 +392,11 @@
           </div>
 
           <div>
-            <label class="block font-medium text-slate-200 mb-1">
+            <label for="mem-entry-tags" class="block font-medium text-slate-200 mb-1">
               {{ locale === 'pl' ? 'Tagi (oddzielone przecinkiem)' : 'Tags (comma separated)' }}
             </label>
             <input
+              id="mem-entry-tags"
               v-model="rawTags"
               type="text"
               placeholder="api, architecture, security"
@@ -398,10 +406,11 @@
         </div>
 
         <div>
-          <label class="block font-medium text-slate-200 mb-1">
+          <label for="mem-entry-content" class="block font-medium text-slate-200 mb-1">
             {{ locale === 'pl' ? 'Treść (Markdown z [[wikilinkami]]) *' : 'Markdown Content (with [[wikilinks]]) *' }}
           </label>
           <textarea
+            id="mem-entry-content"
             v-model="newEntry.content"
             rows="5"
             required

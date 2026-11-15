@@ -18,14 +18,14 @@
     <!-- Primary Metrics Display (Type, not tiles) -->
     <div class="space-y-1">
       <div class="flex items-baseline justify-between">
-        <span class="text-2xl font-bold text-slate-100 font-mono">
+        <span class="text-2xl font-bold text-slate-100 font-mono tabular-nums">
           {{ pct.toFixed(1) }}%
         </span>
-        <span class="text-xs font-mono text-slate-300">
+        <span class="text-xs font-mono text-slate-300 tabular-nums">
           {{ formatNumber(window.current_usage) }} / {{ formatNumber(window.limit) }}
         </span>
       </div>
-      <div class="text-xs font-mono text-slate-400">
+      <div class="text-xs font-mono text-slate-400 tabular-nums">
         {{ formatNumber(remaining) }} {{ t('wallet.quota.remaining') }}
       </div>
     </div>
@@ -52,7 +52,7 @@
       class="flex items-center justify-between text-xs font-mono text-slate-400 pt-1 border-t border-botex-800/60"
     >
       <span class="flex items-center space-x-1">
-        <ClockIcon class="w-3.5 h-3.5 text-cyan-400" />
+        <ClockIcon class="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
         <span>{{ t('wallet.quota.resets_in') }}:</span>
       </span>
       <span class="text-slate-200 font-semibold">{{ countdownDisplay }}</span>

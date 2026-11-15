@@ -4,7 +4,7 @@
     <div class="flex flex-wrap items-center justify-between gap-4 border-b border-botex-800 pb-4">
       <div>
         <h2 class="text-xl font-bold text-slate-100 flex items-center space-x-2">
-          <CpuIcon class="w-5 h-5 text-cyan-400" />
+          <CpuIcon class="w-5 h-5 text-cyan-400" aria-hidden="true" />
           <span>{{ t('tasksTitle') }}</span>
         </h2>
         <p class="text-xs text-slate-300 mt-1">
@@ -18,7 +18,7 @@
           class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
           @click="tasksStore.fetchTasks"
         >
-          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': tasksStore.isLoading }" />
+          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': tasksStore.isLoading }" aria-hidden="true" />
           <span>{{ t('refresh') }}</span>
         </button>
         <button
@@ -26,7 +26,7 @@
           class="min-h-[44px] lg:min-h-[36px] px-4 py-1.5 rounded-lg bg-brand-blue hover:bg-blue-600 text-xs font-semibold text-white transition flex items-center space-x-1.5"
           @click="showCreateModal = true"
         >
-          <PlusIcon class="w-4 h-4" />
+          <PlusIcon class="w-4 h-4" aria-hidden="true" />
           <span>{{ t('newTask') }}</span>
         </button>
       </div>
@@ -35,6 +35,7 @@
     <!-- Error notice -->
     <div
       v-if="tasksStore.errorMessage"
+      role="alert"
       class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
     >
       <span class="font-mono truncate">{{ tasksStore.errorMessage }}</span>
@@ -63,7 +64,7 @@
         >
           <div class="min-w-0">
             <div class="flex items-center space-x-1.5">
-              <span :class="['w-2 h-2 rounded-full shrink-0', dev.healthy ? 'bg-emerald-400' : 'bg-amber-400']"></span>
+              <span :class="['w-2 h-2 rounded-full shrink-0', dev.healthy ? 'bg-emerald-400' : 'bg-amber-400']" aria-hidden="true"></span>
               <span class="font-mono font-semibold text-slate-100 truncate">{{ dev.device_id }}</span>
               <Badge :variant="dev.healthy ? 'success' : 'warning'">
                 {{ dev.healthy ? t('deviceOnline') : t('deviceStale') }}
@@ -74,7 +75,7 @@
           <button
             v-if="dev.can_delegate"
             type="button"
-            class="shrink-0 min-h-[36px] px-2.5 py-1 rounded bg-botex-800 hover:bg-botex-700 border border-cyan-500/40 text-cyan-300 font-medium transition"
+            class="shrink-0 min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-botex-800 hover:bg-botex-700 border border-cyan-500/40 text-cyan-300 font-medium transition"
             @click="openDeviceDelegateModal(dev)"
           >
             {{ t('delegateDeviceTitle') }}
@@ -88,7 +89,7 @@
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center space-x-3">
           <div class="p-2 rounded-lg bg-cyan-500/20 text-cyan-300">
-            <Loader2Icon class="w-5 h-5 animate-spin" />
+            <Loader2Icon class="w-5 h-5 animate-spin" aria-hidden="true" />
           </div>
           <div>
             <div class="flex items-center space-x-2">
@@ -128,7 +129,7 @@
         </div>
 
         <!-- Skeleton Loader -->
-        <div v-if="tasksStore.isLoading && tasks.length === 0" class="space-y-3">
+        <div v-if="tasksStore.isLoading && tasks.length === 0" class="space-y-3" aria-hidden="true">
           <div
             v-for="idx in 3"
             :key="idx"
@@ -152,7 +153,7 @@
             class="inline-flex items-center space-x-1.5 min-h-[44px] px-3.5 py-2 rounded-lg bg-botex-800 hover:bg-botex-700 border border-botex-700 text-xs font-medium text-slate-100 transition"
             @click="showCreateModal = true"
           >
-            <PlusIcon class="w-3.5 h-3.5 text-cyan-400" />
+            <PlusIcon class="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
             <span>{{ t('newTask') }}</span>
           </button>
         </div>
@@ -161,26 +162,29 @@
           v-for="taskItem in tasks"
           :key="taskItem.task_id"
           :class="[
-            'p-4 rounded-xl border transition-all cursor-pointer bg-botex-900 hover:border-slate-600 flex flex-wrap items-center justify-between gap-3',
+            'p-4 rounded-xl border transition-all bg-botex-900 hover:border-slate-600 flex flex-wrap items-center justify-between gap-3',
             selectedTaskId === taskItem.task_id ? 'border-cyan-500 ring-1 ring-cyan-500/20' : 'border-botex-800'
           ]"
-          @click="inspectTask(taskItem.task_id)"
         >
-          <div class="flex items-center space-x-3">
-            <div :class="['w-2.5 h-2.5 rounded-full', statusDotColor(taskItem.status)]"></div>
-            <div>
-              <div class="flex items-center space-x-2">
+          <button
+            type="button"
+            class="flex-1 min-w-0 flex items-center space-x-3 text-left rounded-lg"
+            @click="inspectTask(taskItem.task_id)"
+          >
+            <span :class="['w-2.5 h-2.5 rounded-full shrink-0', statusDotColor(taskItem.status)]" aria-hidden="true"></span>
+            <span class="min-w-0">
+              <span class="flex items-center space-x-2">
                 <span class="text-sm font-semibold text-slate-100 font-mono">{{ taskItem.task_id }}</span>
                 <Badge :variant="statusBadgeVariant(taskItem.status)">{{ taskItem.status }}</Badge>
-              </div>
-              <p class="text-xs text-slate-300 mt-0.5 font-mono">
+              </span>
+              <span class="block text-xs text-slate-300 mt-0.5 font-mono">
                 {{ formatDate(taskItem.created_at) }}
                 <span v-if="taskItem.finished_at" class="ml-2 text-slate-400">
                   ({{ formatDuration(taskItem.created_at, taskItem.finished_at) }})
                 </span>
-              </p>
-            </div>
-          </div>
+              </span>
+            </span>
+          </button>
 
           <div class="flex items-center space-x-2">
             <button
@@ -191,7 +195,7 @@
             >
               {{ t('cancel') }}
             </button>
-            <ChevronRightIcon class="w-4 h-4 text-slate-400" />
+            <ChevronRightIcon class="w-4 h-4 text-slate-400" aria-hidden="true" />
           </div>
         </div>
       </div>
@@ -251,8 +255,9 @@
       <form @submit.prevent="handleCreateTask" class="space-y-4 text-xs">
         <!-- Task Prompt -->
         <div>
-          <label class="block font-medium text-slate-200 mb-1">{{ t('taskSpecLabel') }}</label>
+          <label for="task-spec" class="block font-medium text-slate-200 mb-1">{{ t('taskSpecLabel') }}</label>
           <textarea
+            id="task-spec"
             v-model="newTask.task"
             rows="4"
             :required="selectedExecutorMode !== 'device'"
@@ -264,8 +269,9 @@
         <!-- Executor & Model/Agent -->
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block font-medium text-slate-200 mb-1">{{ t('executorLabel') }}</label>
+            <label for="task-executor" class="block font-medium text-slate-200 mb-1">{{ t('executorLabel') }}</label>
             <select
+              id="task-executor"
               v-model="selectedExecutorMode"
               class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
             >
@@ -277,8 +283,9 @@
           </div>
 
           <div v-if="selectedExecutorMode === 'device'">
-            <label class="block font-medium text-slate-200 mb-1">{{ t('targetDeviceLabel') }}</label>
+            <label for="task-device" class="block font-medium text-slate-200 mb-1">{{ t('targetDeviceLabel') }}</label>
             <select
+              id="task-device"
               v-model="selectedDeviceKey"
               class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
             >
@@ -294,10 +301,11 @@
           </div>
 
           <div v-else>
-            <label class="block font-medium text-slate-200 mb-1">{{ t('execModelLabel') }}</label>
+            <span class="block font-medium text-slate-200 mb-1">{{ t('execModelLabel') }}</span>
             <button
               type="button"
               class="w-full min-h-[44px] lg:min-h-[36px] flex items-center justify-between px-3 py-2 rounded-lg bg-botex-950 hover:bg-botex-900 border border-botex-700 text-left transition"
+              :aria-label="`${t('execModelLabel')}: ${newTask.model} (${newTask.provider || 'openrouter'})`"
               @click="showModelSelector = true"
             >
               <div class="min-w-0 pr-2">
@@ -319,12 +327,13 @@
           <template v-else>
             <div>
               <div class="flex items-center justify-between mb-1">
-                <label class="font-medium text-slate-200">{{ t('deviceSkillLabel') }}</label>
+                <label for="task-device-skill" class="font-medium text-slate-200">{{ t('deviceSkillLabel') }}</label>
                 <Badge v-if="selectedDeviceSkill" :variant="selectedDeviceSkill.read_only ? 'success' : 'warning'">
                   {{ selectedDeviceSkill.read_only ? t('deviceReadOnlyBadge') : t('deviceMutationBadge') }}
                 </Badge>
               </div>
               <select
+                id="task-device-skill"
                 v-model="deviceDelegateForm.skill"
                 class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-900 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
               >
@@ -339,33 +348,35 @@
             </div>
 
             <div>
-              <label class="block font-medium text-slate-200 mb-1">{{ t('deviceParamsLabel') }}</label>
+              <label for="task-device-params" class="block font-medium text-slate-200 mb-1">{{ t('deviceParamsLabel') }}</label>
               <textarea
+                id="task-device-params"
                 v-model="deviceDelegateForm.paramsJson"
                 rows="3"
                 placeholder="{}"
-                class="w-full rounded-lg bg-botex-900 border border-botex-700 text-slate-100 placeholder-slate-500 p-2 text-xs font-mono focus:outline-none focus:border-cyan-500"
+                class="w-full rounded-lg bg-botex-900 border border-botex-700 text-slate-100 placeholder-slate-500 p-2 text-base sm:text-xs font-mono focus:outline-none focus:border-cyan-500"
               ></textarea>
             </div>
 
-            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[36px]">
+            <label class="inline-flex items-center space-x-2 text-slate-200 cursor-pointer min-h-[44px] lg:min-h-[36px]">
               <input
                 v-model="deviceDelegateForm.requireApproval"
                 :disabled="selectedDeviceSkill ? !selectedDeviceSkill.read_only : false"
                 type="checkbox"
-                class="w-4 h-4 rounded bg-botex-900 border-botex-700 text-cyan-500"
+                class="w-5 h-5 rounded bg-botex-900 border-botex-700 text-cyan-500"
               />
               <span>{{ t('deviceRequireApproval') }}</span>
             </label>
           </template>
-          <p v-if="deviceDelegateError" class="text-xs font-mono text-rose-400">{{ deviceDelegateError }}</p>
+          <p v-if="deviceDelegateError" role="alert" class="text-xs font-mono text-rose-400">{{ deviceDelegateError }}</p>
         </div>
 
         <!-- Mode (botex executor only) -->
         <div v-if="selectedExecutorMode === 'botex'" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block font-medium text-slate-200 mb-1">{{ t('permModeLabel') }}</label>
+            <label for="task-perm-mode" class="block font-medium text-slate-200 mb-1">{{ t('permModeLabel') }}</label>
             <select
+              id="task-perm-mode"
               v-model="newTask.mode"
               class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg p-2 text-base sm:text-xs text-slate-100"
             >

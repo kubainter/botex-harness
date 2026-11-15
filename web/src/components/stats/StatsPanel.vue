@@ -24,7 +24,7 @@
         class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
         @click="analytics.fetchStats(undefined, true)"
       >
-        <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': analytics.isLoading }" />
+        <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': analytics.isLoading }" aria-hidden="true" />
         <span>{{ t('forceRefresh') }}</span>
       </button>
     </div>
@@ -34,6 +34,7 @@
     <!-- Error -->
     <div
       v-if="analytics.errorMessage"
+      role="alert"
       class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
     >
       <span class="font-mono truncate">{{ analytics.errorMessage }}</span>
@@ -56,7 +57,7 @@
         <div v-for="kpi in kpis" :key="kpi.label" class="rounded-xl border border-botex-800 bg-botex-900 p-3 min-w-0">
           <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
             <span class="truncate">{{ kpi.label }}</span>
-            <component :is="kpi.icon" class="w-4 h-4 shrink-0" :class="kpi.color" />
+            <component :is="kpi.icon" class="w-4 h-4 shrink-0" :class="kpi.color" aria-hidden="true" />
           </div>
           <div class="text-lg font-bold text-slate-100 font-mono tabular-nums truncate">{{ kpi.value }}</div>
           <div
@@ -384,7 +385,7 @@
     <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 space-y-3">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="text-xs text-slate-300 font-semibold uppercase tracking-wider font-mono flex items-center space-x-2">
-          <SparklesIcon class="w-4 h-4 text-amber-300" />
+          <SparklesIcon class="w-4 h-4 text-amber-300" aria-hidden="true" />
           <span>{{ t('digestTitle') }}</span>
         </div>
         <button
@@ -396,7 +397,7 @@
           {{ analytics.isDigestRunning ? '…' : t('runDigest') }}
         </button>
       </div>
-      <p v-if="analytics.digestMessage" class="text-xs text-amber-300">{{ analytics.digestMessage }}</p>
+      <p v-if="analytics.digestMessage" role="status" class="text-xs text-amber-300">{{ analytics.digestMessage }}</p>
       <div v-if="stats?.latest_digest" class="space-y-1">
         <div class="text-xs text-slate-400 font-mono">{{ stats.latest_digest.title }}</div>
         <p class="text-xs text-slate-200 whitespace-pre-wrap leading-relaxed">{{ stats.latest_digest.content }}</p>

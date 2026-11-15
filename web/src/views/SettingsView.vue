@@ -3,7 +3,7 @@
     <!-- View Header -->
     <div class="border-b border-botex-800 pb-4">
       <h2 class="text-xl font-bold text-slate-100 flex items-center space-x-2">
-        <SettingsIcon class="w-5 h-5 text-cyan-400" />
+        <SettingsIcon class="w-5 h-5 text-cyan-400" aria-hidden="true" />
         <span>{{ t('settingsTitle') }}</span>
       </h2>
       <p class="text-xs text-slate-300 mt-1">
@@ -15,7 +15,7 @@
     <div class="rounded-xl border border-botex-800 bg-botex-900 p-5 space-y-5 shadow-sm">
       <div class="flex flex-wrap items-center justify-between gap-2 border-b border-botex-800 pb-3">
         <div class="flex items-center space-x-2">
-          <ServerIcon class="w-4 h-4 text-cyan-400" />
+          <ServerIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
           <h3 class="text-sm font-semibold text-slate-100">{{ t('backendConnection') }}</h3>
         </div>
         <Badge :variant="authStore.isServerHealthy ? 'success' : 'danger'">
@@ -25,8 +25,8 @@
 
       <!-- Backend URL Input -->
       <div>
-        <label class="block text-xs font-medium text-slate-200 mb-1 flex items-center justify-between">
-          <span>Backend URL</span>
+        <div class="mb-1 flex items-center justify-between">
+          <label for="settings-backend-url" class="text-xs font-medium text-slate-200">Backend URL</label>
           <button
             type="button"
             class="min-h-[44px] lg:min-h-[36px] inline-flex items-center text-xs text-cyan-300 hover:text-cyan-200"
@@ -34,8 +34,9 @@
           >
             {{ locale === 'pl' ? 'Przywróć lokalny adres' : 'Reset to Local Default' }}
           </button>
-        </label>
+        </div>
         <input
+          id="settings-backend-url"
           v-model="urlInput"
           type="text"
           placeholder="http://127.0.0.1:8000"
@@ -48,7 +49,7 @@
 
       <!-- Master Bearer Token Input -->
       <div>
-        <label class="block text-xs font-medium text-slate-200 mb-1 flex items-center justify-between">
+        <label for="settings-token" class="block text-xs font-medium text-slate-200 mb-1 flex items-center justify-between">
           <span>Bearer Access Token</span>
           <span class="text-slate-300 font-normal">
             {{ locale === 'pl' ? 'Opcjonalny w trybie lokalnym' : 'Optional on localhost' }}
@@ -56,6 +57,7 @@
         </label>
         <div class="relative">
           <input
+            id="settings-token"
             v-model="tokenInput"
             :type="showToken ? 'text' : 'password'"
             :placeholder="locale === 'pl' ? 'Zostaw puste lokalnie lub wpisz token dostępowy' : 'Leave blank on localhost or enter bearer token'"
@@ -64,10 +66,12 @@
           <button
             type="button"
             class="absolute inset-y-0 right-0 w-11 flex items-center justify-center text-slate-300 hover:text-white"
+            :aria-label="showToken ? (locale === 'pl' ? 'Ukryj token' : 'Hide token') : (locale === 'pl' ? 'Pokaż token' : 'Show token')"
+            :aria-pressed="showToken"
             @click="showToken = !showToken"
           >
-            <EyeOffIcon v-if="showToken" class="w-4 h-4" />
-            <EyeIcon v-else class="w-4 h-4" />
+            <EyeOffIcon v-if="showToken" class="w-4 h-4" aria-hidden="true" />
+            <EyeIcon v-else class="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
         <p class="text-xs text-slate-300 mt-1">
@@ -99,18 +103,18 @@
             rel="noopener noreferrer"
             class="min-h-[44px] lg:min-h-[36px] inline-flex items-center px-3 rounded-lg text-xs font-medium text-cyan-300 hover:text-cyan-200 bg-botex-950 hover:bg-botex-800 border border-botex-700 transition"
           >
-            <ExternalLinkIcon class="w-3.5 h-3.5 mr-1.5" />
+            <ExternalLinkIcon class="w-3.5 h-3.5 mr-1.5" aria-hidden="true" />
             {{ locale === 'pl' ? 'Dokumentacja API' : 'API Docs' }}
           </a>
         </div>
 
-        <span v-if="saveMessage" class="text-xs text-emerald-300 animate-fadeIn">
+        <span v-if="saveMessage" role="status" class="text-xs text-emerald-300 animate-fadeIn">
           {{ saveMessage }}
         </span>
       </div>
 
       <!-- Probe Result Banner -->
-      <div v-if="testResult" :class="['p-3 rounded-lg border text-xs', testResult.ok ? 'bg-emerald-950/40 border-emerald-700 text-emerald-200' : 'bg-rose-950/40 border-rose-700 text-rose-200']">
+      <div v-if="testResult" :role="testResult.ok ? 'status' : 'alert'" :class="['p-3 rounded-lg border text-xs', testResult.ok ? 'bg-emerald-950/40 border-emerald-700 text-emerald-200' : 'bg-rose-950/40 border-rose-700 text-rose-200']">
         <div class="font-semibold">{{ testResult.title }}</div>
         <p class="mt-0.5 font-mono text-xs">{{ testResult.detail }}</p>
       </div>
@@ -119,7 +123,7 @@
     <!-- Interface & Language -->
     <div class="rounded-xl border border-botex-800 bg-botex-900 p-5 space-y-4 shadow-sm">
       <div class="flex items-center space-x-2 border-b border-botex-800 pb-3">
-        <PaletteIcon class="w-4 h-4 text-cyan-400" />
+        <PaletteIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
         <h3 class="text-sm font-semibold text-slate-100">{{ t('interfaceLanguage') }}</h3>
       </div>
 
@@ -133,6 +137,7 @@
         <div class="flex items-center bg-botex-950 p-1 rounded-lg border border-botex-800 space-x-1">
           <button
             type="button"
+            :aria-pressed="locale === 'en'"
             :class="[
               'min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded text-xs font-mono font-semibold transition',
               locale === 'en' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
@@ -143,6 +148,7 @@
           </button>
           <button
             type="button"
+            :aria-pressed="locale === 'pl'"
             :class="[
               'min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded text-xs font-mono font-semibold transition',
               locale === 'pl' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
@@ -168,6 +174,7 @@
             v-for="s in themeStore.skins"
             :key="s.id"
             type="button"
+            :aria-pressed="themeStore.currentSkinId === s.id"
             :class="[
               'p-3 rounded-lg border text-left transition relative flex flex-col justify-between space-y-2',
               themeStore.currentSkinId === s.id
@@ -181,6 +188,7 @@
                 <span
                   class="w-3.5 h-3.5 rounded-full border border-white/20 shrink-0"
                   :style="{ backgroundColor: s.accentColor }"
+                  aria-hidden="true"
                 ></span>
                 <span class="text-xs font-semibold text-slate-100">
                   {{ locale === 'pl' ? s.namePl : s.name }}
@@ -205,13 +213,13 @@
     <div class="rounded-xl border border-botex-800 bg-botex-900 p-5 space-y-4 shadow-sm">
       <div class="flex items-center justify-between border-b border-botex-800 pb-3">
         <div class="flex items-center space-x-2">
-          <SmartphoneIcon class="w-4 h-4 text-cyan-400" />
+          <SmartphoneIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
           <h3 class="text-sm font-semibold text-slate-100">PWA Runtime</h3>
         </div>
         <div class="flex items-center space-x-2">
-          <span v-if="pwaUpdateMsg" class="text-xs text-amber-300 font-mono">{{ pwaUpdateMsg }}</span>
+          <span v-if="pwaUpdateMsg" role="status" class="text-xs text-amber-300 font-mono">{{ pwaUpdateMsg }}</span>
           <Button variant="secondary" size="sm" :loading="checkingPwa" @click="checkPwaUpdate">
-            <RefreshCwIcon class="w-3.5 h-3.5 mr-1" />
+            <RefreshCwIcon class="w-3.5 h-3.5 mr-1" aria-hidden="true" />
             <span>{{ locale === 'pl' ? 'Sprawdź aktualizacje PWA' : 'Check PWA Update' }}</span>
           </Button>
         </div>
@@ -244,7 +252,7 @@
       <div class="flex flex-wrap items-center justify-between gap-2 border-b border-botex-800 pb-3">
         <div>
           <div class="flex items-center space-x-2">
-            <BookOpenIcon class="w-4 h-4 text-cyan-400" />
+            <BookOpenIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
             <h3 class="text-sm font-semibold text-slate-100">
               {{ locale === 'pl' ? 'Katalog Skilli BoteX (Skill Vault & L0 Triage)' : 'Server-Side Skills Catalog (Skill Vault)' }}
             </h3>
@@ -259,17 +267,17 @@
 
         <div class="flex items-center space-x-2">
           <Button variant="secondary" size="sm" :loading="skillsLoading" @click="fetchSkills">
-            <RefreshCwIcon class="w-3.5 h-3.5 mr-1" />
+            <RefreshCwIcon class="w-3.5 h-3.5 mr-1" aria-hidden="true" />
             <span>{{ locale === 'pl' ? 'Odśwież' : 'Refresh' }}</span>
           </Button>
           <Button variant="primary" size="sm" @click="showInstallSkillModal = true">
-            <PlusIcon class="w-3.5 h-3.5 mr-1" />
+            <PlusIcon class="w-3.5 h-3.5 mr-1" aria-hidden="true" />
             <span>{{ locale === 'pl' ? 'Zainstaluj Skill' : 'Install Skill' }}</span>
           </Button>
         </div>
       </div>
 
-      <div v-if="skillStatusBanner" :class="[
+      <div v-if="skillStatusBanner" :role="skillStatusBanner.ok ? 'status' : 'alert'" :class="[
         'p-3 rounded-lg border text-xs',
         skillStatusBanner.ok
           ? 'bg-emerald-950/40 border-emerald-700 text-emerald-200'
@@ -344,8 +352,9 @@
                 class="min-h-[44px] lg:min-h-[36px] min-w-[44px] lg:min-w-[36px] px-2 py-1 rounded text-xs font-medium text-rose-400 hover:text-rose-300 bg-botex-900 hover:bg-rose-950/50 border border-rose-900/50 transition flex items-center justify-center"
                 @click="confirmDeleteSkill = sk.name"
                 :title="locale === 'pl' ? 'Usuń skill' : 'Delete skill'"
+                :aria-label="`${locale === 'pl' ? 'Usuń skill' : 'Delete skill'}: ${sk.name}`"
               >
-                <Trash2Icon class="w-3.5 h-3.5" />
+                <Trash2Icon class="w-3.5 h-3.5" aria-hidden="true" />
               </button>
               <template v-else>
                 <button
@@ -394,7 +403,7 @@
       <div class="flex flex-wrap items-center justify-between gap-2 border-b border-botex-800 pb-3">
         <div>
           <div class="flex flex-wrap items-center gap-2">
-            <BlocksIcon class="w-4 h-4 text-cyan-400" />
+            <BlocksIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
             <h3 class="text-sm font-semibold text-slate-100">
               {{ locale === 'pl' ? 'Wtyczki i poczekalnia (Creator Mode)' : 'Plugins and staging vault (Creator Mode)' }}
             </h3>
@@ -411,12 +420,12 @@
         </div>
 
         <Button variant="secondary" size="sm" :loading="pluginsStore.isLoading" @click="pluginsStore.fetchPlugins()">
-          <RefreshCwIcon class="w-3.5 h-3.5 mr-1" />
+          <RefreshCwIcon class="w-3.5 h-3.5 mr-1" aria-hidden="true" />
           <span>{{ locale === 'pl' ? 'Odśwież' : 'Refresh' }}</span>
         </Button>
       </div>
 
-      <div v-if="pluginsStore.errorMessage" class="p-3 rounded-lg border text-xs bg-rose-950/40 border-rose-700 text-rose-200">
+      <div v-if="pluginsStore.errorMessage" role="alert" class="p-3 rounded-lg border text-xs bg-rose-950/40 border-rose-700 text-rose-200">
         {{ pluginsStore.errorMessage }}
       </div>
 
@@ -467,6 +476,7 @@
       <div class="flex items-center bg-botex-950 p-1 rounded-lg border border-botex-800 space-x-1 w-fit">
         <button
           type="button"
+          :aria-pressed="activePluginTab === 'local'"
           :class="[
             'min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded text-xs font-medium transition-colors',
             activePluginTab === 'local' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
@@ -477,6 +487,7 @@
         </button>
         <button
           type="button"
+          :aria-pressed="activePluginTab === 'global'"
           :class="[
             'min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded text-xs font-medium transition-colors',
             activePluginTab === 'global' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
@@ -487,6 +498,7 @@
         </button>
         <button
           type="button"
+          :aria-pressed="activePluginTab === 'index'"
           :class="[
             'min-h-[44px] lg:min-h-[36px] px-3 py-1 rounded text-xs font-medium transition-colors',
             activePluginTab === 'index' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
@@ -615,75 +627,81 @@
       <form @submit.prevent="handleInstallSkill" class="space-y-3.5 text-xs">
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block text-slate-200 font-medium mb-1 font-mono uppercase">
+            <label for="skill-install-name" class="block text-slate-200 font-medium mb-1 font-mono uppercase">
               {{ locale === 'pl' ? 'Nazwa skilla (opcjonalnie z URL)' : 'Skill Name' }}
             </label>
             <input
+              id="skill-install-name"
               v-model="installForm.name"
               type="text"
               placeholder="e.g. release-readiness"
-              class="w-full min-h-[40px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-100"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs font-mono text-slate-100"
             />
           </div>
           <div>
-            <label class="block text-slate-200 font-medium mb-1 font-mono uppercase">
+            <label for="skill-install-version" class="block text-slate-200 font-medium mb-1 font-mono uppercase">
               {{ locale === 'pl' ? 'Wersja' : 'Version' }}
             </label>
             <input
+              id="skill-install-version"
               v-model="installForm.version"
               type="text"
               placeholder="1.0.0"
-              class="w-full min-h-[40px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-100"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs font-mono text-slate-100"
             />
           </div>
         </div>
 
         <div>
-          <label class="block text-slate-200 font-medium mb-1 font-mono uppercase">
+          <label for="skill-install-url" class="block text-slate-200 font-medium mb-1 font-mono uppercase">
             {{ locale === 'pl' ? 'Adres URL repozytorium lub pliku SKILL.md' : 'Source Repository or SKILL.md URL' }}
           </label>
           <input
+            id="skill-install-url"
             v-model="installForm.source_url"
             type="text"
             placeholder="https://github.com/owner/repo/blob/main/skills/my-skill/SKILL.md"
-            class="w-full min-h-[40px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-100"
+            class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs font-mono text-slate-100"
           />
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block text-slate-200 font-medium mb-1 font-mono uppercase">
+            <label for="skill-install-origin" class="block text-slate-200 font-medium mb-1 font-mono uppercase">
               {{ locale === 'pl' ? 'Pochodzenie (Origin Repo)' : 'Origin Repo Label/URL' }}
             </label>
             <input
+              id="skill-install-origin"
               v-model="installForm.origin_repo"
               type="text"
               placeholder="https://github.com/owner/repo"
-              class="w-full min-h-[40px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-100"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs font-mono text-slate-100"
             />
           </div>
           <div>
-            <label class="block text-slate-200 font-medium mb-1 font-mono uppercase">
+            <label for="skill-install-taxonomy" class="block text-slate-200 font-medium mb-1 font-mono uppercase">
               {{ locale === 'pl' ? 'Taksonomia L0 (po przecinku)' : 'L0 Taxonomy Tags (comma-separated)' }}
             </label>
             <input
+              id="skill-install-taxonomy"
               v-model="installForm.taxonomyRaw"
               type="text"
               placeholder="analysis, bugfix, test, general"
-              class="w-full min-h-[40px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-100"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs font-mono text-slate-100"
             />
           </div>
         </div>
 
         <div>
-          <label class="block text-slate-200 font-medium mb-1 font-mono uppercase">
+          <label for="skill-install-content" class="block text-slate-200 font-medium mb-1 font-mono uppercase">
             {{ locale === 'pl' ? 'Treść SKILL.md (opcjonalnie, jeśli nie podano URL)' : 'SKILL.md Content (optional if URL provided)' }}
           </label>
           <textarea
+            id="skill-install-content"
             v-model="installForm.content"
             rows="6"
             placeholder="---\nname: my-skill\ndescription: ...\n---\n# Instructions..."
-            class="w-full bg-botex-950 border border-botex-700 rounded-lg p-3 text-xs font-mono text-slate-100"
+            class="w-full bg-botex-950 border border-botex-700 rounded-lg p-3 text-base sm:text-xs font-mono text-slate-100"
           ></textarea>
         </div>
       </form>

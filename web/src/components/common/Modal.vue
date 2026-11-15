@@ -48,7 +48,7 @@
                 class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] rounded-lg p-1.5 text-slate-300 hover:text-white hover:bg-botex-800 transition flex items-center justify-center"
                 @click="$emit('close')"
               >
-                <XIcon class="w-5 h-5" />
+                <XIcon class="w-5 h-5" aria-hidden="true" />
               </button>
             </div>
 

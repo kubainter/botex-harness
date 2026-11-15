@@ -11,6 +11,7 @@
     <!-- Collapsible Right-Hand Inspector (Desktop 1024px+ open by default, toggleable on Tablet) -->
     <aside
       v-if="showInspector"
+      :aria-label="t('chat.inspector.title')"
       class="hidden lg:flex flex-col w-80 xl:w-96 border-l border-botex-800 bg-botex-900/70 shrink-0 h-full overflow-y-auto"
     >
       <!-- Inspector Header with Tabs -->
@@ -18,8 +19,9 @@
         <div class="flex items-center space-x-1">
           <button
             type="button"
+            :aria-pressed="activeTab === 'inspector'"
             :class="[
-              'min-h-[32px] px-2.5 py-1 rounded text-xs font-medium font-mono transition',
+              'min-h-[36px] px-2.5 py-1 rounded text-xs font-medium font-mono transition',
               activeTab === 'inspector'
                 ? 'bg-botex-800 text-sky-300 border border-botex-700'
                 : 'text-slate-400 hover:text-slate-200'
@@ -30,8 +32,9 @@
           </button>
           <button
             type="button"
+            :aria-pressed="activeTab === 'history'"
             :class="[
-              'min-h-[32px] px-2.5 py-1 rounded text-xs font-medium font-mono transition flex items-center space-x-1',
+              'min-h-[36px] px-2.5 py-1 rounded text-xs font-medium font-mono transition flex items-center space-x-1',
               activeTab === 'history'
                 ? 'bg-botex-800 text-sky-300 border border-botex-700'
                 : 'text-slate-400 hover:text-slate-200'
@@ -51,9 +54,10 @@
           type="button"
           class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] p-0 rounded hover:bg-botex-800 text-slate-300 hover:text-white transition flex items-center justify-center"
           title="Collapse inspector"
+          aria-label="Collapse inspector"
           @click="showInspector = false"
         >
-          <XIcon class="w-3.5 h-3.5" />
+          <XIcon class="w-3.5 h-3.5" aria-hidden="true" />
         </button>
       </div>
 
@@ -61,12 +65,13 @@
       <div v-if="activeTab === 'history'" class="p-3 space-y-3 flex-1 overflow-y-auto text-xs">
         <div class="flex items-center justify-between gap-2">
           <div class="relative flex-1">
-            <SearchIcon class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+            <SearchIcon class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
             <input
               v-model="historyFilter"
               type="text"
               :placeholder="t('chat.history.search')"
-              class="w-full min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg pl-8 pr-2.5 py-1.5 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
+              :aria-label="t('chat.history.search')"
+              class="w-full min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg pl-8 pr-2.5 py-1.5 text-base lg:text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 font-sans"
             />
           </div>
           <button
@@ -75,13 +80,13 @@
             title="Start new conversation"
             @click="chatStore.newSession"
           >
-            <PlusIcon class="w-3.5 h-3.5" />
-            <span>Nowy</span>
+            <PlusIcon class="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{{ t('chat.new_session') }}</span>
           </button>
         </div>
 
         <div v-if="filteredSessions.length === 0" class="p-6 text-center text-slate-400 space-y-1">
-          <HistoryIcon class="w-6 h-6 mx-auto text-slate-500 mb-2" />
+          <HistoryIcon class="w-6 h-6 mx-auto text-slate-500 mb-2" aria-hidden="true" />
           <p>{{ t('chat.history.empty') }}</p>
         </div>
 
@@ -89,29 +94,36 @@
           v-for="s in filteredSessions"
           :key="s.session_id"
           :class="[
-            'rounded-lg border p-2.5 cursor-pointer transition space-y-1.5',
+            'rounded-lg border p-2.5 transition space-y-1.5',
             s.session_id === chatStore.sessionId
               ? 'bg-sky-950/30 border-sky-500/50'
               : 'bg-botex-950 border-botex-800 hover:border-botex-700'
           ]"
-          @click="chatStore.switchSession(s.session_id)"
         >
-          <div class="flex items-start justify-between gap-2">
-            <span class="font-medium text-slate-100 line-clamp-1 text-xs">
-              {{ s.title }}
-            </span>
+          <div class="flex items-start gap-2">
             <button
               type="button"
-              class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] p-0 rounded text-slate-400 hover:text-rose-400 transition flex items-center justify-center"
+              class="flex-1 min-w-0 text-left space-y-1.5 rounded"
+              :aria-current="s.session_id === chatStore.sessionId ? 'true' : undefined"
+              @click="chatStore.switchSession(s.session_id)"
+            >
+              <span class="block font-medium text-slate-100 line-clamp-1 text-xs">
+                {{ s.title }}
+              </span>
+              <span class="flex items-center justify-between text-xs font-mono text-slate-400">
+                <span class="truncate">{{ formatModelSlug(s.model) }}</span>
+                <span>{{ s.message_count }} msgs</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] p-0 rounded text-slate-400 hover:text-rose-400 transition flex items-center justify-center shrink-0"
               title="Delete session"
+              :aria-label="`Delete session: ${s.title}`"
               @click.stop="onDeleteSession(s.session_id)"
             >
-              <Trash2Icon class="w-3.5 h-3.5" />
+              <Trash2Icon class="w-3.5 h-3.5" aria-hidden="true" />
             </button>
-          </div>
-          <div class="flex items-center justify-between text-xs font-mono text-slate-400">
-            <span class="truncate">{{ formatModelSlug(s.model) }}</span>
-            <span>{{ s.message_count }} msgs</span>
           </div>
         </div>
       </div>
@@ -211,10 +223,11 @@
           >
             No background tasks queued in this session.
           </div>
-          <div
+          <button
             v-for="task in tasksStore.tasks.slice(0, 3)"
             :key="task.task_id"
-            class="rounded-lg border border-botex-800 bg-botex-950 p-2.5 flex items-center justify-between cursor-pointer hover:border-botex-700 transition"
+            type="button"
+            class="w-full text-left rounded-lg border border-botex-800 bg-botex-950 p-2.5 flex items-center justify-between hover:border-botex-700 transition"
             @click="emit('navigate', 'tasks')"
           >
             <span class="font-mono text-slate-200">{{ task.task_id }}</span>
@@ -230,7 +243,7 @@
             >
               {{ task.status }}
             </span>
-          </div>
+          </button>
         </div>
 
         <!-- Memory Vault Quick Notes -->
@@ -254,20 +267,21 @@
           >
             No saved memory notes loaded yet.
           </div>
-          <div
+          <button
             v-for="note in memoryStore.entries.slice(0, 3)"
             :key="note.memory_id"
-            class="rounded-lg border border-botex-800 bg-botex-950 p-2.5 space-y-1 cursor-pointer hover:border-botex-700 transition"
+            type="button"
+            class="w-full text-left rounded-lg border border-botex-800 bg-botex-950 p-2.5 space-y-1 hover:border-botex-700 transition"
             @click="emit('navigate', 'memory')"
           >
-            <div class="flex items-center justify-between gap-2">
+            <span class="flex items-center justify-between gap-2">
               <span class="font-medium text-slate-100 truncate">{{ note.title }}</span>
               <span class="text-xs font-mono text-sky-300 uppercase shrink-0">{{ note.kind }}</span>
-            </div>
-            <p class="text-xs text-slate-300 line-clamp-2 font-mono">
+            </span>
+            <span class="block text-xs text-slate-300 line-clamp-2 font-mono">
               {{ note.content }}
-            </p>
-          </div>
+            </span>
+          </button>
         </div>
       </div>
     </aside>
@@ -277,10 +291,12 @@
       v-else
       type="button"
       title="Expand Workspace Inspector"
+      aria-label="Expand Workspace Inspector"
+      aria-expanded="false"
       class="hidden lg:flex items-center justify-center w-8 border-l border-botex-800 bg-botex-900 hover:bg-botex-800 text-slate-300 hover:text-white transition"
       @click="showInspector = true"
     >
-      <PanelRightIcon class="w-4 h-4" />
+      <PanelRightIcon class="w-4 h-4" aria-hidden="true" />
     </button>
   </div>
 </template>
