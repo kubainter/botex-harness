@@ -1593,6 +1593,18 @@ async def _run_botex_task_once(*args, task_id: Optional[str] = None, **kwargs):
     return result
 
 
+def _executor_workspace_key(executor: Any, fallback_root: Path) -> str:
+    """Return canonical edge://<device>/<ws> identity when running over Edge Bridge."""
+    sess = getattr(executor, "_session", None)
+    dev = str(getattr(executor, "device_id", "") or getattr(sess, "device_id", "") or "").strip()
+    ws = str(
+        getattr(executor, "workspace_id", "") or getattr(sess, "workspace_id", "") or ""
+    ).strip()
+    if dev and ws:
+        return f"edge://{dev}/{ws}"
+    return fallback_root.as_posix()
+
+
 def _save_task_receipt(
     task_id: str,
     prompt: str,
@@ -2352,6 +2364,22 @@ async def _run_botex_task_once_impl(
     if meta_lessons:
         lesson_bullets = "\n".join(f"- {ml}" for ml in meta_lessons)
         initial_user_prompt += f"HARNESS LESSONS ({tax.upper()}):\n{lesson_bullets}\n"
+    blackbox_ws_key = _executor_workspace_key(active_executor, root_path)
+    blackbox_actor = f"botex:{model}" if model else "botex"
+    try:
+        from botex.core.blackbox import format_audit_hint, format_rap_sheet_warning
+
+        rap_warning = await asyncio.to_thread(
+            format_rap_sheet_warning, blackbox_actor, blackbox_ws_key
+        )
+        if rap_warning:
+            initial_user_prompt += f"\n{rap_warning}\n"
+        if recipe in ("reviewer", "security-reviewer"):
+            audit_hint = await asyncio.to_thread(format_audit_hint, blackbox_ws_key)
+            if audit_hint:
+                initial_user_prompt += f"\n{audit_hint}\n"
+    except Exception:
+        pass
     matched_skills = triage_skills_for_task(task, files, taxonomy=tax, max_skills=2)
     applied_skills = [str(s["name"]) for s in matched_skills if s.get("name")]
     skills_block = format_skills_prompt_block(matched_skills)
@@ -4027,6 +4055,28 @@ async def _run_botex_task_once_impl(
 
         if stagnant_turns >= 3 or failed_mutations_streak >= 3:
             # Stagnation deadlock detected: rollback and exit
+            try:
+                from botex.core.blackbox import record_incident as _record_blackbox_incident
+
+                await asyncio.to_thread(
+                    _record_blackbox_incident,
+                    actor_agent=f"botex:{actual_model or model}"
+                    if (actual_model or model)
+                    else "botex",
+                    reported_by="botex-engine",
+                    source="engine",
+                    workspace_id=blackbox_ws_key,
+                    skill_recipe=recipe or "",
+                    violation_code="LOOP_01",
+                    severity="WARN",
+                    evidence_snippet=(
+                        f"stagnant_turns={stagnant_turns}, "
+                        f"failed_mutations_streak={failed_mutations_streak}"
+                    ),
+                    enforcement_action="PENALTY_LOGGED",
+                )
+            except Exception:
+                pass
             _emit(
                 progress_cb,
                 EventKind.NO_PROGRESS,
