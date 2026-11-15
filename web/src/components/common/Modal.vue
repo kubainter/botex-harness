@@ -12,7 +12,6 @@
         v-if="isOpen"
         class="fixed inset-0 z-[10000] overflow-y-auto overscroll-contain bg-botex-950/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-2 sm:p-6"
         @click.self="onBackdropClick"
-        @keydown.esc="onEsc"
       >
         <Transition
           enter-active-class="transition duration-150 ease-out"
@@ -24,13 +23,18 @@
         >
           <div
             v-if="isOpen"
+            ref="panelRef"
+            role="dialog"
+            aria-modal="true"
+            :aria-labelledby="titleId"
+            tabindex="-1"
             :class="[
               'relative w-full max-w-[calc(100vw-16px)] rounded-2xl sm:rounded-xl bg-botex-900 border border-botex-700 shadow-2xl text-slate-100 flex flex-col max-h-[88dvh] sm:max-h-[90dvh] px-safe pb-safe overflow-hidden',
               maxWidthClass
             ]"
           >
             <!-- Header -->
-            <div class="px-4 sm:px-5 py-3.5 sm:py-4 border-b border-botex-800 flex items-center justify-between gap-3">
+            <div :id="titleId" class="px-4 sm:px-5 py-3.5 sm:py-4 border-b border-botex-800 flex items-center justify-between gap-3">
               <div>
                 <slot name="title">
                   <h3 class="text-sm sm:text-base font-semibold leading-6 text-slate-100">{{ title }}</h3>
@@ -65,7 +69,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import { X as XIcon } from 'lucide-vue-next'
 
 const props = withDefaults(
@@ -111,10 +115,30 @@ function onBackdropClick() {
 }
 
 function onEsc(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
+  if (e.key === 'Escape' && props.isOpen) {
     emit('close')
   }
 }
+
+const titleId = useId()
+const panelRef = ref<HTMLElement | null>(null)
+let restoreFocusEl: HTMLElement | null = null
+
+// Move focus into the dialog on open and hand it back to the trigger on close,
+// so keyboard users never land on the page behind the overlay.
+watch(
+  () => props.isOpen,
+  async (open) => {
+    if (open) {
+      restoreFocusEl = (document.activeElement as HTMLElement | null) ?? null
+      await nextTick()
+      panelRef.value?.focus()
+    } else if (restoreFocusEl) {
+      restoreFocusEl.focus()
+      restoreFocusEl = null
+    }
+  }
+)
 
 onMounted(() => {
   window.addEventListener('keydown', onEsc)

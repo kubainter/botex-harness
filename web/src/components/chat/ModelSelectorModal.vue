@@ -35,6 +35,7 @@
                 <button
                   type="button"
                   title="Refresh catalog"
+                  aria-label="Refresh catalog"
                   class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
                   @click="onRefresh"
                 >
@@ -101,8 +102,8 @@
                 >
                   <span>{{ pTab.label }}</span>
                   <span
-                    class="text-xs font-mono px-1 py-px rounded"
-                    :class="activeProvider === pTab.id ? 'bg-emerald-500/20 text-emerald-200' : 'bg-botex-900 text-slate-500'"
+                    class="text-xs font-mono tabular-nums px-1 py-px rounded"
+                    :class="activeProvider === pTab.id ? 'bg-emerald-500/20 text-emerald-200' : 'bg-botex-900 text-slate-400'"
                   >
                     {{ pTab.count }}
                   </span>
@@ -131,7 +132,7 @@
                 >
                   <span>{{ tab.label }}</span>
                   <span
-                    class="text-xs font-mono px-1.5 py-px rounded"
+                    class="text-xs font-mono tabular-nums px-1.5 py-px rounded"
                     :class="activeCategory === tab.id ? 'bg-sky-500/20 text-sky-200' : 'bg-botex-900 text-slate-400'"
                   >
                     {{ tab.count }}
@@ -253,20 +254,20 @@
                 <!-- Cost Badge -->
                 <span
                   v-if="item.is_free"
-                  class="px-2 py-0.5 rounded text-xs font-mono font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40"
+                  class="px-2 py-0.5 rounded text-xs font-mono tabular-nums font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40"
                 >
                   FREE (0.00$)
                 </span>
                 <span
                   v-else
-                  class="px-2 py-0.5 rounded text-xs font-mono font-medium bg-botex-900 text-slate-200 border border-botex-700"
+                  class="px-2 py-0.5 rounded text-xs font-mono tabular-nums font-medium bg-botex-900 text-slate-200 border border-botex-700"
                 >
                   {{ formatPriceLabel(item) }}
                 </span>
 
                 <!-- Context Window Pill -->
                 <span
-                  class="px-2 py-0.5 rounded text-xs font-mono text-slate-300 bg-botex-900 border border-botex-800"
+                  class="px-2 py-0.5 rounded text-xs font-mono tabular-nums text-slate-300 bg-botex-900 border border-botex-800"
                   title="Maximum context window"
                 >
                   {{ formatContextWindow(item.context_length) }}
@@ -282,6 +283,7 @@
                       : 'text-slate-400 hover:text-cyan-300 hover:bg-botex-800'
                   ]"
                   :aria-label="t('models.info_title')"
+                  :aria-expanded="infoOpenKey === modelKey(item)"
                   @click.stop.prevent="toggleInfo(item, $event)"
                 >
                   <InfoIcon class="w-3.5 h-3.5" />
@@ -300,51 +302,51 @@
               >
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-xs font-semibold text-slate-100 truncate">{{ item.name }}</span>
-                  <span class="text-[10px] font-mono text-slate-400 shrink-0">{{ formatProviderLabel(item.provider) }}</span>
+                  <span class="text-[11px] font-mono text-slate-400 shrink-0">{{ formatProviderLabel(item.provider) }}</span>
                 </div>
                 <div class="flex flex-wrap gap-1">
                   <span
                     v-for="mod in inferModality(item)"
                     :key="mod"
                     :title="t('models.info_inferred')"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-violet-500/15 text-violet-300 border border-violet-500/30 uppercase"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-violet-500/15 text-violet-300 border border-violet-500/30 uppercase"
                   >~{{ mod }}</span>
                   <span
                     v-if="item.supports_tools"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-sky-500/15 text-sky-300 border border-sky-500/30"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-sky-500/15 text-sky-300 border border-sky-500/30"
                   >TOOLS</span>
                   <span
                     v-if="isReasoningModel(item)"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30"
                   >REASONING</span>
                   <span
                     v-if="item.is_zdr_compliant"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
                   >ZDR</span>
                   <span
                     v-if="item.is_free"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
                   >FREE</span>
                 </div>
                 <div v-if="recommendedFor(item).length" class="text-[11px] text-slate-300">
-                  <span class="text-slate-500">{{ t('models.info_recommended') }}:</span>
+                  <span class="text-slate-400">{{ t('models.info_recommended') }}:</span>
                   {{ recommendedFor(item).join(', ') }}
                 </div>
-                <div class="grid grid-cols-3 gap-1.5 text-center text-[10px] font-mono">
+                <div class="grid grid-cols-3 gap-1.5 text-center text-[11px] font-mono tabular-nums">
                   <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
-                    <div class="text-slate-500 uppercase">Ctx</div>
+                    <div class="text-slate-400 uppercase">Ctx</div>
                     <div class="text-slate-200 font-semibold">{{ formatContextWindow(item.context_length) }}</div>
                   </div>
                   <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
-                    <div class="text-slate-500 uppercase">In/1M</div>
+                    <div class="text-slate-400 uppercase">In/1M</div>
                     <div class="text-slate-200 font-semibold">{{ item.is_free ? '$0' : '$' + (item.pricing?.prompt_per_m ?? 0).toFixed(2) }}</div>
                   </div>
                   <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
-                    <div class="text-slate-500 uppercase">Out/1M</div>
+                    <div class="text-slate-400 uppercase">Out/1M</div>
                     <div class="text-slate-200 font-semibold">{{ item.is_free ? '$0' : '$' + (item.pricing?.completion_per_m ?? 0).toFixed(2) }}</div>
                   </div>
                 </div>
-                <div class="text-[10px] font-mono text-slate-500 break-all">{{ item.id }}</div>
+                <div class="text-[11px] font-mono text-slate-400 break-all">{{ item.id }}</div>
               </div>
             </div>
           </div>
@@ -595,14 +597,20 @@ const visibleModels = computed<CatalogModel[]>(() => {
   return filteredModels.value.slice(0, 150)
 })
 
+let restoreFocusEl: HTMLElement | null = null
+
 watch(
   () => props.isOpen,
   async (open) => {
     if (open) {
+      restoreFocusEl = (document.activeElement as HTMLElement | null) ?? null
       highlightedIndex.value = 0
       infoOpenKey.value = null
       await nextTick()
       searchInputRef.value?.focus()
+    } else if (restoreFocusEl) {
+      restoreFocusEl.focus()
+      restoreFocusEl = null
     }
   }
 )
@@ -653,7 +661,12 @@ function scrollHighlightedIntoView() {
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     e.preventDefault()
-    close()
+    // Dismiss the open info popover first; only a second Escape closes the modal.
+    if (infoOpenKey.value) {
+      infoOpenKey.value = null
+    } else {
+      close()
+    }
     return
   }
   const len = visibleModels.value.length

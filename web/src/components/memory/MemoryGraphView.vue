@@ -1,16 +1,17 @@
 <template>
   <div
     ref="rootRef"
-    class="relative w-full rounded-xl border border-botex-800 bg-slate-950 overflow-hidden flex flex-col select-none"
+    class="relative w-full rounded-xl border border-botex-800 bg-botex-950 overflow-hidden flex flex-col select-none"
     :class="isFullscreen ? 'fixed inset-0 z-[9999] rounded-none h-[100dvh] w-screen border-none' : 'h-[clamp(360px,72dvh,720px)] min-h-[360px]'"
   >
     <!-- Top Bar: Health Stats & Navigation Controls -->
-    <div class="absolute top-2.5 left-2.5 right-2.5 z-10 flex items-center justify-between gap-2 pointer-events-none max-w-full">
-      <!-- Health Badge and Topology Counters (clickable: diagnostics popover) -->
+    <div class="absolute top-2.5 left-2.5 right-2.5 z-10 flex items-start justify-between gap-2 pointer-events-none max-w-full">
+      <!-- Left column: Health Badge (diagnostics popover) + Quick Node Search -->
+      <div class="flex flex-col items-start gap-1.5 min-w-0">
       <div ref="healthWrapRef" class="relative pointer-events-auto min-w-0">
         <button
           type="button"
-          class="flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-lg px-2.5 sm:px-3 py-1.5 shadow-xl text-xs min-w-0 truncate hover:border-slate-500 hover:bg-slate-800/90 transition cursor-pointer"
+          class="flex items-center space-x-1.5 bg-botex-900/90 backdrop-blur-md border border-botex-700/80 rounded-lg px-2.5 sm:px-3 py-1.5 shadow-xl text-xs min-w-0 truncate hover:border-botex-500 hover:bg-botex-800/90 transition cursor-pointer"
           :aria-expanded="showHealthPopover"
           :title="locale === 'pl' ? 'Diagnostyka grafu' : 'Graph diagnostics'"
           @click="showHealthPopover = !showHealthPopover"
@@ -22,12 +23,12 @@
             ></span>
             <span class="hidden sm:inline font-semibold">{{ health?.is_healthy ? (locale === 'pl' ? 'Graf Spójny' : 'Graph Healthy') : (locale === 'pl' ? 'Wykryto Uwagi' : 'Graph Issues') }}</span>
           </span>
-          <span class="text-slate-600">|</span>
+          <span class="text-botex-600">|</span>
           <span class="text-slate-200 font-mono font-medium">{{ nodes.length }} <span class="hidden sm:inline text-slate-400">{{ locale === 'pl' ? 'węzłów' : 'nodes' }}</span></span>
-          <span class="text-slate-600">|</span>
+          <span class="text-botex-600">|</span>
           <span class="text-slate-200 font-mono font-medium">{{ edges.length }} <span class="hidden sm:inline text-slate-400">{{ locale === 'pl' ? 'krawędzi' : 'edges' }}</span></span>
           <template v-if="health && health.orphan_count > 0">
-            <span class="text-slate-600">|</span>
+            <span class="text-botex-600">|</span>
             <span class="text-amber-300 font-mono font-semibold">{{ health.orphan_count }} <span class="hidden sm:inline">{{ locale === 'pl' ? 'sierot' : 'orphans' }}</span></span>
           </template>
         </button>
@@ -35,9 +36,9 @@
         <!-- Diagnostics Popover: legend + orphans + broken links -->
         <div
           v-if="showHealthPopover"
-          class="absolute top-full left-0 mt-2 z-30 w-[min(300px,calc(100vw-24px))] max-h-[300px] overflow-y-auto rounded-xl border border-slate-700 bg-slate-900/95 backdrop-blur-md shadow-2xl p-3 space-y-3 text-xs select-text cursor-auto"
+          class="absolute top-full left-0 mt-2 z-30 w-[min(300px,calc(100vw-24px))] max-h-[300px] overflow-y-auto rounded-xl border border-botex-700 bg-botex-900/95 backdrop-blur-md shadow-2xl p-3 space-y-3 text-xs select-text cursor-auto"
         >
-          <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+          <div class="flex items-center justify-between border-b border-botex-800 pb-1.5">
             <span class="font-semibold text-slate-100">{{ locale === 'pl' ? 'Diagnostyka grafu' : 'Graph Diagnostics' }}</span>
             <button type="button" class="text-slate-400 hover:text-white px-1 transition" @click="showHealthPopover = false">✕</button>
           </div>
@@ -66,7 +67,7 @@
                 v-for="o in orphanList"
                 :key="o.id"
                 type="button"
-                class="w-full text-left px-2 py-1 rounded hover:bg-slate-800 text-slate-200 font-mono text-[11px] truncate transition"
+                class="w-full text-left px-2 py-1 rounded hover:bg-botex-800 text-slate-200 font-mono text-[11px] truncate transition"
                 :title="o.title || o.id"
                 @click="focusNodeById(o.id)"
               >
@@ -84,7 +85,7 @@
                 v-for="(b, i) in brokenLinks"
                 :key="i"
                 type="button"
-                class="w-full text-left px-2 py-1 rounded hover:bg-slate-800 font-mono text-[11px] truncate transition"
+                class="w-full text-left px-2 py-1 rounded hover:bg-botex-800 font-mono text-[11px] truncate transition"
                 :title="locale === 'pl' ? 'Kliknij, aby sfokusować źródło' : 'Click to focus the source node'"
                 @click="focusNodeById(b.source)"
               >
@@ -97,11 +98,56 @@
         </div>
       </div>
 
+      <!-- Quick Node Search: title/id match → dim non-matches, Enter or pick centers it -->
+      <div class="relative pointer-events-auto w-[190px] max-w-[52vw]">
+        <svg class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="7" />
+          <line x1="16.5" y1="16.5" x2="21" y2="21" />
+        </svg>
+        <input
+          v-model="searchQuery"
+          type="text"
+          :placeholder="locale === 'pl' ? 'Szukaj węzła…' : 'Search nodes…'"
+          :aria-label="locale === 'pl' ? 'Szukaj węzła na grafie' : 'Search graph nodes'"
+          class="w-full bg-botex-900/90 backdrop-blur-md border border-botex-700/80 rounded-lg pl-7 pr-6 py-1.5 text-base sm:text-xs text-slate-100 placeholder-botex-500 shadow-xl focus:outline-none focus:border-cyan-500/60 transition"
+          @focus="showHealthPopover = false"
+          @keydown.enter.prevent="onSearchEnter"
+          @keydown.esc.prevent="clearSearch"
+        />
+        <button
+          v-if="searchQuery"
+          type="button"
+          class="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 flex items-center justify-center text-slate-400 hover:text-white transition"
+          :title="locale === 'pl' ? 'Wyczyść' : 'Clear'"
+          @click="clearSearch"
+        >✕</button>
+        <div
+          v-if="searchQuery.trim()"
+          class="absolute top-full left-0 right-0 mt-1 z-30 rounded-lg border border-botex-700 bg-botex-900/95 backdrop-blur-md shadow-2xl max-h-56 overflow-y-auto"
+        >
+          <div v-if="searchMatches.length === 0" class="px-2.5 py-2 text-[11px] text-slate-500 italic">
+            {{ locale === 'pl' ? 'Brak trafień.' : 'No matches.' }}
+          </div>
+          <button
+            v-for="m in searchMatches.slice(0, 7)"
+            :key="m.id"
+            type="button"
+            class="w-full text-left px-2.5 py-1.5 hover:bg-botex-800 flex items-center gap-1.5 text-[11px] min-w-0 transition"
+            @click="onSearchPick(m.id)"
+          >
+            <span class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: getNodeColor(m.kind) }"></span>
+            <span class="truncate text-slate-200">{{ m.title || m.id }}</span>
+            <span class="ml-auto shrink-0 max-w-[45%] truncate font-mono text-[9.5px] text-slate-500">{{ m.id }}</span>
+          </button>
+        </div>
+      </div>
+      </div>
+
       <!-- Controls: Zoom & Fit & Fullscreen Toggle -->
       <div class="flex items-center space-x-1.5 pointer-events-auto shrink-0">
         <button
           type="button"
-          class="w-8 h-8 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-sm text-slate-200 font-bold transition shadow-lg flex items-center justify-center hover:text-white"
+          class="w-8 h-8 rounded-lg bg-botex-900/90 hover:bg-botex-800 border border-botex-700/80 text-sm text-slate-200 font-bold transition shadow-lg flex items-center justify-center hover:text-white"
           @click="zoom(1.2)"
           title="Zoom In (+)"
         >
@@ -109,7 +155,7 @@
         </button>
         <button
           type="button"
-          class="w-8 h-8 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-sm text-slate-200 font-bold transition shadow-lg flex items-center justify-center hover:text-white"
+          class="w-8 h-8 rounded-lg bg-botex-900/90 hover:bg-botex-800 border border-botex-700/80 text-sm text-slate-200 font-bold transition shadow-lg flex items-center justify-center hover:text-white"
           @click="zoom(0.8)"
           title="Zoom Out (-)"
         >
@@ -117,7 +163,7 @@
         </button>
         <button
           type="button"
-          class="h-8 px-2.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-xs text-slate-200 font-medium transition shadow-lg flex items-center space-x-1.5 hover:text-white"
+          class="h-8 px-2.5 rounded-lg bg-botex-900/90 hover:bg-botex-800 border border-botex-700/80 text-xs text-slate-200 font-medium transition shadow-lg flex items-center space-x-1.5 hover:text-white"
           @click="resetView"
           :title="locale === 'pl' ? 'Wycentruj cały graf' : 'Center Graph'"
         >
@@ -130,7 +176,7 @@
         </button>
         <button
           type="button"
-          class="w-8 h-8 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-slate-200 hover:text-white transition shadow-lg flex items-center justify-center"
+          class="w-8 h-8 rounded-lg bg-botex-900/90 hover:bg-botex-800 border border-botex-700/80 text-slate-200 hover:text-white transition shadow-lg flex items-center justify-center"
           @click="toggleFullscreen"
           :title="isFullscreen ? (locale === 'pl' ? 'Zamknij pełny ekran (Esc)' : 'Exit Fullscreen (Esc)') : (locale === 'pl' ? 'Pełny ekran' : 'Fullscreen')"
         >
@@ -151,11 +197,11 @@
       <!-- Hover / Focused Spotlight Tooltip (Viewport-Clamped for Mobile & Desktop) -->
       <div
         v-if="tooltipNode"
-        class="absolute z-20 bg-slate-900/95 border border-cyan-500/40 backdrop-blur-md rounded-xl p-3 shadow-2xl text-xs space-y-1.5 w-[min(270px,calc(100vw-24px))] transition-opacity duration-150 ring-1 ring-cyan-500/20"
+        class="absolute z-20 bg-botex-900/95 border border-cyan-500/40 backdrop-blur-md rounded-xl p-3 shadow-2xl text-xs space-y-1.5 w-[min(270px,calc(100vw-24px))] transition-opacity duration-150 ring-1 ring-cyan-500/20"
         :class="focusedNode ? 'pointer-events-auto' : 'pointer-events-none'"
         :style="tooltipStyle"
       >
-        <div class="flex items-center justify-between gap-2 border-b border-slate-800 pb-1.5">
+        <div class="flex items-center justify-between gap-2 border-b border-botex-800 pb-1.5">
           <span class="font-bold text-slate-100 truncate text-sm">{{ tooltipNode.title }}</span>
           <span
             class="px-2 py-0.5 rounded text-[10px] uppercase font-mono font-bold tracking-wider shrink-0"
@@ -191,11 +237,11 @@
     <!-- Bottom: Obsidian-Style Cluster Galaxy Navigator Ribbon -->
     <div class="absolute bottom-2.5 left-2.5 right-2.5 z-10 flex items-center justify-between pointer-events-none">
       <!-- Galaxy Selector Pills -->
-      <div class="flex items-center gap-1.5 p-1 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl pointer-events-auto overflow-x-auto max-w-[calc(100%-80px)] no-scrollbar">
+      <div class="flex items-center gap-1.5 p-1 bg-botex-900/90 backdrop-blur-md border border-botex-700/80 rounded-xl shadow-2xl pointer-events-auto overflow-x-auto max-w-[calc(100%-80px)] no-scrollbar">
         <button
           type="button"
           class="px-2.5 py-1 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 shrink-0"
-          :class="activeClusterId === null ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-semibold shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-800/80'"
+          :class="activeClusterId === null ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-semibold shadow-sm' : 'text-slate-300 hover:text-white hover:bg-botex-800/80'"
           @click="selectCluster(null)"
         >
           <span>✨</span>
@@ -207,7 +253,7 @@
           :key="c.id"
           type="button"
           class="px-2.5 py-1 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 shrink-0"
-          :class="activeClusterId === c.id ? 'bg-slate-800 text-white border font-semibold shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-800/60'"
+          :class="activeClusterId === c.id ? 'bg-botex-800 text-white border font-semibold shadow-sm' : 'text-slate-300 hover:text-white hover:bg-botex-800/60'"
           :style="activeClusterId === c.id ? { borderColor: `${c.color}80`, color: c.color } : {}"
           @click="selectCluster(c.id)"
         >
@@ -218,7 +264,7 @@
       </div>
 
       <!-- Quick Reset Indicator -->
-      <div class="pointer-events-auto shrink-0 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-xl px-2.5 py-1 text-[11px] text-slate-300 font-mono shadow-xl hidden md:flex items-center space-x-1">
+      <div class="pointer-events-auto shrink-0 bg-botex-900/90 backdrop-blur-md border border-botex-700/80 rounded-xl px-2.5 py-1 text-[11px] text-slate-300 font-mono shadow-xl hidden md:flex items-center space-x-1">
         <span class="text-cyan-400 font-bold">LOD</span>
         <span class="text-slate-500">|</span>
         <span>{{ Math.round(transform.k * 100) }}%</span>
@@ -399,6 +445,30 @@ function getNodeColor(kind: string): string {
 const activeClusterId = ref<string | null>(null)
 const showHealthPopover = ref(false)
 
+// Quick Node Search — title/id match set drives canvas dim + priority labels;
+// Enter / dropdown pick routes through focusNodeById for the center + pulse
+const searchQuery = ref('')
+const searchMatches = computed<GraphNode[]>(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return []
+  return props.nodes.filter((n) => n.title.toLowerCase().includes(q) || n.id.toLowerCase().includes(q))
+})
+const searchMatchIds = computed(() => new Set(searchMatches.value.map((n) => n.id)))
+const searchDimActive = computed(() => searchMatchIds.value.size > 0)
+
+function clearSearch() {
+  searchQuery.value = ''
+}
+
+function onSearchEnter() {
+  const first = searchMatches.value[0]
+  if (first) focusNodeById(first.id)
+}
+
+function onSearchPick(id: string) {
+  focusNodeById(id)
+}
+
 const clusterList = computed(() => {
   const counts = new Map<string, number>()
   for (const n of props.nodes) {
@@ -421,6 +491,51 @@ const isFullscreen = ref(false)
 let animId = 0
 let simNodes: SimNode[] = []
 let transform = { x: 0, y: 0, k: 0.95 }
+
+// Idle rAF sleep — the loop parks once every node crawls below ~0.04px/frame,
+// no drag/hold/pinch is live and no focus pulse is running; wakeLoop() restarts it
+const SLEEP_VELOCITY_SQ = 0.0016
+const SLEEP_AFTER_STILL_FRAMES = 45
+let loopActive = false
+let stillFrames = 0
+
+// Focus pulse — brief expanding ring whenever a node gets centered programmatically
+const FOCUS_PULSE_MS = 700
+let pulseNodeId: string | null = null
+let pulseStartedAt = 0
+
+interface LabelCandidate {
+  n: SimNode
+  isActive: boolean
+  baseColor: string
+  priority: number
+}
+
+// Canvas-drawn surfaces resolve against the active skin's CSS tokens so pills and
+// cluster badges follow every data-skin palette (cached per skin switch)
+let skinCacheKey = ''
+let canvasTheme = {
+  labelBg: 'rgba(15, 23, 42, 0.88)',
+  labelBgActive: 'rgba(2, 6, 23, 0.96)',
+  labelBorder: 'rgba(51, 65, 85, 0.7)',
+  labelText: '#e2e8f0',
+  badgeBg: '#090d16',
+}
+
+function resolveCanvasTheme() {
+  const skin = document.documentElement.getAttribute('data-skin') || 'cyber-slate'
+  if (skin === skinCacheKey) return
+  skinCacheKey = skin
+  const cs = getComputedStyle(document.documentElement)
+  const tri = (name: string, fb: string) => (cs.getPropertyValue(name).trim() || fb).split(/\s+/).join(', ')
+  canvasTheme = {
+    labelBg: `rgba(${tri('--botex-900', '15 23 42')}, 0.88)`,
+    labelBgActive: `rgba(${tri('--botex-950', '2 6 23')}, 0.96)`,
+    labelBorder: `rgba(${tri('--botex-700', '51 65 85')}, 0.7)`,
+    labelText: `rgb(${tri('--botex-200', '226 232 240')})`,
+    badgeBg: `rgb(${tri('--botex-950', '2 6 23')})`,
+  }
+}
 
 type FullscreenCapableDocument = Document & {
   webkitFullscreenElement?: Element | null
@@ -678,10 +793,12 @@ function resetView() {
     y: h / 2 - ((minY + maxY) / 2) * k,
     k,
   }
+  wakeLoop()
 }
 
 function selectCluster(clusterId: string | null) {
   activeClusterId.value = clusterId
+  wakeLoop()
   if (!containerRef.value) return
   const w = containerRef.value.clientWidth
   const h = containerRef.value.clientHeight
@@ -724,9 +841,10 @@ function zoom(factor: number) {
   transform.x = w - ((w - transform.x) * newK) / curK
   transform.y = h - ((h - transform.y) * newK) / curK
   transform.k = newK
+  wakeLoop()
 }
 
-function updateSimulation() {
+function updateSimulation(): number {
   const nodeMap = new Map<string, SimNode>()
   for (const n of simNodes) nodeMap.set(n.id, n)
 
@@ -783,6 +901,7 @@ function updateSimulation() {
   }
 
   // 3. Dedicated Galaxy Gravity & Damping (softened pull prevents planetary collapse)
+  let maxV2 = 0
   for (const n of simNodes) {
     if (n === draggedNode) continue
     const cluster = getNodeCluster(n)
@@ -801,7 +920,10 @@ function updateSimulation() {
     n.vy *= 0.85
     n.x += n.vx
     n.y += n.vy
+    const v2 = n.vx * n.vx + n.vy * n.vy
+    if (v2 > maxV2) maxV2 = v2
   }
+  return maxV2
 }
 
 // Pre-baked comet-trail echo colors (head → tail falloff) — avoids per-particle
@@ -829,6 +951,10 @@ function render() {
 
   const ctx = canvas.getContext('2d')
   if (!ctx) return
+
+  resolveCanvasTheme()
+  const searchMatchSet = searchMatchIds.value
+  const searchDimNow = searchDimActive.value
 
   ctx.clearRect(0, 0, cw, ch)
 
@@ -939,7 +1065,7 @@ function render() {
     // Badge Container
     ctx.beginPath()
     ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 12)
-    ctx.fillStyle = '#090d16'
+    ctx.fillStyle = canvasTheme.badgeBg
     ctx.fill()
     ctx.strokeStyle = data.def.color
     ctx.lineWidth = 1.4
@@ -969,7 +1095,8 @@ function render() {
 
     if (activeClusterId.value !== null && (getNodeCluster(src).id !== activeClusterId.value || getNodeCluster(tgt).id !== activeClusterId.value)) return
     const isConnectedToSpotlight = hasActiveSpotlight && (src.id === spotlightRoot?.id || tgt.id === spotlightRoot?.id)
-    const isDimmed = hasActiveSpotlight && !isConnectedToSpotlight
+    const isSearchEdge = searchDimNow && (searchMatchSet.has(src.id) || searchMatchSet.has(tgt.id))
+    const isDimmed = (hasActiveSpotlight && !isConnectedToSpotlight) || (searchDimNow && !isSearchEdge)
 
     ctx.save()
     ctx.globalAlpha = isDimmed ? 0.08 : isConnectedToSpotlight ? 1.0 : 0.65
@@ -1107,17 +1234,19 @@ function render() {
   })
 
   // 2. Draw Nodes with 3D Volumetric Orbs, Atmospheric Glow & Obsidian Badges
+  const labelCandidates: LabelCandidate[] = []
   for (const n of simNodes) {
     const isHovered = hoveredNode.value?.id === n.id
     const isFocused = focusedNode.value?.id === n.id
     const isActive = isHovered || isFocused
     const isSpotlit = hasActiveSpotlight && spotlightSet.has(n.id)
+    const isSearchMatch = searchMatchSet.has(n.id)
     const cluster = getNodeCluster(n)
     const baseColor = getNodeColor(n.kind) || cluster.color
     const r = n.radius
 
     if (activeClusterId.value !== null && cluster.id !== activeClusterId.value) continue
-    const isDimmed = hasActiveSpotlight && !isSpotlit
+    const isDimmed = (hasActiveSpotlight && !isSpotlit) || (searchDimNow && !isSearchMatch)
 
     ctx.save()
     ctx.globalAlpha = isDimmed ? 0.14 : 1.0
@@ -1175,49 +1304,149 @@ function render() {
     ctx.strokeStyle = isActive ? '#ffffff' : adjustHex(baseColor, 35)
     ctx.stroke()
 
-    // E. Intelligent Level-of-Detail (LOD) Label Filtering
+    // D2. Search-match halo — amber ring keeps query hits readable inside the dimmed field
+    if (isSearchMatch) {
+      ctx.beginPath()
+      ctx.arc(n.x, n.y, r + 5.5, 0, Math.PI * 2)
+      ctx.strokeStyle = '#facc15'
+      ctx.lineWidth = 2.1
+      ctx.shadowColor = '#facc15'
+      ctx.shadowBlur = 10
+      ctx.stroke()
+      ctx.shadowBlur = 0
+    }
+
+    // E. Label candidacy — pills are painted in a second pass (below) ordered by
+    // priority with screen-space AABB anti-collision
     // Far (k < 1.15): hide regular labels so galaxy orbits & badges remain uncluttered
-    // Mid (1.15 <= k < 2.0): show only hovered, focused, spotlight, compiled_truth, or major hubs (degree >= 3)
+    // Mid (1.15 <= k < 2.0): show only hovered, focused, spotlight, compiled_truth, search hits, or major hubs (degree >= 3)
     // Deep zoom (k >= 2.0): show regular labels with anti-collision clarity
     const isMajorHub = (n.in_degree + n.out_degree) >= 3
-    const isPriorityNode = n.compiled_truth || isActive || isSpotlit || isMajorHub
-    const shouldShowLabel = isActive || (transform.k >= 2.0) || (transform.k >= 1.15 && isPriorityNode)
+    const isPriorityNode = n.compiled_truth || isActive || isSpotlit || isMajorHub || isSearchMatch
+    const shouldShowLabel = isActive || isSearchMatch || transform.k >= 2.0 || (transform.k >= 1.15 && isPriorityNode)
 
     if (shouldShowLabel && !isDimmed) {
-      ctx.font = isActive ? '700 11.5px Inter, system-ui, sans-serif' : '500 10.5px Inter, system-ui, sans-serif'
-      const titleText = n.title.length > 22 ? n.title.slice(0, 20) + '…' : n.title
-      const textW = ctx.measureText(titleText).width
-      const labelW = textW + 14
-      const labelH = 19
-      const labelX = n.x - labelW / 2
-      const labelY = n.y + r + 7
-
-      // High-Contrast Pill Background
-      ctx.beginPath()
-      ctx.roundRect(labelX, labelY, labelW, labelH, 6)
-      ctx.fillStyle = isActive ? '#090d16' : 'rgba(15, 23, 42, 0.88)'
-      ctx.fill()
-      ctx.strokeStyle = isActive ? baseColor : 'rgba(51, 65, 85, 0.7)'
-      ctx.lineWidth = isActive ? 1.5 : 0.8
-      ctx.stroke()
-
-      // High-Contrast Label Text
-      ctx.fillStyle = isActive ? '#ffffff' : '#e2e8f0'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillText(titleText, n.x, labelY + labelH / 2)
+      labelCandidates.push({
+        n,
+        isActive,
+        baseColor,
+        priority:
+          (isActive ? 1e6 : 0) +
+          (isSearchMatch ? 1e5 : 0) +
+          (n.compiled_truth ? 1e4 : 0) +
+          (isSpotlit ? 1e3 : 0) +
+          Math.min(n.in_degree + n.out_degree, 999),
+      })
     }
 
     ctx.restore()
+  }
+
+  // 3. Focus Pulse — expanding spotlight ripple when a node is centered programmatically
+  const pulseAge = pulseNodeId ? performance.now() - pulseStartedAt : Infinity
+  if (pulseNodeId && pulseAge < FOCUS_PULSE_MS) {
+    const pn = nodeMap.get(pulseNodeId)
+    if (pn) {
+      const t = pulseAge / FOCUS_PULSE_MS
+      ctx.beginPath()
+      ctx.arc(pn.x, pn.y, pn.radius + 6 + t * 40, 0, Math.PI * 2)
+      ctx.strokeStyle = `rgba(34, 211, 238, ${(1 - t) * 0.75})`
+      ctx.lineWidth = 3 * (1 - t) + 0.6
+      ctx.stroke()
+    }
+  } else {
+    pulseNodeId = null
+  }
+
+  // 4. Label Pass — priority-sorted, screen-anchored pill size, AABB anti-collision.
+  // fontPx is derived in screen space then scaled by 1/k for the world transform,
+  // so labels keep a readable on-screen size band at every zoom level instead of
+  // going microscopic zoomed out or billboard-sized zoomed in.
+  if (labelCandidates.length > 0) {
+    const invK = 1 / transform.k
+    const fontScreen = Math.min(Math.max(10.5 * Math.sqrt(transform.k), 8), 15)
+    const fontPx = fontScreen * invK
+    const padX = fontPx * 0.62
+    const pillH = fontPx + 9 * invK
+    const pillR = Math.min(6 * invK, pillH * 0.5)
+    const gapY = 7 * invK
+    const M = 6 // screen-px collision margin around each painted pill
+    const drawnRects: number[] = []
+
+    labelCandidates.sort((a, b) => b.priority - a.priority)
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+
+    for (const c of labelCandidates) {
+      const n = c.n
+      // Cheap viewport cull before paying for measureText
+      const nsx = n.x * transform.k + transform.x
+      const nsy = n.y * transform.k + transform.y
+      if (nsx < -140 || nsx > cw + 140 || nsy < -80 || nsy > ch + 80) continue
+
+      ctx.font = `${c.isActive ? 700 : 500} ${fontPx}px Inter, system-ui, sans-serif`
+      const titleText = n.title.length > 22 ? n.title.slice(0, 20) + '…' : n.title
+      const labelW = ctx.measureText(titleText).width + padX * 2
+      const labelX = n.x - labelW / 2
+      const labelY = n.y + n.radius + gapY
+
+      const rx1 = labelX * transform.k + transform.x - M
+      const ry1 = labelY * transform.k + transform.y - M
+      const rx2 = (labelX + labelW) * transform.k + transform.x + M
+      const ry2 = (labelY + pillH) * transform.k + transform.y + M
+      let collides = false
+      for (let i = 0; i < drawnRects.length; i += 4) {
+        if (rx1 < drawnRects[i + 2] && rx2 > drawnRects[i] && ry1 < drawnRects[i + 3] && ry2 > drawnRects[i + 1]) {
+          collides = true
+          break
+        }
+      }
+      if (collides) continue
+      drawnRects.push(rx1, ry1, rx2, ry2)
+
+      ctx.beginPath()
+      ctx.roundRect(labelX, labelY, labelW, pillH, pillR)
+      ctx.fillStyle = c.isActive ? canvasTheme.labelBgActive : canvasTheme.labelBg
+      ctx.fill()
+      ctx.strokeStyle = c.isActive ? c.baseColor : canvasTheme.labelBorder
+      ctx.lineWidth = c.isActive ? 1.5 : 0.8
+      ctx.stroke()
+
+      ctx.fillStyle = c.isActive ? '#ffffff' : canvasTheme.labelText
+      ctx.fillText(titleText, n.x, labelY + pillH / 2)
+    }
   }
 
   ctx.restore()
 }
 
 function loop() {
-  updateSimulation()
+  animId = 0
+  const maxV2 = updateSimulation()
   render()
+  const fxActive = pulseNodeId !== null && performance.now() - pulseStartedAt < FOCUS_PULSE_MS
+  const interacting = isDragging || draggedNode !== null || touchMode !== 'idle' || touchHoldTimer !== null
+  stillFrames = !interacting && !fxActive && maxV2 < SLEEP_VELOCITY_SQ ? stillFrames + 1 : 0
+  if (stillFrames >= SLEEP_AFTER_STILL_FRAMES) {
+    loopActive = false
+    return
+  }
   animId = requestAnimationFrame(loop)
+}
+
+function wakeLoop() {
+  stillFrames = 0
+  if (!loopActive) {
+    loopActive = true
+    animId = requestAnimationFrame(loop)
+  }
+}
+
+function startFocusPulse(n: SimNode | null) {
+  if (!n) return
+  pulseNodeId = n.id
+  pulseStartedAt = performance.now()
+  wakeLoop()
 }
 
 function handleResize() {
@@ -1232,6 +1461,7 @@ function handleResize() {
   if (starfield.length === 0 || Math.abs(starfield[0]?.x || 0) > w * 2) {
     initStarfield(w, h)
   }
+  wakeLoop()
 }
 
 function getCanvasPoint(evt: MouseEvent) {
@@ -1262,6 +1492,7 @@ function hitTestNode(x: number, y: number): SimNode | null {
 
 function onMouseDown(evt: MouseEvent) {
   if (evt.button !== 0) return
+  wakeLoop()
   const pt = getCanvasPoint(evt)
   mouseDownClient = { x: evt.clientX, y: evt.clientY }
   const found = hitTestNode(pt.x, pt.y)
@@ -1276,6 +1507,7 @@ function onMouseDown(evt: MouseEvent) {
 }
 
 function onMouseMove(evt: MouseEvent) {
+  wakeLoop()
   const pt = getCanvasPoint(evt)
   if (isDragging) {
     if (draggedNode) {
@@ -1302,6 +1534,7 @@ function onMouseMove(evt: MouseEvent) {
 }
 
 function onMouseUp(evt: MouseEvent) {
+  wakeLoop()
   if (draggedNode && dragStartPos) {
     // Single click on a node — focus it (first stage); 'select-node' fires on double-click
     const dx = draggedNode.x - dragStartPos.x
@@ -1309,6 +1542,7 @@ function onMouseUp(evt: MouseEvent) {
     if (dx * dx + dy * dy < 25) {
       focusedNode.value = draggedNode
       positionTooltipAtNode(draggedNode)
+      startFocusPulse(draggedNode)
     }
   } else if (isDragging) {
     // Click on empty background (not a camera pan) — clear focus
@@ -1323,6 +1557,7 @@ function onMouseUp(evt: MouseEvent) {
 }
 
 function onDoubleClick(evt: MouseEvent) {
+  wakeLoop()
   const pt = getCanvasPoint(evt)
   const found = hitTestNode(pt.x, pt.y)
   if (found) {
@@ -1390,6 +1625,7 @@ function focusNodeById(id: string) {
     transform = { x: w / 2 - n.x * k, y: h / 2 - n.y * k, k }
   }
   positionTooltipAtNode(n)
+  startFocusPulse(n)
 }
 
 function onDocumentPointerDown(evt: Event) {
@@ -1413,6 +1649,7 @@ function onWheel(evt: WheelEvent) {
   transform.x = mouseX - ((mouseX - transform.x) * newK) / transform.k
   transform.y = mouseY - ((mouseY - transform.y) * newK) / transform.k
   transform.k = newK
+  wakeLoop()
 }
 
 // Touch Handling for Mobile Devices — PAN is the default 1-finger gesture; nodes are never grabbed on touchdown
@@ -1453,6 +1690,7 @@ function touchMidpoint(a: Touch, b: Touch): { x: number; y: number } {
 }
 
 function onTouchStart(evt: TouchEvent) {
+  wakeLoop()
   if (evt.touches.length === 1) {
     const t = evt.touches[0]
     touchStartClient = { x: t.clientX, y: t.clientY }
@@ -1489,6 +1727,7 @@ function onTouchStart(evt: TouchEvent) {
 }
 
 function onTouchMove(evt: TouchEvent) {
+  wakeLoop()
   if (touchMode === 'pinch' && evt.touches.length >= 2) {
     const dist = touchDistance(evt.touches[0], evt.touches[1])
     const mid = touchMidpoint(evt.touches[0], evt.touches[1])
@@ -1542,6 +1781,7 @@ function onTouchMove(evt: TouchEvent) {
 }
 
 function onTouchEnd(evt: TouchEvent) {
+  wakeLoop()
   cancelTouchHold()
 
   if (evt.touches.length >= 2) {
@@ -1576,6 +1816,7 @@ function onTouchEnd(evt: TouchEvent) {
     } else {
       focusedNode.value = touchCandidate
       positionTooltipAtNode(touchCandidate)
+      startFocusPulse(touchCandidate)
       lastTapNodeId = touchCandidate.id
       lastTapTimestamp = now
     }
@@ -1596,9 +1837,12 @@ watch(
   () => [props.nodes, props.edges],
   () => {
     initSimulation()
+    wakeLoop()
   },
   { deep: true }
 )
+
+watch(searchQuery, () => wakeLoop())
 
 onMounted(() => {
   handleResize()
@@ -1620,11 +1864,12 @@ onMounted(() => {
     window.addEventListener('touchcancel', onTouchEnd)
   }
   initSimulation()
-  animId = requestAnimationFrame(loop)
+  wakeLoop()
 })
 
 onUnmounted(() => {
   cancelAnimationFrame(animId)
+  loopActive = false
   cancelTouchHold()
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('keydown', onKeydown)

@@ -20,26 +20,30 @@
       </div>
     </div>
 
-    <!-- Unified Diff Rendering -->
-    <div v-if="parsedLines.length > 0" class="overflow-x-auto max-h-96 divide-y divide-slate-800/40">
-      <div
-        v-for="(line, idx) in parsedLines"
-        :key="idx"
-        :class="[
-          'flex items-start px-3 py-0.5 leading-5 font-mono select-text',
-          line.type === 'add' ? 'bg-emerald-950/40 text-emerald-300' :
-          line.type === 'del' ? 'bg-rose-950/40 text-rose-300' :
-          line.type === 'hunk' ? 'bg-indigo-950/40 text-indigo-300 font-semibold' :
-          'text-slate-300 hover:bg-botex-900/40'
-        ]"
-      >
-        <span class="w-6 shrink-0 text-right pr-3 select-none text-slate-600 text-xs">
-          {{ idx + 1 }}
-        </span>
-        <span class="w-4 shrink-0 select-none font-bold text-center">
-          {{ line.prefix }}
-        </span>
-        <pre class="flex-1 overflow-x-auto whitespace-pre font-mono text-xs m-0">{{ line.text }}</pre>
+    <!-- Unified Diff Rendering: one horizontal scroll surface for the whole
+         block (min-w-max wrapper keeps every row as wide as the longest line,
+         so backgrounds align and no per-line scrollbars appear). -->
+    <div v-if="parsedLines.length > 0" class="overflow-auto max-h-96">
+      <div class="min-w-max">
+        <div
+          v-for="(line, idx) in parsedLines"
+          :key="idx"
+          :class="[
+            'flex items-start px-3 py-0.5 leading-5 font-mono select-text',
+            line.type === 'add' ? 'diff-line-add bg-emerald-950/40 text-emerald-300' :
+            line.type === 'del' ? 'diff-line-del bg-rose-950/40 text-rose-300' :
+            line.type === 'hunk' ? 'diff-line-hunk bg-indigo-950/40 text-indigo-300 font-semibold' :
+            'diff-line-normal text-slate-300 hover:bg-botex-900/40'
+          ]"
+        >
+          <span class="w-6 shrink-0 text-right pr-3 select-none text-slate-400 text-xs tabular-nums">
+            {{ idx + 1 }}
+          </span>
+          <span class="w-4 shrink-0 select-none font-bold text-center">
+            {{ line.prefix }}
+          </span>
+          <pre class="whitespace-pre font-mono text-xs m-0">{{ line.text }}</pre>
+        </div>
       </div>
     </div>
 
@@ -106,3 +110,26 @@ function copyContent() {
   })
 }
 </script>
+
+<style>
+/* Skin contrast bridges for diff tints (same pattern as the bridges in the
+   global stylesheet). Dark skins use the Tailwind emerald/rose/indigo 950
+   washes above; studio-light must invert them to daylight washes or the
+   950-tint backgrounds drown the text (contrast < 1.5:1 on white). */
+[data-skin='studio-light'] .diff-line-add {
+  background-color: #dcfce7;
+  color: #166534;
+}
+[data-skin='studio-light'] .diff-line-del {
+  background-color: #ffe4e6;
+  color: #be123c;
+}
+[data-skin='studio-light'] .diff-line-hunk {
+  background-color: #e0e7ff;
+  color: #4338ca;
+}
+[data-skin='studio-light'] .diff-line-normal:hover,
+[data-skin='studio-light'] .hover\:bg-botex-900\/40:hover {
+  background-color: #f1f5f9;
+}
+</style>

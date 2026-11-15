@@ -27,6 +27,11 @@
     >
       <div
         v-if="isOpen"
+        ref="panelRef"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('chat.history.title')"
+        tabindex="-1"
         class="fixed inset-y-0 right-0 z-50 w-full max-w-md bg-botex-900 border-l border-botex-800 shadow-2xl flex flex-col h-full text-slate-100 pt-safe pr-safe pb-safe"
       >
         <!-- Header -->
@@ -38,7 +43,7 @@
             </h3>
             <span
               v-if="sessions.length > 0"
-              class="px-2 py-0.5 rounded-full text-xs font-mono bg-botex-800 text-sky-300 font-semibold"
+              class="px-2 py-0.5 rounded-full text-xs font-mono tabular-nums bg-botex-800 text-sky-300 font-semibold"
             >
               {{ sessions.length }}
             </span>
@@ -105,6 +110,9 @@
           <div
             v-for="s in filteredSessions"
             :key="s.session_id"
+            role="button"
+            tabindex="0"
+            :aria-current="s.session_id === currentSessionId ? 'true' : undefined"
             :class="[
               'rounded-xl border p-3 cursor-pointer transition text-xs space-y-2 group',
               s.session_id === currentSessionId
@@ -112,6 +120,8 @@
                 : 'bg-botex-950/70 border-botex-800 hover:border-botex-700 hover:bg-botex-950'
             ]"
             @click="handleSelect(s.session_id)"
+            @keydown.enter.prevent="handleSelect(s.session_id)"
+            @keydown.space.prevent="handleSelect(s.session_id)"
           >
             <div class="flex items-start justify-between gap-2">
               <span class="font-semibold text-slate-100 group-hover:text-white line-clamp-1">
@@ -142,7 +152,7 @@
             <div class="flex flex-wrap items-center justify-between gap-1 text-xs font-mono text-slate-300">
               <div class="flex items-center space-x-1.5 truncate">
                 <span class="truncate text-slate-300">{{ formatModel(s.model) }}</span>
-                <span class="px-1.5 py-px rounded bg-botex-800 text-slate-200 text-xs">
+                <span class="px-1.5 py-px rounded bg-botex-800 text-slate-200 text-xs tabular-nums">
                   {{ s.message_count }} msg
                 </span>
               </div>
@@ -158,7 +168,7 @@
           <span>Active: {{ currentSessionId.slice(0, 8) }}...</span>
           <button
             type="button"
-            class="text-sky-400 hover:text-sky-300 transition"
+            class="min-h-[36px] px-2 -mr-2 rounded text-sky-400 hover:text-sky-300 transition"
             @click="handleNewSession"
           >
             + Start New Conversation
@@ -170,7 +180,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import type { ChatSessionSummary } from '../../api/types'
 import { useI18n } from '../../i18n'
 import {
@@ -201,6 +211,37 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const searchQuery = ref('')
+const panelRef = ref<HTMLElement | null>(null)
+let restoreFocusEl: HTMLElement | null = null
+
+function onEsc(e: KeyboardEvent) {
+  if (e.key === 'Escape' && props.isOpen) {
+    emit('close')
+  }
+}
+
+// Focus lands in the drawer on open and returns to the trigger on close.
+watch(
+  () => props.isOpen,
+  async (open) => {
+    if (open) {
+      restoreFocusEl = (document.activeElement as HTMLElement | null) ?? null
+      await nextTick()
+      panelRef.value?.focus()
+    } else if (restoreFocusEl) {
+      restoreFocusEl.focus()
+      restoreFocusEl = null
+    }
+  }
+)
+
+onMounted(() => {
+  window.addEventListener('keydown', onEsc)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onEsc)
+})
 
 const filteredSessions = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
