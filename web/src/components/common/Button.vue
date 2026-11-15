@@ -72,7 +72,7 @@ const variantClasses = computed(() => {
     case 'amber':
       return 'bg-amber-600 hover:bg-amber-500 text-white shadow-sm focus:ring-amber-500'
     case 'ghost':
-      return 'bg-transparent hover:bg-slate-800 text-slate-300 hover:text-white focus:ring-slate-500'
+      return 'bg-transparent hover:bg-botex-800 text-slate-300 hover:text-white focus:ring-botex-500'
     default:
       return 'bg-brand-blue hover:bg-blue-600 text-white shadow-sm focus:ring-blue-500'
   }

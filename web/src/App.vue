@@ -18,10 +18,16 @@
           >
             <span class="font-mono font-bold text-sky-400 text-sm">BX</span>
           </button>
-          <div v-if="!sidebarCollapsed" class="truncate cursor-pointer select-none" @click="currentView = 'chat'" title="Go to Chat">
+          <button
+            v-if="!sidebarCollapsed"
+            type="button"
+            class="text-left truncate select-none rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            title="Go to Chat"
+            @click="currentView = 'chat'"
+          >
             <h1 class="text-base font-bold text-slate-100 tracking-tight truncate hover:text-sky-300 transition">BoteX Control</h1>
             <p class="text-xs text-slate-300 font-mono truncate">{{ t('app.subtitle') }}</p>
-          </div>
+          </button>
         </div>
 
         <!-- Connection Status, Theme & Language Switcher -->
@@ -127,12 +133,17 @@
     <main class="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden">
       <!-- Mobile Top Bar (Strict RWD & Safe Bounds) -->
       <header class="md:hidden px-2.5 sm:px-3.5 py-2 bg-botex-900 border-b border-botex-800 flex items-center justify-between gap-1.5 shrink-0 w-full max-w-full overflow-hidden">
-        <div class="flex items-center space-x-2 cursor-pointer select-none min-w-0 shrink" @click="currentView = 'chat'" title="Go to Chat">
+        <button
+          type="button"
+          class="flex items-center space-x-2 select-none min-w-0 shrink rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          title="Go to Chat"
+          @click="currentView = 'chat'"
+        >
           <div class="w-7 h-7 shrink-0 rounded-lg bg-botex-950 border border-botex-700 hover:border-sky-500/50 flex items-center justify-center text-sky-400 font-bold font-mono text-xs transition">
             BX
           </div>
           <span class="text-base font-bold text-slate-100 hover:text-sky-300 transition truncate">BoteX Control</span>
-        </div>
+        </button>
 
         <div class="flex items-center space-x-1 shrink-0">
           <button

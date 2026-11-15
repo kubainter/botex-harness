@@ -131,7 +131,7 @@
             </div>
             <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs font-mono text-slate-300">
               <span>{{ t('colRuns') }}: {{ p.runs }}</span>
-              <span :class="p.done_pct >= 80 ? 'text-emerald-300' : p.done_pct >= 50 ? 'text-amber-300' : 'text-red-300'">
+              <span :class="p.done_pct >= 80 ? 'text-emerald-300' : p.done_pct >= 50 ? 'text-amber-300' : 'text-rose-300'">
                 {{ t('colDone') }} {{ p.done_pct }}%
               </span>
               <span>{{ t('colTokens') }}: {{ p.tokens.toLocaleString() }}</span>
@@ -160,7 +160,7 @@
                 <td class="py-2.5 px-4 text-cyan-200 font-semibold uppercase">{{ p.provider }}</td>
                 <td class="py-2.5 px-4">{{ p.runs }}</td>
                 <td class="py-2.5 px-4">
-                  <span :class="p.done_pct >= 80 ? 'text-emerald-300' : p.done_pct >= 50 ? 'text-amber-300' : 'text-red-300'">
+                  <span :class="p.done_pct >= 80 ? 'text-emerald-300' : p.done_pct >= 50 ? 'text-amber-300' : 'text-rose-300'">
                     {{ p.done_pct }}%
                   </span>
                 </td>
@@ -187,7 +187,7 @@
             </div>
             <div class="flex flex-wrap gap-x-3 text-slate-400">
               <span>{{ t('colRuns') }}: <span class="text-slate-200">{{ g.runs }}</span></span>
-              <span :class="g.done_pct >= 80 ? 'text-emerald-300' : g.done_pct >= 50 ? 'text-amber-300' : 'text-red-300'">
+              <span :class="g.done_pct >= 80 ? 'text-emerald-300' : g.done_pct >= 50 ? 'text-amber-300' : 'text-rose-300'">
                 {{ g.done_pct }}%
               </span>
               <span>{{ g.tokens.toLocaleString() }} tok</span>
@@ -206,7 +206,7 @@
             </div>
             <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs font-mono text-slate-300">
               <span>{{ t('colRuns') }}: {{ m.runs }}</span>
-              <span :class="m.done_pct >= 80 ? 'text-emerald-300' : m.done_pct >= 50 ? 'text-amber-300' : 'text-red-300'">
+              <span :class="m.done_pct >= 80 ? 'text-emerald-300' : m.done_pct >= 50 ? 'text-amber-300' : 'text-rose-300'">
                 {{ t('colDone') }} {{ m.done_pct }}%
               </span>
               <span>{{ t('colTokens') }}: {{ m.tokens.toLocaleString() }}</span>
@@ -234,7 +234,7 @@
                 <td class="py-2.5 px-4 text-slate-100 break-all">{{ m.model }}</td>
                 <td class="py-2.5 px-4">{{ m.runs }}</td>
                 <td class="py-2.5 px-4">
-                  <span :class="m.done_pct >= 80 ? 'text-emerald-300' : m.done_pct >= 50 ? 'text-amber-300' : 'text-red-300'">
+                  <span :class="m.done_pct >= 80 ? 'text-emerald-300' : m.done_pct >= 50 ? 'text-amber-300' : 'text-rose-300'">
                     {{ m.done_pct }}%
                   </span>
                 </td>

@@ -32,9 +32,9 @@ const variantClasses = computed(() => {
     case 'info':
       return 'bg-sky-950/80 text-sky-300 border border-sky-500/40'
     case 'purple':
-      return 'bg-slate-800 text-sky-200 border border-slate-600'
+      return 'bg-botex-800 text-sky-200 border border-botex-600'
     default:
-      return 'bg-slate-800 text-slate-200 border border-slate-700'
+      return 'bg-botex-800 text-slate-200 border border-botex-700'
   }
 })
 </script>

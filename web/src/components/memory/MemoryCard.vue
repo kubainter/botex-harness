@@ -24,7 +24,7 @@
             :class="[
               'text-xs px-1.5 py-0.5 rounded uppercase font-mono font-bold tracking-wider border',
               entry.scope === 'global'
-                ? 'bg-slate-800 text-slate-200 border-slate-600'
+                ? 'bg-botex-800 text-slate-200 border-botex-600'
                 : 'bg-cyan-950/60 text-cyan-200 border-cyan-700/60'
             ]"
           >
