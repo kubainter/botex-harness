@@ -7,7 +7,7 @@
       :aria-expanded="isOpen"
       @click="toggleOpen"
     >
-      <FilterIcon class="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+      <FilterIcon class="w-3.5 h-3.5 text-cyan-400 shrink-0" aria-hidden="true" />
       <span class="text-xs font-semibold text-slate-200 uppercase tracking-wider font-mono shrink-0">
         {{ locale === 'pl' ? 'Filtry' : 'Filters' }}
       </span>
@@ -41,6 +41,7 @@
       <ChevronDownIcon
         class="w-4 h-4 text-slate-300 shrink-0 transition-transform duration-150"
         :class="{ 'rotate-180': isOpen }"
+        aria-hidden="true"
       />
     </button>
 
@@ -48,10 +49,10 @@
     <div v-if="isOpen" class="border-t border-botex-800 p-4 space-y-3">
       <!-- Project Selector Chips -->
       <div v-if="projects && projects.length > 0">
-        <label class="block text-xs font-semibold text-slate-200 uppercase tracking-wider mb-2 font-mono">
+        <span id="mf-project-label" class="block text-xs font-semibold text-slate-200 uppercase tracking-wider mb-2 font-mono">
           {{ locale === 'pl' ? 'Projekt (Project)' : 'Project' }}
-        </label>
-        <div class="flex flex-wrap gap-1.5" role="group">
+        </span>
+        <div class="flex flex-wrap gap-1.5" role="group" aria-labelledby="mf-project-label">
           <button
             type="button"
             :aria-pressed="!project"
@@ -86,10 +87,10 @@
 
       <!-- Scope Selector Tabs -->
       <div>
-        <label class="block text-xs font-semibold text-slate-200 uppercase tracking-wider mb-2 font-mono">
+        <span id="mf-scope-label" class="block text-xs font-semibold text-slate-200 uppercase tracking-wider mb-2 font-mono">
           {{ locale === 'pl' ? 'Lokalizacja pamięci (Vault Scope)' : 'Vault Scope' }}
-        </label>
-        <div class="grid grid-cols-3 gap-1 bg-botex-950 p-1 rounded-lg border border-botex-800" role="group">
+        </span>
+        <div class="grid grid-cols-3 gap-1 bg-botex-950 p-1 rounded-lg border border-botex-800" role="group" aria-labelledby="mf-scope-label">
           <button
             type="button"
             :aria-pressed="scope === 'all'"
@@ -125,7 +126,7 @@
           </button>
           <button
             type="button"
-            class="px-2.5 py-1 text-xs rounded-md transition-colors"
+            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 text-xs rounded-md transition-colors"
             :aria-pressed="scope === 'swarm'"
             :class="
               scope === 'swarm' ? 'bg-botex-800 text-cyan-200 border border-cyan-500/30' : 'text-slate-300 hover:text-white'
@@ -140,10 +141,11 @@
       <!-- Search Query, Kind, and Tag filter -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <div>
-          <label class="block text-xs font-medium text-slate-300 mb-1">
+          <label for="mf-query" class="block text-xs font-medium text-slate-300 mb-1">
             {{ locale === 'pl' ? 'Szukaj w treści' : 'Search Keywords' }}
           </label>
           <input
+            id="mf-query"
             :value="query"
             type="text"
             :placeholder="locale === 'pl' ? 'Szukaj po tytule lub treści...' : 'Filter title or content...'"
@@ -154,10 +156,11 @@
         </div>
 
         <div>
-          <label class="block text-xs font-medium text-slate-300 mb-1">
+          <label for="mf-tag" class="block text-xs font-medium text-slate-300 mb-1">
             {{ locale === 'pl' ? 'Filtruj po tagu' : 'Filter by Tag' }}
           </label>
           <input
+            id="mf-tag"
             :value="tag"
             type="text"
             placeholder="mcp, security, api..."
@@ -168,10 +171,11 @@
         </div>
 
         <div>
-          <label class="block text-xs font-medium text-slate-300 mb-1">
+          <label for="mf-kind" class="block text-xs font-medium text-slate-300 mb-1">
             {{ locale === 'pl' ? 'Kategoria' : 'Entry Kind' }}
           </label>
           <select
+            id="mf-kind"
             :value="kind"
             class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-1.5 text-base sm:text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
             @change="$emit('update:kind', ($event.target as HTMLSelectElement).value)"

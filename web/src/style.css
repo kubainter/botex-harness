@@ -221,6 +221,18 @@ body {
   animation: fadeIn 0.2s ease-out forwards;
 }
 
+/* Skip link: hidden off-canvas until keyboard focus, then floats top-left. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0.75rem;
+  z-index: 10030;
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  left: 0.75rem;
+}
+
 /* Keyboard focus ring: one global rule covers every interactive element.
    Mouse/touch activation unaffected (:focus-visible only fires for keyboard nav). */
 :focus-visible {
@@ -333,6 +345,10 @@ body {
   border-color: #e2e8f0 !important;
 }
 
+[data-skin="studio-light"] .border-botex-600 {
+  border-color: #cbd5e1 !important;
+}
+
 [data-skin="studio-light"] .hover\:bg-botex-800:hover,
 [data-skin="studio-light"] .hover\:bg-botex-900:hover {
   background-color: #e2e8f0 !important;
@@ -340,13 +356,53 @@ body {
 
 [data-skin="studio-light"] .text-cyan-400,
 [data-skin="studio-light"] .text-sky-300,
-[data-skin="studio-light"] .text-cyan-300 {
-  color: #0284c7 !important;
+[data-skin="studio-light"] .text-sky-400,
+[data-skin="studio-light"] .text-sky-200,
+[data-skin="studio-light"] .text-cyan-300,
+[data-skin="studio-light"] .text-cyan-200 {
+  color: #0369a1 !important;
 }
 
 [data-skin="studio-light"] .text-emerald-300,
 [data-skin="studio-light"] .text-emerald-400 {
-  color: #059669 !important;
+  color: #047857 !important;
+}
+
+[data-skin="studio-light"] .text-teal-300,
+[data-skin="studio-light"] .text-teal-400 {
+  color: #0f766e !important;
+}
+
+[data-skin="studio-light"] .text-amber-300,
+[data-skin="studio-light"] .text-amber-400 {
+  color: #b45309 !important;
+}
+
+[data-skin="studio-light"] .text-rose-300,
+[data-skin="studio-light"] .text-rose-400 {
+  color: #be123c !important;
+}
+
+[data-skin="studio-light"] .bg-emerald-950\/80 {
+  background-color: #ecfdf5 !important;
+}
+
+[data-skin="studio-light"] .bg-amber-950\/80,
+[data-skin="studio-light"] .bg-amber-950\/40 {
+  background-color: #fffbeb !important;
+}
+
+[data-skin="studio-light"] .bg-rose-950\/80 {
+  background-color: #fff1f2 !important;
+}
+
+[data-skin="studio-light"] .bg-sky-950\/80 {
+  background-color: #f0f9ff !important;
+}
+
+[data-skin="studio-light"] .bg-cyan-950\/40,
+[data-skin="studio-light"] .bg-cyan-950\/20 {
+  background-color: #ecfeff !important;
 }
 
 /* ==========================================================================

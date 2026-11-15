@@ -1,17 +1,26 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../api/client'
-import type { AnalyticsResponse } from '../api/types'
+import type { AnalyticsResponse, LearningStatusResponse } from '../api/types'
 
 export type AnalyticsPeriod = 'week' | 'month' | 'all'
 
 export const useAnalyticsStore = defineStore('analytics', () => {
   const stats = ref<AnalyticsResponse | null>(null)
+  const learningStatus = ref<LearningStatusResponse | null>(null)
   const period = ref<AnalyticsPeriod>('week')
   const isLoading = ref<boolean>(false)
   const isDigestRunning = ref<boolean>(false)
   const errorMessage = ref<string | null>(null)
   const digestMessage = ref<string | null>(null)
+
+  async function fetchLearningStatus() {
+    try {
+      learningStatus.value = await api.getLearningStatus()
+    } catch {
+      // Non-blocking: learning loop panel stays hidden/empty if endpoint unavailable
+    }
+  }
 
   async function fetchStats(nextPeriod?: AnalyticsPeriod, forceRefresh = false) {
     if (nextPeriod) period.value = nextPeriod
@@ -19,7 +28,8 @@ export const useAnalyticsStore = defineStore('analytics', () => {
     isLoading.value = true
     errorMessage.value = null
     try {
-      stats.value = await api.getAnalytics(period.value)
+      const [s] = await Promise.all([api.getAnalytics(period.value), fetchLearningStatus()])
+      stats.value = s
     } catch (err: any) {
       errorMessage.value = err?.message || 'Failed to fetch analytics'
     } finally {
@@ -58,12 +68,14 @@ export const useAnalyticsStore = defineStore('analytics', () => {
 
   return {
     stats,
+    learningStatus,
     period,
     isLoading,
     isDigestRunning,
     errorMessage,
     digestMessage,
     fetchStats,
+    fetchLearningStatus,
     fetchPeriodStats,
     runDigest
   }

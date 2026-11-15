@@ -4,7 +4,7 @@
     <div class="flex flex-wrap items-center justify-between gap-4 border-b border-botex-800 pb-4">
       <div>
         <h2 class="text-xl font-bold text-slate-100 flex items-center space-x-2">
-          <WalletIcon class="w-5 h-5 text-emerald-400" />
+          <WalletIcon class="w-5 h-5 text-emerald-400" aria-hidden="true" />
           <span>{{ t('walletTitle') }}</span>
         </h2>
         <p class="text-xs text-slate-300 mt-1">
@@ -56,7 +56,7 @@
           class="min-h-[44px] lg:min-h-[32px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
           @click="walletStore.fetchWallet(true)"
         >
-          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': walletStore.isLoading }" />
+          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': walletStore.isLoading }" aria-hidden="true" />
           <span>{{ t('forceRefresh') }}</span>
         </button>
       </div>
@@ -90,7 +90,7 @@
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
           <span>{{ t('activeBalance') }}</span>
-          <CreditCardIcon class="w-4 h-4 text-emerald-400" />
+          <CreditCardIcon class="w-4 h-4 text-emerald-400" aria-hidden="true" />
         </div>
         <div class="text-2xl font-bold text-slate-100 font-mono">
           <span v-if="walletInfo?.balance_usd !== null && walletInfo?.balance_usd !== undefined">
@@ -110,7 +110,7 @@
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
           <span>{{ t('totalUsage') }}</span>
-          <TrendingUpIcon class="w-4 h-4 text-cyan-400" />
+          <TrendingUpIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
         </div>
         <div class="text-2xl font-bold text-slate-100 font-mono">
           <span v-if="walletInfo?.usage_usd !== null && walletInfo?.usage_usd !== undefined">
@@ -127,7 +127,7 @@
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
           <span>{{ t('limitCap') }}</span>
-          <ShieldIcon class="w-4 h-4 text-amber-400" />
+          <ShieldIcon class="w-4 h-4 text-amber-400" aria-hidden="true" />
         </div>
         <div class="text-2xl font-bold text-slate-100 font-mono">
           <span v-if="walletInfo?.limit_usd !== null && walletInfo?.limit_usd !== undefined">
@@ -144,7 +144,7 @@
       <div class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm">
         <div class="flex items-center justify-between text-xs text-slate-300 mb-1">
           <span>{{ t('remainingQuota') }}</span>
-          <ClockIcon class="w-4 h-4 text-cyan-400" />
+          <ClockIcon class="w-4 h-4 text-cyan-400" aria-hidden="true" />
         </div>
         <div class="text-2xl font-bold text-slate-100 font-mono">
           <span v-if="walletInfo?.limit_remaining_usd !== null && walletInfo?.limit_remaining_usd !== undefined">
@@ -175,6 +175,7 @@
     <!-- API error notice -->
     <div
       v-if="walletStore.errorMessage"
+      role="alert"
       class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
     >
       <span class="font-mono truncate">{{ walletStore.errorMessage }}</span>
@@ -182,7 +183,7 @@
     </div>
 
     <!-- Error Notice if any -->
-    <div v-if="walletInfo?.error" class="p-3 rounded-xl bg-amber-950/50 border border-amber-700/60 text-xs text-amber-200">
+    <div v-if="walletInfo?.error" role="alert" class="p-3 rounded-xl bg-amber-950/50 border border-amber-700/60 text-xs text-amber-200">
       <strong>Provider Notice:</strong> {{ walletInfo.error }}
     </div>
 
@@ -217,14 +218,65 @@
                 {{ info.requests_available !== null ? Math.round(info.requests_available) : info.rpm }} / {{ Math.round(info.requests_capacity ?? info.rpm) }}
               </span>
             </div>
-            <div class="flex justify-between text-slate-300">
+            <div class="flex justify-between text-slate-300 tabular-nums">
               <span>TPM:</span>
               <span class="text-slate-100 font-semibold">
-                {{ info.tokens_available !== null ? (Math.round(info.tokens_available) / 1000).toFixed(0) + 'k' : (info.tpm / 1000).toFixed(0) + 'k' }} / {{ ((info.tokens_capacity ?? info.tpm) / 1000).toFixed(0) + 'k' }}
+                {{ info.tokens_available !== null ? formatCompactTokens(info.tokens_available) : formatCompactTokens(info.tpm) }} / {{ formatCompactTokens(info.tokens_capacity ?? info.tpm) }}
               </span>
+            </div>
+            <div v-if="info.requests_consumed !== undefined || info.tokens_consumed !== undefined" class="pt-1.5 mt-1.5 border-t border-botex-800/80 space-y-1 text-[11px] text-slate-400">
+              <div v-if="info.requests_consumed !== undefined" class="flex justify-between">
+                <span>{{ t('bucketUsedReq') }}:</span>
+                <span class="text-slate-200">{{ info.requests_consumed.toLocaleString() }}</span>
+              </div>
+              <div v-if="info.tokens_consumed !== undefined" class="flex justify-between">
+                <span>{{ t('bucketUsedTok') }}:</span>
+                <span class="text-slate-200">{{ info.tokens_consumed.toLocaleString() }}</span>
+              </div>
+              <div v-if="info.cooldown_hits" class="flex justify-between text-amber-300">
+                <span>{{ t('bucketHits429') }}:</span>
+                <span>{{ info.cooldown_hits }}</span>
+              </div>
+              <div v-if="info.throttle_wait_ms && info.throttle_wait_ms > 0" class="flex justify-between">
+                <span>{{ t('bucketWait') }}:</span>
+                <span class="text-slate-200">{{ (info.throttle_wait_ms / 1000).toFixed(1) }}s</span>
+              </div>
             </div>
             <div v-if="info.wait_s > 0" class="text-amber-400 text-xs">
               Wait: {{ info.wait_s.toFixed(1) }}s
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lifetime Per-Provider Usage -->
+    <div v-if="providerLedgerRows.length > 0" class="space-y-3">
+      <div class="flex items-center justify-between text-xs text-slate-300 px-1 border-b border-botex-800 pb-2">
+        <span class="font-semibold uppercase tracking-wider font-mono">{{ t('providerUsageTitle') }}</span>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div
+          v-for="p in providerLedgerRows"
+          :key="p.provider"
+          class="rounded-xl border border-botex-800 bg-botex-900 p-4 shadow-sm space-y-2 font-mono text-xs"
+        >
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-cyan-200 uppercase">{{ p.provider }}</span>
+            <span class="text-emerald-300 font-semibold">${{ p.cost_usd.toFixed(4) }}</span>
+          </div>
+          <div class="space-y-1 text-slate-300">
+            <div class="flex justify-between">
+              <span>{{ t('colRuns') }}:</span>
+              <span class="text-slate-100">{{ p.runs }} ({{ p.done_pct }}%)</span>
+            </div>
+            <div class="flex justify-between">
+              <span>{{ t('colTokens') }}:</span>
+              <span class="text-slate-100">{{ p.tokens.toLocaleString() }}</span>
+            </div>
+            <div v-if="p.cached_tokens > 0" class="flex justify-between text-emerald-400/90">
+              <span>Cache:</span>
+              <span>{{ p.cache_hit_pct ?? 0 }}%</span>
             </div>
           </div>
         </div>
@@ -321,6 +373,7 @@
             v-for="roleName in ['all', 'planner', 'coder', 'chat', 'reviewer'] as const"
             :key="roleName"
             type="button"
+            :aria-pressed="selectedRole === roleName"
             :class="[
               'min-h-[44px] lg:min-h-[36px] min-w-[44px] justify-center px-2.5 py-1 rounded text-xs font-medium capitalize transition',
               selectedRole === roleName
@@ -434,6 +487,8 @@ const filteredModels = computed(() => {
 // the catalog for role badges and list pricing. Models never used never appear.
 const ledgerStats = ref<AnalyticsResponse | null>(null)
 
+const providerLedgerRows = computed(() => ledgerStats.value?.by_provider || [])
+
 const ledgerRows = computed(() => {
   const rows = (ledgerStats.value?.by_model || []).map((s) => {
     const catalog = recommendedModels.value.find((m) => m.id === s.model)
@@ -483,5 +538,12 @@ function roleBadgeVariant(role: string) {
 function formatContext(tokens: number) {
   if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`
   return `${Math.round(tokens / 1024)}k`
+}
+
+function formatCompactTokens(tokens: number) {
+  const n = Math.round(tokens)
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(0)}k`
+  return String(n)
 }
 </script>

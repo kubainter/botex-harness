@@ -1,7 +1,12 @@
 <template>
   <div class="h-screen supports-[height:100dvh]:h-dvh w-full flex flex-col md:flex-row bg-botex-950 text-slate-100 font-sans overflow-hidden pt-safe pl-safe pr-safe">
+    <a
+      href="#main-content"
+      class="skip-link px-4 py-2.5 rounded-lg bg-sky-600 text-white text-sm font-semibold shadow-lg"
+    >{{ lang === 'pl' ? 'Przejdź do treści' : 'Skip to main content' }}</a>
     <!-- Tablet / Desktop Sidebar -->
     <aside
+      id="app-sidebar"
       :class="[
         'hidden md:flex flex-col bg-botex-900 border-r border-botex-800 shrink-0 transition-all duration-150 select-none',
         sidebarCollapsed ? 'w-16' : 'w-56 lg:w-64'
@@ -14,14 +19,23 @@
             type="button"
             class="w-11 h-11 lg:w-9 lg:h-9 rounded-lg bg-botex-950 border border-botex-700 hover:border-sky-500/50 flex items-center justify-center shrink-0 transition"
             title="Toggle sidebar width"
+            :aria-label="sidebarCollapsed ? (lang === 'pl' ? 'Rozwiń panel nawigacji' : 'Expand sidebar') : (lang === 'pl' ? 'Zwiń panel nawigacji' : 'Collapse sidebar')"
+            :aria-expanded="!sidebarCollapsed"
+            aria-controls="app-sidebar"
             @click="sidebarCollapsed = !sidebarCollapsed"
           >
             <span class="font-mono font-bold text-sky-400 text-sm">BX</span>
           </button>
-          <div v-if="!sidebarCollapsed" class="truncate cursor-pointer select-none" @click="currentView = 'chat'" title="Go to Chat">
+          <button
+            v-if="!sidebarCollapsed"
+            type="button"
+            class="text-left truncate select-none rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            title="Go to Chat"
+            @click="currentView = 'chat'"
+          >
             <h1 class="text-base font-bold text-slate-100 tracking-tight truncate hover:text-sky-300 transition">BoteX Control</h1>
             <p class="text-xs text-slate-300 font-mono truncate">{{ t('app.subtitle') }}</p>
-          </div>
+          </button>
         </div>
 
         <!-- Connection Status, Theme & Language Switcher -->
@@ -30,16 +44,18 @@
             type="button"
             class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] p-1.5 rounded bg-botex-950 border border-botex-700 text-slate-200 hover:border-sky-500/50 transition flex items-center justify-center"
             :title="themeStore.isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
+            :aria-label="themeStore.isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
             :aria-pressed="themeStore.isDark"
             @click="toggleTheme"
           >
-            <SunIcon v-if="themeStore.isDark" class="w-3.5 h-3.5 text-amber-400" />
-            <MoonIcon v-else class="w-3.5 h-3.5 text-sky-400" />
+            <SunIcon v-if="themeStore.isDark" class="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+            <MoonIcon v-else class="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />
           </button>
           <button
             type="button"
             class="min-h-[44px] min-w-[44px] lg:min-h-[36px] lg:min-w-[36px] px-2 py-1 rounded bg-botex-950 border border-botex-700 text-xs font-mono font-semibold text-slate-200 hover:border-sky-500/50 transition uppercase"
             title="Switch interface language (EN / PL)"
+            aria-label="Switch interface language (EN / PL)"
             @click="toggleLang"
           >
             {{ lang }}
@@ -48,17 +64,22 @@
             class="w-2.5 h-2.5 rounded-full"
             :class="authStore.isServerHealthy ? 'bg-emerald-400' : 'bg-rose-500 animate-pulse'"
             :title="authStore.isServerHealthy ? t('app.online') : t('app.offline')"
-          ></div>
+            role="status"
+          >
+            <span class="sr-only">{{ authStore.isServerHealthy ? t('app.online') : t('app.offline') }}</span>
+          </div>
         </div>
       </div>
 
       <!-- Navigation Links -->
-      <nav class="flex-1 px-2.5 py-3 space-y-1 overflow-y-auto">
+      <nav class="flex-1 px-2.5 py-3 space-y-1 overflow-y-auto" aria-label="Primary">
         <button
           v-for="item in navItems"
           :key="item.id"
           type="button"
           :title="t(item.labelKey)"
+          :aria-label="navAriaLabel(item)"
+          :aria-current="currentView === item.id ? 'page' : undefined"
           :class="[
             'w-full min-h-[44px] flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors',
             currentView === item.id
@@ -72,6 +93,7 @@
               :is="item.icon"
               class="w-4 h-4 shrink-0"
               :class="currentView === item.id ? 'text-sky-400' : 'text-slate-300'"
+              aria-hidden="true"
             />
             <span v-if="!sidebarCollapsed" class="truncate">{{ t(item.labelKey) }}</span>
           </div>
@@ -80,6 +102,7 @@
           <span
             v-if="!sidebarCollapsed && item.id === 'approvals' && approvalsCount > 0"
             class="px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-950 text-amber-300 border border-amber-500/40"
+            aria-hidden="true"
           >
             {{ approvalsCount }}
           </span>
@@ -88,6 +111,7 @@
             v-if="!sidebarCollapsed && item.id === 'wallet' && isBudgetLow"
             class="px-1.5 py-0.5 rounded text-xs font-mono font-bold bg-rose-950 text-rose-300 border border-rose-500/40"
             :title="t('app.budget.low')"
+            aria-hidden="true"
           >
             !$
           </span>
@@ -96,13 +120,14 @@
 
       <!-- Sidebar Footer -->
       <div v-if="!sidebarCollapsed" class="p-3 border-t border-botex-800 bg-botex-950/70 text-xs">
-        <div
+        <button
           v-if="isBudgetLow"
-          class="mb-2 px-2 py-1 rounded bg-rose-950/90 border border-rose-500/40 text-rose-200 text-xs font-mono flex items-center justify-between cursor-pointer"
+          type="button"
+          class="mb-2 w-full px-2 py-1 rounded bg-rose-950/90 border border-rose-500/40 text-rose-200 text-xs font-mono flex items-center justify-between text-left hover:bg-rose-900/70 transition"
           @click="currentView = 'wallet'"
         >
           <span class="truncate">{{ t('app.budget.low') }}</span>
-        </div>
+        </button>
         <div class="flex items-center justify-between text-xs text-slate-300 font-mono mb-1">
           <span class="truncate max-w-[140px]">{{ backendHost }}</span>
           <span :class="wsColorClass">{{ wsStatus }}</span>
@@ -110,12 +135,12 @@
         <div class="flex items-center justify-between text-xs text-slate-300 font-mono">
           <button
             type="button"
-            class="hover:text-sky-300 transition cursor-pointer flex items-center space-x-1 select-none"
+            class="min-h-[36px] hover:text-sky-300 transition cursor-pointer flex items-center space-x-1 select-none"
             :title="lang === 'pl' ? 'Wersja PWA (kliknij aby sprawdzić aktualizacje)' : 'PWA Version (click to check for updates)'"
             @click="checkForAppUpdate"
           >
             <span class="font-bold">{{ appVersion }}</span>
-            <span v-if="updateStatusMessage" class="text-[10px] text-amber-300 font-sans">({{ updateStatusMessage }})</span>
+            <span v-if="updateStatusMessage" role="status" class="text-[10px] text-amber-300 font-sans">({{ updateStatusMessage }})</span>
           </button>
           <span v-if="authStore.accessToken" class="text-sky-300">{{ t('app.auth.bearer') }}</span>
           <span v-else class="text-slate-300">{{ t('app.auth.local') }}</span>
@@ -124,15 +149,20 @@
     </aside>
 
     <!-- Main Content Area -->
-    <main class="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden">
+    <main id="main-content" tabindex="-1" class="flex-1 flex flex-col min-w-0 h-full relative overflow-hidden focus:outline-none">
       <!-- Mobile Top Bar (Strict RWD & Safe Bounds) -->
       <header class="md:hidden px-2.5 sm:px-3.5 py-2 bg-botex-900 border-b border-botex-800 flex items-center justify-between gap-1.5 shrink-0 w-full max-w-full overflow-hidden">
-        <div class="flex items-center space-x-2 cursor-pointer select-none min-w-0 shrink" @click="currentView = 'chat'" title="Go to Chat">
+        <button
+          type="button"
+          class="flex items-center space-x-2 select-none min-w-0 shrink rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          title="Go to Chat"
+          @click="currentView = 'chat'"
+        >
           <div class="w-7 h-7 shrink-0 rounded-lg bg-botex-950 border border-botex-700 hover:border-sky-500/50 flex items-center justify-center text-sky-400 font-bold font-mono text-xs transition">
             BX
           </div>
           <span class="text-base font-bold text-slate-100 hover:text-sky-300 transition truncate">BoteX Control</span>
-        </div>
+        </button>
 
         <div class="flex items-center space-x-1 shrink-0">
           <button
@@ -148,16 +178,18 @@
             type="button"
             class="min-h-[44px] min-w-[44px] p-1.5 rounded bg-botex-950 border border-botex-700 text-slate-200 flex items-center justify-center transition hover:border-slate-500"
             :title="themeStore.isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
+            :aria-label="themeStore.isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'"
             :aria-pressed="themeStore.isDark"
             @click="toggleTheme"
           >
-            <SunIcon v-if="themeStore.isDark" class="w-4 h-4 text-amber-400" />
-            <MoonIcon v-else class="w-4 h-4 text-sky-400" />
+            <SunIcon v-if="themeStore.isDark" class="w-4 h-4 text-amber-400" aria-hidden="true" />
+            <MoonIcon v-else class="w-4 h-4 text-sky-400" aria-hidden="true" />
           </button>
           <button
             type="button"
             class="min-h-[44px] min-w-[44px] px-2 py-1 rounded bg-botex-950 border border-botex-700 text-xs font-mono font-semibold text-slate-200 uppercase transition hover:border-slate-500 flex items-center justify-center"
             title="Switch Language"
+            aria-label="Switch interface language (EN / PL)"
             @click="toggleLang"
           >
             {{ lang }}
@@ -167,16 +199,20 @@
             type="button"
             class="min-h-[44px] px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-950 text-amber-300 border border-amber-500/40 flex items-center space-x-1"
             title="Pending Approvals"
+            :aria-label="`${t('nav.approvals')} (${approvalsCount})`"
             @click="currentView = 'approvals'"
           >
-            <ShieldAlertIcon class="w-3.5 h-3.5 text-amber-400" />
-            <span>{{ approvalsCount }}</span>
+            <ShieldAlertIcon class="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+            <span aria-hidden="true">{{ approvalsCount }}</span>
           </button>
           <div
             class="w-2.5 h-2.5 rounded-full shrink-0 ml-0.5"
             :class="authStore.isServerHealthy ? 'bg-emerald-400' : 'bg-rose-500 animate-pulse'"
             :title="authStore.isServerHealthy ? t('app.online') : t('app.offline')"
-          ></div>
+            role="status"
+          >
+            <span class="sr-only">{{ authStore.isServerHealthy ? t('app.online') : t('app.offline') }}</span>
+          </div>
         </div>
       </header>
 
@@ -186,7 +222,7 @@
         role="alert"
         class="bg-amber-950/90 border-b border-amber-500/40 text-amber-200 text-xs px-4 py-1.5 text-center flex items-center justify-center space-x-2 shrink-0"
       >
-        <AlertTriangleIcon class="w-3.5 h-3.5 text-amber-400 shrink-0" />
+        <AlertTriangleIcon class="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
         <span class="truncate">
           {{ !authStore.isOnline ? t('app.offline.banner') : t('app.unreachable.banner') + authStore.backendUrl }}
         </span>
@@ -199,7 +235,7 @@
         class="bg-rose-950/90 border-b border-rose-500/40 text-rose-200 text-xs px-4 py-1.5 flex items-center justify-between shrink-0"
       >
         <div class="flex items-center space-x-2 truncate">
-          <AlertTriangleIcon class="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          <AlertTriangleIcon class="w-3.5 h-3.5 text-rose-400 shrink-0" aria-hidden="true" />
           <span class="truncate">{{ t('app.auth.banner') }}</span>
         </div>
         <button
@@ -218,7 +254,7 @@
         class="bg-rose-950/90 border-b border-rose-500/40 text-rose-200 text-xs px-4 py-1.5 flex items-center justify-between shrink-0"
       >
         <div class="flex items-center space-x-2 truncate">
-          <AlertTriangleIcon class="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          <AlertTriangleIcon class="w-3.5 h-3.5 text-rose-400 shrink-0" aria-hidden="true" />
           <span class="truncate">
             {{ lang === 'pl' ? 'Niski stan portfela OpenRouter' : 'Low OpenRouter Balance' }}:
             <strong class="font-mono text-white">${{ (walletStore.walletInfo?.balance_usd ?? walletStore.keyStatus?.balance_usd ?? 0).toFixed(2) }}</strong>
@@ -262,11 +298,13 @@
       </div>
 
       <!-- Mobile Bottom Navigation Bar (Safe Bounds & Equal Columns) -->
-      <nav class="md:hidden bg-botex-900 border-t border-botex-800 grid grid-cols-6 w-full max-w-full overflow-hidden py-1 px-0.5 pb-safe shrink-0 z-30 select-none">
+      <nav class="md:hidden bg-botex-900 border-t border-botex-800 grid grid-cols-6 w-full max-w-full overflow-hidden py-1 px-0.5 pb-safe shrink-0 z-30 select-none" aria-label="Primary">
         <button
           v-for="item in navItems"
           :key="item.id"
           type="button"
+          :aria-label="navAriaLabel(item)"
+          :aria-current="currentView === item.id ? 'page' : undefined"
           :class="[
             'min-h-[48px] w-full min-w-0 overflow-hidden flex flex-col items-center justify-center py-1 px-0 rounded-lg text-xs font-medium transition relative',
             currentView === item.id ? 'text-sky-300 bg-botex-800/80 shadow-sm' : 'text-slate-300 hover:text-white'
@@ -274,15 +312,16 @@
           @click="currentView = item.id"
         >
           <div class="relative shrink-0 flex items-center justify-center">
-            <component :is="item.icon" class="w-4 h-4 shrink-0" />
+            <component :is="item.icon" class="w-4 h-4 shrink-0" aria-hidden="true" />
             <span
               v-if="item.id === 'approvals' && approvalsCount > 0"
               class="absolute -top-1 -right-1.5 w-3.5 h-3.5 bg-amber-500 text-botex-950 text-[8px] font-mono font-bold rounded-full flex items-center justify-center"
+              aria-hidden="true"
             >
               {{ approvalsCount }}
             </span>
           </div>
-          <span class="mt-0.5 truncate w-full text-center text-xs tracking-[-0.07em] leading-none">{{ t(item.shortKey) }}</span>
+          <span class="mt-0.5 truncate w-full text-center text-xs tracking-tight leading-none">{{ t(item.shortKey) }}</span>
         </button>
       </nav>
     </main>
@@ -378,6 +417,13 @@ async function checkForAppUpdate() {
       updateStatusMessage.value = ''
     }, 2500)
   }
+}
+
+function navAriaLabel(item: (typeof navItems)[number]): string {
+  let label = t(item.labelKey)
+  if (item.id === 'approvals' && approvalsCount.value > 0) label += ` (${approvalsCount.value})`
+  else if (item.id === 'wallet' && isBudgetLow.value) label += ` — ${t('app.budget.low')}`
+  return label
 }
 
 const wsColorClass = computed(() => {

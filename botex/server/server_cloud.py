@@ -28,7 +28,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -104,6 +104,7 @@ from botex.memory import (
     delete_memory,
     find_graph_health,
     get_backlinks,
+    list_memories,
     list_memory_projects,
     read_memory,
     save_memory,
@@ -2694,6 +2695,124 @@ async def trigger_curator_run_endpoint(
         notify_telegram=body.notify_telegram,
         max_batches=1,
     )
+    return botex_server.mask_secrets_recursive(res)
+
+
+# ---------------------------------------------------------------------------
+# Self-Improvement Loop Telemetry (Layers A-C)
+# ---------------------------------------------------------------------------
+
+
+def _collect_learning_status_sync(ws: str) -> Dict[str, Any]:
+    """Gather deterministic learning-loop telemetry for the resolved workspace."""
+    from botex.curator import get_curator_status
+
+    lessons_by_id: Dict[str, Dict[str, Any]] = {}
+    for scope in ("local", "global"):
+        res = list_memories(workspace_dir=ws, scope=scope, kind="lesson", status="all")
+        for item in res.get("memories") or []:
+            mid = str(item.get("id") or "")
+            if mid and mid not in lessons_by_id:
+                lessons_by_id[mid] = item
+
+    counts = {"candidate": 0, "active": 0, "deprecated": 0, "superseded": 0}
+    confidences: List[float] = []
+    for item in lessons_by_id.values():
+        status_key = str(item.get("status") or "").lower()
+        if status_key in counts:
+            counts[status_key] += 1
+        conf_val = item.get("confidence")
+        if isinstance(conf_val, (int, float)) and not isinstance(conf_val, bool):
+            confidences.append(float(conf_val))
+    counts["total"] = len(lessons_by_id)
+    avg_confidence = round(sum(confidences) / len(confidences), 3) if confidences else None
+
+    recent = sorted(
+        lessons_by_id.values(),
+        key=lambda it: (str(it.get("timestamp") or ""), str(it.get("id") or "")),
+        reverse=True,
+    )[:20]
+    lesson_items = [
+        {
+            "memory_id": item.get("id"),
+            "title": item.get("title"),
+            "status": item.get("status"),
+            "confidence": item.get("confidence"),
+            "tags": item.get("tags") or [],
+            "scope": item.get("scope"),
+            "updated_at": item.get("timestamp") or "",
+        }
+        for item in recent
+    ]
+
+    proposals: List[Dict[str, Any]] = []
+    proposals_root = Path(ws).resolve() / ".botex" / "proposals"
+    if proposals_root.is_dir():
+        seen_names: set = set()
+        for sub in sorted(proposals_root.rglob("*")):
+            if not sub.is_dir() or sub.name in seen_names:
+                continue
+            files = sorted(f.name for f in sub.iterdir() if f.is_file())
+            if not files:
+                continue
+            seen_names.add(sub.name)
+            latest_mtime = max(f.stat().st_mtime for f in sub.iterdir() if f.is_file())
+            proposals.append(
+                {
+                    "name": sub.name,
+                    "files": files,
+                    "updated_at": datetime.fromtimestamp(latest_mtime, tz=timezone.utc).isoformat(),
+                }
+            )
+
+    records = load_analytics()
+    shadow_counter: Counter = Counter()
+    for rec in records:
+        model = rec.get("shadow_recommended_model")
+        if model:
+            shadow_counter[
+                (
+                    str(rec.get("recipe") or ""),
+                    str(rec.get("taxonomy") or ""),
+                    str(model),
+                )
+            ] += 1
+    shadow_recommendations = [
+        {"recipe": recipe, "taxonomy": taxonomy, "model": model, "count": cnt}
+        for (recipe, taxonomy, model), cnt in shadow_counter.most_common(10)
+    ]
+
+    curator_res = get_curator_status(workspace_dir=ws)
+
+    return {
+        "ok": True,
+        "lessons": {
+            "counts": counts,
+            "avg_confidence": avg_confidence,
+            "items": lesson_items,
+        },
+        "proposals": proposals,
+        "ledger": {
+            "runs_total": len(records),
+            "runs_with_applied_lessons": sum(1 for r in records if r.get("applied_lessons")),
+            "runs_with_applied_skills": sum(1 for r in records if r.get("applied_skills")),
+            "runs_with_shadow_advice": sum(1 for r in records if r.get("shadow_recommended_model")),
+            "shadow_recommendations": shadow_recommendations,
+        },
+        "curator": {
+            "is_healthy": curator_res.get("is_healthy"),
+            "last_run_timestamp": curator_res.get("last_run_timestamp"),
+        },
+    }
+
+
+@app.get("/api/learning/status")
+async def get_learning_status_endpoint(
+    workspace_dir: str = Query(default="."),
+) -> Dict[str, Any]:
+    """Expose real self-improvement loop telemetry: lessons, proposals, ledger, curator."""
+    ws = resolve_workspace(workspace_dir)
+    res = await asyncio.to_thread(_collect_learning_status_sync, ws)
     return botex_server.mask_secrets_recursive(res)
 
 

@@ -3,7 +3,7 @@
     <!-- Header -->
     <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
       <div class="flex items-center space-x-2.5">
-        <div :class="['p-2 rounded-lg', riskIconBg]">
+        <div :class="['p-2 rounded-lg', riskIconBg]" aria-hidden="true">
           <ShieldAlertIcon v-if="isHighRisk" class="w-4 h-4 text-rose-300" />
           <AlertTriangleIcon v-else-if="isMutation" class="w-4 h-4 text-amber-300" />
           <ShieldCheckIcon v-else class="w-4 h-4 text-emerald-300" />
@@ -55,10 +55,11 @@
     <div class="space-y-3 pt-2 border-t border-botex-800">
       <!-- Optional Rejection Reason -->
       <div v-if="showRejectInput" class="animate-fadeIn">
-        <label class="block text-xs font-medium text-slate-200 mb-1">
+        <label :for="`reject-reason-${action.action_id}`" class="block text-xs font-medium text-slate-200 mb-1">
           {{ locale === 'pl' ? 'Powód odrzucenia (wskazówka dla modelu):' : 'Rejection reason (model feedback):' }}
         </label>
         <input
+          :id="`reject-reason-${action.action_id}`"
           v-model="rejectionReason"
           type="text"
           :placeholder="locale === 'pl' ? 'np. Nie zmieniaj testów, popraw logikę biznesową' : 'e.g. Do not modify tests, fix the logic instead'"
@@ -87,7 +88,7 @@
             class="min-h-[44px] lg:min-h-[36px] px-3.5 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 border border-rose-700/60 text-xs font-medium transition active:scale-95 flex items-center space-x-1"
             @click="showRejectInput = true"
           >
-            <XCircleIcon class="w-3.5 h-3.5" />
+            <XCircleIcon class="w-3.5 h-3.5" aria-hidden="true" />
             <span>{{ t('rejectAction') }}</span>
           </button>
           <button
@@ -97,7 +98,7 @@
             class="min-h-[44px] lg:min-h-[36px] px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition active:scale-95 flex items-center space-x-1"
             @click="handleDecision(false)"
           >
-            <XCircleIcon class="w-3.5 h-3.5" />
+            <XCircleIcon class="w-3.5 h-3.5" aria-hidden="true" />
             <span>{{ t('confirmReject') }}</span>
           </button>
 
@@ -108,7 +109,7 @@
             class="min-h-[44px] lg:min-h-[36px] px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition active:scale-95 flex items-center space-x-1.5"
             @click="handleDecision(true)"
           >
-            <CheckCircleIcon class="w-3.5 h-3.5" />
+            <CheckCircleIcon class="w-3.5 h-3.5" aria-hidden="true" />
             <span>{{ t('approveAction') }}</span>
           </button>
         </div>

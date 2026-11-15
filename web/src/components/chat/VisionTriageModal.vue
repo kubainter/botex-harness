@@ -14,14 +14,18 @@
       <!-- Error Banner -->
       <div
         v-if="errorMsg"
+        role="alert"
         class="p-3 rounded-lg bg-rose-950/60 border border-rose-500/40 text-rose-200 flex items-center space-x-2"
       >
-        <AlertCircleIcon class="w-4 h-4 text-rose-400 shrink-0" />
+        <AlertCircleIcon class="w-4 h-4 text-rose-400 shrink-0" aria-hidden="true" />
         <span class="break-words">{{ errorMsg }}</span>
       </div>
 
       <!-- Dropzone / Image Picker -->
       <div
+        role="button"
+        tabindex="0"
+        :aria-label="locale === 'pl' ? 'Wybierz lub upuść zrzut ekranu' : 'Choose or drop a screenshot'"
         class="border-2 border-dashed rounded-xl p-4 text-center transition-colors cursor-pointer"
         :class="
           isDragging
@@ -32,12 +36,16 @@
         @dragleave.prevent="isDragging = false"
         @drop.prevent="handleDrop"
         @click="triggerFileInput"
+        @keydown.enter.prevent="triggerFileInput"
+        @keydown.space.prevent="triggerFileInput"
       >
         <input
           ref="fileInputRef"
           type="file"
           accept="image/*"
           class="hidden"
+          tabindex="-1"
+          aria-hidden="true"
           @change="handleFileSelect"
         />
 
@@ -60,7 +68,7 @@
         </div>
 
         <div v-else class="py-4 space-y-1.5 text-slate-300">
-          <EyeIcon class="w-6 h-6 mx-auto text-cyan-400" />
+          <EyeIcon class="w-6 h-6 mx-auto text-cyan-400" aria-hidden="true" />
           <div class="font-medium text-slate-100">
             {{
               locale === 'pl'
@@ -77,10 +85,11 @@
       <!-- Prompt Hint & Baseline dHash -->
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <label class="block text-slate-200 font-medium mb-1.5 text-xs">
+          <label for="vt-hint" class="block text-slate-200 font-medium mb-1.5 text-xs">
             {{ locale === 'pl' ? 'Na co zwrócić uwagę' : 'What to look for' }}
           </label>
           <input
+            id="vt-hint"
             v-model="promptHint"
             type="text"
             :placeholder="
@@ -88,20 +97,21 @@
                 ? 'np. Sprawdź, czy modal zasłania pasek nawigacji'
                 : 'e.g. Check if the modal covers the navigation bar'
             "
-            class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500"
           />
         </div>
 
         <div>
-          <label class="block text-slate-200 font-medium mb-1.5 text-xs">
+          <label for="vt-refhash" class="block text-slate-200 font-medium mb-1.5 text-xs">
             {{ locale === 'pl' ? 'Poprzedni skrót dHash (opcjonalnie)' : 'Baseline dHash (optional)' }}
           </label>
           <div class="flex items-center space-x-1.5">
             <input
+              id="vt-refhash"
               v-model="referenceHashText"
               type="text"
               :placeholder="locale === 'pl' ? 'Brak (pełna analiza)' : 'None (full check)'"
-              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 tabular-nums"
+              class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-3 py-2 text-base sm:text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-sky-500 tabular-nums"
             />
             <button
               v-if="lastDhash !== null"

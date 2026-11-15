@@ -1,4 +1,4 @@
-// Mirrors the status taxonomy in botex/contracts.py (STATUS_FAILURE_KIND).
+// Mirrors the backend task-status / failure-kind taxonomy.
 const LIMIT_STATUSES = new Set([
   'MAX_TURNS_REACHED', 'TOKEN_LIMIT', 'TIME_LIMIT', 'BUDGET_EXCEEDED', 'PRICE_EXCEEDED',
   'INCOMPLETE', 'STAGNANT_ROLLBACK', 'BLOCKED', 'UNSUPPORTED'

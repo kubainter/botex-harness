@@ -35,10 +35,11 @@
                 <button
                   type="button"
                   title="Refresh catalog"
+                  aria-label="Refresh catalog"
                   class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
                   @click="onRefresh"
                 >
-                  <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': isLoading }" />
+                  <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': isLoading }" aria-hidden="true" />
                 </button>
                 <button
                   type="button"
@@ -46,7 +47,7 @@
                   class="min-w-[44px] min-h-[44px] lg:min-w-[36px] lg:min-h-[36px] px-2.5 rounded-lg bg-botex-950 hover:bg-botex-800 border border-botex-700 text-slate-300 hover:text-white transition flex items-center justify-center"
                   @click="close"
                 >
-                  <XIcon class="w-4 h-4" />
+                  <XIcon class="w-4 h-4" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -55,12 +56,13 @@
             <template v-if="availableModels.length > 0">
               <!-- Search Input -->
               <div class="relative">
-                <SearchIcon class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <SearchIcon class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" aria-hidden="true" />
                 <input
                   ref="searchInputRef"
                   v-model="searchQuery"
                   type="text"
                   :placeholder="t('models.search.placeholder')"
+                  :aria-label="t('models.search.placeholder')"
                   class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg pl-10 pr-20 py-2 text-base sm:text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-sans"
                 />
                 <button
@@ -101,8 +103,8 @@
                 >
                   <span>{{ pTab.label }}</span>
                   <span
-                    class="text-xs font-mono px-1 py-px rounded"
-                    :class="activeProvider === pTab.id ? 'bg-emerald-500/20 text-emerald-200' : 'bg-botex-900 text-slate-500'"
+                    class="text-xs font-mono tabular-nums px-1 py-px rounded"
+                    :class="activeProvider === pTab.id ? 'bg-emerald-500/20 text-emerald-200' : 'bg-botex-900 text-slate-400'"
                   >
                     {{ pTab.count }}
                   </span>
@@ -131,7 +133,7 @@
                 >
                   <span>{{ tab.label }}</span>
                   <span
-                    class="text-xs font-mono px-1.5 py-px rounded"
+                    class="text-xs font-mono tabular-nums px-1.5 py-px rounded"
                     :class="activeCategory === tab.id ? 'bg-sky-500/20 text-sky-200' : 'bg-botex-900 text-slate-400'"
                   >
                     {{ tab.count }}
@@ -146,12 +148,12 @@
             v-if="catalogStale"
             class="mx-3.5 sm:mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-950/60 border border-amber-500/40 flex items-center gap-2 text-xs text-amber-200"
           >
-            <AlertTriangleIcon class="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <AlertTriangleIcon class="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
             <span class="flex-1">{{ t('models.stale') }}</span>
           </div>
 
           <!-- Skeleton Loader when refreshing empty list -->
-          <div v-if="isLoading && models.length === 0" class="p-4 space-y-2.5 overflow-y-auto flex-1">
+          <div v-if="isLoading && models.length === 0" class="p-4 space-y-2.5 overflow-y-auto flex-1" aria-hidden="true">
             <div
               v-for="n in 5"
               :key="n"
@@ -171,7 +173,7 @@
             class="flex-1 p-8 sm:p-12 text-center flex flex-col items-center justify-center space-y-4 my-auto bg-botex-950/60"
           >
             <div class="w-12 h-12 rounded-full bg-botex-900 border border-botex-700 flex items-center justify-center text-slate-300">
-              <LockIcon class="w-6 h-6 text-slate-400" />
+              <LockIcon class="w-6 h-6 text-slate-400" aria-hidden="true" />
             </div>
             <div class="space-y-1.5 max-w-sm">
               <h4 class="text-sm font-semibold text-slate-100">
@@ -189,6 +191,7 @@
             ref="listContainerRef"
             class="flex-1 overflow-y-auto overscroll-contain divide-y divide-botex-800/70 bg-botex-950/60"
             role="listbox"
+            :aria-activedescendant="visibleModels.length > 0 ? `model-opt-${highlightedIndex}` : undefined"
           >
             <div
               v-if="filteredModels.length === 0"
@@ -207,6 +210,7 @@
             <div
               v-for="(item, idx) in visibleModels"
               :key="`${item.provider}:${item.id}`"
+              :id="`model-opt-${idx}`"
               :ref="(el) => setItemRef(el, idx)"
               role="option"
               tabindex="-1"
@@ -231,6 +235,7 @@
                   <CheckIcon
                     v-if="isSelected(item)"
                     class="w-4 h-4 text-emerald-400 shrink-0"
+                    aria-hidden="true"
                   />
                 </div>
                 <div class="font-mono text-xs text-slate-400 truncate mt-0.5">
@@ -253,20 +258,20 @@
                 <!-- Cost Badge -->
                 <span
                   v-if="item.is_free"
-                  class="px-2 py-0.5 rounded text-xs font-mono font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40"
+                  class="px-2 py-0.5 rounded text-xs font-mono tabular-nums font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40"
                 >
                   FREE (0.00$)
                 </span>
                 <span
                   v-else
-                  class="px-2 py-0.5 rounded text-xs font-mono font-medium bg-botex-900 text-slate-200 border border-botex-700"
+                  class="px-2 py-0.5 rounded text-xs font-mono tabular-nums font-medium bg-botex-900 text-slate-200 border border-botex-700"
                 >
                   {{ formatPriceLabel(item) }}
                 </span>
 
                 <!-- Context Window Pill -->
                 <span
-                  class="px-2 py-0.5 rounded text-xs font-mono text-slate-300 bg-botex-900 border border-botex-800"
+                  class="px-2 py-0.5 rounded text-xs font-mono tabular-nums text-slate-300 bg-botex-900 border border-botex-800"
                   title="Maximum context window"
                 >
                   {{ formatContextWindow(item.context_length) }}
@@ -276,15 +281,16 @@
                 <button
                   type="button"
                   :class="[
-                    'p-1 rounded transition shrink-0',
+                    'min-h-[36px] min-w-[36px] p-1.5 rounded transition shrink-0 flex items-center justify-center',
                     infoOpenKey === modelKey(item)
                       ? 'text-cyan-300 bg-cyan-500/15'
                       : 'text-slate-400 hover:text-cyan-300 hover:bg-botex-800'
                   ]"
                   :aria-label="t('models.info_title')"
+                  :aria-expanded="infoOpenKey === modelKey(item)"
                   @click.stop.prevent="toggleInfo(item, $event)"
                 >
-                  <InfoIcon class="w-3.5 h-3.5" />
+                  <InfoIcon class="w-3.5 h-3.5" aria-hidden="true" />
                 </button>
               </div>
 
@@ -300,51 +306,51 @@
               >
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-xs font-semibold text-slate-100 truncate">{{ item.name }}</span>
-                  <span class="text-[10px] font-mono text-slate-400 shrink-0">{{ formatProviderLabel(item.provider) }}</span>
+                  <span class="text-[11px] font-mono text-slate-400 shrink-0">{{ formatProviderLabel(item.provider) }}</span>
                 </div>
                 <div class="flex flex-wrap gap-1">
                   <span
                     v-for="mod in inferModality(item)"
                     :key="mod"
                     :title="t('models.info_inferred')"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-violet-500/15 text-violet-300 border border-violet-500/30 uppercase"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-violet-500/15 text-violet-300 border border-violet-500/30 uppercase"
                   >~{{ mod }}</span>
                   <span
                     v-if="item.supports_tools"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-sky-500/15 text-sky-300 border border-sky-500/30"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-sky-500/15 text-sky-300 border border-sky-500/30"
                   >TOOLS</span>
                   <span
                     v-if="isReasoningModel(item)"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30"
                   >REASONING</span>
                   <span
                     v-if="item.is_zdr_compliant"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
                   >ZDR</span>
                   <span
                     v-if="item.is_free"
-                    class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                    class="px-1.5 py-0.5 rounded text-[11px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
                   >FREE</span>
                 </div>
                 <div v-if="recommendedFor(item).length" class="text-[11px] text-slate-300">
-                  <span class="text-slate-500">{{ t('models.info_recommended') }}:</span>
+                  <span class="text-slate-400">{{ t('models.info_recommended') }}:</span>
                   {{ recommendedFor(item).join(', ') }}
                 </div>
-                <div class="grid grid-cols-3 gap-1.5 text-center text-[10px] font-mono">
+                <div class="grid grid-cols-3 gap-1.5 text-center text-[11px] font-mono tabular-nums">
                   <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
-                    <div class="text-slate-500 uppercase">Ctx</div>
+                    <div class="text-slate-400 uppercase">Ctx</div>
                     <div class="text-slate-200 font-semibold">{{ formatContextWindow(item.context_length) }}</div>
                   </div>
                   <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
-                    <div class="text-slate-500 uppercase">In/1M</div>
+                    <div class="text-slate-400 uppercase">In/1M</div>
                     <div class="text-slate-200 font-semibold">{{ item.is_free ? '$0' : '$' + (item.pricing?.prompt_per_m ?? 0).toFixed(2) }}</div>
                   </div>
                   <div class="bg-botex-900 rounded p-1.5 border border-botex-800">
-                    <div class="text-slate-500 uppercase">Out/1M</div>
+                    <div class="text-slate-400 uppercase">Out/1M</div>
                     <div class="text-slate-200 font-semibold">{{ item.is_free ? '$0' : '$' + (item.pricing?.completion_per_m ?? 0).toFixed(2) }}</div>
                   </div>
                 </div>
-                <div class="text-[10px] font-mono text-slate-500 break-all">{{ item.id }}</div>
+                <div class="text-[11px] font-mono text-slate-400 break-all">{{ item.id }}</div>
               </div>
             </div>
           </div>
@@ -595,14 +601,20 @@ const visibleModels = computed<CatalogModel[]>(() => {
   return filteredModels.value.slice(0, 150)
 })
 
+let restoreFocusEl: HTMLElement | null = null
+
 watch(
   () => props.isOpen,
   async (open) => {
     if (open) {
+      restoreFocusEl = (document.activeElement as HTMLElement | null) ?? null
       highlightedIndex.value = 0
       infoOpenKey.value = null
       await nextTick()
       searchInputRef.value?.focus()
+    } else if (restoreFocusEl) {
+      restoreFocusEl.focus()
+      restoreFocusEl = null
     }
   }
 )
@@ -653,7 +665,12 @@ function scrollHighlightedIntoView() {
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     e.preventDefault()
-    close()
+    // Dismiss the open info popover first; only a second Escape closes the modal.
+    if (infoOpenKey.value) {
+      infoOpenKey.value = null
+    } else {
+      close()
+    }
     return
   }
   const len = visibleModels.value.length

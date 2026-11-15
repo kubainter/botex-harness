@@ -25,6 +25,7 @@ import type {
   SkillInstallRequest,
   CuratorStatus,
   CuratorRunRequest,
+  LearningStatusResponse,
   PluginsCatalogResponse,
   PluginResolveRequest,
   PluginResolveResponse,
@@ -504,6 +505,13 @@ export const api = {
     if (workspaceDir && workspaceDir !== '.') q.set('workspace_dir', workspaceDir)
     const qs = q.toString()
     return request<CuratorStatus>(`/api/curator/status${qs ? '?' + qs : ''}`)
+  },
+
+  async getLearningStatus(workspaceDir: string = '.'): Promise<LearningStatusResponse> {
+    const q = new URLSearchParams()
+    if (workspaceDir && workspaceDir !== '.') q.set('workspace_dir', workspaceDir)
+    const qs = q.toString()
+    return request<LearningStatusResponse>(`/api/learning/status${qs ? '?' + qs : ''}`)
   },
 
   async runCurator(body: CuratorRunRequest = {}): Promise<any> {

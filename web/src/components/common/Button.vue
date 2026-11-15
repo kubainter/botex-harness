@@ -2,6 +2,7 @@
   <button
     :type="type"
     :disabled="disabled || loading"
+    :aria-busy="loading || undefined"
     :class="[
       'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-botex-900 active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none disabled:active:scale-100',
       sizeClasses,
@@ -13,6 +14,7 @@
     <svg
       v-if="loading"
       class="animate-spin -ml-1 mr-2 h-4 w-4 text-current"
+      aria-hidden="true"
       xmlns="http://www.w3.org/2000/svg"
       fill="none"
       viewBox="0 0 24 24"
@@ -72,7 +74,7 @@ const variantClasses = computed(() => {
     case 'amber':
       return 'bg-amber-600 hover:bg-amber-500 text-white shadow-sm focus:ring-amber-500'
     case 'ghost':
-      return 'bg-transparent hover:bg-slate-800 text-slate-300 hover:text-white focus:ring-slate-500'
+      return 'bg-transparent hover:bg-botex-800 text-slate-300 hover:text-white focus:ring-botex-500'
     default:
       return 'bg-brand-blue hover:bg-blue-600 text-white shadow-sm focus:ring-blue-500'
   }

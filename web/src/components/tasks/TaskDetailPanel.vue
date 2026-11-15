@@ -1,7 +1,7 @@
 <template>
   <div class="space-y-4">
-    <div v-if="task.status === 'RUNNING' || task.status === 'QUEUED'" class="p-3 rounded-lg bg-cyan-950/40 border border-cyan-800/50 flex items-center space-x-3">
-      <Loader2Icon class="w-4 h-4 text-cyan-400 animate-spin" />
+    <div v-if="task.status === 'RUNNING' || task.status === 'QUEUED'" role="status" class="p-3 rounded-lg bg-cyan-950/40 border border-cyan-800/50 flex items-center space-x-3">
+      <Loader2Icon class="w-4 h-4 text-cyan-400 animate-spin" aria-hidden="true" />
       <span class="text-xs text-cyan-200">
         {{ locale === 'pl' ? 'Zadanie działa w tle...' : 'Task running in background harness...' }}
       </span>
@@ -9,20 +9,20 @@
 
     <!-- Live progress strip -->
     <div v-if="task.progress" class="grid grid-cols-3 gap-2 text-center">
-      <div class="p-2 rounded-lg bg-botex-950 border border-botex-800">
-        <div class="text-xs text-slate-400 font-mono uppercase">{{ t('progressTurn') }}</div>
+      <div class="p-2 rounded-lg bg-botex-950 border border-botex-800 min-w-0">
+        <div class="text-xs text-slate-400 font-mono uppercase truncate">{{ t('progressTurn') }}</div>
         <div class="text-sm font-bold text-slate-100 font-mono">
           {{ task.progress.turn ?? '—' }}<span v-if="task.progress.max_turns" class="text-slate-400">/{{ task.progress.max_turns }}</span>
         </div>
       </div>
-      <div class="p-2 rounded-lg bg-botex-950 border border-botex-800">
-        <div class="text-xs text-slate-400 font-mono uppercase">{{ t('progressCost') }}</div>
+      <div class="p-2 rounded-lg bg-botex-950 border border-botex-800 min-w-0">
+        <div class="text-xs text-slate-400 font-mono uppercase truncate">{{ t('progressCost') }}</div>
         <div class="text-sm font-bold text-slate-100 font-mono">
           ${{ (task.progress.cost_usd ?? 0).toFixed(4) }}
         </div>
       </div>
-      <div class="p-2 rounded-lg border" :class="task.progress.waiting_for ? 'bg-amber-950/40 border-amber-700/50' : 'bg-botex-950 border-botex-800'">
-        <div class="text-xs text-slate-400 font-mono uppercase">{{ locale === 'pl' ? 'Stan' : 'State' }}</div>
+      <div class="p-2 rounded-lg border min-w-0" :class="task.progress.waiting_for ? 'bg-amber-950/40 border-amber-700/50' : 'bg-botex-950 border-botex-800'">
+        <div class="text-xs text-slate-400 font-mono uppercase truncate">{{ locale === 'pl' ? 'Stan' : 'State' }}</div>
         <div class="text-xs font-semibold truncate" :class="task.progress.waiting_for ? 'text-amber-300' : 'text-slate-300'">
           {{ waitingLabel }}
         </div>
@@ -31,16 +31,16 @@
 
     <!-- Live events feed -->
     <div v-if="task.status === 'RUNNING' || task.status === 'QUEUED' || events.length" class="space-y-1.5">
-      <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
+      <span class="block text-xs font-semibold text-slate-200 uppercase font-mono">
         {{ t('taskEventsTitle') }}
-      </label>
+      </span>
       <div
         v-if="eventMeta.dropped > 0"
         class="px-2 py-1 rounded bg-amber-950/40 border border-amber-700/50 text-xs text-amber-300 font-mono"
       >
         {{ eventMeta.dropped }} {{ t('taskEventsDropped') }}
       </div>
-      <div class="rounded-lg bg-botex-950 border border-botex-800 max-h-64 overflow-y-auto font-mono text-xs divide-y divide-botex-800/60">
+      <div role="log" class="rounded-lg bg-botex-950 border border-botex-800 max-h-64 overflow-y-auto font-mono text-xs divide-y divide-botex-800/60">
         <div v-if="!events.length" class="p-3 text-slate-400">{{ t('taskEventsEmpty') }}</div>
         <div
           v-for="ev in visibleEvents"
@@ -56,9 +56,9 @@
 
     <!-- Structured Result -->
     <div v-if="task.result" class="space-y-1.5">
-      <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
+      <span class="block text-xs font-semibold text-slate-200 uppercase font-mono">
         {{ locale === 'pl' ? 'Wynik zadania' : 'Summary Result' }}
-      </label>
+      </span>
       <div class="p-3 rounded-lg bg-botex-950 border border-botex-800 text-xs text-slate-200 max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
         {{ task.result }}
       </div>
@@ -69,9 +69,8 @@
       v-if="synthesizedPlugins.length > 0 || stagedPluginsList.length > 0 || stepSnapshotsList.length > 0"
       class="p-3 rounded-lg bg-botex-950 border border-botex-800 space-y-2 text-xs"
     >
-      <div class="font-semibold text-slate-200 flex items-center justify-between">
+      <div class="font-semibold text-slate-200">
         <span>{{ locale === 'pl' ? 'Utworzone wtyczki i migawki kroków' : 'Created plugins and step snapshots' }}</span>
-        <code class="text-sky-400 text-[11px]">TwoTierLifoStack</code>
       </div>
       <div v-if="synthesizedPlugins.length > 0" class="flex flex-wrap items-center gap-1.5">
         <span class="text-slate-400">{{ locale === 'pl' ? 'Wtyczki z tego zadania:' : 'Task plugins:' }}</span>
@@ -107,9 +106,9 @@
 
     <!-- Result Data JSON -->
     <div v-if="task.result_data" class="space-y-1.5">
-      <label class="block text-xs font-semibold text-slate-200 uppercase font-mono">
+      <span class="block text-xs font-semibold text-slate-200 uppercase font-mono">
         {{ locale === 'pl' ? 'Weryfikacja kontraktu' : 'Contract Verification Data' }}
-      </label>
+      </span>
       <div class="p-3 rounded-lg bg-botex-950 border border-botex-800 font-mono text-xs text-slate-300 max-h-56 overflow-auto">
         <pre class="m-0">{{ JSON.stringify(task.result_data, null, 2) }}</pre>
       </div>

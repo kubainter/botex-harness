@@ -6,7 +6,7 @@
       :height="H"
       class="min-w-[320px] w-full h-auto select-none"
       role="img"
-      :aria-label="t('dailyTitle')"
+      :aria-label="chartSummary"
     >
       <!-- baseline -->
       <line :x1="padL" :y1="H - padB" :x2="W - padR" :y2="H - padB" class="stroke-botex-700" stroke-width="1" />
@@ -60,6 +60,13 @@ const padB = 22
 
 const points = computed(() => props.data || [])
 const maxCost = computed(() => Math.max(0, ...points.value.map((d) => d.cost_usd)))
+const chartSummary = computed(() => {
+  const n = points.value.length
+  if (!n) return `${t('dailyTitle')} — ${t('noStats')}`
+  const total = points.value.reduce((acc, d) => acc + d.cost_usd, 0)
+  const runs = points.value.reduce((acc, d) => acc + d.runs, 0)
+  return `${t('dailyTitle')}: ${n} days, total $${total.toFixed(4)}, max $${maxCost.value.toFixed(4)}, ${runs} ${t('colRuns').toLowerCase()}`
+})
 const plotH = computed(() => H - padT - padB)
 const slotW = computed(() => (W - padL - padR) / Math.max(points.value.length, 1))
 const barW = computed(() => Math.max(4, Math.min(28, slotW.value * 0.66)))

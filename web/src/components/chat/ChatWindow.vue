@@ -9,6 +9,7 @@
           <button
             type="button"
             :title="t('chat.mode.chat')"
+            :aria-pressed="activeMode === 'chat'"
             :class="[
               'min-h-[44px] lg:min-h-[36px] px-2.5 sm:px-3 py-1 rounded-md text-xs font-medium transition-colors flex items-center space-x-1.5 min-w-0',
               activeMode === 'chat'
@@ -17,12 +18,13 @@
             ]"
             @click="setMode('chat')"
           >
-            <TerminalIcon class="w-3.5 h-3.5 text-sky-400 shrink-0" />
+            <TerminalIcon class="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden="true" />
             <span class="truncate"><span class="sm:hidden">{{ t('chat.mode.chat.short') }}</span><span class="hidden sm:inline">{{ t('chat.mode.chat') }}</span></span>
           </button>
           <button
             type="button"
             :title="t('chat.mode.agent')"
+            :aria-pressed="activeMode === 'agent'"
             :class="[
               'min-h-[44px] lg:min-h-[36px] px-2.5 sm:px-3 py-1 rounded-md text-xs font-medium transition-colors flex items-center space-x-1.5 min-w-0',
               activeMode === 'agent'
@@ -31,7 +33,7 @@
             ]"
             @click="setMode('agent')"
           >
-            <CpuIcon class="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <CpuIcon class="w-3.5 h-3.5 text-emerald-400 shrink-0" aria-hidden="true" />
             <span class="truncate"><span class="sm:hidden">{{ t('chat.mode.agent.short') }}</span><span class="hidden sm:inline">{{ t('chat.mode.agent') }}</span></span>
           </button>
         </div>
@@ -41,21 +43,24 @@
           <button
             type="button"
             :title="t('chat.new_session')"
+            :aria-label="t('chat.new_session')"
             class="min-w-[44px] lg:min-w-[36px] min-h-[44px] lg:min-h-[36px] p-2 bg-botex-950 hover:bg-botex-800 border border-botex-700 rounded-lg text-slate-200 hover:text-white transition flex items-center justify-center"
             @click="chatStore.newSession"
           >
-            <PlusIcon class="w-4 h-4 text-sky-400" />
+            <PlusIcon class="w-4 h-4 text-sky-400" aria-hidden="true" />
           </button>
           <button
             type="button"
             :title="t('chat.history.button')"
+            :aria-label="t('chat.history.button') + (sessions.length > 0 ? ` (${sessions.length})` : '')"
             class="min-h-[44px] lg:min-h-[36px] px-2 py-1 bg-botex-950 hover:bg-botex-800 border border-botex-700 rounded-lg text-xs text-slate-200 hover:text-white transition flex items-center space-x-1"
             @click="openHistoryDrawer"
           >
-            <HistoryIcon class="w-3.5 h-3.5 text-sky-400" />
+            <HistoryIcon class="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />
             <span
               v-if="sessions.length > 0"
               class="px-1 py-px rounded-full text-xs font-mono bg-botex-800 text-sky-300 font-semibold"
+              aria-hidden="true"
             >
               {{ sessions.length }}
             </span>
@@ -94,31 +99,36 @@
             v-if="catalogStale"
             class="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
             :title="t('models.stale')"
+            role="img"
+            :aria-label="t('models.stale')"
           ></span>
-          <ChevronDownIcon class="w-3.5 h-3.5 text-slate-300 shrink-0" />
+          <ChevronDownIcon class="w-3.5 h-3.5 text-slate-300 shrink-0" aria-hidden="true" />
         </button>
 
         <button
           type="button"
           :title="t('chat.new_session')"
+          :aria-label="t('chat.new_session')"
           class="hidden sm:flex min-w-[44px] lg:min-w-[36px] min-h-[44px] lg:min-h-[36px] p-2 bg-botex-950 hover:bg-botex-800 border border-botex-700 rounded-lg text-slate-200 hover:text-white transition items-center justify-center shrink-0"
           @click="chatStore.newSession"
         >
-          <PlusIcon class="w-4 h-4" />
+          <PlusIcon class="w-4 h-4" aria-hidden="true" />
         </button>
 
         <!-- History Drawer Button (Desktop) -->
         <button
           type="button"
           :title="t('chat.history.button')"
+          :aria-label="t('chat.history.button') + (sessions.length > 0 ? ` (${sessions.length})` : '')"
           class="hidden sm:flex min-h-[44px] lg:min-h-[36px] px-2.5 py-1.5 bg-botex-950 hover:bg-botex-800 border border-botex-700 rounded-lg text-xs text-slate-200 hover:text-white transition items-center space-x-1.5 shrink-0"
           @click="openHistoryDrawer"
         >
-          <HistoryIcon class="w-3.5 h-3.5 text-sky-400" />
+          <HistoryIcon class="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />
           <span class="hidden md:inline">{{ t('chat.history.button') }}</span>
           <span
             v-if="sessions.length > 0"
             class="px-1.5 py-px rounded-full text-xs font-mono bg-botex-800 text-sky-300 font-semibold"
+            aria-hidden="true"
           >
             {{ sessions.length }}
           </span>
@@ -129,10 +139,11 @@
           v-if="messages.length > 0"
           type="button"
           :title="t('chat.save_memory.button')"
+          :aria-label="t('chat.save_memory.button')"
           class="min-h-[44px] lg:min-h-[36px] px-2 sm:px-2.5 py-1.5 bg-botex-950 hover:bg-botex-800 border border-botex-700 rounded-lg text-xs text-slate-200 hover:text-sky-300 transition flex items-center space-x-1 shrink-0"
           @click="openSaveMemoryModal"
         >
-          <BookmarkPlusIcon class="w-3.5 h-3.5 text-amber-400" />
+          <BookmarkPlusIcon class="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
           <span class="hidden md:inline">{{ t('chat.save_memory.button') }}</span>
         </button>
 
@@ -140,27 +151,29 @@
         <button
           type="button"
           :title="locale === 'pl' ? 'Wizja (dHash)' : 'Vision Triage'"
+          :aria-label="t('vision.button')"
           class="min-h-[44px] lg:min-h-[36px] px-2 sm:px-2.5 py-1.5 bg-botex-950 hover:bg-botex-800 border border-botex-700 rounded-lg text-xs text-slate-200 hover:text-cyan-300 transition flex items-center space-x-1 shrink-0"
           @click="showVisionModal = true"
         >
-          <EyeIcon class="w-3.5 h-3.5 text-cyan-400" />
+          <EyeIcon class="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
           <span class="hidden md:inline">{{ locale === 'pl' ? 'Sprawdź obraz' : 'Inspect image' }}</span>
         </button>
 
         <button
           v-if="messages.length > 0"
           type="button"
+          :aria-label="t('chat.convert_task')"
           class="min-h-[44px] lg:min-h-[36px] px-2.5 sm:px-3 py-1.5 bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 rounded-lg text-xs font-medium text-sky-200 transition flex items-center space-x-1 shrink-0"
           @click="onConvertClick"
         >
-          <ArrowRightCircleIcon class="w-3.5 h-3.5" />
+          <ArrowRightCircleIcon class="w-3.5 h-3.5" aria-hidden="true" />
           <span class="hidden sm:inline">{{ t('chat.convert_task') }}</span>
         </button>
       </div>
     </div>
 
     <!-- Messages List / Structured Empty State -->
-    <div ref="scrollContainer" class="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-5 space-y-3">
+    <div ref="scrollContainer" role="log" :aria-label="t('chat.history')" class="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-5 space-y-3">
       <div
         v-if="messages.length === 0"
         class="min-h-full flex flex-col items-center justify-center p-4 sm:p-8"
@@ -169,7 +182,7 @@
           <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 border-b border-botex-800 pb-4">
             <div class="space-y-1 flex-1 min-w-0">
               <div class="flex items-center space-x-2">
-                <TerminalIcon class="w-4 h-4 text-sky-400" />
+                <TerminalIcon class="w-4 h-4 text-sky-400" aria-hidden="true" />
                 <h2 class="text-base font-semibold text-slate-100">{{ t('chat.empty.title') }}</h2>
               </div>
               <p class="text-xs text-slate-300 leading-relaxed">
@@ -234,6 +247,7 @@
             v-model="inputText"
             rows="2"
             :placeholder="isCoarsePointer ? t('chat.input.placeholder.short') : t('chat.input.placeholder')"
+            :aria-label="t('chat.input.placeholder.short')"
             class="w-full bg-botex-950 border border-botex-700 rounded-xl px-3.5 py-2.5 text-base sm:text-sm text-slate-100 placeholder-slate-400 resize-none focus:outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500 font-sans"
             @keydown.enter.exact.prevent="handleSend"
           ></textarea>
@@ -243,10 +257,11 @@
           v-if="isStreaming"
           type="button"
           :title="locale === 'pl' ? 'Zatrzymaj generowanie' : 'Stop generation'"
+          :aria-label="locale === 'pl' ? 'Zatrzymaj generowanie' : 'Stop generation'"
           class="min-h-[44px] min-w-[44px] h-11 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition flex items-center justify-center space-x-1.5 animate-pulse shadow-lg shadow-rose-950/50"
           @click.stop="handleAbort"
         >
-          <SquareIcon class="w-4 h-4 fill-current" />
+          <SquareIcon class="w-4 h-4 fill-current" aria-hidden="true" />
           <span class="hidden sm:inline">{{ locale === 'pl' ? 'Zatrzymaj' : 'Stop' }}</span>
         </button>
 
@@ -256,9 +271,10 @@
           type="submit"
           :disabled="!inputText.trim()"
           :title="t('chat.send')"
+          :aria-label="t('chat.send')"
           class="min-h-[44px] min-w-[44px] h-11 px-4 rounded-xl bg-brand-blue hover:bg-blue-600 disabled:opacity-40 disabled:pointer-events-none text-white text-xs font-medium transition flex items-center justify-center space-x-1.5"
         >
-          <SendIcon class="w-4 h-4" />
+          <SendIcon class="w-4 h-4" aria-hidden="true" />
           <span class="hidden sm:inline">{{ t('chat.send') }}</span>
         </button>
       </form>
