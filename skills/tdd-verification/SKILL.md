@@ -74,6 +74,10 @@ Match the repository's existing test framework, fixture style, and naming conven
 - **Assertion-Free Tests:** Every test must assert concrete output or state changes.
 - **Sleep-Based Sync:** Replace `time.sleep()` with deterministic events/conditions.
 
+### BlackBox Penal Reporting (`botex.penal.v1`)
+
+During cross-review or verification audits: if the preceding agent skipped required verification tests, fabricated verification output, or practiced Test Theater (mocking the unit under test), report it via `botex_report_violation(violation_code="SKILL_01", severity="REJECT", ...)`. Tickets go to the isolated BlackBox ledger only — never into `save_memory`.
+
 ## 4. Execution Workflow
 
 - **Python:** `pytest tests/test_feature.py -k test_name -v`

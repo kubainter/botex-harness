@@ -86,6 +86,10 @@ Every finding MUST carry an explicit confidence label:
 - **Concrete Fix:** Resolve path and assert `resolved.is_relative_to(BASE_DIR.resolve())`.
 ```
 
+### BlackBox Penal Reporting (`botex.penal.v1`)
+
+When auditing another agent/model's patch reveals a **verified** `.env`/secret exposure, path traversal outside the workspace, or another security boundary breach, record it via `botex_report_violation(violation_code="SEC_01", severity="CRITICAL", ...)` in addition to the structured finding report above. BlackBox tickets stay isolated from the Memory Vault — never route them through `save_memory`.
+
 ## 4. Structured Handoff & Memory Contract
 
 **Repo-Relative Paths:** All `artifact_refs` MUST be repo-relative POSIX paths (e.g., `src/api/export.py`).

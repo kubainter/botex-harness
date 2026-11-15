@@ -49,8 +49,8 @@ BoteX enforces **Read-Before-Write** on existing files, confines all paths to `w
 
 ## 3. Caller vs Internal Worker Tools
 
-Caller-facing MCP tools (20):
-MCP tools: `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `find_graph_health`, `get_backlinks`, `get_outline`, `get_stats`, `get_task_status`, `init_obsidian_vault`, `patch_memory_section`, `read_memory`, `read_scratchpad`, `recall_memory`, `recommend_models`, `reflect_memory`, `run_subagent`, `save_memory`, `search_memory`, `start_task`
+Caller-facing MCP tools (22):
+MCP tools: `botex_get_rap_sheet`, `botex_report_violation`, `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `find_graph_health`, `get_backlinks`, `get_outline`, `get_stats`, `get_task_status`, `init_obsidian_vault`, `patch_memory_section`, `read_memory`, `read_scratchpad`, `recall_memory`, `recommend_models`, `reflect_memory`, `run_subagent`, `save_memory`, `search_memory`, `start_task`
 - **Internal Worker Tools (Sandbox Only):** `get_file_outline`, `read_file_lines`, `read_file`, `list_dir`, `apply_patch`, `create_file`, `delete_file`, `move_file`, `run_command`, `read_url`, `read_scratchpad`. Callers MUST NOT invoke internal worker tools over MCP.
 
 ## 4. Concrete Usage Examples
@@ -97,6 +97,14 @@ BoteX records every run in a local analytics ledger and feeds that evidence back
 - **Provenance:** on BoteX Cloud, `save_memory`/`POST /api/memory` derive `origin` server-side from sanitized `X-Agent-Id`/`X-Host` headers; reserved claims (`human`, `human-curated`, `operator`, `curator`) are rejected. Never claim a reserved origin.
 - **Skill proposals:** the Curator may draft `learned-*` `SKILL.md`/`recipe.md` proposals under `<workspace>/.botex/proposals/` only. The loop never mutates live `skills/` or `botex/skills/recipes/`; promotion happens via a reviewed PR, so do not delegate writes into live skill directories as a promotion path.
 - **Shadow routing:** the engine's per-`(recipe, taxonomy)` shadow model advice is advisory telemetry only and never overrides the `model`/`profile` you selected. `recommend_models` remains the caller-facing ranking surface.
+
+### BlackBox Penal Registry (`botex.penal.v1`)
+
+Peer cross-review violation tracking, isolated from the Memory Vault:
+
+- **Tools:** `botex_report_violation` (issue a peer cross-review violation ticket) and `botex_get_rap_sheet` (inspect an actor/workspace incident history before delegation or review).
+- **Violation codes:** `SEC_01` (security/secret/workspace boundary breach), `SKILL_01` (verification bypass / test theater), `SCOPE_01` (diff/scope explosion), `HAL_01` (hallucinated tool/path), `LOOP_01` (3+ turn failure loop).
+- **Isolation invariant:** the BlackBox ledger (`penal_vault.db`) is strictly separated from the Memory Vault (`ecc.memory.v1`) to prevent Context Poisoning — never log violations via `save_memory`.
 
 ## Troubleshooting
 

@@ -80,6 +80,12 @@ Review the modified modules for regressions, silent failures, contract drift, an
 2. **Wide Read:** Read full function and caller context (never 5-line fragments).
 3. **Severity:** `[CRITICAL]` (blocking regression/data loss), `[MAJOR]` (silent failure/resource leak), `[MINOR]` (missing logging/typing drift), `[NITPICK]` (style only).
 
+### BlackBox Cross-Review Tribunal (`botex.penal.v1`)
+
+- At cross-review start, call `botex_get_rap_sheet(workspace_dir=...)` (or review any injected `[AUDIT HINT]` context) to focus inspection on prior high-frequency failure modes.
+- When a verified defect matches a formal violation code — `SEC_01` (security/secret/workspace boundary), `SKILL_01` (verification bypass / test theater), `SCOPE_01` (diff/scope explosion), `HAL_01` (hallucinated tool/path), `LOOP_01` (3+ turn failure loop) — issue a ticket via `botex_report_violation(offender=..., violation_code=..., severity=..., skill_recipe=..., evidence_snippet=..., workspace_dir=...)`.
+- Keep `evidence_snippet` factual and concise (observed file/line + defect mechanism); never write penalties into `save_memory` (BlackBox is isolated from the Memory Vault by design).
+
 ## 4. Structured Handoff & Memory Contract
 
 **Repo-Relative Paths:** All `artifact_refs` MUST be repo-relative POSIX paths (e.g., `botex/engine.py`).
