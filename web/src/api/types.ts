@@ -59,6 +59,12 @@ export interface ProviderRateLimitInfo {
   tokens_capacity: number | null
   cooldown_s: number
   wait_s: number
+  requests_consumed?: number
+  tokens_consumed?: number
+  tokens_reserved?: number
+  cooldown_hits?: number
+  last_429_at?: number | null
+  throttle_wait_ms?: number
 }
 
 export type RateLimitsMap = Record<string, ProviderRateLimitInfo>
@@ -203,6 +209,7 @@ export interface MemoryEntry {
   project?: string
   path?: string
   status?: string
+  confidence?: number | null
   compiled_truth?: boolean
   links?: string[]
   timestamp?: string
@@ -396,6 +403,34 @@ export interface AnalyticsDigest {
   content: string
 }
 
+export interface AnalyticsProviderStat {
+  provider: string
+  runs: number
+  done_runs: number
+  done_pct: number
+  cost_usd: number
+  tokens: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  cached_tokens: number
+  cache_hit_pct?: number
+  cache_savings_usd: number
+  avg_duration_s?: number | null
+  avg_generation_ms?: number | null
+  failures: Record<string, number>
+  top_failure: string | null
+}
+
+export interface AnalyticsGroupStat {
+  key: string
+  runs: number
+  done_runs: number
+  done_pct: number
+  cost_usd: number
+  tokens: number
+  avg_duration_s: number | null
+}
+
 export interface AnalyticsResponse {
   period: 'week' | 'month' | 'all' | string
   days: number | null
@@ -415,9 +450,71 @@ export interface AnalyticsResponse {
   avg_generation_ms: number | null
   status_counts: Record<string, number>
   by_model: AnalyticsModelStat[]
+  by_provider?: AnalyticsProviderStat[]
+  by_taxonomy?: AnalyticsGroupStat[]
+  by_recipe?: AnalyticsGroupStat[]
+  by_tier?: AnalyticsGroupStat[]
+  cost_source_counts?: Record<string, number>
+  estimated_cost_usd?: number
+  total_steps?: number
+  avg_steps?: number
+  syntax_rejections?: number
+  rollback_count?: number
+  avg_queue_ms?: number | null
+  learning_summary?: {
+    runs_with_applied_lessons: number
+    runs_with_applied_skills: number
+    runs_with_shadow_advice: number
+    top_applied_lessons: { id: string; runs: number; done_runs: number }[]
+    top_applied_skills: { id: string; runs: number; done_runs: number }[]
+    shadow_recommendations: { recipe: string; taxonomy: string; model: string; runs: number }[]
+  }
   daily: AnalyticsDailyPoint[]
   recent: AnalyticsRecentRun[]
   latest_digest: AnalyticsDigest | null
+}
+
+export interface LearningLessonItem {
+  memory_id: string
+  title: string
+  status: string
+  confidence: number | null
+  tags: string[]
+  scope: string
+  updated_at: string
+}
+
+export interface LearningProposalItem {
+  name: string
+  files: string[]
+  updated_at: string
+}
+
+export interface LearningStatusResponse {
+  ok: boolean
+  lessons: {
+    counts: {
+      candidate: number
+      active: number
+      deprecated: number
+      superseded: number
+      total: number
+    }
+    avg_confidence: number | null
+    items: LearningLessonItem[]
+  }
+  proposals: LearningProposalItem[]
+  ledger: {
+    runs_total: number
+    runs_with_applied_lessons: number
+    runs_with_applied_skills: number
+    runs_with_shadow_advice: number
+    shadow_recommendations: { recipe: string; taxonomy: string; model: string; count: number }[]
+  }
+  curator: {
+    is_healthy: boolean | null
+    last_run_timestamp: string | null
+  }
 }
 
 // ---------------------------------------------------------------------------

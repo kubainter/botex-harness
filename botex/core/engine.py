@@ -3263,6 +3263,7 @@ async def _run_botex_task_once_impl(
                     status="DONE",
                     summary=summary_text,
                     cost_usd=live_cost_usd,
+                    cost_source=("free" if model_is_free else cost_source),
                     **attribution_kw,
                     syntax_rejections=syntax_rejections,
                     rollback_count=rollback_count,

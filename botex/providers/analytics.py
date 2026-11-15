@@ -63,6 +63,20 @@ MODEL_PRICING_ESTIMATES = {
     "google/gemini-2.5-flash": {"prompt": 0.075, "completion": 0.30},
 }
 
+# Canonical cost-provenance enum stored on ledger entries. Raw engine/provider
+# labels fold onto the canonical set; unmapped values never persist verbatim.
+_COST_SOURCE_MAP: Dict[str, str] = {
+    "openrouter_generation_api": "api_generation",
+    "openrouter_inline_usage": "api_inline",
+    "api_generation": "api_generation",
+    "api_inline": "api_inline",
+    "api_reported": "api_reported",
+    "catalog_estimate": "catalog_estimate",
+    "fallback_estimate": "fallback_estimate",
+    "free": "free",
+}
+_ESTIMATED_COST_SOURCES = frozenset({"catalog_estimate", "fallback_estimate"})
+
 
 _FREE_MODEL_MARKERS = (":free", "openrouter/free")
 _FREE_MODEL_PREFIXES = ("openrouter-free/", "ollama/", "nvidia/", "gemini-", "models/gemini-")
@@ -131,6 +145,74 @@ def _read_discount_for(model: str) -> float:
     return CACHE_READ_DISCOUNT
 
 
+def _catalog_cache_pricing(model: str) -> Optional[Dict[str, float]]:
+    """Resolve per-1M pricing for ``model`` from the on-disk catalog cache.
+
+    Strictly offline: reads ``.model_pricing.json`` directly so callers never
+    trigger a ``ModelCatalog`` network refresh. Returns ``None`` when the
+    model or its prices are absent.
+    """
+    slug = (model or "").strip().removeprefix("models/").lower()
+    if not slug:
+        return None
+    try:
+        try:
+            from botex.providers import catalog as _catalog_mod
+        except (ImportError, ValueError):
+            import catalog as _catalog_mod  # type: ignore[no-redef]
+    except Exception:
+        return None
+    try:
+        cache_path = Path(_catalog_mod.CACHE_FILE_DEFAULT)
+        if not cache_path.is_file():
+            return None
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        entries: List[Any] = []
+        catalogs = payload.get("catalogs")
+        if isinstance(catalogs, dict):
+            entries.extend(v for v in catalogs.values() if isinstance(v, dict))
+        # Legacy single-catalog layouts keyed under "catalog"/"models".
+        for legacy_key in ("catalog", "models"):
+            if isinstance(payload.get(legacy_key), dict):
+                entries.append({legacy_key: payload[legacy_key]})
+        for entry in entries:
+            raw_catalog = entry.get("catalog") or entry.get("models")
+            if not isinstance(raw_catalog, dict):
+                continue
+            for mid, data in raw_catalog.items():
+                if not isinstance(mid, str) or mid.strip().removeprefix("models/").lower() != slug:
+                    continue
+                meta = _catalog_mod.ModelMetadata.from_dict(
+                    data if isinstance(data, dict) else {}, default_id=mid
+                )
+                if meta.prompt_price_per_m is not None and meta.completion_price_per_m is not None:
+                    return {
+                        "prompt": float(meta.prompt_price_per_m),
+                        "completion": float(meta.completion_price_per_m),
+                    }
+    except Exception:
+        return None
+    return None
+
+
+def _lookup_pricing_per_m(model: str, provider_name: str = "") -> tuple[Dict[str, float], bool]:
+    """Resolve per-1M pricing: catalog cache first, static estimates last.
+
+    ``is_catalog`` is True only when the ``.model_pricing.json`` cache
+    supplied both prices — the lookup stays synchronous and offline-safe.
+    """
+    del provider_name  # catalog pricing is provider-agnostic for now
+    catalog_pricing = _catalog_cache_pricing(model)
+    if catalog_pricing is not None:
+        return catalog_pricing, True
+    pricing = MODEL_PRICING_ESTIMATES.get(model)
+    if pricing is not None:
+        return pricing, False
+    return {"prompt": 0.20, "completion": 0.80}, False
+
+
 def calculate_cost_usd(
     model: str,
     prompt_tokens: int,
@@ -145,7 +227,7 @@ def calculate_cost_usd(
     """
     if is_free_model(model, provider_name=provider_name):
         return 0.0
-    pricing = MODEL_PRICING_ESTIMATES.get(model, {"prompt": 0.20, "completion": 0.80})
+    pricing, _is_catalog = _lookup_pricing_per_m(model, provider_name)
     p_cost = (prompt_tokens / 1_000_000) * pricing["prompt"]
     c_cost = (completion_tokens / 1_000_000) * pricing["completion"]
     return round(p_cost + c_cost, 6)
@@ -168,7 +250,7 @@ def _cache_savings_usd(
         model, provider_cfg, provider_name
     ):
         return 0.0
-    pricing = MODEL_PRICING_ESTIMATES.get(model, {"prompt": 0.20, "completion": 0.80})
+    pricing, _is_catalog = _lookup_pricing_per_m(model, provider_name)
     read_savings = (cached_tokens / 1_000_000) * pricing["prompt"] * _read_discount_for(model)
     write_premium = (cache_write_tokens / 1_000_000) * pricing["prompt"] * 0.25
     return read_savings - write_premium
@@ -327,6 +409,7 @@ def log_run(
     syntax_rejections: int = 0,
     rollback_count: int = 0,
     shadow_recommended_model: Optional[str] = None,
+    cost_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record a completed BoteX run into the ledger.
 
@@ -339,10 +422,22 @@ def log_run(
     """
     if is_free_model(model, provider_name=provider or ""):
         cost_usd = 0.0
+        resolved_cost_source = "free"
     elif cost_usd is None:
-        cost_usd = calculate_cost_usd(model, prompt_tokens, completion_tokens, provider or "")
+        pricing, from_catalog = _lookup_pricing_per_m(model, provider or "")
+        cost_usd = round(
+            (prompt_tokens / 1_000_000) * pricing["prompt"]
+            + (completion_tokens / 1_000_000) * pricing["completion"],
+            6,
+        )
+        resolved_cost_source = "catalog_estimate" if from_catalog else "fallback_estimate"
     else:
         cost_usd = round(float(cost_usd), 6)
+        resolved_cost_source = (
+            _COST_SOURCE_MAP.get(str(cost_source or "").strip().lower(), "api_inline")
+            if cost_source is not None
+            else "api_reported"
+        )
 
     masked_summary = coerce_text(mask_secrets(summary or ""))
     stored_summary = masked_summary
@@ -368,6 +463,7 @@ def log_run(
         "cached_tokens": cached_tokens,
         "cache_write_tokens": int(cache_write_tokens or 0),
         "cost_usd": cost_usd,
+        "cost_source": resolved_cost_source,
         "files_touched": files_touched,
         "lines_added": lines_added,
         "lines_removed": lines_removed,
@@ -451,7 +547,7 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
 
     ``days=None`` aggregates all records; a positive value keeps only runs newer
     than ``now - days``. Returns JSON-serializable totals, per-model breakdown,
-    daily time series, and the most recent runs.
+    daily time series, self-improvement loop telemetry, and the most recent runs.
     """
     cutoff_naive = datetime.now() - timedelta(days=days) if days and days > 0 else None
     cutoff_utc = datetime.now(timezone.utc) - timedelta(days=days) if days and days > 0 else None
@@ -460,11 +556,46 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
     ]
 
     by_model: Dict[str, Dict[str, Any]] = {}
+    by_provider: Dict[str, Dict[str, Any]] = {}
+    by_taxonomy: Dict[str, Dict[str, Any]] = {}
+    by_recipe: Dict[str, Dict[str, Any]] = {}
+    by_tier: Dict[str, Dict[str, Any]] = {}
     daily: Dict[str, Dict[str, Any]] = {}
     status_counts: Dict[str, int] = {}
+    cost_source_counts: Dict[str, int] = {
+        "api_generation": 0,
+        "api_inline": 0,
+        "api_reported": 0,
+        "catalog_estimate": 0,
+        "fallback_estimate": 0,
+        "free": 0,
+        "unknown": 0,
+    }
+    estimated_cost_usd = 0.0
+    total_steps = 0
+    syntax_rejections_total = 0
+    rollback_total = 0
     durations: List[float] = []
     gen_times: List[float] = []
+    queue_times: List[float] = []
     prov_cfgs: Dict[str, Dict[str, Any]] = {}
+    lesson_hits: Dict[str, Dict[str, int]] = {}
+    skill_hits: Dict[str, Dict[str, int]] = {}
+    shadow_hits: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    runs_with_learning = {"applied_lessons": 0, "applied_skills": 0}
+    runs_with_shadow_advice = 0
+
+    def _learning_ids(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        out: List[str] = []
+        seen: set = set()
+        for item in value:
+            iid = str(item).strip() if item is not None else ""
+            if iid and iid not in seen:
+                seen.add(iid)
+                out.append(iid)
+        return out
 
     for r in filtered:
         st = r.get("status") or "UNKNOWN"
@@ -500,18 +631,129 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
                 prov_cfgs[pname] = {}
         cost = _effective_record_cost_usd(r, prov_cfgs)
         toks = (r.get("prompt_tokens", 0) or 0) + (r.get("completion_tokens", 0) or 0)
-        bm["cost_usd"] += cost
-        bm["tokens"] += toks
-        bm["prompt_tokens"] += r.get("prompt_tokens", 0) or 0
         cached_i = r.get("cached_tokens", 0) or 0
-        bm["cached_tokens"] += cached_i
-        bm["cache_savings_usd"] += _cache_savings_usd(
+        savings_i = _cache_savings_usd(
             m,
             cached_i,
             pname,
             prov_cfgs.get(pname) if pname else None,
             r.get("cache_write_tokens", 0) or 0,
         )
+        bm["cost_usd"] += cost
+        bm["tokens"] += toks
+        bm["prompt_tokens"] += r.get("prompt_tokens", 0) or 0
+        bm["cached_tokens"] += cached_i
+        bm["cache_savings_usd"] += savings_i
+
+        prov_key = pname or "unknown"
+        bp = by_provider.setdefault(
+            prov_key,
+            {
+                "provider": prov_key,
+                "runs": 0,
+                "done_runs": 0,
+                "cost_usd": 0.0,
+                "tokens": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+                "cache_savings_usd": 0.0,
+                "failures": {},
+                "_dur": [],
+                "_gen": [],
+            },
+        )
+        bp["runs"] += 1
+        if st == "DONE":
+            bp["done_runs"] += 1
+        else:
+            bp["failures"][fk] = bp["failures"].get(fk, 0) + 1
+        bp["cost_usd"] += cost
+        bp["tokens"] += toks
+        bp["prompt_tokens"] += r.get("prompt_tokens", 0) or 0
+        bp["completion_tokens"] += r.get("completion_tokens", 0) or 0
+        bp["cached_tokens"] += cached_i
+        bp["cache_savings_usd"] += savings_i
+
+        dur_v = r.get("duration_s")
+        gen_v = r.get("generation_time_ms")
+        if isinstance(dur_v, (int, float)):
+            durations.append(float(dur_v))
+            bp["_dur"].append(float(dur_v))
+        if isinstance(gen_v, (int, float)):
+            gen_times.append(float(gen_v))
+            bp["_gen"].append(float(gen_v))
+
+        for dim_map, field in (
+            (by_taxonomy, "taxonomy"),
+            (by_recipe, "recipe"),
+            (by_tier, "routed_tier"),
+        ):
+            dkey = str(r.get(field) or "").strip().lower() or "unspecified"
+            db = dim_map.setdefault(
+                dkey,
+                {
+                    "key": dkey,
+                    "runs": 0,
+                    "done_runs": 0,
+                    "cost_usd": 0.0,
+                    "tokens": 0,
+                    "_dur": [],
+                },
+            )
+            db["runs"] += 1
+            if st == "DONE":
+                db["done_runs"] += 1
+            db["cost_usd"] += cost
+            db["tokens"] += toks
+            if isinstance(dur_v, (int, float)):
+                db["_dur"].append(float(dur_v))
+
+        cs_key = _COST_SOURCE_MAP.get(str(r.get("cost_source") or "").strip().lower(), "unknown")
+        cost_source_counts[cs_key] = cost_source_counts.get(cs_key, 0) + 1
+        if cs_key in _ESTIMATED_COST_SOURCES:
+            estimated_cost_usd += cost
+
+        steps_v = r.get("steps")
+        if isinstance(steps_v, int) and not isinstance(steps_v, bool):
+            total_steps += steps_v
+        sr_v = r.get("syntax_rejections")
+        if isinstance(sr_v, int) and not isinstance(sr_v, bool):
+            syntax_rejections_total += sr_v
+        rb_v = r.get("rollback_count")
+        if isinstance(rb_v, int) and not isinstance(rb_v, bool):
+            rollback_total += rb_v
+        q_v = r.get("queue_time_ms")
+        if isinstance(q_v, (int, float)) and not isinstance(q_v, bool):
+            queue_times.append(float(q_v))
+
+        for field, hits in (
+            ("applied_lessons", lesson_hits),
+            ("applied_skills", skill_hits),
+        ):
+            ids = _learning_ids(r.get(field))
+            if not ids:
+                continue
+            runs_with_learning[field] += 1
+            for iid in ids:
+                ent = hits.setdefault(iid, {"runs": 0, "done_runs": 0})
+                ent["runs"] += 1
+                if st == "DONE":
+                    ent["done_runs"] += 1
+
+        shadow_model = str(r.get("shadow_recommended_model") or "").strip()
+        if shadow_model:
+            runs_with_shadow_advice += 1
+            skey = (
+                str(r.get("recipe") or "").strip().lower() or "unspecified",
+                str(r.get("taxonomy") or "").strip().lower() or "unspecified",
+                shadow_model,
+            )
+            sent = shadow_hits.setdefault(
+                skey,
+                {"recipe": skey[0], "taxonomy": skey[1], "model": skey[2], "runs": 0},
+            )
+            sent["runs"] += 1
 
         day = str(r.get("timestamp", ""))[:10]
         if day:
@@ -519,11 +761,6 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
             d["runs"] += 1
             d["cost_usd"] += cost
             d["tokens"] += toks
-
-        if isinstance(r.get("duration_s"), (int, float)):
-            durations.append(float(r["duration_s"]))
-        if isinstance(r.get("generation_time_ms"), (int, float)):
-            gen_times.append(float(r["generation_time_ms"]))
 
     models_out: List[Dict[str, Any]] = []
     for bm in sorted(by_model.values(), key=lambda x: x["cost_usd"], reverse=True):
@@ -539,6 +776,39 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
         )
         bm["cache_savings_usd"] = round(bm["cache_savings_usd"], 6)
         models_out.append(bm)
+
+    providers_out: List[Dict[str, Any]] = []
+    for bp in sorted(by_provider.values(), key=lambda x: (x["cost_usd"], x["runs"]), reverse=True):
+        bp["done_pct"] = round(bp["done_runs"] / bp["runs"] * 100, 1) if bp["runs"] else 0.0
+        bp["cache_hit_pct"] = (
+            round(min(bp["cached_tokens"] / bp["prompt_tokens"], 1.0) * 100, 1)
+            if bp["prompt_tokens"]
+            else 0.0
+        )
+        bp["cost_usd"] = round(bp["cost_usd"], 6)
+        bp["cache_savings_usd"] = round(bp["cache_savings_usd"], 6)
+        bp["avg_duration_s"] = round(sum(bp["_dur"]) / len(bp["_dur"]), 2) if bp["_dur"] else None
+        bp["avg_generation_ms"] = (
+            round(sum(bp["_gen"]) / len(bp["_gen"]), 1) if bp["_gen"] else None
+        )
+        bp["top_failure"] = (
+            max(bp["failures"].items(), key=lambda x: x[1])[0] if bp["failures"] else None
+        )
+        bp.pop("_dur", None)
+        bp.pop("_gen", None)
+        providers_out.append(bp)
+
+    def _dim_out(dim_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for db in sorted(dim_map.values(), key=lambda x: (x["cost_usd"], x["runs"]), reverse=True):
+            db["done_pct"] = round(db["done_runs"] / db["runs"] * 100, 1) if db["runs"] else 0.0
+            db["cost_usd"] = round(db["cost_usd"], 6)
+            db["avg_duration_s"] = (
+                round(sum(db["_dur"]) / len(db["_dur"]), 2) if db["_dur"] else None
+            )
+            db.pop("_dur", None)
+            out.append(db)
+        return out
 
     prompt_tok = sum(r.get("prompt_tokens", 0) or 0 for r in filtered)
     cached_tok = sum(r.get("cached_tokens", 0) or 0 for r in filtered)
@@ -560,6 +830,26 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
         for r in recent
     ]
 
+    def _top_learning(hits: Dict[str, Dict[str, int]]) -> List[Dict[str, Any]]:
+        return [
+            {"id": iid, **ent}
+            for iid, ent in sorted(hits.items(), key=lambda kv: (-kv[1]["runs"], kv[0]))[:10]
+        ]
+
+    learning_summary = {
+        "runs_with_applied_lessons": runs_with_learning["applied_lessons"],
+        "runs_with_applied_skills": runs_with_learning["applied_skills"],
+        "runs_with_shadow_advice": runs_with_shadow_advice,
+        "top_applied_lessons": _top_learning(lesson_hits),
+        "top_applied_skills": _top_learning(skill_hits),
+        "shadow_recommendations": [
+            ent
+            for _key, ent in sorted(shadow_hits.items(), key=lambda kv: (-kv[1]["runs"], kv[0]))[
+                :10
+            ]
+        ],
+    }
+
     return {
         "runs": len(filtered),
         "done_runs": done,
@@ -579,6 +869,18 @@ def aggregate_stats(records: List[Dict[str, Any]], days: Optional[int] = None) -
         "avg_generation_ms": round(sum(gen_times) / len(gen_times), 1) if gen_times else None,
         "status_counts": status_counts,
         "by_model": models_out,
+        "by_provider": providers_out,
+        "by_taxonomy": _dim_out(by_taxonomy),
+        "by_recipe": _dim_out(by_recipe),
+        "by_tier": _dim_out(by_tier),
+        "cost_source_counts": cost_source_counts,
+        "estimated_cost_usd": round(estimated_cost_usd, 6),
+        "total_steps": total_steps,
+        "avg_steps": round(total_steps / len(filtered), 2) if filtered else 0.0,
+        "syntax_rejections": syntax_rejections_total,
+        "rollback_count": rollback_total,
+        "avg_queue_ms": (round(sum(queue_times) / len(queue_times), 1) if queue_times else None),
+        "learning_summary": learning_summary,
         "daily": [daily[k] for k in sorted(daily)],
         "recent": recent_out,
     }

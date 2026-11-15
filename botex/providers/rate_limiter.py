@@ -213,6 +213,12 @@ class ProviderRateLimiter:
         self._req_buckets: Dict[str, TokenBucket] = {}
         self._tok_buckets: Dict[str, TokenBucket] = {}
         self._cooldown_until: Dict[str, float] = {}
+        self._requests_consumed: Dict[str, int] = {}
+        self._tokens_consumed: Dict[str, int] = {}
+        self._tokens_reserved: Dict[str, int] = {}
+        self._cooldown_hits: Dict[str, int] = {}
+        self._last_429_at: Dict[str, float] = {}
+        self._throttle_wait_ms: Dict[str, float] = {}
         self._state_path = state_path
         self._restore_cooldowns()
 
@@ -231,6 +237,7 @@ class ProviderRateLimiter:
     # a provider that already sent a 429. Persisted as wall-clock epochs
     # (clock() is monotonic and meaningless across processes); restored
     # synchronously at construction so the very first acquire() sees them.
+    # Cumulative 429 hit counts and last-seen timestamps persist alongside.
 
     def _restore_cooldowns(self) -> None:
         if self._state_path is None:
@@ -239,17 +246,32 @@ class ProviderRateLimiter:
             raw = json.loads(Path(self._state_path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        entries = raw.get("cooldowns") if isinstance(raw, dict) else None
-        if not isinstance(entries, dict):
+        if not isinstance(raw, dict):
             return
-        now_wall = time.time()
-        for name, until_wall in entries.items():
-            name_n = _norm_name(name)
-            if name_n not in self._limits or not _num(until_wall):
-                continue
-            remaining = float(until_wall) - now_wall
-            if remaining > 0.0:
-                self._cooldown_until[name_n] = self._clock() + remaining
+        entries = raw.get("cooldowns")
+        if isinstance(entries, dict):
+            now_wall = time.time()
+            for name, until_wall in entries.items():
+                name_n = _norm_name(name)
+                if name_n not in self._limits or not _num(until_wall):
+                    continue
+                remaining = float(until_wall) - now_wall
+                if remaining > 0.0:
+                    self._cooldown_until[name_n] = self._clock() + remaining
+        hits = raw.get("cooldown_hits")
+        if isinstance(hits, dict):
+            for name, count in hits.items():
+                name_n = _norm_name(name)
+                n = _num(count)
+                if name_n in self._limits and n is not None and n > 0.0:
+                    self._cooldown_hits[name_n] = int(n)
+        stamps = raw.get("last_429_at")
+        if isinstance(stamps, dict):
+            for name, ts in stamps.items():
+                name_n = _norm_name(name)
+                t = _num(ts)
+                if name_n in self._limits and t is not None and t > 0.0:
+                    self._last_429_at[name_n] = t
 
     def _persist_cooldowns(self) -> None:
         if self._state_path is None:
@@ -265,7 +287,16 @@ class ProviderRateLimiter:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(json.dumps({"cooldowns": entries}), encoding="utf-8")
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "cooldowns": entries,
+                        "cooldown_hits": self._cooldown_hits,
+                        "last_429_at": self._last_429_at,
+                    }
+                ),
+                encoding="utf-8",
+            )
             os.replace(tmp, path)
         except OSError:
             pass
@@ -348,11 +379,13 @@ class ProviderRateLimiter:
         bucket = self._req_bucket(name)
         if bucket is not None:
             waited += await bucket.acquire(max(1.0, _pos(requests, 1.0)))
+        est = _pos(est_tokens)
         bucket = self._tok_bucket(name)
-        if bucket is not None:
-            est = _pos(est_tokens)
-            if est > 0.0:
-                waited += await bucket.acquire(est)
+        if bucket is not None and est > 0.0:
+            waited += await bucket.acquire(est)
+            self._tokens_reserved[name] = self._tokens_reserved.get(name, 0) + int(est)
+        self._requests_consumed[name] = self._requests_consumed.get(name, 0) + 1
+        self._throttle_wait_ms[name] = self._throttle_wait_ms.get(name, 0.0) + waited * 1000.0
         return waited
 
     def report_limited(self, provider: str, retry_after_s: Optional[float] = None) -> float:
@@ -367,13 +400,14 @@ class ProviderRateLimiter:
         lim = self._limits.get(name) if name else None
         if lim is None:
             return 0.0
+        self._cooldown_hits[name] = self._cooldown_hits.get(name, 0) + 1
+        self._last_429_at[name] = time.time()
         wait = _pos(retry_after_s) if _num(retry_after_s) is not None else lim.cooldown_s
-        if wait <= 0.0:
-            return 0.0
-        until = self._clock() + wait
-        if until > self._cooldown_until.get(name, 0.0):
-            self._cooldown_until[name] = until
-            self._persist_cooldowns()
+        if wait > 0.0:
+            until = self._clock() + wait
+            if until > self._cooldown_until.get(name, 0.0):
+                self._cooldown_until[name] = until
+        self._persist_cooldowns()
         return wait
 
     def record_tokens(self, provider: str, tokens: float) -> None:
@@ -381,12 +415,14 @@ class ProviderRateLimiter:
         amount = _pos(tokens)
         if amount <= 0.0:
             return
-        bucket = self._tok_bucket(_norm_name(provider))
+        name = _norm_name(provider)
+        self._tokens_consumed[name] = self._tokens_consumed.get(name, 0) + int(amount)
+        bucket = self._tok_bucket(name)
         if bucket is not None:
             bucket.charge(amount)
 
     def stats(self) -> Dict[str, Any]:
-        """Snapshot of configured limits and live bucket levels for diagnostics."""
+        """Snapshot of configured limits, live bucket levels, and cumulative usage."""
         out: Dict[str, Any] = {}
         for name, lim in self._limits.items():
             req = self._req_buckets.get(name)
@@ -409,6 +445,12 @@ class ProviderRateLimiter:
                 else None,
                 "cooldown_s": round(self.cooldown_remaining(name), 3),
                 "wait_s": round(self.wait_estimate(name), 3),
+                "requests_consumed": self._requests_consumed.get(name, 0),
+                "tokens_consumed": self._tokens_consumed.get(name, 0),
+                "tokens_reserved": self._tokens_reserved.get(name, 0),
+                "cooldown_hits": self._cooldown_hits.get(name, 0),
+                "last_429_at": self._last_429_at.get(name),
+                "throttle_wait_ms": round(self._throttle_wait_ms.get(name, 0.0), 1),
             }
         return out
 

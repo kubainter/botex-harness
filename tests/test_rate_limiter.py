@@ -361,6 +361,61 @@ def test_stats_snapshot_shape():
     assert stats["prov"]["cooldown_s"] == 0.0
 
 
+@pytest.mark.anyio
+async def test_stats_reports_requests_and_tokens_consumed():
+    limiter, _ = _limiter()
+    await limiter.acquire("prov", est_tokens=100.0)
+    limiter.record_tokens("prov", 80.0)
+    await limiter.acquire("unconfigured")
+    stats = limiter.stats()["prov"]
+    assert stats["requests_consumed"] == 1
+    assert stats["tokens_consumed"] == 80
+    assert stats["tokens_reserved"] == 100
+    assert stats["cooldown_hits"] == 0
+    assert stats["last_429_at"] is None
+    assert stats["throttle_wait_ms"] == 0.0
+    assert "unconfigured" not in limiter.stats()
+
+
+@pytest.mark.anyio
+async def test_stats_reports_throttle_wait_ms():
+    limiter, _ = _limiter({"prov": {"rpm": 1.0}})
+    await limiter.acquire("prov")
+    await limiter.acquire("prov")  # second request waits ~60s for refill
+    stats = limiter.stats()["prov"]
+    assert stats["requests_consumed"] == 2
+    assert stats["throttle_wait_ms"] == pytest.approx(60000.0)
+
+
+def test_stats_reports_cooldown_hits_and_last_429(tmp_path):
+    state = tmp_path / "rate_limits_state.json"
+    clk = FakeClock()
+    limiter = ProviderRateLimiter(
+        {"prov": {"rpm": 60.0, "cooldown_s": 30.0}},
+        clock=clk,
+        sleep=clk.sleep,
+        state_path=state,
+    )
+    limiter.report_limited("prov", retry_after_s=45.0)
+    stats = limiter.stats()["prov"]
+    assert stats["cooldown_hits"] == 1
+    assert stats["last_429_at"] is not None
+    limiter.report_limited("prov", retry_after_s=10.0)
+    assert limiter.stats()["prov"]["cooldown_hits"] == 2
+
+    clk2 = FakeClock()
+    restored = ProviderRateLimiter(
+        {"prov": {"rpm": 60.0, "cooldown_s": 30.0}},
+        clock=clk2,
+        sleep=clk2.sleep,
+        state_path=state,
+    )
+    rst = restored.stats()["prov"]
+    assert rst["cooldown_hits"] == 2
+    assert rst["last_429_at"] == pytest.approx(limiter.stats()["prov"]["last_429_at"])
+    assert rst["cooldown_s"] > 0.0
+
+
 # ---------------------------------------------------------------------------
 # 4. Shared singleton
 # ---------------------------------------------------------------------------

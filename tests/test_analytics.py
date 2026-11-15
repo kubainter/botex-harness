@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import math
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -691,3 +692,413 @@ def test_engine_shadow_advice_never_overrides_model(monkeypatch: pytest.MonkeyPa
     assert res2["status"] == "DONE", res2
     assert "shadow_recommended_model" not in logged[-1]
     assert not [k for k, _ in events if k == EventKind.SHADOW_ROUTING]
+
+
+# ---------------------------------------------------------------------------
+# Plan 020 — cost_source persistence, catalog-first pricing, new aggregations
+# ---------------------------------------------------------------------------
+
+
+def test_log_run_persists_cost_source(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """cost_source is normalized via the canonical enum and persisted on entry."""
+    import botex.providers.analytics as analytics_mod
+
+    written: list[dict] = []
+    monkeypatch.setattr(analytics_mod, "_append_ledger", lambda e: written.append(dict(e)))
+    # No catalog cache on disk -> computed costs must be fallback estimates.
+    monkeypatch.setattr("botex.providers.catalog.CACHE_FILE_DEFAULT", tmp_path / "absent.json")
+
+    base = dict(
+        task_id="t-cost-src",
+        model="deepseek/deepseek-chat",
+        provider="openrouter",
+        duration_s=1.0,
+        steps=2,
+        prompt_tokens=1000,
+        completion_tokens=500,
+        cached_tokens=0,
+        files_touched=[],
+        lines_added=0,
+        lines_removed=0,
+    )
+
+    gen = log_run(**base, cost_usd=0.0123, cost_source="openrouter_generation_api")
+    assert gen["cost_source"] == "api_generation"
+
+    inline = log_run(**base, cost_usd=0.01, cost_source="openrouter_inline_usage")
+    assert inline["cost_source"] == "api_inline"
+
+    passthrough = log_run(**base, cost_usd=0.01, cost_source="api_generation")
+    assert passthrough["cost_source"] == "api_generation"
+
+    unmapped = log_run(**base, cost_usd=0.01, cost_source="not-a-real-source")
+    assert unmapped["cost_source"] == "api_inline"
+
+    reported = log_run(**base, cost_usd=0.01)
+    assert reported["cost_source"] == "api_reported"
+
+    estimated = log_run(**base)
+    assert estimated["cost_source"] == "fallback_estimate"
+
+    free = log_run(**{**base, "model": "vendor/x:free"}, cost_usd=5.0, cost_source="api_inline")
+    assert free["cost_usd"] == 0.0
+    assert free["cost_source"] == "free"
+
+    assert written[-1]["cost_source"] == "free"
+    assert len(written) == 7
+
+
+def test_calculate_cost_uses_catalog_cache_before_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """`.model_pricing.json` prices win over MODEL_PRICING_ESTIMATES and the
+    0.20/0.80 default — resolved strictly offline from the cache file."""
+    cache_file = tmp_path / ".model_pricing.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "catalogs": {
+                    "https://openrouter.ai/api/v1": {
+                        "fetched_at": 0,
+                        "catalog": {
+                            "vendor/catalog-model": {
+                                "id": "vendor/catalog-model",
+                                "prompt_price_per_m": 10.0,
+                                "completion_price_per_m": 30.0,
+                            },
+                            "deepseek/deepseek-chat": {
+                                "id": "deepseek/deepseek-chat",
+                                "prompt_price_per_m": 5.0,
+                                "completion_price_per_m": 10.0,
+                            },
+                            "vendor/raw-pricing": {
+                                "id": "vendor/raw-pricing",
+                                "pricing": {"prompt": "0.000002", "completion": "0.000008"},
+                            },
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("botex.providers.catalog.CACHE_FILE_DEFAULT", cache_file)
+
+    # Catalog pricing wins over the 0.20/0.80 default...
+    assert calculate_cost_usd("vendor/catalog-model", 1_000_000, 1_000_000) == pytest.approx(40.0)
+    # ...and over entries present in MODEL_PRICING_ESTIMATES (0.14/0.28).
+    assert calculate_cost_usd("deepseek/deepseek-chat", 1_000_000, 1_000_000) == pytest.approx(15.0)
+    # Raw OpenRouter per-token pricing is normalized to per-1M.
+    assert calculate_cost_usd("vendor/raw-pricing", 1_000_000, 1_000_000) == pytest.approx(10.0)
+    # Models absent from the cache still fall back to static estimates.
+    assert calculate_cost_usd("unknown/paid-model", 1_000_000, 0) == pytest.approx(0.20)
+    # Free models still short-circuit to zero before any pricing lookup.
+    assert calculate_cost_usd("vendor/catalog-model:free", 1_000_000, 1_000_000) == 0.0
+
+    # The catalog hit is what marks computed log_run costs as catalog estimates.
+    import botex.providers.analytics as analytics_mod
+
+    monkeypatch.setattr(analytics_mod, "_append_ledger", lambda e: None)
+    entry = log_run(
+        task_id="t-catalog-src",
+        model="vendor/catalog-model",
+        provider="openrouter",
+        duration_s=1.0,
+        steps=1,
+        prompt_tokens=1_000_000,
+        completion_tokens=1_000_000,
+        cached_tokens=0,
+        files_touched=[],
+        lines_added=0,
+        lines_removed=0,
+    )
+    assert entry["cost_usd"] == pytest.approx(40.0)
+    assert entry["cost_source"] == "catalog_estimate"
+
+
+def test_aggregate_stats_by_provider_taxonomy_and_cost_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """aggregate_stats exposes provider/dimension buckets, cost-source counts,
+    and execution totals — including legacy records without cost_source."""
+    # Keep _cache_savings_usd deterministic regardless of any live cache file.
+    monkeypatch.setattr("botex.providers.catalog.CACHE_FILE_DEFAULT", tmp_path / "absent.json")
+    now = datetime.now(timezone.utc).isoformat()
+    records = [
+        {
+            "task_id": "r-or",
+            "timestamp": now,
+            "model": "deepseek/deepseek-chat",
+            "provider": "OpenRouter",
+            "status": "DONE",
+            "failure_kind": None,
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "cached_tokens": 100,
+            "cost_usd": 0.50,
+            "cost_source": "api_generation",
+            "duration_s": 2.0,
+            "generation_time_ms": 80.0,
+            "queue_time_ms": 40.0,
+            "steps": 4,
+            "taxonomy": "BugFix",
+            "recipe": "planner",
+            "routed_tier": "premium",
+            "syntax_rejections": 1,
+            "rollback_count": 0,
+            "lines_added": 10,
+            "lines_removed": 2,
+        },
+        {
+            "task_id": "r-est",
+            "timestamp": now,
+            "model": "vendor/other",
+            "provider": "openrouter",
+            "status": "FAILED",
+            "failure_kind": "api_error",
+            "prompt_tokens": 200,
+            "completion_tokens": 100,
+            "cached_tokens": 0,
+            "cost_usd": 0.25,
+            "cost_source": "catalog_estimate",
+            "duration_s": 1.0,
+            "generation_time_ms": 20.0,
+            "queue_time_ms": 60.0,
+            "steps": 2,
+            "taxonomy": "bugfix",
+            "recipe": "reviewer",
+            "routed_tier": "free",
+            "syntax_rejections": 2,
+            "rollback_count": 1,
+        },
+        {
+            "task_id": "r-free",
+            "timestamp": now,
+            "model": "ollama/bielik",
+            "provider": "ollama",
+            "status": "DONE",
+            "prompt_tokens": 500,
+            "completion_tokens": 100,
+            "cached_tokens": 0,
+            "cost_usd": 0.0,
+            "cost_source": "free",
+            "duration_s": 3.0,
+            "steps": 1,
+            "taxonomy": "feature",
+            "recipe": "planner",
+            "routed_tier": "free",
+        },
+        {
+            # Legacy record: no provider, cost_source, taxonomy, or counters.
+            "task_id": "r-legacy",
+            "timestamp": now,
+            "model": "deepseek/deepseek-chat",
+            "status": "DONE",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cached_tokens": 0,
+            "cost_usd": 0.05,
+            "duration_s": 0.5,
+            "steps": 1,
+        },
+    ]
+    stats = aggregate_stats(records)
+
+    providers = {p["provider"]: p for p in stats["by_provider"]}
+    assert set(providers) == {"openrouter", "ollama", "unknown"}
+    assert stats["by_provider"][0]["provider"] == "openrouter"  # sorted by cost desc
+    orow = providers["openrouter"]
+    assert orow["runs"] == 2
+    assert orow["done_runs"] == 1
+    assert orow["done_pct"] == pytest.approx(50.0)
+    assert orow["cost_usd"] == pytest.approx(0.75)
+    assert orow["tokens"] == 1800
+    assert orow["prompt_tokens"] == 1200
+    assert orow["completion_tokens"] == 600
+    assert orow["cached_tokens"] == 100
+    assert orow["cache_hit_pct"] == pytest.approx(round(100 / 1200 * 100, 1))
+    assert orow["avg_duration_s"] == pytest.approx(1.5)
+    assert orow["avg_generation_ms"] == pytest.approx(50.0)
+    assert orow["top_failure"] == "api_error"
+    assert orow["failures"] == {"api_error": 1}
+
+    tax = {t["key"]: t for t in stats["by_taxonomy"]}
+    assert tax["bugfix"]["runs"] == 2  # case-folded merge
+    assert tax["feature"]["runs"] == 1
+    assert tax["unspecified"]["runs"] == 1
+    rec = {r["key"]: r for r in stats["by_recipe"]}
+    assert rec["planner"]["runs"] == 2
+    assert rec["reviewer"]["runs"] == 1
+    tier = {t["key"]: t for t in stats["by_tier"]}
+    assert tier["premium"]["runs"] == 1
+    assert tier["free"]["runs"] == 2
+    for bucket in (*tax.values(), *rec.values(), *tier.values()):
+        assert set(bucket) == {
+            "key",
+            "runs",
+            "done_runs",
+            "done_pct",
+            "cost_usd",
+            "tokens",
+            "avg_duration_s",
+        }
+
+    csc = stats["cost_source_counts"]
+    assert csc["api_generation"] == 1
+    assert csc["catalog_estimate"] == 1
+    assert csc["free"] == 1
+    assert csc["unknown"] == 1  # legacy record without cost_source
+    assert stats["estimated_cost_usd"] == pytest.approx(0.25)
+
+    assert stats["total_steps"] == 8
+    assert stats["avg_steps"] == pytest.approx(2.0)
+    assert stats["syntax_rejections"] == 3
+    assert stats["rollback_count"] == 1
+    assert stats["avg_queue_ms"] == pytest.approx(50.0)
+
+    # Existing keys stay intact for CLI/API backwards compatibility.
+    for key in (
+        "runs",
+        "done_runs",
+        "failed_runs",
+        "done_pct",
+        "cost_usd",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "cache_savings_usd",
+        "cache_hit_pct",
+        "lines_added",
+        "lines_removed",
+        "avg_duration_s",
+        "avg_generation_ms",
+        "status_counts",
+        "by_model",
+        "daily",
+        "recent",
+    ):
+        assert key in stats, key
+
+
+# ---------------------------------------------------------------------------
+# Learning summary — Layer A-C self-improvement telemetry in aggregate_stats
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_stats_learning_summary():
+    """``learning_summary`` rolls up applied lessons/skills and shadow picks."""
+    records = [
+        _shadow_record(
+            "paid/m1",
+            status="DONE",
+            recipe="planner",
+            taxonomy="bugfix",
+            applied_lessons=["lesson_a", "lesson_b"],
+            applied_skills=["code-review"],
+            shadow_recommended_model="vendor/shadow-a:free",
+        ),
+        _shadow_record(
+            "paid/m2",
+            status="FAILED",
+            recipe="Planner",
+            taxonomy="BugFix",
+            applied_lessons=["lesson_a"],
+            applied_skills=["code-review", "tdd-verification"],
+            shadow_recommended_model="vendor/shadow-a:free",
+        ),
+        _shadow_record(
+            "paid/m3",
+            status="DONE",
+            recipe="planner",
+            taxonomy="bugfix",
+            applied_lessons=[],
+            shadow_recommended_model="vendor/shadow-b:free",
+        ),
+        _shadow_record("paid/m4", status="DONE"),
+        _shadow_record(
+            "paid/old",
+            status="DONE",
+            timestamp="2001-01-01T00:00:00+00:00",
+            applied_lessons=["lesson_old"],
+            shadow_recommended_model="vendor/shadow-old:free",
+        ),
+    ]
+
+    stats = aggregate_stats(records)
+    ls = stats["learning_summary"]
+    assert ls["runs_with_applied_lessons"] == 3
+    assert ls["runs_with_applied_skills"] == 2
+    assert ls["runs_with_shadow_advice"] == 4
+
+    lessons = {e["id"]: e for e in ls["top_applied_lessons"]}
+    assert lessons["lesson_a"] == {"id": "lesson_a", "runs": 2, "done_runs": 1}
+    assert lessons["lesson_b"] == {"id": "lesson_b", "runs": 1, "done_runs": 1}
+    assert lessons["lesson_old"] == {"id": "lesson_old", "runs": 1, "done_runs": 1}
+    assert ls["top_applied_lessons"][0]["id"] == "lesson_a"
+
+    skills = {e["id"]: e for e in ls["top_applied_skills"]}
+    assert skills["code-review"] == {"id": "code-review", "runs": 2, "done_runs": 1}
+    assert skills["tdd-verification"] == {"id": "tdd-verification", "runs": 1, "done_runs": 0}
+
+    shadow = ls["shadow_recommendations"]
+    assert shadow[0] == {
+        "recipe": "planner",
+        "taxonomy": "bugfix",
+        "model": "vendor/shadow-a:free",
+        "runs": 2,
+    }
+    shadow_by_model = {e["model"]: e for e in shadow}
+    assert shadow_by_model["vendor/shadow-b:free"]["runs"] == 1
+    assert shadow_by_model["vendor/shadow-old:free"]["recipe"] == "unspecified"
+    assert shadow_by_model["vendor/shadow-old:free"]["taxonomy"] == "general"
+
+    # The days filter scopes learning telemetry like every other aggregate.
+    recent = aggregate_stats(records, days=1)["learning_summary"]
+    assert recent["runs_with_applied_lessons"] == 2
+    assert recent["runs_with_shadow_advice"] == 3
+
+
+def test_aggregate_stats_learning_summary_empty_and_top10():
+    """Empty input yields a zeroed summary; top lists cap at 10 entries."""
+    empty = aggregate_stats([])["learning_summary"]
+    assert empty == {
+        "runs_with_applied_lessons": 0,
+        "runs_with_applied_skills": 0,
+        "runs_with_shadow_advice": 0,
+        "top_applied_lessons": [],
+        "top_applied_skills": [],
+        "shadow_recommendations": [],
+    }
+
+    records = [
+        _shadow_record(
+            f"paid/m{i}",
+            applied_lessons=[f"lesson_{i:02d}"],
+            applied_skills=["skill_a"] if i % 2 == 0 else ["skill_b"],
+        )
+        for i in range(12)
+    ]
+    records.append(_shadow_record("paid/extra", applied_lessons=["lesson_00"]))
+    stats = aggregate_stats(records)
+    ls = stats["learning_summary"]
+    assert ls["runs_with_applied_lessons"] == 13
+    assert len(ls["top_applied_lessons"]) == 10
+    assert ls["top_applied_lessons"][0] == {"id": "lesson_00", "runs": 2, "done_runs": 2}
+    assert {e["id"] for e in ls["top_applied_skills"]} == {"skill_a", "skill_b"}
+    assert all(e["runs"] == 6 and e["done_runs"] == 6 for e in ls["top_applied_skills"])
+
+
+def test_aggregate_stats_learning_summary_malformed_fields():
+    """Non-list lesson/skill payloads and blank shadow picks are ignored."""
+    records = [
+        _shadow_record("paid/x", applied_lessons="lesson_str"),
+        _shadow_record("paid/y", applied_lessons=["  ", None]),
+        _shadow_record("paid/z", applied_skills={"a": 1}),
+        _shadow_record("paid/w", applied_lessons=["lesson_ok"], shadow_recommended_model="  "),
+    ]
+    ls = aggregate_stats(records)["learning_summary"]
+    assert ls["runs_with_applied_lessons"] == 1
+    assert ls["runs_with_applied_skills"] == 0
+    assert ls["runs_with_shadow_advice"] == 0
+    assert ls["top_applied_lessons"] == [{"id": "lesson_ok", "runs": 1, "done_runs": 1}]
+    assert ls["shadow_recommendations"] == []
