@@ -1563,6 +1563,11 @@ async def botex_report_violation(
     Records a swarm agent/model rule violation into the isolated BlackBox penal ledger
     (.botex/penal_vault.db), completely separated from the Memory Vault.
 
+    When to call: during cross-review or handoff verification when you observe a verified
+    contract breach (SEC_01 secrets/workspace breach, SKILL_01 skipped tests or test theater,
+    SCOPE_01 diff explosion, HAL_01 hallucinated tools/paths, LOOP_01 3+ identical failures).
+    Never log violations or penalties into save_memory.
+
     Args:
         offender: Target agent or model identifier (e.g. 'zcode-headless', 'botex:glm-5.3-flash').
         violation_code: Canonical code ('SEC_01', 'SKILL_01', 'SCOPE_01', 'HAL_01', 'LOOP_01').
@@ -1604,6 +1609,9 @@ async def botex_get_rap_sheet(
     """
     Queries the isolated BlackBox penal ledger for an agent/model or workspace rap sheet.
     Returned evidence snippets are wrapped as untrusted data to block prompt injection.
+
+    When to call: at cross-review start or when taking over a local or Edge workspace
+    ('edge://<device_id>/<workspace_id>') from another agent to check recurring mistakes.
 
     Args:
         actor_agent: Optional offender filter (empty = all actors in workspace).
