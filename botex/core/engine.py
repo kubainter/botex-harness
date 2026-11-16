@@ -121,11 +121,14 @@ try:
     )
     from .events import EventKind
     from .meta_harness import (
+        SpiralTracker,
         classify_task_taxonomy,
         extract_meta_lesson,
         get_relevant_meta_lessons,
         is_infra_failure,
         pack_lessons_within_budget,
+        parse_edge_workspace_key,
+        persist_envfacts_lessons,
     )
     from .state import InFlightTaskState, clear_inflight_checkpoint, save_inflight_checkpoint
     from .tool_executor import LocalToolExecutor, ToolExecutor
@@ -182,11 +185,14 @@ except (ImportError, ValueError):
     )
     from memory import extract_implicit_links, save_memory, update_lesson_confidence
     from meta_harness import (
+        SpiralTracker,
         classify_task_taxonomy,
         extract_meta_lesson,
         get_relevant_meta_lessons,
         is_infra_failure,
         pack_lessons_within_budget,
+        parse_edge_workspace_key,
+        persist_envfacts_lessons,
     )
     from net_tools import read_url, resolve_net_scope
     from patch_engine import apply_patch, snapshot_manager, validate_syntax
@@ -1499,6 +1505,9 @@ async def run_botex_task(
                     attempts[-2].get("failure_kind"),
                     str(attempts[-2].get("status") or ""),
                 ):
+                    fb_edge_sub, fb_edge_ws = parse_edge_workspace_key(
+                        _executor_workspace_key(tool_executor, Path(workspace_dir))
+                    )
                     extract_meta_lesson(
                         task_id=str(attempts[-1].get("task_id") or ""),
                         taxonomy=tax,
@@ -1509,6 +1518,8 @@ async def run_botex_task(
                         successful_model=succ_m,
                         failure_kind=str(attempts[-2].get("failure_kind") or ""),
                         files_touched=list(last_result.get("files_touched") or []),
+                        edge_sub=fb_edge_sub,
+                        workspace_id=fb_edge_ws,
                     )
             except Exception:
                 pass
@@ -2338,6 +2349,8 @@ async def _run_botex_task_once_impl(
             "in the final STATUS: DONE response.\n"
         )
     tax = classify_task_taxonomy(task, files)
+    blackbox_ws_key = _executor_workspace_key(active_executor, root_path)
+    edge_sub, edge_ws_id = parse_edge_workspace_key(blackbox_ws_key)
     applied_lesson_ids: List[str] = []
     meta_lessons = get_relevant_meta_lessons(
         tax,
@@ -2345,6 +2358,8 @@ async def _run_botex_task_once_impl(
         max_lessons=2,
         lesson_ids_out=applied_lesson_ids,
         files=files,
+        edge_sub=edge_sub,
+        workspace_id=edge_ws_id,
     )
     if meta_lessons:
         # ContextKnapsack budget: the injected lesson block is capped at
@@ -2364,7 +2379,6 @@ async def _run_botex_task_once_impl(
     if meta_lessons:
         lesson_bullets = "\n".join(f"- {ml}" for ml in meta_lessons)
         initial_user_prompt += f"HARNESS LESSONS ({tax.upper()}):\n{lesson_bullets}\n"
-    blackbox_ws_key = _executor_workspace_key(active_executor, root_path)
     blackbox_actor = f"botex:{model}" if model else "botex"
     try:
         from botex.core.blackbox import format_audit_hint, format_rap_sheet_warning
@@ -2505,6 +2519,23 @@ async def _run_botex_task_once_impl(
     verify_failures = 0
     max_failed_mutations = 0
     max_stagnant_turns = 0
+    spiral_tracker = SpiralTracker()
+    task_cmd_log: List[Dict[str, Any]] = []
+
+    def _track_command_outcome(cmd_text: str, res: Any) -> None:
+        ok_val = bool(isinstance(res, dict) and res.get("ok"))
+        err_val = str(res.get("error") or "") if isinstance(res, dict) else ""
+        out_val = str(res.get("stdout") or "") if isinstance(res, dict) else ""
+        task_cmd_log.append(
+            {
+                "command": cmd_text,
+                "ok": ok_val,
+                "error": err_val,
+                "stdout": out_val,
+            }
+        )
+        spiral_tracker.record_command(cmd_text, ok_val, err_val or out_val)
+
     # Invocation-level failures (malformed JSON args, non-object args,
     # unknown tool, dispatch crash) are the model's fault — tracked so a
     # surrender after only-failed calls reports model_tool_misuse instead
@@ -3162,6 +3193,7 @@ async def _run_botex_task_once_impl(
                         timeout_s=int(verify_cfg.get("timeout_s", 120)),
                         max_output_bytes=int(verify_cfg.get("max_output_bytes", 20000)),
                     )
+                    _track_command_outcome(str(verify_command or ""), verification)
                     if verification.get("ok"):
                         verify_passed = True
                     elif verify_attempts < 3:
@@ -3341,6 +3373,8 @@ async def _run_botex_task_once_impl(
                             workspace_dir=root_path,
                             successful_model=model,
                             files_touched=list(files_touched),
+                            edge_sub=edge_sub,
+                            workspace_id=edge_ws_id,
                         )
                     except Exception:
                         pass
@@ -3359,6 +3393,8 @@ async def _run_botex_task_once_impl(
                             workspace_dir=root_path,
                             successful_model=model,
                             files_touched=list(files_touched),
+                            edge_sub=edge_sub,
+                            workspace_id=edge_ws_id,
                         )
                     except Exception:
                         pass
@@ -3378,6 +3414,22 @@ async def _run_botex_task_once_impl(
                             workspace_dir=root_path,
                             successful_model=model,
                             files_touched=list(files_touched),
+                            edge_sub=edge_sub,
+                            workspace_id=edge_ws_id,
+                        )
+                    except Exception:
+                        pass
+                if task_cmd_log:
+                    try:
+                        persist_envfacts_lessons(
+                            task_id=task_id,
+                            taxonomy=tax,
+                            cmd_log=task_cmd_log,
+                            workspace_dir=root_path,
+                            successful_model=model,
+                            files_touched=list(files_touched),
+                            edge_sub=edge_sub,
+                            workspace_id=edge_ws_id,
                         )
                     except Exception:
                         pass
@@ -3876,6 +3928,7 @@ async def _run_botex_task_once_impl(
                                 call_id=tc.id,
                             )
                         if tool_result.get("ok"):
+                            spiral_tracker.record_edit(target_p)
                             files_touched.add(target_p)
                             if norm_p:
                                 files_read.add(norm_p)
@@ -3892,6 +3945,7 @@ async def _run_botex_task_once_impl(
                             fold_pending = True
                         else:
                             err_str = str(tool_result.get("error", ""))
+                            spiral_tracker.record_mutation_error("apply_patch", target_p, err_str)
                             if "syntax" in err_str.lower() or "rejected" in err_str.lower():
                                 syntax_rejections += 1
                                 last_syntax_error = err_str[:150]
@@ -3927,6 +3981,7 @@ async def _run_botex_task_once_impl(
                             "create_file", args, root_path, task_id=task_id, call_id=tc.id
                         )
                         if tool_result.get("ok"):
+                            spiral_tracker.record_edit(target_p)
                             files_touched.add(target_p)
                             if norm_p:
                                 files_read.add(norm_p)
@@ -3934,6 +3989,12 @@ async def _run_botex_task_once_impl(
                             lines_added_total += tool_result.get("lines_written", 0)
                             prune_tool_history(messages, target_p, root=root_path)
                             fold_pending = True
+                        else:
+                            spiral_tracker.record_mutation_error(
+                                "create_file",
+                                target_p,
+                                str(tool_result.get("error") or ""),
+                            )
                 elif fn_name == "delete_file":
                     op_path = args.get("path", "")
                     tool_result = await active_executor.execute(
@@ -3964,6 +4025,7 @@ async def _run_botex_task_once_impl(
                     tool_result = await active_executor.execute(
                         "run_command", args, root_path, task_id=task_id, call_id=tc.id
                     )
+                    _track_command_outcome(str(args.get("command") or ""), tool_result)
                 elif fn_name == "synthesize_plugin":
                     exec_ran = True
                     tool_result, _new_pdef = await _synthesize_plugin_tool(
@@ -4053,7 +4115,18 @@ async def _run_botex_task_once_impl(
                 }
             )
 
-        if stagnant_turns >= 3 or failed_mutations_streak >= 3:
+        if (
+            not spiral_tracker.nudge_sent
+            and spiral_tracker.is_spiraling(stagnant_turns, failed_mutations_streak)
+            and not spiral_tracker.should_abort(stagnant_turns, failed_mutations_streak)
+            and turn < max_turns
+        ):
+            nudge_msg = spiral_tracker.format_redirect_nudge()
+            if nudge_msg:
+                messages.append({"role": "user", "content": nudge_msg})
+                ct_out["spiral_nudges"] = int(ct_out.get("spiral_nudges") or 0) + 1
+
+        if spiral_tracker.should_abort(stagnant_turns, failed_mutations_streak):
             # Stagnation deadlock detected: rollback and exit
             try:
                 from botex.core.blackbox import record_incident as _record_blackbox_incident
@@ -4071,7 +4144,9 @@ async def _run_botex_task_once_impl(
                     severity="WARN",
                     evidence_snippet=(
                         f"stagnant_turns={stagnant_turns}, "
-                        f"failed_mutations_streak={failed_mutations_streak}"
+                        f"failed_mutations_streak={failed_mutations_streak}, "
+                        f"repeated_fail_sigs={spiral_tracker.repeated_fail_sigs}, "
+                        f"edit_churn={spiral_tracker.edit_churn}"
                     ),
                     enforcement_action="PENALTY_LOGGED",
                 )
@@ -4090,11 +4165,12 @@ async def _run_botex_task_once_impl(
             rolled_ok = rollback_verified is not False
             duration = time.time() - start_time
 
-            reason = (
-                "3 identical failed attempts"
-                if stagnant_turns >= 3
-                else "3 consecutive failed mutations"
-            )
+            if stagnant_turns >= 3:
+                reason = "3 identical failed attempts"
+            elif failed_mutations_streak >= 3:
+                reason = "3 consecutive failed mutations"
+            else:
+                reason = "repeated command/test failure spiral"
             ct_out["rollback_reason"] = f"rollback: no-progress loop ({reason})"
             summary_text = f"No-progress loop detected ({reason}). " + (
                 "Changes were rolled back."
