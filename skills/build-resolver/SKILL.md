@@ -72,6 +72,10 @@ Diagnose and fix the build/type error for `mypy botex/` with minimal diff and ve
 - **TypeScript / ESLint:** `Type 'X | undefined' is not assignable to type 'X'` -> optional chaining `?.`, nullish coalescing `??`, or type guard.
 - **Rust / Cargo:** `cannot borrow as mutable more than once` -> narrow borrow scope `{ ... }`, pass `&`, or `.clone()` if appropriate.
 
+### BlackBox Penal Reporting (`botex.penal.v1`)
+
+During cross-review or arena handoff: if an agent blew up minimal diff bounds (e.g., rewriting an entire unrelated file for a one-line fix -> `SCOPE_01`) or repeated identical build failures across 3+ iterations (`LOOP_01`), report it via `botex_report_violation` with `severity="REJECT"` or `severity="WARN"`. Tickets go to the isolated BlackBox ledger only — never into `save_memory`.
+
 ## 4. Structured Handoff & Memory Contract
 
 **Repo-Relative Paths:** All `artifact_refs` MUST be repo-relative POSIX paths (e.g., `botex/server_cloud.py`).

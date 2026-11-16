@@ -2959,6 +2959,8 @@ def test_mcp_tool_surface():
         "get_stats",
         "check_health",
         "clean_snapshots",
+        "botex_report_violation",
+        "botex_get_rap_sheet",
     }
 
     catalog = {

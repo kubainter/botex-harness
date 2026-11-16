@@ -76,6 +76,12 @@ from botex.ui import accent, dim, err, mark_status, ok, title, warn
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 
+from botex.core.blackbox import (
+    get_rap_sheet as _get_rap_sheet,
+)
+from botex.core.blackbox import (
+    record_incident as _record_incident,
+)
 from botex.core.events import drop_emitter
 from botex.memory import (
     close_index_dbs,
@@ -1533,6 +1539,103 @@ async def clean_snapshots(max_age_days: float = 7.0, max_total_mb: float = 50.0)
         f"[OK] Purged old snapshots: removed {res['deleted_dirs']} folders, "
         f"freed {res['freed_mb']} MB. Remaining: {res['remaining_mb']} MB."
     )
+
+
+def _resolve_blackbox_workspace(workspace_dir: str = "") -> str:
+    """Preserve logical edge:// URIs verbatim; resolve local workspaces normally."""
+    raw = str(workspace_dir or "").strip()
+    if raw.startswith("edge://"):
+        return raw
+    return resolve_workspace(workspace_dir)
+
+
+@mcp.tool()
+async def botex_report_violation(
+    offender: str,
+    violation_code: str,
+    severity: str = "REJECT",
+    skill_recipe: str = "",
+    evidence_snippet: str = "",
+    workspace_dir: str = "",
+    enforcement_action: str = "PENALTY_LOGGED",
+) -> dict[str, Any]:
+    """
+    Records a swarm agent/model rule violation into the isolated BlackBox penal ledger
+    (.botex/penal_vault.db), completely separated from the Memory Vault.
+
+    Args:
+        offender: Target agent or model identifier (e.g. 'zcode-headless', 'botex:glm-5.3-flash').
+        violation_code: Canonical code ('SEC_01', 'SKILL_01', 'SCOPE_01', 'HAL_01', 'LOOP_01').
+        severity: Incident severity ('WARN', 'REJECT', 'CRITICAL'). Default 'REJECT'.
+        skill_recipe: Optional skill/recipe active during the infraction.
+        evidence_snippet: Concise log/diff excerpt (automatically secret-masked).
+        workspace_dir: Target workspace path or 'edge://<device_id>/<workspace_id>' URI.
+        enforcement_action: Action label ('PENALTY_LOGGED', 'HANDOFF_REJECTED', 'ESCALATED').
+    """
+    reporter = str(get_mcp_client_origin("botex") or "").strip() or "peer-client"
+    if reporter.lower().startswith("botex"):
+        # Prevent peer MCP callers from spoofing internal engine auto-logs.
+        reporter = "peer-client"
+    try:
+        ws_key = _resolve_blackbox_workspace(workspace_dir)
+        return await asyncio.to_thread(
+            _record_incident,
+            actor_agent=offender,
+            reported_by=reporter,
+            violation_code=violation_code,
+            severity=severity or "REJECT",
+            workspace_id=ws_key,
+            skill_recipe=skill_recipe,
+            evidence_snippet=evidence_snippet,
+            enforcement_action=enforcement_action or "PENALTY_LOGGED",
+            source="peer",
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": "INVALID_INPUT", "message": str(exc)}
+
+
+@mcp.tool()
+async def botex_get_rap_sheet(
+    actor_agent: str = "",
+    workspace_dir: str = "",
+    limit: int = 20,
+    window_days: int = 30,
+) -> dict[str, Any]:
+    """
+    Queries the isolated BlackBox penal ledger for an agent/model or workspace rap sheet.
+    Returned evidence snippets are wrapped as untrusted data to block prompt injection.
+
+    Args:
+        actor_agent: Optional offender filter (empty = all actors in workspace).
+        workspace_dir: Target workspace path or 'edge://<device_id>/<workspace_id>' URI.
+        limit: Max incidents to return (clamped to 1..200).
+        window_days: Trailing lookback window in days (clamped to 1..365).
+    """
+    try:
+        ws_key = _resolve_blackbox_workspace(workspace_dir)
+        sheet = await asyncio.to_thread(
+            _get_rap_sheet,
+            actor_agent=actor_agent,
+            workspace_id=ws_key,
+            limit=limit,
+            window_days=window_days,
+        )
+        incidents = sheet.get("incidents")
+        if isinstance(incidents, list):
+            wrapped_incidents = []
+            for inc in incidents:
+                entry = dict(inc)
+                snippet = entry.get("evidence_snippet")
+                if snippet:
+                    entry["evidence_snippet"] = wrap_untrusted_content(
+                        str(snippet),
+                        source=f"blackbox:{entry.get('incident_id', 'inc')}",
+                    )
+                wrapped_incidents.append(entry)
+            sheet["incidents"] = wrapped_incidents
+        return sheet
+    except ValueError as exc:
+        return {"ok": False, "error": "INVALID_INPUT", "message": str(exc)}
 
 
 # ---------------------------------------------------------------------------
