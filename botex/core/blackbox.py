@@ -131,9 +131,10 @@ def normalize_workspace_id(raw: str) -> str:
     text = unicodedata.normalize("NFKC", str(raw or "")).strip()
     if not text:
         return ""
-    if text.startswith("edge://"):
-        return text.replace("\\", "/").rstrip("/")
-    return Path(text).as_posix().rstrip("/")
+    posix_text = text.replace("\\", "/")
+    if posix_text.startswith("edge://"):
+        return posix_text.rstrip("/")
+    return Path(posix_text).as_posix().rstrip("/")
 
 
 def _clean_recipe(raw: str) -> str:
