@@ -1717,6 +1717,7 @@ def _print_usage():
   {c("botex memory <save|search|read|list>")} {d(t("usage.memory"))}
   {c("botex cloud [--host H] [--port P]")}   {d(t("usage.cloud"))}
   {c("botex edge [--server WSS] [-w DIR]")}    {d("Outbound WSS edge runner for BoteX Cloud")}
+  {c("botex setup")}                         {d("Print Cloud MCP + Edge .env setup guide")}
 
 {title(t("usage.examples"))}
   {c('botex run "fix failing tests" -w .')}   {d(t("usage.ex.run"))}
@@ -2580,6 +2581,38 @@ def _load_edge_env_files() -> None:
         load_dotenv(resolved, override=False)
 
 
+def _cli_setup() -> None:
+    """Print a host-agnostic setup guide for connecting a workstation to BoteX Cloud."""
+    print(f"""{title("BoteX Cloud & Edge Setup Guide")}
+
+1. {accent("Connect your IDE / AI agent to BoteX Cloud MCP (no local server.py needed):")}
+   - MCP SSE URL : https://<cloud-host>/mcp/sse
+   - HTTP Headers:
+       Authorization: Bearer <BOTEX_ACCESS_TOKEN>
+       X-Agent-Id:    <agent-name>   (optional, e.g. antigravity, cursor, devin, zcode)
+       X-Host:        <device-name>  (optional, for Memory Vault / BlackBox provenance)
+
+2. {accent("Issue an Edge device token (once per device/workspace):")}
+   POST https://<cloud-host>/api/edge/tokens
+   Header: Authorization: Bearer <BOTEX_ACCESS_TOKEN>
+   Body:   {{"device_id": "<device-id>", "workspace_id": "<workspace-id>"}}
+   -> Returns one-time token starting with: btxd_...
+
+3. {accent("Create ~/.ai/botex_mcp/.env (or ./.env in the target repo):")}
+   BOTEX_EDGE_SERVER=wss://<cloud-host>/api/edge/ws
+   BOTEX_EDGE_TOKEN=btxd_...
+   BOTEX_EDGE_DEVICE_ID=<device-id>
+   BOTEX_EDGE_WORKSPACE_ID=<workspace-id>
+
+4. {accent("Start the Edge bridge in your project directory:")}
+   botex edge -w .
+   (add --allow-exec / --allow-destructive only if Cloud tasks should run commands/deletes)
+
+5. {accent("Target this machine from Cloud MCP tools (start_task / run_subagent):")}
+   workspace_dir="edge://<device-id>/<workspace-id>"
+""")
+
+
 def _cli_edge(argv: list[str]) -> None:
     """CLI dispatcher for the thin edge runner (outbound WSS bridge)."""
     import argparse
@@ -2595,11 +2628,12 @@ def _cli_edge(argv: list[str]) -> None:
             "Run the thin edge runner: an outbound WSS bridge that lets BoteX "
             "Cloud execute workspace tools on this device (no inbound port)."
         ),
+        epilog="Run 'botex setup' for full Cloud MCP + Edge .env instructions.",
     )
     parser.add_argument(
         "--server",
-        default=os.environ.get("BOTEX_EDGE_SERVER", "") or "wss://botex.jg-webtech.pl/api/edge/ws",
-        help="Cloud gateway WSS URL (default: BOTEX_EDGE_SERVER env, else wss://botex.jg-webtech.pl/api/edge/ws)",
+        default=os.environ.get("BOTEX_EDGE_SERVER", ""),
+        help="Cloud gateway WSS URL, e.g. wss://<cloud-host>/api/edge/ws (default: BOTEX_EDGE_SERVER)",
     )
     parser.add_argument(
         "--workspace",
@@ -2639,6 +2673,17 @@ def _cli_edge(argv: list[str]) -> None:
     )
     args = parser.parse_args(argv)
 
+    server_url = str(args.server or "").strip()
+    if not server_url:
+        print(
+            err(
+                "Edge server URL required: pass --server wss://<cloud-host>/api/edge/ws "
+                "or set BOTEX_EDGE_SERVER (run 'botex setup' for details)."
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     token = args.token
     if not token and args.token_file:
         try:
@@ -2653,7 +2698,10 @@ def _cli_edge(argv: list[str]) -> None:
         token = os.environ.get("BOTEX_EDGE_TOKEN", "")
     if not token:
         print(
-            err("Edge token required: pass --token/--token-file or set BOTEX_EDGE_TOKEN."),
+            err(
+                "Edge token required: pass --token/--token-file or set BOTEX_EDGE_TOKEN "
+                "(run 'botex setup' for details)."
+            ),
             file=sys.stderr,
         )
         sys.exit(2)
@@ -3045,6 +3093,8 @@ def main():
         _cli_cloud(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "edge":
         _cli_edge(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "setup":
+        _cli_setup()
     elif len(sys.argv) > 1 and sys.argv[1] == "maintenance":
         _cli_maintenance(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] in ("serve", "server", "--serve"):
