@@ -656,10 +656,35 @@ def test_cli_edge_requires_token(monkeypatch, tmp_path):
     import server
 
     monkeypatch.delenv("BOTEX_EDGE_TOKEN", raising=False)
+    monkeypatch.setenv("BOTEX_EDGE_SERVER", "wss://cloud.example.invalid/api/edge/ws")
     monkeypatch.setattr(sys, "argv", ["botex", "edge", "--workspace", str(tmp_path)])
     with pytest.raises(SystemExit) as exc:
         server.main()
     assert exc.value.code == 2
+
+
+def test_cli_edge_requires_server(monkeypatch, tmp_path):
+    import server
+
+    monkeypatch.delenv("BOTEX_EDGE_SERVER", raising=False)
+    monkeypatch.setenv("BOTEX_EDGE_TOKEN", "btxd_test.secret")
+    monkeypatch.setattr(sys, "argv", ["botex", "edge", "--workspace", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        server.main()
+    assert exc.value.code == 2
+
+
+def test_cli_setup_prints_universal_guide(monkeypatch, capsys):
+    import server
+
+    monkeypatch.setattr(sys, "argv", ["botex", "setup"])
+    server.main()
+    out = capsys.readouterr().out
+    assert "/mcp/sse" in out
+    assert "BOTEX_EDGE_SERVER" in out
+    assert "BOTEX_EDGE_TOKEN" in out
+    assert "edge://<device-id>/<workspace-id>" in out
+    assert "jg-webtech" not in out
 
 
 def test_start_task_routes_edge_workspace(monkeypatch):
@@ -774,12 +799,14 @@ def test_cli_edge_loads_botex_env_file(tmp_path, monkeypatch):
 
     env_file = tmp_path / "mcp.env"
     env_file.write_text(
+        "BOTEX_EDGE_SERVER=wss://cloud.example.invalid/api/edge/ws\n"
         "BOTEX_EDGE_TOKEN=btxd_envtest.secret\n"
         "BOTEX_EDGE_DEVICE_ID=env-device\n"
         "BOTEX_EDGE_WORKSPACE_ID=env-ws\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("BOTEX_DISABLE_DOTENV", raising=False)
+    monkeypatch.delenv("BOTEX_EDGE_SERVER", raising=False)
     monkeypatch.delenv("BOTEX_EDGE_TOKEN", raising=False)
     monkeypatch.delenv("BOTEX_EDGE_DEVICE_ID", raising=False)
     monkeypatch.delenv("BOTEX_EDGE_WORKSPACE_ID", raising=False)
@@ -803,6 +830,7 @@ def test_cli_edge_loads_botex_env_file(tmp_path, monkeypatch):
     monkeypatch.setattr(edge_pkg, "EdgeRunner", DummyRunner)
     server._cli_edge(["-w", str(tmp_path)])
 
+    assert captured["server_url"] == "wss://cloud.example.invalid/api/edge/ws"
     assert captured["token"] == "btxd_envtest.secret"
     assert captured["device_id"] == "env-device"
     assert captured["workspace_id"] == "env-ws"

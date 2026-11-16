@@ -11,7 +11,7 @@
     }
 }
 
-{$BOTEX_DOMAIN:botex.jg-webtech.pl} {
+{$BOTEX_DOMAIN:localhost} {
     request_body {
         max_size 25MB
     }
