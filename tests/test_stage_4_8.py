@@ -258,19 +258,22 @@ async def test_chat_tools_and_cloud_skills_endpoints(
     assert mem_data["ok"] is True
 
     # 2. Chat tool: install_skill (from URL via mocked fetch_url with real <untrusted_web_content> envelope)
-    with patch(
-        "botex.skills.fetch_url",
-        new=AsyncMock(
-            return_value={
-                "ok": True,
-                "truncated": False,
-                "content": (
-                    '<untrusted_web_content url="https://raw.githubusercontent.com/org/repo/main/SKILL.md">\n'
-                    "---\nname: repo-skill\ndescription: Skill from repo\nversion: 2.0.0\ntaxonomy:\n  - security\n---\n"
-                    "# Repo Skill Rules\nFollow strict typing.\n"
-                    "</untrusted_web_content>"
-                ),
-            }
+    with (
+        patch("botex.server.chat.load_config", return_value={"chat": {"allow_skill_admin": True}}),
+        patch(
+            "botex.skills.fetch_url",
+            new=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "truncated": False,
+                    "content": (
+                        '<untrusted_web_content url="https://raw.githubusercontent.com/org/repo/main/SKILL.md">\n'
+                        "---\nname: repo-skill\ndescription: Skill from repo\nversion: 2.0.0\ntaxonomy:\n  - security\n---\n"
+                        "# Repo Skill Rules\nFollow strict typing.\n"
+                        "</untrusted_web_content>"
+                    ),
+                }
+            ),
         ),
     ):
         inst_out = await execute_chat_tool(
@@ -287,14 +290,17 @@ async def test_chat_tools_and_cloud_skills_endpoints(
     assert "security" in inst_data["taxonomy"]
 
     # 2b. Truncated fetch must be rejected
-    with patch(
-        "botex.skills.fetch_url",
-        new=AsyncMock(
-            return_value={
-                "ok": True,
-                "truncated": True,
-                "content": '<untrusted_web_content url="https://example.com/SKILL.md"># Partial</untrusted_web_content>',
-            }
+    with (
+        patch("botex.server.chat.load_config", return_value={"chat": {"allow_skill_admin": True}}),
+        patch(
+            "botex.skills.fetch_url",
+            new=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "truncated": True,
+                    "content": '<untrusted_web_content url="https://example.com/SKILL.md"># Partial</untrusted_web_content>',
+                }
+            ),
         ),
     ):
         trunc_out = await execute_chat_tool(
