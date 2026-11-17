@@ -55,11 +55,24 @@ export function setStoredBackendUrl(url: string): void {
 }
 
 export function getStoredAccessToken(): string {
-  return (localStorage.getItem(STORAGE_KEY_TOKEN) || '').trim()
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem(STORAGE_KEY_TOKEN)
+  }
+  if (typeof sessionStorage === 'undefined') return ''
+  return (sessionStorage.getItem(STORAGE_KEY_TOKEN) || '').trim()
 }
 
 export function setStoredAccessToken(token: string): void {
-  localStorage.setItem(STORAGE_KEY_TOKEN, token.trim())
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem(STORAGE_KEY_TOKEN)
+  }
+  if (typeof sessionStorage === 'undefined') return
+  const clean = token.trim()
+  if (clean) {
+    sessionStorage.setItem(STORAGE_KEY_TOKEN, clean)
+  } else {
+    sessionStorage.removeItem(STORAGE_KEY_TOKEN)
+  }
 }
 
 // Reactive auth-failure signal: set when any API call returns 401/403 so the

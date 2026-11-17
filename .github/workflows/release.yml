@@ -92,12 +92,12 @@ jobs:
         cd ..
 
     - name: Attest release artifact provenance
-      uses: actions/attest-build-provenance@v2
+      uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
       with:
         subject-path: botex-${{ github.event.inputs.version }}.zip
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
       with:
         tag_name: ${{ github.event.inputs.version }}
         name: Release ${{ github.event.inputs.version }}

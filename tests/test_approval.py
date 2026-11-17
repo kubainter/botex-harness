@@ -675,3 +675,234 @@ def test_server_recursive_masking():
     assert fake_sk not in str(cleaned)
     assert "[REDACTED]" in str(cleaned)
     assert cleaned["nested"]["list"][1] == "clean value"
+
+
+# ---------------------------------------------------------------------------
+# 7. SEC-01: Dynamic plugins inherit the synthesize_plugin agency gate
+# ---------------------------------------------------------------------------
+def _engine_fakes():
+    """Shared fake-client/response helpers mirroring tests/test_botex.py."""
+    import json as _json
+    from types import SimpleNamespace
+
+    def resp(content=None, tool_calls=None, finish="stop"):
+        msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, finish_reason=finish)],
+            usage=None,
+        )
+
+    def tcall(name, args):
+        return SimpleNamespace(
+            id="t1",
+            type="function",
+            function=SimpleNamespace(
+                name=name, arguments=args if isinstance(args, str) else _json.dumps(args)
+            ),
+        )
+
+    class FakeClient:
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.calls = []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        async def _create(self, **kw):
+            self.calls.append(kw)
+            return self.responses.pop(0)
+
+    return resp, tcall, FakeClient
+
+
+def _patch_engine_runtime(engine, monkeypatch):
+    """Zero-network engine patch set: fake OpenAI client + passing guards +
+    exec.enabled so CAP_EXEC survives and dynamic plugins are advertised."""
+    orig_load_config = engine.load_config
+    monkeypatch.setattr(
+        engine,
+        "load_config",
+        lambda reload=False: {
+            **orig_load_config(reload),
+            "exec": {**orig_load_config().get("exec", {}), "enabled": True},
+        },
+    )
+    monkeypatch.setattr(engine, "check_model_price", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_model_tools", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_budget_limit", lambda *a, **k: (False, 0.0))
+    monkeypatch.setattr(engine, "log_run", lambda **kw: {"cost_usd": 0.0})
+    monkeypatch.setattr(engine, "print_run_summary", lambda *a, **k: None)
+
+
+@pytest.mark.anyio
+async def test_dynamic_plugin_headless_blocked_by_agency_gate(tmp_path, monkeypatch):
+    """A registered dynamic plugin must route through async_check_agency_policy
+    as 'synthesize_plugin' — headless high_risk runs block before Stage 2."""
+    import botex.engine as engine
+    from botex.approval import default_approval_manager
+    from botex.plugins import (
+        BoteXPluginDefinition,
+        PluginVaultManager,
+        TaskLocalPluginRegistry,
+    )
+
+    resp, tcall, FakeClient = _engine_fakes()
+    _patch_engine_runtime(engine, monkeypatch)
+
+    calls: list = []
+
+    async def _spy_execute(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"ok": True, "output": {}}
+
+    monkeypatch.setattr(engine, "_execute_dynamic_plugin", _spy_execute)
+
+    vault = PluginVaultManager(tmp_path)
+    registry = TaskLocalPluginRegistry("dynplug-headless", vault=vault)
+    script = tmp_path / "probe.py"
+    script.write_text(
+        "import sys, json\njson.load(sys.stdin)\nprint(json.dumps({'ran': True}))\n",
+        encoding="utf-8",
+    )
+    registry.register(
+        BoteXPluginDefinition(
+            name="vault_probe",
+            description="probe plugin",
+            parameters_schema={"type": "object", "properties": {}},
+            script_path=str(script),
+        )
+    )
+
+    fake = FakeClient(
+        [
+            resp(tool_calls=[tcall("vault_probe", {})]),
+            resp("STATUS: DONE\nblocked"),
+            resp("STATUS: DONE\nblocked"),
+        ]
+    )
+    monkeypatch.setattr(engine, "AsyncOpenAI", lambda **_: fake)
+    try:
+        result = await engine._run_botex_task_once_impl(
+            task="invoke the plugin",
+            workspace_dir=str(tmp_path),
+            model="test/model",
+            api_key="x",
+            mode="full",
+            confirm_fn=None,
+            approval_policy="high_risk",
+            task_id="dynplug_headless_t1",
+            plugin_registry=registry,
+            plugin_vault=vault,
+        )
+    finally:
+        default_approval_manager.clear_task("dynplug_headless_t1")
+
+    assert result["status"] == "DONE"
+    assert calls == []  # never reached Stage 2 — no subprocess spawned
+    tool_msgs = [
+        m for call in fake.calls for m in call.get("messages", []) if m.get("role") == "tool"
+    ]
+    assert any("requires operator confirmation" in m["content"] for m in tool_msgs)
+
+
+@pytest.mark.anyio
+async def test_dynamic_plugin_net_call_needs_operator_channel(tmp_path, monkeypatch):
+    """CAP_NET alone is not an approval: with confirm_fn=None the engine must
+    pass approval_confirmed=False, so requires_net plugins still refuse."""
+    import botex.engine as engine
+    from botex.approval import default_approval_manager
+    from botex.plugins import (
+        BoteXPluginDefinition,
+        PluginVaultManager,
+        TaskLocalPluginRegistry,
+    )
+
+    resp, tcall, FakeClient = _engine_fakes()
+    _patch_engine_runtime(engine, monkeypatch)
+
+    exec_kwargs: dict = {}
+    real_exec = engine._execute_dynamic_plugin
+
+    async def _spy_execute(pdef, args, **kwargs):
+        exec_kwargs.update(kwargs)
+        return await real_exec(pdef, args, **kwargs)
+
+    synth_kwargs: dict = {}
+    real_synth = engine._synthesize_plugin_tool
+
+    async def _spy_synth(args, **kwargs):
+        synth_kwargs.update(kwargs)
+        return await real_synth(args, **kwargs)
+
+    monkeypatch.setattr(engine, "_execute_dynamic_plugin", _spy_execute)
+    monkeypatch.setattr(engine, "_synthesize_plugin_tool", _spy_synth)
+
+    vault = PluginVaultManager(tmp_path)
+    registry = TaskLocalPluginRegistry("dynplug-net", vault=vault)
+    script = tmp_path / "netprobe.py"
+    script.write_text(
+        "import sys, json\njson.load(sys.stdin)\nprint(json.dumps({'ran': True}))\n",
+        encoding="utf-8",
+    )
+    registry.register(
+        BoteXPluginDefinition(
+            name="net_probe",
+            description="net probe plugin",
+            parameters_schema={"type": "object", "properties": {}},
+            requires_net=True,
+            script_path=str(script),
+        )
+    )
+
+    fake = FakeClient(
+        [
+            resp(tool_calls=[tcall("net_probe", {})]),
+            resp(
+                tool_calls=[
+                    tcall(
+                        "synthesize_plugin",
+                        {
+                            "name": "egress_plugin",
+                            "description": "wants network",
+                            "code": "import sys, json\njson.load(sys.stdin)\n"
+                            "print(json.dumps({'ok': True}))\n",
+                            "parameters_schema": {"type": "object", "properties": {}},
+                            "requires_net": True,
+                        },
+                    )
+                ]
+            ),
+            resp("STATUS: DONE\ndone"),
+            resp("STATUS: DONE\ndone"),
+        ]
+    )
+    monkeypatch.setattr(engine, "AsyncOpenAI", lambda **_: fake)
+    try:
+        result = await engine._run_botex_task_once_impl(
+            task="invoke plugins",
+            workspace_dir=str(tmp_path),
+            model="test/model",
+            api_key="x",
+            mode="full",
+            allow_net=True,
+            confirm_fn=None,
+            approval_policy="none",
+            task_id="dynplug_net_t1",
+            plugin_registry=registry,
+            plugin_vault=vault,
+        )
+    finally:
+        default_approval_manager.clear_task("dynplug_net_t1")
+
+    assert result["status"] == "DONE"
+    assert exec_kwargs.get("allow_net") is True
+    assert exec_kwargs.get("approval_confirmed") is False
+    assert synth_kwargs.get("allow_net") is True
+    assert synth_kwargs.get("approval_confirmed") is False
+    tool_msgs = [
+        m.get("content", "")
+        for call in fake.calls
+        for m in call.get("messages", [])
+        if m.get("role") == "tool"
+    ]
+    assert any("Refusing to execute" in c for c in tool_msgs)
+    assert any("no approved network grant" in c for c in tool_msgs)

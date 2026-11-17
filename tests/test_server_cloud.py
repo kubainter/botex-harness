@@ -234,6 +234,37 @@ def test_origin_guard_websocket_foreign_origin(client):
     assert excinfo.value.code == 1008
 
 
+def test_chat_ws_rate_limit_and_cap_rejected(client, monkeypatch):
+    """/api/chat/ws enforces the gateway RPM and a 32-connection cap pre-accept."""
+    from botex.server.server_cloud import _ACTIVE_WEBSOCKETS, _GATEWAY_RATE_LIMITER
+
+    monkeypatch.setenv("BOTEX_GATEWAY_RPM", "1")
+    _GATEWAY_RATE_LIMITER.reset()
+    try:
+        # First handshake consumes the single token of the minute window.
+        with client.websocket_connect("/api/chat/ws"):
+            pass
+
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/api/chat/ws") as ws:
+                ws.receive_json()
+        assert excinfo.value.code == 1008
+    finally:
+        monkeypatch.setenv("BOTEX_GATEWAY_RPM", "240")
+        _GATEWAY_RATE_LIMITER.reset()
+
+    try:
+        for _ in range(32):
+            _ACTIVE_WEBSOCKETS[object()] = asyncio.Lock()
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/api/chat/ws") as ws:
+                ws.receive_json()
+        assert excinfo.value.code == 1008
+    finally:
+        _ACTIVE_WEBSOCKETS.clear()
+        _GATEWAY_RATE_LIMITER.reset()
+
+
 # ---------------------------------------------------------------------------
 # 3. Wallet / Credits Endpoint
 # ---------------------------------------------------------------------------
@@ -388,6 +419,21 @@ def test_task_not_found(client):
     """Non-existent task ID returns 404."""
     resp = client.get("/api/tasks/nonexistent_12345")
     assert resp.status_code == 404
+
+
+def test_list_tasks_offloads_disk_load_to_thread(client, monkeypatch):
+    """GET /api/tasks must run the .botex/tasks disk scan off the event loop."""
+    seen = []
+    real_to_thread = asyncio.to_thread
+
+    def _spy_to_thread(func, /, *args, **kwargs):
+        seen.append(func)
+        return real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _spy_to_thread)
+    resp = client.get("/api/tasks")
+    assert resp.status_code == 200
+    assert server_cloud._load_tasks_persistent in seen
 
 
 def test_task_cancellation(client):
@@ -721,13 +767,15 @@ def _live_mcp_transport(monkeypatch):
     server_cloud._SSE_SESSION_BINDINGS.clear()
 
 
-def test_mcp_messages_session_post_binds_to_first_client_ip(monkeypatch, _live_mcp_transport):
-    """First /mcp/messages post binds session_id to its peer IP; same IP stays allowed."""
+def test_mcp_messages_requires_prior_sse_binding_same_ip(monkeypatch, _live_mcp_transport):
+    """Unbound /mcp/messages post gets 401; a prior GET /mcp/sse binding admits the same IP."""
     monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
     sid = _live_mcp_transport.hex
 
     status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
-    assert status == 200 and reached
+    assert status == 401 and not reached
+
+    server_cloud._bind_sse_session(sid, "203.0.113.10")
 
     status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
     assert status == 200 and reached
@@ -737,12 +785,74 @@ def test_mcp_messages_session_post_rejects_different_ip(monkeypatch, _live_mcp_t
     """A live session id posted from a different peer IP is rejected with 401."""
     monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "master-secret")
     sid = _live_mcp_transport.hex
+    server_cloud._bind_sse_session(sid, "203.0.113.10")
 
     status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "203.0.113.10"))
     assert status == 200 and reached
 
     status, reached = _invoke_auth_middleware(_mcp_messages_scope(sid, "198.51.100.7"))
     assert status == 401 and not reached
+
+
+def test_mcp_sse_guard_binds_session_ip_on_handshake(_live_mcp_transport):
+    """_MCPSseErrorGuard binds session_id -> client_ip during the GET /mcp/sse handshake."""
+    sid = _live_mcp_transport.hex
+    sent = []
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send(
+            {
+                "type": "http.response.body",
+                "body": f"event: endpoint\ndata: /mcp/messages?session_id={sid}\n\n".encode(),
+            }
+        )
+
+    async def _receive():
+        return {"type": "http.request", "body": b""}
+
+    async def _send(msg):
+        sent.append(msg)
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/mcp/sse",
+        "query_string": b"",
+        "client": ("203.0.113.55", 50000),
+        "headers": [],
+    }
+    asyncio.run(server_cloud._MCPSseErrorGuard(inner)(scope, _receive, _send))
+    assert server_cloud._SSE_SESSION_BINDINGS[sid]["ip"] == "203.0.113.55"
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert (b"x-accel-buffering", b"no") in start["headers"]
+
+
+def test_mcp_sse_guard_binds_session_via_writer_delta(_live_mcp_transport):
+    """A single new _read_stream_writers entry at response.start also binds the peer IP."""
+    new_sid = uuid.uuid4()
+
+    async def inner(scope, receive, send):
+        server_cloud._mcp_transport._read_stream_writers[new_sid] = object()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def _receive():
+        return {"type": "http.request", "body": b""}
+
+    async def _send(msg):
+        pass
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/mcp/sse",
+        "query_string": b"",
+        "client": ("198.51.100.9", 50000),
+        "headers": [],
+    }
+    asyncio.run(server_cloud._MCPSseErrorGuard(inner)(scope, _receive, _send))
+    assert server_cloud._SSE_SESSION_BINDINGS[new_sid.hex]["ip"] == "198.51.100.9"
 
 
 def test_mcp_messages_unknown_session_id_rejected(monkeypatch, _live_mcp_transport):
@@ -813,6 +923,40 @@ _requires_pwa_build = pytest.mark.skipif(
 )
 
 
+def test_pwa_security_headers_always_emitted(tmp_path):
+    """_NoCacheStaticFiles emits CSP/framing headers even without a web/dist build (SEC-05)."""
+    (tmp_path / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+    files = server_cloud._NoCacheStaticFiles(directory=str(tmp_path), html=True)
+    resp = asyncio.run(
+        files.get_response("index.html", {"type": "http", "method": "GET", "headers": []})
+    )
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    csp = resp.headers["Content-Security-Policy"]
+    assert "frame-ancestors 'none'" in csp
+    assert "script-src 'self' 'sha256-p+tHzEcHFHDEELDmXpTaQ0BuVNK1d0x/N41rW5RlGJw='" in csp
+    assert "https://fonts.gstatic.com" in csp
+
+
+def test_pwa_csp_hash_matches_inline_theme_script():
+    """The CSP script-src hash must equal the live web/index.html inline script hash."""
+    import base64
+    import hashlib
+    import re
+
+    index_html = (
+        (Path(__file__).resolve().parent.parent / "web" / "index.html")
+        .read_text(encoding="utf-8")
+        .replace("\r\n", "\n")
+    )
+    raw = re.search(r"<script>([\s\S]*?)</script>", index_html).group(1)
+    digest = "sha256-" + base64.b64encode(hashlib.sha256(raw.encode("utf-8")).digest()).decode(
+        "ascii"
+    )
+    assert digest in server_cloud._PWA_CSP
+
+
 @_requires_pwa_build
 def test_pwa_static_shell_served(client, monkeypatch):
     """PWA static entrypoint index.html is served at root / even in Strict Cloud Mode."""
@@ -821,6 +965,10 @@ def test_pwa_static_shell_served(client, monkeypatch):
     assert resp.status_code == 200
     assert "BoteX Control" in resp.text
     assert '<div id="app"></div>' in resp.text
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
 
 
 @_requires_pwa_build

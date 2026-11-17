@@ -105,6 +105,17 @@ def test_edge_ws_auth_rejects_bad_token_and_scope(_isolated_cloud_state):
                 ws.receive_json()
 
 
+def test_edge_ws_rejects_foreign_origin(_isolated_cloud_state):
+    """/api/edge/ws upgrades from a foreign Origin are closed pre-accept with 1008."""
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect(
+                "/api/edge/ws", headers={"origin": "http://evil.example"}
+            ) as ws:
+                ws.receive_json()
+    assert excinfo.value.code == 1008
+
+
 def test_edge_ws_handshake_ping_and_revocation(_isolated_cloud_state):
     with TestClient(app) as client:
         tok_res = client.post(

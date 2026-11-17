@@ -3678,19 +3678,24 @@ async def _run_botex_task_once_impl(
                     "ok": False,
                     "error": f"Unknown tool '{fn_name}'. Available tools: {', '.join(tool_names)}.",
                 }
-            elif fn_name in dynamic_plugins:
-                entry["kind"] = "dynamic_plugin"
             else:
+                # Dynamic plugins inherit the synthesize_plugin ToolPolicy —
+                # running vaulted/generated code is the same exec+write risk.
+                is_dynamic = fn_name in dynamic_plugins
                 op_path = (
-                    args.get("path")
-                    or args.get("src_path")
-                    or args.get("command")
-                    or args.get("url")
-                    or ""
+                    fn_name
+                    if is_dynamic
+                    else (
+                        args.get("path")
+                        or args.get("src_path")
+                        or args.get("command")
+                        or args.get("url")
+                        or ""
+                    )
                 )
                 try:
                     agency_error = await async_check_agency_policy(
-                        fn_name,
+                        "synthesize_plugin" if is_dynamic else fn_name,
                         caps,
                         confirm_fn,
                         op_path,
@@ -3748,6 +3753,8 @@ async def _run_botex_task_once_impl(
                             "cost_usd": log_entry.get("cost_usd", 0.0),
                         }
                     entry["preset_result"] = {"ok": False, "error": agency_error}
+                elif is_dynamic:
+                    entry["kind"] = "dynamic_plugin"
                 elif fn_name == "read_url":
                     if net_requests >= net_request_limit:
                         entry["preset_result"] = {
@@ -3884,7 +3891,7 @@ async def _run_botex_task_once_impl(
                             args,
                             runner=plugin_runner,
                             allow_net=CAP_NET in caps,
-                            approval_confirmed=CAP_NET in caps,
+                            approval_confirmed=(CAP_NET in caps and confirm_fn is not None),
                         )
                 elif fn_name == "read_scratchpad":
                     tool_result = await active_executor.execute(
@@ -4034,7 +4041,7 @@ async def _run_botex_task_once_impl(
                         plugin_vault=plugin_vault,
                         runner=plugin_runner,
                         allow_net=CAP_NET in caps,
-                        approval_confirmed=CAP_NET in caps,
+                        approval_confirmed=(CAP_NET in caps and confirm_fn is not None),
                     )
                     if _new_pdef is not None:
                         dynamic_plugins[_new_pdef.name] = _new_pdef

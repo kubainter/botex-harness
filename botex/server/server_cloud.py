@@ -64,6 +64,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
@@ -184,8 +185,8 @@ _IDEMPOTENCY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SSE_REPLAY_BUFFER: Dict[str, List[Dict[str, Any]]] = {}
 _MAX_REPLAY_EVENTS_PER_SESSION: int = 100
 _IDEMPOTENCY_TTL_SECONDS: float = 86400.0
-# Remote MCP SSE: the first /mcp/messages post binds session_id to its client IP,
-# so a session id lifted from logs cannot be driven from a different peer.
+# Remote MCP SSE: GET /mcp/sse binds session_id to its client IP, so a
+# session id lifted from logs cannot be driven from a different peer.
 _SSE_SESSION_BINDINGS: Dict[str, Dict[str, Any]] = {}
 _SSE_SESSION_BINDINGS_CAP: int = 10_000
 
@@ -1582,9 +1583,7 @@ class CloudAuthMiddleware:
                 if session_id in active_sessions:
                     client_ip = _extract_client_ip_from_scope(scope)
                     binding = _SSE_SESSION_BINDINGS.get(session_id)
-                    if binding is None:
-                        _bind_sse_session(session_id, client_ip)
-                    elif binding["ip"] != client_ip:
+                    if binding is None or binding["ip"] != client_ip:
                         resp = JSONResponse(
                             status_code=status.HTTP_401_UNAUTHORIZED,
                             content={"detail": "Unauthorized: Invalid or missing bearer token"},
@@ -1673,12 +1672,37 @@ class _MCPSseErrorGuard:
             return
         is_sse = scope.get("path", "").rstrip("/").endswith("/sse")
 
+        # Bind the session_id to this peer IP at handshake time (TOFU removal):
+        # /mcp/messages posts are then only accepted from the bound IP.
+        client_ip = _extract_client_ip_from_scope(scope) if is_sse else ""
+        bound_sse = False
+        known_sids = (
+            {sid.hex for sid in getattr(_mcp_transport, "_read_stream_writers", {}).keys()}
+            if is_sse and _mcp_transport is not None
+            else set()
+        )
+
         async def _send_with_no_buffer(message: dict[str, Any]) -> None:
-            if is_sse and message.get("type") == "http.response.start":
+            nonlocal bound_sse
+            msg_type = message.get("type")
+            if msg_type == "http.response.start":
                 hdrs = list(message.get("headers") or [])
                 if not any(k.lower() == b"x-accel-buffering" for k, _ in hdrs):
                     hdrs.append((b"x-accel-buffering", b"no"))
                 message = {**message, "headers": hdrs}
+                if not bound_sse and _mcp_transport is not None:
+                    new_sids = {
+                        sid.hex
+                        for sid in getattr(_mcp_transport, "_read_stream_writers", {}).keys()
+                    } - known_sids
+                    if len(new_sids) == 1:
+                        _bind_sse_session(next(iter(new_sids)), client_ip)
+                        bound_sse = True
+            elif not bound_sse and msg_type == "http.response.body":
+                match = re.search(rb"session_id=([0-9a-fA-F]{32})", message.get("body") or b"")
+                if match:
+                    _bind_sse_session(match.group(1).decode("ascii").lower(), client_ip)
+                    bound_sse = True
             await send(message)
 
         try:
@@ -2207,7 +2231,7 @@ async def create_task(
 @app.get("/api/tasks")
 async def list_tasks() -> Dict[str, Any]:
     """List all registered background tasks."""
-    _load_tasks_persistent()
+    await asyncio.to_thread(_load_tasks_persistent)
     tasks = []
     for tid, entry in _TASKS.items():
         tasks.append(
@@ -3001,7 +3025,13 @@ async def post_chat(
 @app.websocket("/api/chat/ws")
 async def chat_websocket(websocket: WebSocket) -> None:
     """Bidirectional WebSocket chat endpoint with 15s ping heartbeat and auth support."""
-    await websocket.accept()
+    allowed, _ = _GATEWAY_RATE_LIMITER.check_allow(_extract_client_ip_from_scope(websocket.scope))
+    if not allowed or len(_ACTIVE_WEBSOCKETS) >= 32:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Rate or connection limit exceeded",
+        )
+        return
 
     ws_origin = websocket.headers.get("origin", "")
     if ws_origin.strip() and not _is_allowed_origin(ws_origin, websocket.headers.get("host", "")):
@@ -3010,6 +3040,8 @@ async def chat_websocket(websocket: WebSocket) -> None:
             reason="Forbidden: cross-origin request",
         )
         return
+
+    await websocket.accept()
 
     if not _is_auth_configured():
         client_host = websocket.client.host if websocket.client else ""
@@ -3576,6 +3608,14 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Rate limit exceeded")
         return
 
+    ws_origin = websocket.headers.get("origin", "")
+    if ws_origin.strip() and not _is_allowed_origin(ws_origin, websocket.headers.get("host", "")):
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Forbidden: cross-origin request",
+        )
+        return
+
     await websocket.accept()
     store = _edge_token_store()
 
@@ -3711,25 +3751,45 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
 # Static Web PWA Mounting (served when web/dist is built)
 # ---------------------------------------------------------------------------
 _web_dist_dir = os.path.join(_root_dir, "web", "dist")
+
+# The pinned sha256 is the inline theme-hydration <script> in web/index.html;
+# it must be updated in lockstep with any edit to that block (test enforces).
+_PWA_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'sha256-p+tHzEcHFHDEELDmXpTaQ0BuVNK1d0x/N41rW5RlGJw='; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com data:; "
+    "img-src 'self' data: blob:; "
+    "connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:*; "
+    "frame-ancestors 'none'; base-uri 'self'"
+)
+
+
+def _apply_pwa_security_headers(resp: Response) -> None:
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Content-Security-Policy"] = _PWA_CSP
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope) -> Response:
+        resp = await super().get_response(path, scope)
+        _apply_pwa_security_headers(resp)
+        # Force re-validation of entrypoints, manifest and service worker to prevent stale PWA cache
+        if (
+            path.endswith(".html")
+            or path.endswith("sw.js")
+            or path.endswith(".webmanifest")
+            or path.endswith("manifest.json")
+            or not path
+            or path == "."
+        ):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+        return resp
+
+
 if os.path.isdir(_web_dist_dir):
-    from fastapi.staticfiles import StaticFiles
-    from starlette.responses import Response
-
-    class NoCacheStaticFiles(StaticFiles):
-        async def get_response(self, path: str, scope) -> Response:
-            resp = await super().get_response(path, scope)
-            # Force re-validation of entrypoints, manifest and service worker to prevent stale PWA cache
-            if (
-                path.endswith(".html")
-                or path.endswith("sw.js")
-                or path.endswith(".webmanifest")
-                or path.endswith("manifest.json")
-                or not path
-                or path == "."
-            ):
-                resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-                resp.headers["Pragma"] = "no-cache"
-                resp.headers["Expires"] = "0"
-            return resp
-
-    app.mount("/", NoCacheStaticFiles(directory=_web_dist_dir, html=True), name="web_pwa")
+    app.mount("/", _NoCacheStaticFiles(directory=_web_dist_dir, html=True), name="web_pwa")

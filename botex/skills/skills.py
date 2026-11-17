@@ -110,6 +110,11 @@ _INJECTION_PATTERNS = (
         r"override\s+(all\s+)?(safety|system|security)\s+(rules|instructions|policies)",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"(zignoruj|pomiń|zapomnij)\s+(wszystkie\s+)?(poprzednie|powyższe|systemowe)\s+(instrukcje|zasady|reguły)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"</\s*untrusted_(web|file|memory)_content\s*>", re.IGNORECASE),
 )
 
 _UNTRUSTED_WEB_WRAPPER_RE = re.compile(

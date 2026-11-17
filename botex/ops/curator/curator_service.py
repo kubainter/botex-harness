@@ -25,6 +25,7 @@ import re
 import socket
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -200,7 +201,9 @@ def check_active_agent_tasks() -> bool:
     if not tasks_url:
         return False
     try:
-        req = urllib.request.Request(tasks_url, method="GET")
+        tok = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
+        hdrs = {"Authorization": f"Bearer {tok}"} if tok and not tok.startswith("sha256:") else {}
+        req = urllib.request.Request(tasks_url, method="GET", headers=hdrs)
         with urllib.request.urlopen(req, timeout=1.0) as resp:
             if resp.status == 200:
                 payload = json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -209,6 +212,13 @@ def check_active_agent_tasks() -> bool:
                     for t in items:
                         if isinstance(t, dict) and t.get("status") in ("RUNNING", "QUEUED"):
                             return True
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            logger.warning(
+                "Curator active-task poll got HTTP %s from %s; check BOTEX_ACCESS_TOKEN",
+                exc.code,
+                tasks_url,
+            )
     except Exception:
         pass
     return False
@@ -558,7 +568,7 @@ def _apply_recommended_links(
             continue
         src_id = str(rec.get("source_id") or "").strip()
         tgt_id = str(rec.get("target_id") or "").strip()
-        rationale = str(rec.get("rationale") or "").strip()
+        rationale = re.sub(r"[\r\n#<>\[\]]+", " ", str(rec.get("rationale") or "")).strip()[:200]
 
         if not src_id or not tgt_id or src_id == tgt_id:
             skipped += 1

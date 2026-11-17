@@ -24,6 +24,7 @@ except (ImportError, ValueError):
 _TOKEN_PREFIX = "btxd_"
 _VALID_SCOPE_PREFIXES = frozenset({"task_pull", "result_push", "delegate_local"})
 _DEFAULT_TTL_S = 30 * 24 * 3600
+_MAX_TTL_S = 90 * 24 * 3600
 
 
 def _digest_secret(raw_value: str) -> str:
@@ -196,6 +197,8 @@ class DeviceTokenStore:
         clean_ws = coerce_text(mask_secrets(str(workspace_id or ""))).strip()[:160]
         if not clean_dev or not clean_ws:
             raise ValueError("device_id and workspace_id must be non-empty.")
+        if clean_dev == "*" or clean_ws == "*":
+            raise ValueError("Wildcard '*' is disallowed for device_id and workspace_id.")
 
         default_scopes = [f"task_pull:{clean_ws}", f"result_push:{clean_ws}"]
         raw_scopes = default_scopes if scopes is None else list(scopes)
@@ -210,7 +213,7 @@ class DeviceTokenStore:
             raise ValueError("At least one valid scope is required.")
 
         now = time.time()
-        ttl_val = max(int(ttl_s), 60) if ttl_s is not None else _DEFAULT_TTL_S
+        ttl_val = min(max(int(ttl_s), 60), _MAX_TTL_S) if ttl_s is not None else _DEFAULT_TTL_S
         jti = secrets.token_hex(8)
         secret_part = secrets.token_urlsafe(32)
         raw_credential = f"{_TOKEN_PREFIX}{jti}.{secret_part}"

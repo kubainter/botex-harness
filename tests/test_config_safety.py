@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -206,3 +207,33 @@ def test_deploy_configs_and_docs_have_no_public_ips_or_hardcoded_ssh_targets():
         assert not public_ips, f"{rel} contains public IPv4 literal(s): {public_ips}"
         ssh_targets = _find_ssh_targets(content)
         assert not ssh_targets, f"{rel} contains hardcoded SSH user@host: {ssh_targets}"
+
+
+def test_committed_json_configs_have_no_duplicate_keys_or_tabs():
+    """Committed JSON configs must have unique keys and zero literal tabs (OPS-01)."""
+
+    def _no_duplicate_keys(pairs):
+        keys = [k for k, _ in pairs]
+        assert len(keys) == len(set(keys)), f"duplicate JSON keys: {keys}"
+        return dict(pairs)
+
+    for rel_file in ("botex.config.json", "botex.config.example.json"):
+        target = REPO_ROOT / rel_file
+        assert target.is_file(), f"missing guarded config: {rel_file}"
+        text = target.read_text(encoding="utf-8")
+        assert "\t" not in text, f"{rel_file} must not contain literal tab characters"
+        json.loads(text, object_pairs_hook=_no_duplicate_keys)
+
+
+def test_set_local_config_restricts_permissions_on_posix(tmp_path, monkeypatch):
+    """set_local_config must chmod 0o600 the local secrets file on POSIX (SEC-07)."""
+    from unittest.mock import patch as _patch
+
+    import botex.server.config as server_config
+
+    target = tmp_path / "botex.config.local.json"
+    monkeypatch.setattr(server_config, "LOCAL_CONFIG_FILE", target)
+    monkeypatch.setattr(server_config.os, "name", "posix")
+    with _patch.object(server_config.os, "chmod") as mock_chmod:
+        server_config.set_local_config("ui.language", "pl")
+    mock_chmod.assert_called_once_with(target, 0o600)

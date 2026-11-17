@@ -54,12 +54,19 @@ def _pep503(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+_PIN_RE = re.compile(r"^([A-Za-z0-9._-]+)==(\S+)$")
+
+
+def _lock_entry(line: str) -> str:
+    """Strip comments, env markers, and `--generate-hashes` line continuations."""
+    return line.split("#", 1)[0].split(";", 1)[0].strip().rstrip("\\").strip()
+
+
 def _lock_pins() -> Dict[str, str]:
     """name -> pinned version for every `==` entry in requirements.lock."""
     pins: Dict[str, str] = {}
     for line in REQUIREMENTS_LOCK.read_text(encoding="utf-8").splitlines():
-        entry = line.split("#", 1)[0].split(";", 1)[0].strip()
-        match = re.match(r"^([A-Za-z0-9._-]+)==(\S+)$", entry)
+        match = _PIN_RE.match(_lock_entry(line))
         if match:
             pins[_pep503(match.group(1))] = match.group(2)
     return pins
@@ -93,10 +100,16 @@ def test_requirements_in_parity_with_pyproject():
 
 def test_lockfile_pins_satisfy_pyproject_floors():
     """requirements.lock must pin every pyproject core dep at a version that
-    satisfies its floor — regenerate via `uv pip compile` when deps change."""
+    satisfies its floor — regenerate via `uv pip compile --generate-hashes`
+    when deps change."""
     assert REQUIREMENTS_LOCK.is_file(), (
         "requirements.lock missing — regenerate via: "
-        "uv pip compile pyproject.toml --universal --python-version 3.13 -o requirements.lock"
+        "uv pip compile --generate-hashes pyproject.toml --universal --python-version 3.13 "
+        "-o requirements.lock"
+    )
+    lock_text = REQUIREMENTS_LOCK.read_text(encoding="utf-8")
+    assert "--hash=sha256:" in lock_text, (
+        "requirements.lock lacks --hash=sha256 entries — regenerate with --generate-hashes"
     )
     pyproject_deps = _pyproject_core_deps()
     pins = _lock_pins()
@@ -109,9 +122,39 @@ def test_lockfile_pins_satisfy_pyproject_floors():
             pins[_pep503(name)], prereleases=True
         )
     )
+    # Every `==` pin block must carry at least one sha256 hash so the VPS
+    # install (`pip install --require-hashes`) fails closed on tampered wheels.
+    pin_blocks = 0
+    blocks_without_hash = 0
+    block_has_hash = False
+    for line in lock_text.splitlines():
+        entry = _lock_entry(line)
+        if _PIN_RE.match(entry):
+            if pin_blocks and not block_has_hash:
+                blocks_without_hash += 1
+            pin_blocks += 1
+            block_has_hash = False
+        elif "--hash=sha256:" in entry:
+            block_has_hash = True
+    if pin_blocks and not block_has_hash:
+        blocks_without_hash += 1
     problems = []
     if missing:
         problems.append(f"not pinned in requirements.lock: {missing}")
     if unsatisfied:
         problems.append("lock pins violate pyproject floors: " + "; ".join(unsatisfied))
+    if pin_blocks != len(pins):
+        problems.append(f"parsed {pin_blocks} pin block(s) but {len(pins)} resolvable pin(s)")
+    if blocks_without_hash:
+        problems.append(f"{blocks_without_hash} pin block(s) lack --hash=sha256")
     assert not problems, "Lockfile drift: " + "; ".join(problems)
+
+
+def test_deploy_pipeline_installs_lockfile_with_hashes_and_no_keyscan():
+    """Deploy surfaces must install the hashed lock with --require-hashes and
+    never trust the network for the VPS host key (pinned VPS_KNOWN_HOSTS)."""
+    deploy_yml = (REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert "ssh-keyscan" not in deploy_yml
+    assert "install --require-hashes -r requirements.lock" in deploy_yml
+    install_sh = (REPO_ROOT / "deploy" / "oracle-vps" / "install.sh").read_text(encoding="utf-8")
+    assert "install --require-hashes -r requirements.lock" in install_sh

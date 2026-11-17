@@ -296,6 +296,49 @@ def test_apply_recommended_links_gates_and_append_only(tmp_path):
     assert "[[tgt_botex]]" in src_text
 
 
+def test_apply_recommended_links_sanitizes_rationale(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    save_memory(
+        workspace_dir=str(ws),
+        memory_id="src_sane",
+        title="Source Sane",
+        content="Original body stays.",
+        kind="context",
+        tags=["arch"],
+        project="botex",
+    )
+    save_memory(
+        workspace_dir=str(ws),
+        memory_id="tgt_sane",
+        title="Target Sane",
+        content="Target body.",
+        kind="context",
+        tags=["arch"],
+        project="botex",
+    )
+    health = find_graph_health(workspace_dir=str(ws), scope="local")
+    node_by_id = {n["id"]: n for n in health["all_nodes"]}
+
+    malicious = "\n## Injected Heading\n<script>x</script>[[fake_id]]" + "A" * 250
+    recs = [{"source_id": "src_sane", "target_id": "tgt_sane", "rationale": malicious}]
+    res = _apply_recommended_links(str(ws), recs, node_by_id)
+    assert res["applied"] == 1
+
+    src_text = (ws / ".botex" / "memory" / "src_sane.md").read_text(encoding="utf-8")
+    assert "## Injected Heading" not in src_text
+    assert "<script>" not in src_text
+    related_lines = [ln for ln in src_text.splitlines() if "[[tgt_sane]]" in ln]
+    assert len(related_lines) == 1  # single line — no multi-line injection
+    prefix = "- [[tgt_sane]] — "
+    assert related_lines[0].startswith(prefix)
+    rationale_part = related_lines[0][len(prefix) :]
+    assert rationale_part  # sanitized text survives, not dropped wholesale
+    assert len(rationale_part) <= 200
+    for ch in "#<>[]\r\n":
+        assert ch not in rationale_part
+
+
 def test_compute_deadline_and_health_assessment():
     d1 = _compute_deadline("05:30", now_dt=datetime(2026, 1, 1, 1, 0), now_mono=1000.0)
     assert d1 == pytest.approx(1000.0 + 4.5 * 3600.0)
@@ -355,6 +398,32 @@ def test_check_active_agent_tasks_polls_http(monkeypatch):
 
     with patch("urllib.request.urlopen", return_value=fake_cm):
         assert check_active_agent_tasks() is True
+
+
+def test_check_active_agent_tasks_sends_bearer_token(monkeypatch):
+    import server as botex_server
+
+    monkeypatch.setenv("BOTEX_CURATOR_POLL_HTTP", "1")
+    monkeypatch.setenv("BOTEX_TASKS_URL", "http://127.0.0.1:8000/api/tasks")
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "curator-secret-token")
+    fake_resp = io.BytesIO(json.dumps({"tasks": []}).encode())
+    fake_cm = MagicMock()
+    fake_cm.__enter__.return_value = SimpleNamespace(status=200, read=fake_resp.read)
+    fake_cm.__exit__.return_value = False
+
+    with patch.object(botex_server, "_TASKS", {}):
+        with patch("urllib.request.urlopen", return_value=fake_cm) as mock_open:
+            assert check_active_agent_tasks() is False
+    req = mock_open.call_args.args[0]
+    assert req.get_header("Authorization") == "Bearer curator-secret-token"
+
+    # Hash-only tokens are verifier material, not a sendable credential.
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "sha256:deadbeef")
+    with patch.object(botex_server, "_TASKS", {}):
+        with patch("urllib.request.urlopen", return_value=fake_cm) as mock_open:
+            assert check_active_agent_tasks() is False
+    req = mock_open.call_args.args[0]
+    assert req.get_header("Authorization") is None
 
 
 def test_set_memory_status_updates_status_adds_timeline_edge_and_preserves_frontmatter(tmp_path):

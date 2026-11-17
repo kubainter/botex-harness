@@ -79,3 +79,14 @@ def test_invalid_inputs_rejected(tmp_path: Path):
         store.issue_token("dev", "ws", scopes=["admin:ws"])
     with pytest.raises(ValueError):
         store.issue_token("dev", "ws", scopes=[])
+    with pytest.raises(ValueError):
+        store.issue_token("*", "ws")
+    with pytest.raises(ValueError):
+        store.issue_token("dev", "*")
+
+
+def test_issue_token_ttl_capped_at_90_days(tmp_path: Path):
+    """Excessive ttl_s is clamped to the 90-day ceiling (SEC-07)."""
+    store = DeviceTokenStore(tmp_path / "tokens.json")
+    _, rec = store.issue_token("dev", "ws", ttl_s=10 * 365 * 24 * 3600)
+    assert rec.expires_at - rec.issued_at <= 90 * 24 * 3600 + 1
