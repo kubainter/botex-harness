@@ -1,6 +1,6 @@
 ---
 name: botex
-version: "2.3.0"
+version: "2.4.0"
 description: Use when delegating bounded code inspection, surgical patching, verification, or Memory Vault operations to the BoteX MCP harness.
 taxonomy: [general]
 metadata:
@@ -97,6 +97,7 @@ BoteX records every run in a local analytics ledger and feeds that evidence back
 - **Provenance:** on BoteX Cloud, `save_memory`/`POST /api/memory` derive `origin` server-side from sanitized `X-Agent-Id`/`X-Host` headers; reserved claims (`human`, `human-curated`, `operator`, `curator`) are rejected. Never claim a reserved origin.
 - **Skill proposals:** the Curator may draft `learned-*` `SKILL.md`/`recipe.md` proposals under `<workspace>/.botex/proposals/` only. The loop never mutates live `skills/` or `botex/skills/recipes/`; promotion happens via a reviewed PR, so do not delegate writes into live skill directories as a promotion path.
 - **Shadow routing:** the engine's per-`(recipe, taxonomy)` shadow model advice is advisory telemetry only and never overrides the `model`/`profile` you selected. `recommend_models` remains the caller-facing ranking surface.
+- **Swarm Memory & `envfact` Hygiene (1:1 & Multi-Agent Hosts):** any workstation connected to BoteX Cloud participates in the shared Memory Vault (`scope="global"`, `project="swarm"`, server-derived `origin="<agent>@<host>"`). Always call `recall_memory(query="...", scope="all")` first (One-Shot Recall via 1-hop wikilinks) before falling back to `search_memory` or `read_memory`, and never dump raw files or huge JSON payloads into prompts or notes (Zero Context Bloat). Before delegating on an unfamiliar or Edge workspace, check active `envfact` lessons (`recall_memory(query="envfact <workspace_or_module>", scope="all")`); when a deterministic shell fix (`FormRepair`, e.g., `python -m pytest` over `pytest`) or missing binary (`AbsentTool`) is verified, persist it via `save_memory(..., kind="lesson", tags=["lesson", "envfact"])` for Curator fast-track promotion. Ephemeral `temp-handoff` notes (`scope="local"`, `tags=["temp-handoff"]`) must include `expires: YYYY-MM-DD` and be cleaned up by the caller when done.
 
 ### BlackBox Penal Registry (`botex.penal.v1`)
 

@@ -1646,6 +1646,27 @@ async def botex_get_rap_sheet(
         return {"ok": False, "error": "INVALID_INPUT", "message": str(exc)}
 
 
+@mcp.resource("botex://skills/botex", mime_type="text/markdown")
+def resource_botex_caller_skill() -> str:
+    """Return the canonical caller-facing BoteX SKILL.md instructions."""
+    from botex.skills.skills import get_bundled_caller_skill_files
+
+    return get_bundled_caller_skill_files("botex")["SKILL.md"]
+
+
+@mcp.resource("botex://skills/botex/references/{ref_name}", mime_type="text/markdown")
+def resource_botex_caller_skill_reference(ref_name: str) -> str:
+    """Return a reference document from the bundled BoteX caller skill."""
+    from botex.skills.skills import get_bundled_caller_skill_files
+
+    clean = str(ref_name or "").strip().removesuffix(".md")
+    key = f"references/{clean}.md"
+    files = get_bundled_caller_skill_files("botex")
+    if key not in files:
+        raise ValueError(f"Unknown botex skill reference: {ref_name!r}")
+    return files[key]
+
+
 # ---------------------------------------------------------------------------
 # CLI Runner
 # ---------------------------------------------------------------------------
@@ -1718,6 +1739,7 @@ def _print_usage():
   {c("botex cloud [--host H] [--port P]")}   {d(t("usage.cloud"))}
   {c("botex edge [--server WSS] [-w DIR]")}    {d("Outbound WSS edge runner for BoteX Cloud")}
   {c("botex setup")}                         {d("Print Cloud MCP + Edge .env setup guide")}
+  {c("botex skills <list|export>")}         {d("List or export the bundled BoteX caller skill")}
 
 {title(t("usage.examples"))}
   {c('botex run "fix failing tests" -w .')}   {d(t("usage.ex.run"))}
@@ -2581,6 +2603,72 @@ def _load_edge_env_files() -> None:
         load_dotenv(resolved, override=False)
 
 
+def _cli_skills(argv: list[str]) -> None:
+    """CLI dispatcher for listing and exporting bundled caller-facing skills."""
+    import argparse
+
+    from botex.skills.skills import (
+        CALLER_SKILL_TARGET_PRESETS,
+        export_bundled_caller_skill,
+        list_bundled_caller_skills,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="botex skills",
+        description="Inspect or export the bundled caller-facing BoteX skill (SKILL.md + references).",
+    )
+    sub = parser.add_subparsers(dest="action")
+
+    sub.add_parser("list", help="List bundled caller skills and target presets")
+
+    exp = sub.add_parser("export", help="Export a bundled caller skill to a local skills directory")
+    exp.add_argument(
+        "name",
+        nargs="?",
+        default="botex",
+        help="Bundled caller skill name to export (default: botex)",
+    )
+    exp.add_argument(
+        "--target",
+        "-t",
+        default="ai",
+        help=(
+            "Destination preset ("
+            + ", ".join(sorted(CALLER_SKILL_TARGET_PRESETS))
+            + ") or custom directory path (default: ai)"
+        ),
+    )
+    exp.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Overwrite existing skill files in the target directory",
+    )
+
+    args = parser.parse_args(argv or ["list"])
+    action = args.action or "list"
+    if action == "list":
+        res = list_bundled_caller_skills()
+        print(title("Bundled BoteX Caller Skills"))
+        for item in res.get("skills", []):
+            ver = item.get("version") or "-"
+            print(f"  {accent(item['name'])} (v{ver}) — {item.get('description', '')}")
+            print(f"    {dim('files:')} {', '.join(item.get('files', []))}")
+        print(f"\n{accent('Target presets:')}")
+        for key, path in sorted(CALLER_SKILL_TARGET_PRESETS.items()):
+            print(f"  {accent(key):<10} -> {path}")
+        return
+
+    res = export_bundled_caller_skill(name=args.name, target=args.target, force=args.force)
+    if not res.get("ok"):
+        print(err(f"[ERROR] {res.get('error', 'Failed to export caller skill')}"))
+        sys.exit(1)
+    files_written = res.get("files_written") or []
+    print(ok(f"[OK] Exported '{res['name']}' to {res['target_dir']} ({len(files_written)} files):"))
+    for fp in files_written:
+        print(f"  {dim('-')} {fp}")
+
+
 def _cli_setup() -> None:
     """Print a host-agnostic setup guide for connecting a workstation to BoteX Cloud."""
     print(f"""{title("BoteX Cloud & Edge Setup Guide")}
@@ -2610,6 +2698,10 @@ def _cli_setup() -> None:
 
 5. {accent("Target this machine from Cloud MCP tools (start_task / run_subagent):")}
    workspace_dir="edge://<device-id>/<workspace-id>"
+
+6. {accent("Export the BoteX caller skill (SKILL.md + references) into your local agent's skills folder:")}
+   botex skills export --target ai
+   (presets: ai, claude, gemini, devin, or custom path)
 """)
 
 
@@ -3095,6 +3187,8 @@ def main():
         _cli_edge(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "setup":
         _cli_setup()
+    elif len(sys.argv) > 1 and sys.argv[1] == "skills":
+        _cli_skills(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "maintenance":
         _cli_maintenance(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] in ("serve", "server", "--serve"):

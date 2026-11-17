@@ -19,6 +19,7 @@ Capabilities:
 
 from __future__ import annotations
 
+import importlib.resources as importlib_resources
 import os
 import re
 import shutil
@@ -66,12 +67,23 @@ __all__ = [
     "format_skills_prompt_block",
     "has_injection_pattern",
     "write_skill_proposal_draft",
+    "CALLER_SKILL_TARGET_PRESETS",
+    "list_bundled_caller_skills",
+    "get_bundled_caller_skill_files",
+    "export_bundled_caller_skill",
     "MAX_SKILL_BYTES",
     "VALID_SKILL_TAXONOMIES",
 ]
 
 MAX_SKILL_BYTES = 131_072  # 128 KB max per SKILL.md
 _SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$")
+_CALLER_ONLY_SKILLS: frozenset[str] = frozenset({"botex"})
+CALLER_SKILL_TARGET_PRESETS: Dict[str, str] = {
+    "ai": "~/.ai/skills",
+    "claude": "~/.claude/skills",
+    "gemini": "~/.gemini/skills",
+    "devin": "~/.config/devin/skills",
+}
 
 VALID_SKILL_TAXONOMIES = frozenset(
     {
@@ -377,11 +389,15 @@ def list_skills(skills_dir: Optional[Path] = None) -> Dict[str, Any]:
         for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
+            if entry.name.lower() in _CALLER_ONLY_SKILLS:
+                continue
             skill_file = entry / "SKILL.md"
             if not skill_file.is_file():
                 continue
             try:
                 parsed = _parse_skill_file(skill_file, root)
+                if str(parsed.get("name") or "").strip().lower() in _CALLER_ONLY_SKILLS:
+                    continue
                 # Omit full markdown body in summary list to keep payloads compact
                 summary_item = {k: v for k, v in parsed.items() if k != "content"}
                 summary_item["preview"] = parsed["content"][:240] + (
@@ -410,6 +426,14 @@ def get_skill(name: str, skills_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Retrieve full metadata and Markdown instructions for a specific installed skill."""
     try:
         clean_name = _sanitize_skill_name(name)
+        if clean_name in _CALLER_ONLY_SKILLS:
+            return {
+                "ok": False,
+                "error": (
+                    f"Skill '{clean_name}' is a caller-only MCP skill and is excluded "
+                    "from the internal worker Skill Vault."
+                ),
+            }
         root = (skills_dir or get_skills_dir()).resolve()
         skill_dir = _find_existing_skill_dir(root, clean_name)
         if skill_dir is None:
@@ -649,6 +673,11 @@ async def install_skill_async(
             candidate_name = _infer_skill_name_from_url(source_url)
 
         clean_name = _sanitize_skill_name(candidate_name)
+        if clean_name in _CALLER_ONLY_SKILLS:
+            return {
+                "ok": False,
+                "error": f"Skill '{clean_name}' is a reserved caller-only MCP skill name.",
+            }
 
         # Security pre-flight check order (W3): 1. size -> 2. fast regex -> 3. SkillSpector
         encoded_len = len(raw_content.encode("utf-8"))
@@ -749,6 +778,11 @@ def delete_skill(name: str, skills_dir: Optional[Path] = None) -> Dict[str, Any]
     """Delete an installed skill from the server-side Skill Vault."""
     try:
         clean_name = _sanitize_skill_name(name)
+        if clean_name in _CALLER_ONLY_SKILLS:
+            return {
+                "ok": False,
+                "error": f"Skill '{clean_name}' is a reserved caller-only MCP skill name.",
+            }
         root = (skills_dir or get_skills_dir()).resolve()
         target_dir = _find_existing_skill_dir(root, clean_name)
         if target_dir is None:
@@ -800,6 +834,8 @@ def triage_skills_for_task(
         for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
+            if entry.name.lower() in _CALLER_ONLY_SKILLS:
+                continue
             skill_file = entry / "SKILL.md"
             if not skill_file.is_file():
                 continue
@@ -809,6 +845,8 @@ def triage_skills_for_task(
                 continue
 
             sname = parsed["name"].lower()
+            if sname in _CALLER_ONLY_SKILLS:
+                continue
             s_tax = [str(t).lower() for t in (parsed.get("taxonomy") or [])]
             score = 0
 
@@ -1065,4 +1103,161 @@ async def write_skill_proposal_draft(
             "ok": False,
             "rejected_reason": "write_error",
             "error": coerce_text(mask_secrets(str(exc))),
+        }
+
+
+def _get_bundled_caller_skill_root(name: str = "botex") -> Any:
+    """Resolve package-data Traversable or filesystem Path for a bundled caller skill."""
+    clean_name = _sanitize_skill_name(name)
+    if clean_name not in _CALLER_ONLY_SKILLS:
+        raise FileNotFoundError(f"No bundled caller skill named '{clean_name}'.")
+
+    try:
+        pkg_root = importlib_resources.files("botex.skills").joinpath("bundled", clean_name)
+        if pkg_root.is_dir() and pkg_root.joinpath("SKILL.md").is_file():
+            return pkg_root
+    except Exception:
+        pass
+
+    local_bundled = Path(__file__).resolve().parent / "bundled" / clean_name
+    if local_bundled.is_dir() and (local_bundled / "SKILL.md").is_file():
+        return local_bundled
+
+    repo_skill = get_skills_dir() / clean_name
+    if repo_skill.is_dir() and (repo_skill / "SKILL.md").is_file():
+        return repo_skill
+
+    raise FileNotFoundError(f"Bundled caller skill '{clean_name}' assets were not found.")
+
+
+def _collect_traversable_markdown(node: Any, prefix: str = "") -> Dict[str, str]:
+    """Recursively collect UTF-8 markdown files keyed by relative POSIX path."""
+    collected: Dict[str, str] = {}
+    for entry in sorted(node.iterdir(), key=lambda item: item.name.lower()):
+        if entry.name.startswith("."):
+            continue
+        rel = f"{prefix}/{entry.name}" if prefix else entry.name
+        if entry.is_dir():
+            collected.update(_collect_traversable_markdown(entry, rel))
+        elif entry.is_file() and entry.name.lower().endswith(".md"):
+            collected[rel] = entry.read_text(encoding="utf-8")
+    return collected
+
+
+def get_bundled_caller_skill_files(name: str = "botex") -> Dict[str, str]:
+    """Return {relative_posix_path: content} for all markdown files in a bundled caller skill."""
+    root = _get_bundled_caller_skill_root(name)
+    files = _collect_traversable_markdown(root)
+    if "SKILL.md" not in files:
+        raise FileNotFoundError(f"Bundled caller skill '{name}' is missing SKILL.md.")
+    return files
+
+
+def list_bundled_caller_skills() -> Dict[str, Any]:
+    """List caller-facing skills bundled in the BoteX Python package."""
+    skills_list: List[Dict[str, Any]] = []
+    for skill_name in sorted(_CALLER_ONLY_SKILLS):
+        try:
+            files = get_bundled_caller_skill_files(skill_name)
+        except FileNotFoundError:
+            continue
+        meta, _ = _parse_frontmatter(files["SKILL.md"])
+        skills_list.append(
+            {
+                "name": str(meta.get("name") or skill_name),
+                "version": str(meta.get("version") or ""),
+                "description": str(meta.get("description") or "").strip(),
+                "files": sorted(files.keys()),
+            }
+        )
+    return {
+        "ok": True,
+        "count": len(skills_list),
+        "skills": skills_list,
+        "target_presets": dict(CALLER_SKILL_TARGET_PRESETS),
+    }
+
+
+def _resolve_caller_skill_export_dir(clean_name: str, target: str | Path) -> Path:
+    """Resolve and validate the destination `<skills-root>/<clean_name>` directory."""
+    raw = str(target or "").strip()
+    if not raw:
+        raise SecurityError("Skill export target cannot be empty.")
+
+    preset = raw.lower()
+    if preset in CALLER_SKILL_TARGET_PRESETS:
+        base_dir = Path(CALLER_SKILL_TARGET_PRESETS[preset]).expanduser().resolve()
+    else:
+        raw_parts = [part for part in re.split(r"[\\/]+", raw) if part]
+        if ".." in raw_parts or ".." in Path(raw).parts:
+            raise SecurityError("Path traversal '..' is not allowed in skill export target.")
+        resolved = Path(raw).expanduser().resolve()
+        base_dir = resolved.parent if resolved.name.lower() == clean_name else resolved
+
+    dest_dir = (base_dir / clean_name).resolve()
+    try:
+        dest_dir.relative_to(base_dir)
+    except ValueError as exc:
+        raise SecurityError(
+            f"Skill export destination '{dest_dir}' escapes base directory '{base_dir}'."
+        ) from exc
+    return dest_dir
+
+
+def export_bundled_caller_skill(
+    name: str = "botex",
+    target: str | Path = "ai",
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Export a bundled caller skill (SKILL.md + references) into an IDE/agent skills directory."""
+    try:
+        clean_name = _sanitize_skill_name(name)
+        if clean_name not in _CALLER_ONLY_SKILLS:
+            return {
+                "ok": False,
+                "error": f"Unknown bundled caller skill '{clean_name}'.",
+            }
+        dest_dir = _resolve_caller_skill_export_dir(clean_name, target)
+        files = get_bundled_caller_skill_files(clean_name)
+
+        existing = [str(dest_dir / rel) for rel in sorted(files) if (dest_dir / rel).exists()]
+        if existing and not force:
+            return {
+                "ok": False,
+                "error": (
+                    f"Target skill files already exist in '{dest_dir}' (pass --force to overwrite)."
+                ),
+                "name": clean_name,
+                "target_dir": str(dest_dir),
+                "existing_files": existing,
+            }
+
+        files_written: List[str] = []
+        for rel_path in sorted(files):
+            out_path = (dest_dir / rel_path).resolve()
+            try:
+                out_path.relative_to(dest_dir)
+            except ValueError as exc:
+                raise SecurityError(
+                    f"Skill asset '{rel_path}' escapes destination '{dest_dir}'."
+                ) from exc
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(files[rel_path], encoding="utf-8", newline="\n")
+            files_written.append(str(out_path))
+
+        return {
+            "ok": True,
+            "name": clean_name,
+            "target_dir": str(dest_dir),
+            "files_written": files_written,
+        }
+    except SecurityError as se:
+        return {
+            "ok": False,
+            "error": f"Security violation: {coerce_text(mask_secrets(str(se)))}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Failed to export caller skill: {coerce_text(mask_secrets(str(exc)))}",
         }
