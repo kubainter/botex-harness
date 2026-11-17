@@ -934,23 +934,49 @@ def test_pwa_security_headers_always_emitted(tmp_path):
     assert resp.headers["X-Frame-Options"] == "DENY"
     assert resp.headers["Referrer-Policy"] == "no-referrer"
     csp = resp.headers["Content-Security-Policy"]
+    directives = {
+        part.strip().split()[0]: part.strip().split()[1:] for part in csp.split(";") if part.strip()
+    }
     assert "frame-ancestors 'none'" in csp
     assert "script-src 'self' 'sha256-p+tHzEcHFHDEELDmXpTaQ0BuVNK1d0x/N41rW5RlGJw='" in csp
-    assert "https://fonts.gstatic.com" in csp
+    assert "https://fonts.gstatic.com" in directives["font-src"]
 
 
 def test_pwa_csp_hash_matches_inline_theme_script():
     """The CSP script-src hash must equal the live web/index.html inline script hash."""
     import base64
     import hashlib
-    import re
+    from html.parser import HTMLParser
+
+    class _ScriptExtractor(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.in_script = False
+            self.scripts: list[str] = []
+            self._buf: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() == "script":
+                self.in_script = True
+                self._buf = []
+
+        def handle_data(self, data: str) -> None:
+            if self.in_script:
+                self._buf.append(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() == "script" and self.in_script:
+                self.scripts.append("".join(self._buf))
+                self.in_script = False
 
     index_html = (
         (Path(__file__).resolve().parent.parent / "web" / "index.html")
         .read_text(encoding="utf-8")
         .replace("\r\n", "\n")
     )
-    raw = re.search(r"<script>([\s\S]*?)</script>", index_html).group(1)
+    parser = _ScriptExtractor()
+    parser.feed(index_html)
+    raw = parser.scripts[0]
     digest = "sha256-" + base64.b64encode(hashlib.sha256(raw.encode("utf-8")).digest()).decode(
         "ascii"
     )
