@@ -2,6 +2,47 @@
 
 Guide for pairing a local workstation with **BoteX Cloud** over an outbound compressed WebSocket tunnel (`/api/edge/ws`), without opening inbound ports on the workstation or syncing provider keys locally.
 
+## 0. Quick Workstation Onboarding (`uv tool` + Cloud MCP + Caller Skill)
+
+Use this flow on any new machine that connects a local IDE/agent to an existing **BoteX Cloud** server (no local `server.py` checkout required):
+
+1. **Install the CLI package (`botex`):**
+   ```bash
+   uv tool install git+https://github.com/kubainter/botex-harness.git
+   ```
+   *(Run `botex setup` at any time to print the interactive setup checklist.)*
+
+2. **Export the caller-facing `botex` skill (`SKILL.md` + `references/`):**
+   ```bash
+   botex skills export --target ai
+   ```
+   Presets: `ai` (`~/.ai/skills`), `claude` (`~/.claude/skills`), `gemini` (`~/.gemini/skills`), `devin` (`~/.config/devin/skills`), or pass any custom directory path (`--force` to overwrite). MCP clients can also read the skill directly via `botex://skills/botex`.
+
+3. **Configure Cloud MCP in your IDE / agent:**
+   - **MCP SSE URL:** `https://<cloud-host>/mcp/sse` (or Streamable HTTP: `https://<cloud-host>/mcp/http`)
+   - **HTTP Headers:**
+     - `Authorization: Bearer <BOTEX_ACCESS_TOKEN>`
+     - `X-Agent-Id: <agent-name>` *(optional, e.g. `antigravity`, `claude`, `cursor`, `devin`, `zcode`)*
+     - `X-Host: <device-name>` *(optional, used for Cloud Memory Vault & BlackBox provenance)*
+
+4. **Issue a one-time Edge device token & save `.env`:**
+   Call `POST https://<cloud-host>/api/edge/tokens` (see Section 2) and store the returned `btxd_...` token in `~/.ai/botex_mcp/.env` (or `./.env` inside the project):
+   ```env
+   BOTEX_EDGE_SERVER=wss://<cloud-host>/api/edge/ws
+   BOTEX_EDGE_TOKEN=btxd_...
+   BOTEX_EDGE_DEVICE_ID=<device-id>
+   BOTEX_EDGE_WORKSPACE_ID=<workspace-id>
+   ```
+
+5. **Start the Edge bridge in the project directory:**
+   ```bash
+   botex edge -w .
+   ```
+   *(Add `--allow-exec` / `--allow-destructive` only if Cloud tasks are permitted to run commands or delete/move files.)*
+
+6. **Target the workstation from Cloud MCP tools (`start_task` / `run_subagent`):**
+   Pass `workspace_dir="edge://<device-id>/<workspace-id>"`.
+
 ## Architecture Overview
 
 - **Cloud Brain (`botex/server/server_cloud.py` + `botex/core/engine.py`)** runs on the VPS (`--workers 1`) behind Caddy TLS (`deploy/oracle-vps/Caddyfile.template`), terminating HTTPS/WSS on `:443` and forwarding to `127.0.0.1:8000`.

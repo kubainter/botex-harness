@@ -72,3 +72,10 @@ packages = [
     "botex.edge",
 ]
 
+[tool.setuptools.package-data]
+"botex.skills" = [
+    "recipes/*.md",
+    "bundled/botex/*.md",
+    "bundled/botex/references/*.md",
+]
+

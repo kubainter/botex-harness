@@ -1847,7 +1847,13 @@ class CuratorService:
             if confidence is None:
                 continue
             confirms = len(confirmations.get(lesson_id, set()))
-            if confidence < min_confidence or confirms < min_confirmations:
+            # envfact lessons encode deterministic command-form rules, not
+            # model behavior: they fast-track at >=0.6 confidence with a
+            # single confirmation while standard lessons keep full gating.
+            is_envfact = "envfact" in tag_lows
+            eff_min_conf = min(float(min_confidence), 0.6) if is_envfact else float(min_confidence)
+            eff_min_confirms = 1 if is_envfact else int(min_confirmations)
+            if confidence < eff_min_conf or confirms < eff_min_confirms:
                 continue
 
             promoted = memory.set_memory_status(
