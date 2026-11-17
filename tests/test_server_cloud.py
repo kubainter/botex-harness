@@ -933,13 +933,18 @@ def test_pwa_security_headers_always_emitted(tmp_path):
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["X-Frame-Options"] == "DENY"
     assert resp.headers["Referrer-Policy"] == "no-referrer"
+    from urllib.parse import urlparse
+
     csp = resp.headers["Content-Security-Policy"]
     directives = {
         part.strip().split()[0]: part.strip().split()[1:] for part in csp.split(";") if part.strip()
     }
     assert "frame-ancestors 'none'" in csp
     assert "script-src 'self' 'sha256-p+tHzEcHFHDEELDmXpTaQ0BuVNK1d0x/N41rW5RlGJw='" in csp
-    assert "https://fonts.gstatic.com" in directives["font-src"]
+    assert any(
+        urlparse(src).scheme == "https" and urlparse(src).netloc == "fonts.gstatic.com"
+        for src in directives["font-src"]
+    )
 
 
 def test_pwa_csp_hash_matches_inline_theme_script():
