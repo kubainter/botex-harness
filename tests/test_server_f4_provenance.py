@@ -433,3 +433,123 @@ def test_save_to_memory_endpoint_strips_reserved_tags(client, tmp_path: Path, mo
         assert rd.json()["metadata"]["tags"] == ["chat"]
     finally:
         default_chat_manager._sessions.pop("prov-forge-1", None)
+
+
+def test_per_call_origin_across_mcp_tools(tmp_path: Path, monkeypatch):
+    """start_task, get_task_status, run_subagent, patch_memory_section, and
+    botex_report_violation honor explicit per-call origin (and reject reserved claims)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    # 1. patch_memory_section returns explicit origin (and falls back on reserved)
+    saved = asyncio.run(
+        botex_server.save_memory(
+            title="Patch Origin Test",
+            content="## Compiled Truth\nInitial",
+            workspace_dir=str(tmp_path),
+            scope="local",
+            origin="zcode@Botek",
+        )
+    )
+    assert saved["ok"] is True
+    patched = asyncio.run(
+        botex_server.patch_memory_section(
+            memory_id=saved["id"],
+            section="Compiled Truth",
+            new_content="Updated",
+            workspace_dir=str(tmp_path),
+            scope="local",
+            origin="devin@Botek",
+        )
+    )
+    assert patched["ok"] is True
+    assert patched["origin"] == "devin@Botek"
+
+    # Reserved origin falls back to session contextvar or 'botex'
+    tok = MCP_CLIENT_ORIGIN.set("antigravity@Botek")
+    try:
+        patched_reserved = asyncio.run(
+            botex_server.patch_memory_section(
+                memory_id=saved["id"],
+                section="Compiled Truth",
+                new_content="Updated 2",
+                workspace_dir=str(tmp_path),
+                scope="local",
+                origin="human@Botek",
+            )
+        )
+        assert patched_reserved["origin"] == "antigravity@Botek"
+    finally:
+        MCP_CLIENT_ORIGIN.reset(tok)
+
+    # 2. run_subagent attaches resolved origin to structured_content
+    async def fake_run_botex_task(**kwargs):
+        return {
+            "ok": True,
+            "status": "DONE",
+            "summary": "ok",
+            "files_touched": [],
+            "exec_ran": False,
+            "steps": 1,
+            "attempts": [],
+            "duration_s": 0.01,
+            "cost_usd": 0.0,
+        }
+
+    monkeypatch.setattr(botex_server, "run_botex_task", fake_run_botex_task)
+    sub_res = asyncio.run(
+        botex_server.run_subagent(
+            task="noop",
+            workspace_dir=str(tmp_path),
+            origin="devin@Botek",
+        )
+    )
+    assert sub_res.structured_content["origin"] == "devin@Botek"
+
+    # 3. start_task + get_task_status propagate origin
+    async def _run_start_and_poll():
+        started = await botex_server.start_task(
+            task="noop",
+            workspace_dir=str(tmp_path),
+            origin="zcode@Botek",
+        )
+        assert started["status"] == "QUEUED"
+        assert started["origin"] == "zcode@Botek"
+        tid = started["task_id"]
+        await botex_server._TASKS[tid]["task"]
+        polled = await botex_server.get_task_status(tid)
+        assert polled["status"] == "DONE"
+        assert polled["origin"] == "zcode@Botek"
+        assert polled["result_data"]["origin"] == "zcode@Botek"
+
+    asyncio.run(_run_start_and_poll())
+
+    # 4. botex_report_violation uses explicit origin as reported_by (with anti-spoofing)
+    captured = {}
+
+    def fake_record_incident(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "incident_id": "inc-1"}
+
+    monkeypatch.setattr(botex_server, "_record_incident", fake_record_incident)
+    rep = asyncio.run(
+        botex_server.botex_report_violation(
+            offender="zcode-headless",
+            violation_code="SCOPE_01",
+            workspace_dir=str(tmp_path),
+            origin="devin@Botek",
+        )
+    )
+    assert rep["ok"] is True
+    assert captured["reported_by"] == "devin@Botek"
+
+    # Spoofed 'botex' origin still maps to 'peer-client'
+    asyncio.run(
+        botex_server.botex_report_violation(
+            offender="zcode-headless",
+            violation_code="SCOPE_01",
+            workspace_dir=str(tmp_path),
+            origin="botex@Botek",
+        )
+    )
+    assert captured["reported_by"] == "peer-client"

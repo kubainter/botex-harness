@@ -22,8 +22,9 @@ Use this flow on any new machine that connects a local IDE/agent to an existing 
    - **MCP SSE URL:** `https://<cloud-host>/mcp/sse` (or Streamable HTTP: `https://<cloud-host>/mcp/http`)
    - **HTTP Headers:**
      - `Authorization: Bearer <BOTEX_ACCESS_TOKEN>`
-     - `X-Agent-Id: <agent-name>` *(optional, e.g. `antigravity`, `claude`, `cursor`, `devin`, `zcode`)*
+     - `X-Agent-Id: <agent-name>` *(optional session-level fallback, e.g. `antigravity`, `claude`, `cursor`, `devin`, `zcode`)*
      - `X-Host: <device-name>` *(optional, used for Cloud Memory Vault & BlackBox provenance)*
+   - **Per-Call Provenance (Shared Bridges / Toolport):** When multiple local agents share one SSE bridge session, pass `origin="<agent>@<host>"` per tool call (`start_task`, `run_subagent`, `save_memory`, `patch_memory_section`, `botex_report_violation`). Reserved identity claims (`human`, `human-curated`, `operator`, `curator`) are rejected and fall back to the session headers.
 
 4. **Issue a one-time Edge device token & save `.env`:**
    Call `POST https://<cloud-host>/api/edge/tokens` (see Section 2) and store the returned `btxd_...` token in `~/.ai/botex_mcp/.env` (or `./.env` inside the project):
