@@ -75,10 +75,11 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
         run: |
           missing=0
-          for var in VPS_HOST VPS_USER VPS_SSH_KEY; do
+          for var in VPS_HOST VPS_USER VPS_SSH_KEY VPS_KNOWN_HOSTS; do
             if [ -z "${!var:-}" ]; then
               echo "::error::Required GitHub secret '$var' is not configured."
               missing=1
@@ -99,7 +100,7 @@ jobs:
           path: dist/
 
       - name: Setup SSH Agent
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
         with:
           ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
 
@@ -108,22 +109,20 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
           DEPLOY_PATH: /opt/botex
         run: |
           set -euo pipefail
           SSH_PORT="${VPS_PORT:-22}"
-          SSH_OPTS=(-p "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
-          SCP_OPTS=(-P "${SSH_PORT}" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+          SSH_OPTS=(-p "${SSH_PORT}" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+          SCP_OPTS=(-P "${SSH_PORT}" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 
-          # 1. Add VPS host key to known_hosts to prevent MITM attacks
+          # 1. Install the pinned VPS host key from the VPS_KNOWN_HOSTS secret
+          #    (fail-closed: no network-time trust of the host key)
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          KNOWN_HOST_KEY=$(ssh-keyscan -p "${SSH_PORT}" -T 10 -H "${VPS_HOST}")
-          if [ -z "${KNOWN_HOST_KEY}" ]; then
-            echo "::error::ssh-keyscan failed to retrieve host key."
-            exit 1
-          fi
-          printf '%s\n' "${KNOWN_HOST_KEY}" >> ~/.ssh/known_hosts
+          printf '%s\n' "${VPS_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
           # 2. Clean temporary upload path and upload compiled PWA frontend
           ssh "${SSH_OPTS[@]}" "${VPS_USER}@${VPS_HOST}" "rm -rf /tmp/web-dist"
@@ -147,7 +146,7 @@ jobs:
           # Install new dependencies if the pinned lockfile (or its floor) changed
           if ! sudo -u botex git diff --quiet "$PREV_SHA" HEAD -- requirements.lock requirements.txt; then
               echo "requirements.lock modified - updating virtual environment dependencies..."
-              sudo -u botex "$DEPLOY_PATH/.venv/bin/pip" install -r requirements.lock
+              sudo -u botex "$DEPLOY_PATH/.venv/bin/pip" install --require-hashes -r requirements.lock
           fi
 
           # Update PWA static assets

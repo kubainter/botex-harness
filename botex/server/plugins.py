@@ -190,8 +190,6 @@ class ZeroTrustSubprocessRunner:
             "SYSTEMROOT",
             "TEMP",
             "TMP",
-            "HOME",
-            "USERPROFILE",
             "PYTHONPATH",
         }
     )
@@ -225,6 +223,12 @@ class ZeroTrustSubprocessRunner:
         enforcement would require OS-level sandboxing (job objects/netpol).
         """
         env = {k: os.environ[k] for k in self._SAFE_ENV_KEYS if k in os.environ}
+        # Host HOME/USERPROFILE never propagate: the child gets a sandbox
+        # home so it cannot inspect .ssh/.aws or the global botex vault.
+        isolated_home = self.workspace_dir / ".botex" / "tmp_plugins" / "_sandbox_home"
+        isolated_home.mkdir(parents=True, exist_ok=True)
+        env["HOME"] = str(isolated_home)
+        env["USERPROFILE"] = str(isolated_home)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["BOTEX_WORKSPACE_DIR"] = str(self.workspace_dir)
         env["BOTEX_NET_ALLOWED"] = "1" if net_allowed else "0"

@@ -130,6 +130,42 @@ def test_build_env_allowed_net_carries_no_proxy_vars(monkeypatch):
         assert key not in env
 
 
+def test_build_env_isolates_home_and_userprofile(tmp_path, monkeypatch):
+    """Host HOME/USERPROFILE must never propagate — the child gets a sandbox
+    home under the workspace so dot-directories stay invisible to plugins."""
+    monkeypatch.setenv("HOME", "/host/real-home")
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\real-host")
+
+    env = ZeroTrustSubprocessRunner(tmp_path).build_env()
+
+    expected_home = tmp_path.resolve() / ".botex" / "tmp_plugins" / "_sandbox_home"
+    assert env["HOME"] == str(expected_home)
+    assert env["USERPROFILE"] == env["HOME"]
+    assert Path(env["HOME"]).is_dir()
+    assert "/host/real-home" not in env.values()
+    assert r"C:\Users\real-host" not in env.values()
+
+
+@pytest.mark.anyio
+async def test_plugin_subprocess_sees_isolated_home(tmp_path, monkeypatch):
+    """A child dumping os.environ observes the sandbox home, never the host's."""
+    monkeypatch.setenv("HOME", "/host/real-home")
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\real-host")
+    script = _write_script(tmp_path, "envdump.py", ENV_DUMP_SCRIPT)
+    plugin = _def("envdump", script)
+
+    res = await ZeroTrustSubprocessRunner(tmp_path).run(plugin, input_data={})
+
+    assert res["ok"] is True
+    child_env = res["output"]
+    sandbox_home = str(tmp_path.resolve() / ".botex" / "tmp_plugins" / "_sandbox_home")
+    assert child_env["HOME"] == sandbox_home
+    assert child_env["USERPROFILE"] == sandbox_home
+    assert Path(child_env["HOME"]).is_dir()
+    assert child_env["HOME"] != "/host/real-home"
+    assert child_env["USERPROFILE"] != r"C:\Users\real-host"
+
+
 # ---------------------------------------------------------------------------
 # 2. Hard execution timeout
 # ---------------------------------------------------------------------------

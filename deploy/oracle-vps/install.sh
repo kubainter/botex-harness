@@ -79,7 +79,7 @@ fi
 log_info "Installing Python dependencies..."
 sudo -u botex .venv/bin/pip install --upgrade pip
 if [ -f "requirements.lock" ]; then
-    sudo -u botex .venv/bin/pip install -r requirements.lock
+    sudo -u botex .venv/bin/pip install --require-hashes -r requirements.lock
 elif [ -f "requirements.txt" ]; then
     sudo -u botex .venv/bin/pip install -r requirements.txt
 else

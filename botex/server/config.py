@@ -772,6 +772,8 @@ def set_local_config(dotted_key: str, value: Any) -> None:
     LOCAL_CONFIG_FILE.write_text(
         json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    if os.name != "nt":
+        os.chmod(LOCAL_CONFIG_FILE, 0o600)
     load_config(reload=True)
 
 

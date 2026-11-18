@@ -8,7 +8,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -523,6 +523,56 @@ def test_execute_chat_tool_save_memory_filters_reserved_tags(tmp_path: Path):
         data_none = json.loads(res_none)
         assert data_none["ok"] is True
         assert data_none["tags"] == []
+
+    asyncio.run(_test())
+
+
+def test_chat_system_prompt_includes_untrusted_boundary():
+    """Chat system prompt must fence untrusted content as data, never instructions."""
+    assert "UNTRUSTED DATA BOUNDARY" in DEFAULT_CHAT_SYSTEM_PROMPT
+    assert "<untrusted_web_content>" in DEFAULT_CHAT_SYSTEM_PROMPT
+    assert "<untrusted_file_content>" in DEFAULT_CHAT_SYSTEM_PROMPT
+    assert "<untrusted_memory_content>" in DEFAULT_CHAT_SYSTEM_PROMPT
+
+
+def test_execute_chat_tool_install_skill_disabled_by_default(tmp_path: Path):
+    """install_skill must fail closed when chat.allow_skill_admin is unset."""
+
+    async def _test():
+        with (
+            patch("botex.chat.load_config", return_value={}),
+            patch("botex.chat.install_skill_async", new_callable=AsyncMock) as mock_install,
+        ):
+            res = await execute_chat_tool(
+                "install_skill", {"name": "evil", "content": "# Evil"}, str(tmp_path)
+            )
+            assert res.startswith("Error: Skill installation via Chat Mode is disabled by policy")
+            mock_install.assert_not_awaited()
+
+    asyncio.run(_test())
+
+
+def test_execute_chat_tool_install_skill_allowed_when_opted_in(tmp_path: Path):
+    """install_skill still works when chat.allow_skill_admin is explicitly true."""
+
+    async def _test():
+        with (
+            patch("botex.chat.load_config", return_value={"chat": {"allow_skill_admin": True}}),
+            patch(
+                "botex.chat.install_skill_async",
+                new_callable=AsyncMock,
+                return_value={"ok": True, "name": "safe-skill"},
+            ) as mock_install,
+        ):
+            res = await execute_chat_tool(
+                "install_skill",
+                {"name": "safe-skill", "content": "# Safe"},
+                str(tmp_path),
+            )
+            mock_install.assert_awaited_once()
+            data = json.loads(res)
+            assert data["ok"] is True
+            assert data["name"] == "safe-skill"
 
     asyncio.run(_test())
 
