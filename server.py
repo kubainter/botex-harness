@@ -510,6 +510,11 @@ def _cleanup_tasks() -> None:
             drop_emitter(task_id)
 
 
+def _resolve_call_origin(origin: str = "") -> str:
+    """Resolve per-call provenance '<agent>@<host>', falling back to session headers."""
+    return sanitize_origin_claim(origin or "") or get_mcp_client_origin("botex")
+
+
 # ---------------------------------------------------------------------------
 # Public MCP Tools (Exposed to MCP clients)
 # ---------------------------------------------------------------------------
@@ -540,6 +545,7 @@ async def start_task(
     allow_non_zdr: bool = False,
     allow_expensive_model: bool = False,
     approval_policy: str = "",
+    origin: str = "",
 ) -> dict[str, Any]:
     """Start a detached BoteX task and return its task_id immediately.
 
@@ -624,6 +630,7 @@ async def start_task(
             "status": "TOO_MANY_QUEUED",
             "message": f"Task queue limit reached ({max_queued}).",
         }
+    effective_origin = _resolve_call_origin(origin)
     task_id = uuid.uuid4().hex[:12]
     edge_exec = None
     if resolve_edge_executor is not None and workspace_dir and str(workspace_dir).strip():
@@ -656,14 +663,16 @@ async def start_task(
         "allow_non_zdr": allow_non_zdr,
         "allow_expensive_model": allow_expensive_model,
         "approval_policy": approval_policy,
+        "origin": effective_origin,
     }
     task_obj = asyncio.create_task(_background_task(task_id, kwargs))
     _TASKS[task_id] = {
         "status": "QUEUED",
         "created_at": time.time(),
+        "origin": effective_origin,
         "task": task_obj,
     }
-    return {"task_id": task_id, "status": "QUEUED"}
+    return {"task_id": task_id, "status": "QUEUED", "origin": effective_origin}
 
 
 @mcp.tool()
@@ -686,6 +695,8 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
         "task_id": task_id,
         "status": entry["status"],
     }
+    if entry.get("origin"):
+        result["origin"] = entry["origin"]
     if entry.get("status") in {"DONE", "FAILED", "CANCELLED"}:
         # `result` is the pretty-text report (legacy); `result_data` is the
         # structured engine result (status, failure_kind, attempts, ...).
@@ -774,6 +785,7 @@ async def run_subagent(
     allow_non_zdr: bool = False,
     allow_expensive_model: bool = False,
     approval_policy: str = "",
+    origin: str = "",
 ) -> Annotated[CallToolResult, SubagentTaskResult]:
     """
     Runs BoteX — an autonomous code execution engine (agent-agnostic harness).
@@ -953,7 +965,9 @@ async def run_subagent(
         tool_executor=edge_exec,
     )
 
+    effective_origin = _resolve_call_origin(origin)
     res = _masked_result(res)
+    res["origin"] = effective_origin
     res = _offload_report(
         res, local_scratch if local_scratch is not None else resolve_workspace(workspace_dir)
     )
@@ -1004,7 +1018,7 @@ async def save_memory(
         origin: Optional provenance identifier '<agent>@<host>'. Falls back to X-Agent-Id@X-Host session header or 'botex'.
                Reserved identity claims ('human', 'human-curated', 'operator', 'curator') are rejected.
     """
-    effective_origin = sanitize_origin_claim(origin or "") or get_mcp_client_origin("botex")
+    effective_origin = _resolve_call_origin(origin)
     ws = (
         "."
         if str(scope).strip().lower() == "global" and is_cross_host_windows_path(workspace_dir)
@@ -1361,6 +1375,7 @@ async def patch_memory_section(
     workspace_dir: str = "",
     scope: str = "local",
     append: bool = False,
+    origin: str = "",
 ) -> dict[str, Any]:
     """
     Surgically updates a Markdown section (e.g. '## Compiled Truth') in a memory note
@@ -1373,8 +1388,10 @@ async def patch_memory_section(
         workspace_dir: Workspace root directory.
         scope: Lookup scope ('local' or 'global').
         append: Whether to append to existing section content instead of replacing.
+        origin: Optional provenance identifier '<agent>@<host>'. Falls back to X-Agent-Id@X-Host session header or 'botex'.
     """
-    return _patch_memory_section(
+    effective_origin = _resolve_call_origin(origin)
+    res = _patch_memory_section(
         workspace_dir=resolve_workspace(workspace_dir),
         memory_id=memory_id,
         section=section,
@@ -1382,6 +1399,8 @@ async def patch_memory_section(
         scope=scope,
         append=append,
     )
+    res["origin"] = effective_origin
+    return res
 
 
 @mcp.tool()
@@ -1558,6 +1577,7 @@ async def botex_report_violation(
     evidence_snippet: str = "",
     workspace_dir: str = "",
     enforcement_action: str = "PENALTY_LOGGED",
+    origin: str = "",
 ) -> dict[str, Any]:
     """
     Records a swarm agent/model rule violation into the isolated BlackBox penal ledger
@@ -1576,8 +1596,9 @@ async def botex_report_violation(
         evidence_snippet: Concise log/diff excerpt (automatically secret-masked).
         workspace_dir: Target workspace path or 'edge://<device_id>/<workspace_id>' URI.
         enforcement_action: Action label ('PENALTY_LOGGED', 'HANDOFF_REJECTED', 'ESCALATED').
+        origin: Optional provenance identifier '<agent>@<host>' of the reporting agent.
     """
-    reporter = str(get_mcp_client_origin("botex") or "").strip() or "peer-client"
+    reporter = str(_resolve_call_origin(origin) or "").strip() or "peer-client"
     if reporter.lower().startswith("botex"):
         # Prevent peer MCP callers from spoofing internal engine auto-logs.
         reporter = "peer-client"
