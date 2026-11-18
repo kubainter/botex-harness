@@ -854,6 +854,14 @@ def test_mcp_sse_guard_binds_session_via_writer_delta(_live_mcp_transport):
     asyncio.run(server_cloud._MCPSseErrorGuard(inner)(scope, _receive, _send))
     assert server_cloud._SSE_SESSION_BINDINGS[new_sid.hex]["ip"] == "198.51.100.9"
 
+    async def plain(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"session_id=" + new_sid.hex.encode()})
+
+    health_scope = {**scope, "path": "/api/health", "client": ("203.0.113.77", 50001)}
+    asyncio.run(server_cloud._MCPSseErrorGuard(plain)(health_scope, _receive, _send))
+    assert server_cloud._SSE_SESSION_BINDINGS[new_sid.hex]["ip"] == "198.51.100.9"
+
 
 def test_mcp_messages_unknown_session_id_rejected(monkeypatch, _live_mcp_transport):
     """session_id not in the transport's active sessions cannot authenticate."""

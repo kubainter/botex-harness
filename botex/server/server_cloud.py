@@ -1684,6 +1684,9 @@ class _MCPSseErrorGuard:
 
         async def _send_with_no_buffer(message: dict[str, Any]) -> None:
             nonlocal bound_sse
+            if not is_sse:
+                await send(message)
+                return
             msg_type = message.get("type")
             if msg_type == "http.response.start":
                 hdrs = list(message.get("headers") or [])
