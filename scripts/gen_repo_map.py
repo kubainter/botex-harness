@@ -94,7 +94,7 @@ def _extract_imports(tree: ast.Module) -> set[str]:
 
 def _build_alias_map(known_modules: set[str]) -> dict[str, str]:
     alias_to_canonical: dict[str, str] = {}
-    for mod in known_modules:
+    for mod in sorted(known_modules):
         alias_to_canonical[mod] = mod
         parts = mod.split(".")
         # Legacy v2.1.0 flat alias: botex.<domain>.<leaf> -> botex.<leaf>
