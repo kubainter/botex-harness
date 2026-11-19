@@ -204,14 +204,14 @@ def test_two_tier_secret_masking(memory_dirs):
 
 
 def test_mcp_server_memory_tools_and_exact_tool_count(memory_dirs):
-    """Verify server.py MCP tools accept scope and exactly 22 tools exist."""
+    """Verify server.py MCP tools accept scope and exactly 25 tools exist."""
     ws_dir, _ = memory_dirs
 
     async def _test():
-        # 1. Verify exactly 22 tools registered on MCPServer
+        # 1. Verify exactly 25 tools registered on MCPServer
         tools = await server.mcp.list_tools()
-        assert len(tools) == 22, (
-            f"Expected exactly 22 MCP tools, found {len(tools)}: {[t.name for t in tools]}"
+        assert len(tools) == 25, (
+            f"Expected exactly 25 MCP tools, found {len(tools)}: {[t.name for t in tools]}"
         )
 
         # 2. Test save_memory MCP tool with scope

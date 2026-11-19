@@ -17,6 +17,7 @@ import re
 import sys
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Optional, Tuple
@@ -67,6 +68,7 @@ from botex.security import (
     coerce_text,
     filter_reserved_tags,
     mask_secrets,
+    resolve_safe_path,
     sanitize_identifier,
     sanitize_origin_claim,
     wrap_untrusted_content,
@@ -83,6 +85,21 @@ from botex.core.blackbox import (
     record_incident as _record_incident,
 )
 from botex.core.events import drop_emitter
+from botex.core.swarm_store import (
+    get_active_leases as _get_active_leases,
+)
+from botex.core.swarm_store import (
+    get_bot as _get_bot,
+)
+from botex.core.swarm_store import (
+    get_bot_brief as _get_bot_brief,
+)
+from botex.core.swarm_store import (
+    list_bots as _list_bots,
+)
+from botex.core.swarm_store import (
+    upsert_host_lease as _upsert_host_lease,
+)
 from botex.memory import (
     close_index_dbs,
 )
@@ -513,6 +530,136 @@ def _cleanup_tasks() -> None:
 def _resolve_call_origin(origin: str = "") -> str:
     """Resolve per-call provenance '<agent>@<host>', falling back to session headers."""
     return sanitize_origin_claim(origin or "") or get_mcp_client_origin("botex")
+
+
+# ---------------------------------------------------------------------------
+# Tethered Bots visibility — Cloud Soul store + edge fast-cache fallbacks
+# ---------------------------------------------------------------------------
+
+# Per-session brief dedup: (session_id, slug) -> last emitted etag. Keeps
+# recall/read_memory piggybacks cheap — the same unchanged brief is never
+# re-broadcast within one client session.
+_SEEN_BRIEF_ETAGS_MAX = 4096
+_SEEN_BRIEF_ETAGS: "OrderedDict[tuple[str, str], str]" = OrderedDict()
+
+
+def _reset_seen_brief_etags() -> None:
+    _SEEN_BRIEF_ETAGS.clear()
+
+
+def _local_bot_briefs(namespace: str = "") -> list[dict[str, Any]]:
+    """Edge fast-cache briefs; empty list on any read error (offline-safe)."""
+    try:
+        from botex.edge.runner import read_local_bot_briefs
+
+        return read_local_bot_briefs(namespace=namespace)
+    except Exception:
+        return []
+
+
+def _cloud_bot_brief(slug: str) -> Optional[dict[str, Any]]:
+    try:
+        return _get_bot_brief(slug)
+    except Exception:
+        return None
+
+
+def _swarm_guardians() -> list[dict[str, Any]]:
+    """Compact guardian roster from Cloud Soul; edge fast-cache fallback."""
+    guardians: list[dict[str, Any]] = []
+    try:
+        bots = _list_bots(status="active") or []
+    except Exception:
+        bots = []
+    for b in bots:
+        slug = str(b.get("slug") or "")
+        if not slug:
+            continue
+        guardians.append(
+            {
+                "slug": slug,
+                "namespace": str(b.get("namespace") or ""),
+                "status": str(b.get("status") or "active"),
+                "role_desc": str(b.get("role_desc") or "")[:80],
+            }
+        )
+    if not guardians:
+        for lb in _local_bot_briefs():
+            slug = str(lb.get("slug") or "")
+            if not slug:
+                continue
+            guardians.append(
+                {
+                    "slug": slug,
+                    "namespace": str(lb.get("namespace") or ""),
+                    "status": "active",
+                    "role_desc": str(lb.get("role_desc") or "")[:80],
+                }
+            )
+    return guardians
+
+
+def _local_brief_for_slug(slug: str) -> Optional[dict[str, Any]]:
+    return next((lb for lb in _local_bot_briefs() if str(lb.get("slug") or "") == slug), None)
+
+
+def _attach_swarm_visibility_piggyback(
+    payload: dict[str, Any], *, namespace: str = "", session_key: str = ""
+) -> dict[str, Any]:
+    """Attach ``swarm_guardians`` + a session-ETag-deduped ``active_brief`` to a
+    successful tool payload (recall_memory / read_memory)."""
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return payload
+    guardians = _swarm_guardians()
+    payload["swarm_guardians"] = guardians
+    ns = str(namespace or "").strip()
+    if ns:
+        slugs = [g["slug"] for g in guardians if g["namespace"] == ns or g["slug"] == ns]
+    else:
+        slugs = [g["slug"] for g in guardians]
+    if not slugs:
+        return payload
+    slug = slugs[0]
+    brief = _cloud_bot_brief(slug) or _local_brief_for_slug(slug)
+    if not brief:
+        return payload
+    etag = str(brief.get("etag") or "")
+    session_id = str(session_key or "").strip() or get_mcp_client_origin("botex")
+    key = (session_id, slug)
+    if _SEEN_BRIEF_ETAGS.get(key) == etag:
+        _SEEN_BRIEF_ETAGS.move_to_end(key)
+        return payload
+    _SEEN_BRIEF_ETAGS[key] = etag
+    _SEEN_BRIEF_ETAGS.move_to_end(key)
+    while len(_SEEN_BRIEF_ETAGS) > _SEEN_BRIEF_ETAGS_MAX:
+        _SEEN_BRIEF_ETAGS.popitem(last=False)
+    payload["active_brief"] = {
+        "slug": slug,
+        "namespace": str(brief.get("namespace") or ""),
+        "etag": etag,
+        "fencing_epoch": int(brief.get("fencing_epoch") or 0),
+        "content": str(brief.get("content") or ""),
+    }
+    return payload
+
+
+_INSTRUCTIONS_EXCERPT_CHARS = 4000
+
+
+def _read_instructions_excerpt(instructions_path: str) -> str:
+    """Bounded, secret-masked excerpt of a registered bot's instructions file.
+
+    The path must resolve INSIDE the effective workspace — traversal and
+    out-of-workspace absolute paths fail closed to "".
+    """
+    try:
+        target = resolve_safe_path(resolve_workspace(""), str(instructions_path or "").strip())
+        if not target.is_file():
+            return ""
+        raw = target.read_text(encoding="utf-8", errors="replace")
+        return mask_secrets(raw[:_INSTRUCTIONS_EXCERPT_CHARS])
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1271,15 +1418,18 @@ async def _recall_memory_impl(
         recall_status = "ZERO_NODES_FOUND"
     if not result:
         result = _deterministic_recall(query, nodes)
-    return {
-        "ok": True,
-        **result,
-        "recall_status": recall_status,
-        "tier_attempts": tier_attempts,
-        "workspace_searched": workspace_dir,
-        "context_nodes": len(nodes),
-        "truncated": bool(ctx.get("truncated")),
-    }
+    return _attach_swarm_visibility_piggyback(
+        {
+            "ok": True,
+            **result,
+            "recall_status": recall_status,
+            "tier_attempts": tier_attempts,
+            "workspace_searched": workspace_dir,
+            "context_nodes": len(nodes),
+            "truncated": bool(ctx.get("truncated")),
+        },
+        namespace=str(project or ""),
+    )
 
 
 @mcp.tool()
@@ -1297,10 +1447,16 @@ async def read_memory(
                from the config, else the server's current directory.
         scope: Lookup scope ('local', 'global', or 'all'). Default is 'local'.
     """
-    return _read_memory(
+    payload = _read_memory(
         workspace_dir=resolve_workspace(workspace_dir),
         memory_id=memory_id,
         scope=scope,
+    )
+    return _attach_swarm_visibility_piggyback(
+        payload,
+        namespace=str((payload.get("metadata") or {}).get("project") or "")
+        if isinstance(payload, dict)
+        else "",
     )
 
 
@@ -1442,6 +1598,201 @@ async def init_obsidian_vault(
     res = _init_obsidian_vault(workspace_dir=ws, scope=scope, override_existing=override_existing)
     if export_index and res.get("ok"):
         _export_graph_index_markdown(workspace_dir=ws, scope=scope)
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Tethered Bots (ADR-SWARM-02 Phase 1) — static Cloud Soul surface
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def swarm_list_bots(namespace: str = "") -> dict[str, Any]:
+    """
+    Lists registered Tethered Bots with their active host leases and brief
+    metadata. Cloud Soul store is authoritative; entries that exist only in
+    the local edge fast-cache are merged in and marked ``source: local_cache``.
+
+    Args:
+        namespace: Optional exact namespace filter (empty = all namespaces).
+    """
+    ns = str(namespace or "").strip()
+    try:
+        bots = _list_bots(namespace=ns) or []
+    except Exception:
+        bots = []
+    leases_by_bot: dict[str, list] = {}
+    try:
+        for lease in _get_active_leases():
+            bslug = str(lease.get("bot_slug") or "")
+            if bslug:
+                leases_by_bot.setdefault(bslug, []).append(lease)
+    except Exception:
+        pass
+    merged: dict[str, dict[str, Any]] = {}
+    for b in bots:
+        slug = str(b.get("slug") or "")
+        if not slug:
+            continue
+        brief = _cloud_bot_brief(slug) or {}
+        merged[slug] = {
+            **b,
+            "active_leases": list(leases_by_bot.get(slug) or []),
+            "etag": str(brief.get("etag") or ""),
+            "fencing_epoch": int(brief.get("fencing_epoch") or 0),
+            "brief_updated_at": str(brief.get("updated_at") or ""),
+            "source": "cloud",
+        }
+    for lb in _local_bot_briefs(namespace=ns):
+        slug = str(lb.get("slug") or "")
+        if not slug or slug in merged:
+            continue
+        merged[slug] = {
+            "slug": slug,
+            "namespace": str(lb.get("namespace") or ""),
+            "role_desc": "",
+            "status": "active",
+            "active_leases": list(leases_by_bot.get(slug) or []),
+            "etag": str(lb.get("etag") or ""),
+            "fencing_epoch": int(lb.get("fencing_epoch") or 0),
+            "brief_updated_at": str(lb.get("updated_at") or ""),
+            "source": "local_cache",
+        }
+    bots_out = sorted(merged.values(), key=lambda b: str(b.get("slug") or ""))
+    return {"ok": True, "bots": bots_out, "count": len(bots_out)}
+
+
+@mcp.tool()
+async def bot_consult(bot_id: str, query: str) -> dict[str, Any]:
+    """
+    Single-hop (ttl_hops=1) consult of a registered Tethered Bot: returns its
+    identity, bounded instructions excerpt, active brief, and a recall over
+    the shared Memory Vault restricted to ACTIVE notes only. Bots unknown to
+    both the Cloud Soul store and the local fast-cache get BOT_NOT_FOUND.
+
+    Args:
+        bot_id: Registered bot slug (alphanumeric/-/_ only).
+        query: Natural-language question for the vault recall.
+    """
+    slug = sanitize_identifier(str(bot_id or ""))
+    if not slug:
+        return {"ok": False, "error": "INVALID_SLUG"}
+    try:
+        bot = _get_bot(slug)
+    except Exception:
+        bot = None
+    local_brief = None
+    if bot is None:
+        local_brief = _local_brief_for_slug(slug)
+        if local_brief is None:
+            return {"ok": False, "error": "BOT_NOT_FOUND"}
+    ns = str((bot or local_brief or {}).get("namespace") or "")
+    instructions = ""
+    ipath = str((bot or {}).get("instructions_path") or "").strip()
+    if ipath:
+        instructions = _read_instructions_excerpt(ipath)
+    brief = _cloud_bot_brief(slug) or local_brief or {}
+    active_brief = {
+        "slug": slug,
+        "namespace": str(brief.get("namespace") or ns),
+        "etag": str(brief.get("etag") or ""),
+        "fencing_epoch": int(brief.get("fencing_epoch") or 0),
+        "content": str(brief.get("content") or ""),
+    }
+    nodes: list[dict[str, Any]] = []
+    try:
+        ctx = _gather_recall_context(
+            workspace_dir=resolve_workspace(""),
+            query=str(query or ""),
+            scope="all",
+            project=ns or None,
+        )
+        if ctx.get("ok"):
+            nodes = ctx.get("nodes") or []
+    except WorkspaceOutOfBounds:
+        nodes = []
+    except Exception:
+        nodes = []
+    # Hard invariant: only active notes reach the consult — candidate,
+    # conflict_pending, deprecated and superseded entries never do.
+    active_nodes = [
+        n for n in nodes if str(n.get("status") or "active").strip().lower() == "active"
+    ]
+    result: Optional[dict[str, Any]] = None
+    if active_nodes:
+        try:
+            from botex.ops.curator import synthesize_recall
+
+            result = await synthesize_recall(str(query or ""), active_nodes)
+        except Exception:
+            result = None
+        if not isinstance(result, dict) or not result.get("answer"):
+            result = None
+    if not result:
+        result = _deterministic_recall(str(query or ""), active_nodes)
+    return {
+        "ok": True,
+        "bot_id": slug,
+        "namespace": ns,
+        "ttl_hops": 1,
+        "instructions": instructions,
+        "active_brief": active_brief,
+        **result,
+        "context_nodes": len(active_nodes),
+    }
+
+
+@mcp.tool()
+async def bot_report_activity(
+    bot_id: str,
+    scope_path: str,
+    summary: str,
+    fencing_token: int = 0,
+) -> dict[str, Any]:
+    """
+    Reports a bot's lease/heartbeat on a scope path into the Cloud Soul
+    ``host_leases`` table. ``host_id`` is bound to the real MCP session
+    provenance (X-Agent-Id@X-Host) — caller-supplied values are never used.
+    A fenced-out write (stale fencing token) returns the rejection payload
+    unchanged and does NOT refresh the local fast-cache.
+
+    Args:
+        bot_id: Registered bot slug.
+        scope_path: Lease scope (workspace path or identifier).
+        summary: Short activity note (secret-masked before storage).
+        fencing_token: Monotonic fencing token; higher wins on a live lease.
+    """
+    host_id = get_mcp_client_origin("botex")
+    try:
+        res = _upsert_host_lease(
+            bot_slug=str(bot_id or ""),
+            host_id=host_id,
+            scope_path=str(scope_path or ""),
+            summary=mask_secrets(str(summary or "")),
+            fencing_token=fencing_token,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": coerce_text(mask_secrets(str(exc)))}
+    if not res.get("ok"):
+        return res
+    # Best-effort fast-cache refresh — never fatal to the lease write.
+    try:
+        from botex.edge.runner import write_local_bot_brief
+
+        clean_slug = sanitize_identifier(str(bot_id or ""))
+        bot = _get_bot(clean_slug) if clean_slug else None
+        brief = _cloud_bot_brief(clean_slug) if clean_slug else None
+        if bot and brief:
+            write_local_bot_brief(
+                str(bot.get("slug") or clean_slug),
+                namespace=str(bot.get("namespace") or ""),
+                etag=str(brief.get("etag") or ""),
+                fencing_epoch=int(brief.get("fencing_epoch") or 0),
+                content=str(brief.get("content") or ""),
+                updated_at=str(brief.get("updated_at") or ""),
+            )
+    except Exception:
+        pass
     return res
 
 
@@ -1759,6 +2110,7 @@ def _print_usage():
   {c("botex memory <save|search|read|list>")} {d(t("usage.memory"))}
   {c("botex cloud [--host H] [--port P]")}   {d(t("usage.cloud"))}
   {c("botex edge [--server WSS] [-w DIR]")}    {d("Outbound WSS edge runner for BoteX Cloud")}
+  {c("botex bots sync [--url URL]")}        {d("Sync tethered-bot briefs into the local fast-cache")}
   {c("botex setup")}                         {d("Print Cloud MCP + Edge .env setup guide")}
   {c("botex skills <list|export>")}         {d("List or export the bundled BoteX caller skill")}
 
@@ -2848,6 +3200,158 @@ def _cli_edge(argv: list[str]) -> None:
         runner.stop()
 
 
+def sync_bot_briefs(
+    base_url: str = "",
+    *,
+    on_startup: bool = False,
+    briefs_dir: Optional[Path] = None,
+    client: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Sync Cloud Soul bot briefs into the edge fast-cache (ETag/304 aware).
+
+    Base URL precedence: ``base_url`` arg > ``BOTEX_CLOUD_URL`` env > config
+    ``cloud.url``. An injectable ``client`` (e.g. FastAPI ``TestClient``) makes
+    the sync offline-testable. With ``on_startup=True`` network failures still
+    return a graceful ``{"ok": False}`` — the caller decides the exit code.
+    """
+    url = str(base_url or "").strip() or os.environ.get("BOTEX_CLOUD_URL", "").strip()
+    if not url:
+        url = str((load_config().get("cloud") or {}).get("url") or "").strip()
+    try:
+        from botex.edge.runner import read_local_bot_briefs, write_local_bot_brief
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "EDGE_HELPERS_UNAVAILABLE",
+            "detail": coerce_text(mask_secrets(str(exc))),
+        }
+    local_etags: dict[str, str] = {}
+    try:
+        for lb in read_local_bot_briefs(briefs_dir=briefs_dir):
+            slug = str(lb.get("slug") or "")
+            etag = str(lb.get("etag") or "")
+            if slug and etag:
+                local_etags[slug] = etag
+    except Exception:
+        pass
+    if not url:
+        return {
+            "ok": False,
+            "error": "NO_CLOUD_URL",
+            "on_startup": bool(on_startup),
+            "updated": 0,
+            "skipped_304": 0,
+            "bots": 0,
+        }
+    owns_client = client is None
+    http = client
+    if http is None:
+        import httpx
+
+        http = httpx.Client(timeout=10.0)
+    auth_token = (
+        os.environ.get("BOTEX_CLOUD_TOKEN", "").strip()
+        or str((load_config().get("cloud") or {}).get("token") or "").strip()
+    )
+    base_headers: dict[str, str] = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+    updated = skipped = 0
+    bots: list[dict[str, Any]] = []
+    try:
+        root = url.rstrip("/")
+        res = http.get(f"{root}/api/bots", headers=base_headers)
+        res.raise_for_status()
+        data = res.json()
+        bots = [
+            b
+            for b in (data.get("bots") or [])
+            if str(b.get("status") or "active").strip().lower() == "active"
+        ]
+        for b in bots:
+            slug = str(b.get("slug") or "")
+            if not slug or slug != sanitize_identifier(slug):
+                continue
+            headers = dict(base_headers)
+            local_etag = local_etags.get(slug)
+            if local_etag:
+                headers["If-None-Match"] = f'"{local_etag}"'
+            r = http.get(f"{root}/api/bots/{slug}/brief", headers=headers)
+            if r.status_code == 304:
+                skipped += 1
+                continue
+            if r.status_code != 200:
+                continue
+            payload = r.json()
+            write_local_bot_brief(
+                slug,
+                namespace=str(payload.get("namespace") or b.get("namespace") or ""),
+                etag=str(payload.get("etag") or ""),
+                fencing_epoch=int(payload.get("fencing_epoch") or 0),
+                content=str(payload.get("content") or ""),
+                updated_at=str(payload.get("updated_at") or ""),
+                briefs_dir=briefs_dir,
+            )
+            updated += 1
+        return {
+            "ok": True,
+            "base_url": url,
+            "bots": len(bots),
+            "updated": updated,
+            "skipped_304": skipped,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": "SYNC_FAILED",
+            "detail": coerce_text(mask_secrets(str(exc))),
+            "on_startup": bool(on_startup),
+            "updated": updated,
+            "skipped_304": skipped,
+        }
+    finally:
+        if owns_client and http is not None:
+            try:
+                http.close()
+            except Exception:
+                pass
+
+
+def _cli_bots(argv: list[str]) -> None:
+    """CLI dispatcher for Tethered Bots ops (brief sync into the fast-cache)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="botex bots", description="Tethered Bots operations.")
+    sub = parser.add_subparsers(dest="cmd")
+    sync_p = sub.add_parser("sync", help="Sync bot briefs from Cloud into the local fast-cache")
+    sync_p.add_argument(
+        "--url",
+        default="",
+        help="Cloud gateway base URL (default: BOTEX_CLOUD_URL or config cloud.url)",
+    )
+    sync_p.add_argument(
+        "--on-startup",
+        action="store_true",
+        help="Never fail the process — exit 0 even on network errors",
+    )
+    args = parser.parse_args(argv)
+    if args.cmd != "sync":
+        parser.print_help()
+        sys.exit(2)
+    res = sync_bot_briefs(base_url=str(args.url or ""), on_startup=bool(args.on_startup))
+    if res.get("ok"):
+        print(
+            ok(
+                f"bots sync: {res['updated']} updated, "
+                f"{res['skipped_304']} unchanged (304), {res['bots']} bots"
+            )
+        )
+        sys.exit(0)
+    print(
+        err(f"bots sync failed: {res.get('error') or 'unknown'} {res.get('detail') or ''}"),
+        file=sys.stderr,
+    )
+    sys.exit(0 if args.on_startup else 1)
+
+
 def _cli_maintenance(argv: list[str]) -> None:
     """Run L2 maintenance jobs manually — local parity for the VPS
     ``botex-maintenance.timer`` (Windows dev has no systemd)."""
@@ -3206,6 +3710,8 @@ def main():
         _cli_cloud(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "edge":
         _cli_edge(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "bots":
+        _cli_bots(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "setup":
         _cli_setup()
     elif len(sys.argv) > 1 and sys.argv[1] == "skills":
