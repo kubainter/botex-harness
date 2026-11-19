@@ -219,9 +219,20 @@ def sanitize_origin_claim(raw: str) -> str:
         return ""
     norm = unicodedata.normalize("NFKC", str(raw)).strip()
     parts = norm.split("@", 1)
+    # The ``steward:`` identity family is checked BEFORE the allowlist strip:
+    # _ORIGIN_DISALLOWED removes ':' so a post-strip check alone would miss
+    # "steward:ops" -> "stewardops" spoofs.
+    raw_agent_head = parts[0].strip().lower()
+    if raw_agent_head == "steward" or raw_agent_head.startswith(
+        ("steward:", "steward-", "steward_", "steward.")
+    ):
+        return ""
     agent = _ORIGIN_DISALLOWED.sub("", parts[0])[:32]
     host = _ORIGIN_DISALLOWED.sub("", parts[1])[:32] if len(parts) > 1 else ""
-    if agent.lower() in RESERVED_ORIGIN_AGENTS:
+    agent_lower = agent.lower()
+    if agent_lower == "steward" or agent_lower.startswith(("steward-", "steward_", "steward.")):
+        return ""
+    if agent_lower in RESERVED_ORIGIN_AGENTS:
         return ""
     if agent and host:
         return f"{agent}@{host}"

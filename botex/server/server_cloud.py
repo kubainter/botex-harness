@@ -93,6 +93,16 @@ from botex.core.device_tokens import (
     DeviceTokenStore,
     default_device_token_store,
 )
+from botex.core.swarm_store import (
+    SWARM_SCHEMA_VERSION,
+    get_active_leases,
+    get_bot,
+    get_bot_brief,
+    list_active_brief_payloads,
+    list_bots,
+    register_bot,
+    upsert_bot_brief,
+)
 from botex.core.tool_executor import (
     ToolExecutor,
     register_edge_executor_resolver,
@@ -428,6 +438,19 @@ class EdgeDelegateRequest(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
     task: str = ""
     require_approval: Optional[bool] = None
+
+
+class BotCreateRequest(BaseModel):
+    slug: str
+    namespace: str
+    role_desc: str = ""
+    instructions_path: str = ""
+    status: str = "active"
+    brief_budget_tokens: int = 250
+
+
+class BotBriefUpdateRequest(BaseModel):
+    content: str
 
 
 _DELEGATE_FORBIDDEN_PARAM_KEYS = frozenset(
@@ -2597,6 +2620,193 @@ async def delete_skill_endpoint(skill_name: str) -> Dict[str, Any]:
     return botex_server.mask_secrets_recursive(res)
 
 
+# ---------------------------------------------------------------------------
+# REST Endpoints: Tethered Bots (Cloud Soul Registry & Briefs)
+# ---------------------------------------------------------------------------
+
+
+def _if_none_match_hits(header_val: Optional[str], etag: str) -> bool:
+    """Return True when an ``If-None-Match`` header matches ``etag`` or ``*``."""
+    if not header_val or not etag:
+        return False
+    target = etag.strip()
+    for raw_part in header_val.split(","):
+        token = raw_part.strip()
+        if not token:
+            continue
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        token = token.strip('"')
+        if token == target:
+            return True
+    return False
+
+
+async def _send_edge_brief_sync_safe(sess: _EdgeSession, payloads: List[Dict[str, Any]]) -> None:
+    try:
+        if sess.is_live():
+            await sess.send_frame({"type": "brief_sync", "bots": payloads})
+    except Exception:
+        logger.debug("Failed broadcasting brief_sync to edge session", exc_info=True)
+
+
+def _fanout_edge_brief_sync(payloads: List[Dict[str, Any]]) -> None:
+    if not _EDGE_SESSIONS or not payloads:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    for sess in list(_EDGE_SESSIONS.values()):
+        if sess.is_live():
+            loop.create_task(_send_edge_brief_sync_safe(sess, payloads))
+
+
+@app.get("/api/bots")
+async def list_registered_bots(
+    namespace: str = Query(default=""),
+    status_filter: str = Query(default="", alias="status"),
+) -> Dict[str, Any]:
+    """List registered Tethered Bots and active lease count."""
+    bots = await asyncio.to_thread(list_bots, namespace=namespace, status=status_filter)
+    leases = await asyncio.to_thread(get_active_leases)
+    return botex_server.mask_secrets_recursive(
+        {
+            "ok": True,
+            "schema_version": SWARM_SCHEMA_VERSION,
+            "bots": bots,
+            "active_leases_count": len(leases),
+        }
+    )
+
+
+@app.post("/api/bots", status_code=status.HTTP_201_CREATED)
+async def create_or_update_bot(body: BotCreateRequest) -> Dict[str, Any]:
+    """Register or update a Tethered Bot identity in Cloud Soul store."""
+    clean_slug = sanitize_identifier(body.slug)
+    if not clean_slug:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid bot slug format.",
+        )
+    res = await asyncio.to_thread(
+        register_bot,
+        slug=clean_slug,
+        namespace=body.namespace,
+        role_desc=body.role_desc,
+        instructions_path=body.instructions_path,
+        status=body.status,
+        brief_budget_tokens=body.brief_budget_tokens,
+    )
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(res.get("error") or "Failed to register bot."),
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.get("/api/bots/{slug}")
+async def get_bot_detail(slug: str) -> Dict[str, Any]:
+    """Return a single bot definition along with active host leases."""
+    clean_slug = sanitize_identifier(slug)
+    if not clean_slug:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid bot slug format.",
+        )
+    bot = await asyncio.to_thread(get_bot, clean_slug)
+    if bot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bot '{clean_slug}' not found.",
+        )
+    leases = await asyncio.to_thread(get_active_leases, bot_slug=clean_slug)
+    return botex_server.mask_secrets_recursive({"ok": True, "bot": bot, "leases": leases})
+
+
+@app.get("/api/bots/{slug}/brief")
+async def get_bot_brief_endpoint(
+    slug: str,
+    if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
+) -> Response:
+    """Return cached domain brief for ``slug``, honoring ``If-None-Match`` -> 304."""
+    clean_slug = sanitize_identifier(slug)
+    if not clean_slug:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid bot slug format.",
+        )
+    bot = await asyncio.to_thread(get_bot, clean_slug)
+    if bot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bot '{clean_slug}' not found.",
+        )
+    brief = await asyncio.to_thread(get_bot_brief, clean_slug)
+    if brief is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Brief for bot '{clean_slug}' not found.",
+        )
+    etag = str(brief.get("etag") or "")
+    etag_hdr = f'"{etag}"' if etag else ""
+    if etag and _if_none_match_hits(if_none_match, etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag_hdr})
+    payload = botex_server.mask_secrets_recursive(
+        {"ok": True, "namespace": bot["namespace"], **brief}
+    )
+    return JSONResponse(content=payload, headers={"ETag": etag_hdr} if etag_hdr else {})
+
+
+@app.put("/api/bots/{slug}/brief")
+async def put_bot_brief_endpoint(slug: str, body: BotBriefUpdateRequest) -> Response:
+    """Validate, store, and push an updated domain brief for ``slug``."""
+    clean_slug = sanitize_identifier(slug)
+    if not clean_slug:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid bot slug format.",
+        )
+    res = await asyncio.to_thread(upsert_bot_brief, clean_slug, body.content)
+    if not res.get("ok"):
+        err = str(res.get("error") or "")
+        if err == "BOT_NOT_FOUND":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Bot '{clean_slug}' not found.",
+            )
+        if err in ("INJECTION_DETECTED", "BRIEF_TOO_LARGE"):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=botex_server.mask_secrets_recursive(res),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=err or "Failed to update brief.",
+        )
+    etag = str(res.get("etag") or "")
+    etag_hdr = f'"{etag}"' if etag else ""
+    _fanout_edge_brief_sync(
+        [
+            {
+                "slug": res["slug"],
+                "namespace": res["namespace"],
+                "etag": etag,
+                "fencing_epoch": res["fencing_epoch"],
+                "content": res["content"],
+                "updated_at": res["updated_at"],
+            }
+        ]
+    )
+    return JSONResponse(
+        content=botex_server.mask_secrets_recursive(res),
+        headers={"ETag": etag_hdr} if etag_hdr else {},
+    )
+
+
 def _fetch_memory_graph_sync(ws: Path, scope: str) -> Dict[str, Any]:
     health = find_graph_health(workspace_dir=ws, scope=scope)
 
@@ -3691,6 +3901,12 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                 "heartbeat_s": int(_EDGE_PING_INTERVAL_S),
             }
         )
+        try:
+            initial_briefs = await asyncio.to_thread(list_active_brief_payloads)
+            if initial_briefs:
+                await session.send_frame({"type": "brief_sync", "bots": initial_briefs})
+        except Exception:
+            logger.debug("Failed sending initial brief_sync after hello_ack", exc_info=True)
         while True:
             if store.is_revoked(rec.jti):
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Token revoked")

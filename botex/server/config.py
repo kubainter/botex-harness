@@ -488,6 +488,9 @@ DEFAULTS: Dict[str, Any] = {
         # (arena-recall S.3). Empty = OFF — no implicit cross-workspace
         # reads; write tools never inherit this root.
         "swarm_memory_dir": "",
+        # Cloud Soul store (botex/core/swarm_store.py). Empty = default
+        # ~/.botex/swarm_store.db; relative paths resolve against PROJECT_ROOT.
+        "swarm_store_db": "",
         "chat_sessions_dir": "",
         # Optional extra dotenv file to load (relative to project root or absolute).
         "env_file": "",
@@ -545,6 +548,12 @@ DEFAULTS: Dict[str, Any] = {
         # Empty list = default_workspace only. Loopback callers are
         # unrestricted (local MCP sessions keep today's semantics).
         "allowed_workspaces": []
+    },
+    # Cloud Soul (Plan 035): per-bot brief token budget (est. ceil(len/4))
+    # and the default host-lease TTL when a caller passes ttl_s=None.
+    "bots": {
+        "brief_budget_tokens": 250,
+        "default_lease_ttl_s": 900,
     },
     "security": {
         # Browser drive-by guard on mutating /api/* routes and /api/chat/ws.
@@ -654,6 +663,7 @@ _ENV_MAP = {
     "BOTEX_WALLET_CACHE_TTL_S": ("wallet", "cache_ttl_s"),
     "BOTEX_GLOBAL_MEMORY_DIR": ("paths", "global_memory_dir"),
     "BOTEX_SWARM_MEMORY_DIR": ("paths", "swarm_memory_dir"),
+    "BOTEX_SWARM_STORE_DB": ("paths", "swarm_store_db"),
     "BOTEX_CHAT_SESSIONS_DIR": ("paths", "chat_sessions_dir"),
     "BOTEX_BENCHMARKS_CACHE_FILE": ("benchmarks", "cache_file"),
     "BOTEX_SKILLS_AUDIT_ALLOW_UNVERIFIED": ("skills", "audit", "allow_unverified"),
@@ -1008,6 +1018,28 @@ def swarm_memory_dir() -> str:
         return ""
     expanded = Path(raw).expanduser()
     return str(expanded if expanded.is_absolute() else (PROJECT_ROOT / expanded).resolve())
+
+
+def get_swarm_store_db_path() -> Path:
+    """Resolved path to the Cloud Soul ``swarm_store.db`` (SQLite WAL).
+
+    ``paths.swarm_store_db`` / ``BOTEX_SWARM_STORE_DB`` wins when set
+    (absolute used as-is, relative resolved against PROJECT_ROOT); otherwise
+    ``~/.botex/swarm_store.db`` — a per-host store shared across workspaces."""
+    raw = str(load_config().get("paths", {}).get("swarm_store_db") or "").strip()
+    if raw:
+        expanded = Path(raw).expanduser()
+        return expanded if expanded.is_absolute() else (PROJECT_ROOT / expanded).resolve()
+    return Path.home().resolve() / ".botex" / "swarm_store.db"
+
+
+def get_bots_config() -> Dict[str, Any]:
+    """Merged ``bots`` config (deep-merge of committed config over DEFAULTS)."""
+    defaults = DEFAULTS.get("bots", {})
+    override = load_config().get("bots")
+    if not isinstance(override, dict):
+        return copy.deepcopy(defaults)
+    return _deep_merge(defaults, override)
 
 
 def get_recall_config() -> Dict[str, Any]:
