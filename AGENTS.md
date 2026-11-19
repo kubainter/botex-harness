@@ -8,7 +8,11 @@ This document serves as a guide and rulebook for AI agents working on the **Bote
 
 ## 1. Architecture Overview
 
-BoteX is an execution harness for autonomous code-editing agents, functioning as an MCP server. Since v2.1.0 the package is organized into domain subpackages; legacy flat imports (`botex.engine`, `botex.memory`, ...) still resolve through the alias graft in `botex/__init__.py` (see `docs/IMPORT_MAP.md`). The main directories and modules are:
+BoteX is an execution harness for autonomous code-editing agents, functioning as an MCP server. Since v2.1.0 the package is organized into domain subpackages; legacy flat imports (`botex.engine`, `botex.memory`, ...) still resolve through the alias graft in `botex/__init__.py` (see `docs/IMPORT_MAP.md`).
+
+> **Live 1:1 Codebase Map:** Read [`docs/REPO_MAP.md`](docs/REPO_MAP.md) first for the auto-generated, CI-verified snapshot of all modules, public symbols, Hot Zones (fan-in), domain dependencies, and module→test links. After adding/moving modules, public symbols, cross-module imports, or test files, refresh it with `python scripts/gen_repo_map.py` (CI enforces `python scripts/gen_repo_map.py --check`).
+
+The main directories and modules are:
 
 *   **Root files:**
     *   `server.py` - Main MCP server entry point and CLI dispatcher.

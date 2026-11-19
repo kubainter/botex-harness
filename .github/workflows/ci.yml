@@ -37,6 +37,9 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
+      - name: Repo map freshness check
+        run: python scripts/gen_repo_map.py --check
+
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
