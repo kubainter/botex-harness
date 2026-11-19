@@ -3200,6 +3200,39 @@ def _cli_edge(argv: list[str]) -> None:
         runner.stop()
 
 
+class _UrllibSyncResponse:
+    def __init__(self, status_code: int, body: bytes) -> None:
+        self.status_code = status_code
+        self._body = body
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self) -> Any:
+        return json.loads(self._body.decode("utf-8"))
+
+
+class _UrllibSyncClient:
+    def __init__(self, timeout: float = 10.0) -> None:
+        self._timeout = timeout
+
+    def get(self, url: str, headers: Optional[dict[str, str]] = None) -> _UrllibSyncResponse:
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(url, headers=headers or {}, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                return _UrllibSyncResponse(int(resp.status), resp.read())
+        except urllib.error.HTTPError as exc:
+            body = exc.read() if hasattr(exc, "read") else b""
+            return _UrllibSyncResponse(int(exc.code), body)
+
+    def close(self) -> None:
+        pass
+
+
 def sync_bot_briefs(
     base_url: str = "",
     *,
@@ -3243,12 +3276,19 @@ def sync_bot_briefs(
             "skipped_304": 0,
             "bots": 0,
         }
-    owns_client = client is None
-    http = client
-    if http is None:
-        import httpx
+    from urllib.parse import urlparse
 
-        http = httpx.Client(timeout=10.0)
+    if urlparse(url).scheme not in ("http", "https"):
+        return {
+            "ok": False,
+            "error": "INVALID_CLOUD_URL",
+            "on_startup": bool(on_startup),
+            "updated": 0,
+            "skipped_304": 0,
+            "bots": 0,
+        }
+    owns_client = client is None
+    http = client if client is not None else _UrllibSyncClient(timeout=10.0)
     auth_token = (
         os.environ.get("BOTEX_CLOUD_TOKEN", "").strip()
         or str((load_config().get("cloud") or {}).get("token") or "").strip()
