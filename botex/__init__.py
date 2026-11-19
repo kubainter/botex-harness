@@ -30,6 +30,7 @@ LEGACY_MODULE_DOMAINS: Dict[str, str] = {
     "meta_harness": "core",
     "tool_executor": "core",
     "device_tokens": "core",
+    "swarm_store": "core",
     # botex/providers
     "providers": "providers",
     "catalog": "providers",

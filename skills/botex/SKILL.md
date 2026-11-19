@@ -1,6 +1,6 @@
 ---
 name: botex
-version: "2.4.0"
+version: "2.5.0"
 description: Use when delegating bounded code inspection, surgical patching, verification, or Memory Vault operations to the BoteX MCP harness.
 taxonomy: [general]
 metadata:
@@ -49,8 +49,8 @@ BoteX enforces **Read-Before-Write** on existing files, confines all paths to `w
 
 ## 3. Caller vs Internal Worker Tools
 
-Caller-facing MCP tools (22):
-MCP tools: `botex_get_rap_sheet`, `botex_report_violation`, `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `find_graph_health`, `get_backlinks`, `get_outline`, `get_stats`, `get_task_status`, `init_obsidian_vault`, `patch_memory_section`, `read_memory`, `read_scratchpad`, `recall_memory`, `recommend_models`, `reflect_memory`, `run_subagent`, `save_memory`, `search_memory`, `start_task`
+Caller-facing MCP tools (25):
+MCP tools: `bot_consult`, `bot_report_activity`, `botex_get_rap_sheet`, `botex_report_violation`, `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `find_graph_health`, `get_backlinks`, `get_outline`, `get_stats`, `get_task_status`, `init_obsidian_vault`, `patch_memory_section`, `read_memory`, `read_scratchpad`, `recall_memory`, `recommend_models`, `reflect_memory`, `run_subagent`, `save_memory`, `search_memory`, `start_task`, `swarm_list_bots`
 - **Internal Worker Tools (Sandbox Only):** `get_file_outline`, `read_file_lines`, `read_file`, `list_dir`, `apply_patch`, `create_file`, `delete_file`, `move_file`, `run_command`, `read_url`, `read_scratchpad`. Callers MUST NOT invoke internal worker tools over MCP.
 
 ## 4. Concrete Usage Examples
@@ -98,6 +98,14 @@ BoteX records every run in a local analytics ledger and feeds that evidence back
 - **Skill proposals:** the Curator may draft `learned-*` `SKILL.md`/`recipe.md` proposals under `<workspace>/.botex/proposals/` only. The loop never mutates live `skills/` or `botex/skills/recipes/`; promotion happens via a reviewed PR, so do not delegate writes into live skill directories as a promotion path.
 - **Shadow routing:** the engine's per-`(recipe, taxonomy)` shadow model advice is advisory telemetry only and never overrides the `model`/`profile` you selected. `recommend_models` remains the caller-facing ranking surface.
 - **Swarm Memory & `envfact` Hygiene (1:1 & Multi-Agent Hosts):** any workstation connected to BoteX Cloud participates in the shared Memory Vault (`scope="global"`, `project="swarm"`, server-derived `origin="<agent>@<host>"`). Always call `recall_memory(query="...", scope="all")` first (One-Shot Recall via 1-hop wikilinks) before falling back to `search_memory` or `read_memory`, and never dump raw files or huge JSON payloads into prompts or notes (Zero Context Bloat). Before delegating on an unfamiliar or Edge workspace, check active `envfact` lessons (`recall_memory(query="envfact <workspace_or_module>", scope="all")`); when a deterministic shell fix (`FormRepair`, e.g., `python -m pytest` over `pytest`) or missing binary (`AbsentTool`) is verified, persist it via `save_memory(..., kind="lesson", tags=["lesson", "envfact"])` for Curator fast-track promotion. Ephemeral `temp-handoff` notes (`scope="local"`, `tags=["temp-handoff"]`) must include `expires: YYYY-MM-DD` and be cleaned up by the caller when done.
+
+### Tethered Bots & Local Fast-Cache (`ADR-SWARM-02` Phase 1)
+
+Local swarm agents (`Antigravity`, `Devin`, `ZCode`) discover Cloud-hosted Tethered Bots at startup without paying Cloud round-trips:
+
+- **Startup Local Fast-Cache (`0 ms`, offline-safe):** check `~/.ai/.swarm/bot_briefs/<slug>.md` (overridable via `BOTEX_SWARM_BRIEFS_DIR`) populated automatically on `/api/edge/ws` `hello_ack -> brief_sync` preload or synced explicitly via `botex bots sync [--url URL] [--on-startup]` (`If-None-Match` -> `304` skip).
+- **MCP Discovery & Consultation:** call `swarm_list_bots(namespace="")` to list active Cloud bots, active `host_leases`, and cached local briefs; call `bot_consult(bot_id, query)` for single-hop advice (`ttl_hops=1`, strictly restricted to verified `status == "active"` notes — never `candidate` or `conflict_pending`); call `bot_report_activity(bot_id, scope_path, summary, fencing_token=0)` to update cross-host activity (monotonically fenced: lower `fencing_token` returns `"stale_epoch"`).
+- **Recall Piggybacking:** `recall_memory` and `read_memory` automatically attach compact `swarm_guardians` plus `active_brief` once per `(session, etag)` until the brief's `etag` changes.
 
 ### BlackBox Penal Registry (`botex.penal.v1`)
 

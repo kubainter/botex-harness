@@ -31,6 +31,7 @@ import os
 import random
 import re
 import socket
+import tempfile
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ from botex.tools.security import (
     coerce_text,
     mask_secrets,
     resolve_safe_path,
+    sanitize_identifier,
 )
 
 try:
@@ -135,6 +137,177 @@ def _mask_recursive(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_mask_recursive(v) for v in value]
     return value
+
+
+def get_local_bot_briefs_dir(briefs_dir: Optional[Path] = None) -> Path:
+    """Resolve the local fast-cache dir for tethered-bot briefs.
+
+    Precedence: explicit ``briefs_dir`` > ``BOTEX_SWARM_BRIEFS_DIR`` env >
+    ``~/.ai/.swarm/bot_briefs``. Local filesystem only — never network.
+    """
+    if briefs_dir is not None:
+        return Path(briefs_dir)
+    env_dir = os.environ.get("BOTEX_SWARM_BRIEFS_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir)
+    return Path.home().resolve() / ".ai" / ".swarm" / "bot_briefs"
+
+
+def _brief_meta_field(value: Any) -> str:
+    """Single-line, secret-masked scalar safe for the brief frontmatter."""
+    flat = " ".join(coerce_text(value).split())
+    return coerce_text(mask_secrets(flat))
+
+
+def write_local_bot_brief(
+    slug: str,
+    *,
+    namespace: str = "",
+    role_desc: str = "",
+    etag: str = "",
+    fencing_epoch: int = 0,
+    content: str = "",
+    updated_at: str = "",
+    briefs_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """Atomically persist one bot brief as ``<slug>.md`` in the fast-cache.
+
+    ``slug`` must survive ``sanitize_identifier`` unchanged — empty or
+    traversal-bearing slugs (``..``, ``/``, ``\\``) return ``None`` without
+    touching the filesystem. Stale writes (lower ``fencing_epoch`` than disk)
+    and identical-ETag no-ops are skipped before touching disk.
+    """
+    cleaned = str(slug or "").strip()
+    safe_slug = sanitize_identifier(cleaned)
+    if not safe_slug or safe_slug != cleaned:
+        return None
+    try:
+        epoch = int(fencing_epoch)
+    except (TypeError, ValueError):
+        epoch = 0
+    clean_ns = _brief_meta_field(namespace)
+    clean_role = _brief_meta_field(role_desc)[:500]
+    clean_etag = _brief_meta_field(etag)
+    clean_updated = _brief_meta_field(updated_at)
+    target_dir = get_local_bot_briefs_dir(briefs_dir)
+    target_path = target_dir / f"{safe_slug}.md"
+    if target_path.is_file():
+        try:
+            existing = _parse_local_bot_brief(
+                target_path.read_text(encoding="utf-8", errors="replace")
+            )
+        except OSError:
+            existing = None
+        if existing is not None:
+            existing_epoch = int(existing.get("fencing_epoch") or 0)
+            if existing_epoch > epoch:
+                return target_path
+            if (
+                clean_etag
+                and existing.get("etag") == clean_etag
+                and existing_epoch >= epoch
+                and existing.get("role_desc", "") == clean_role
+            ):
+                return target_path
+    document = (
+        "---\n"
+        f"slug: {safe_slug}\n"
+        f"namespace: {clean_ns}\n"
+        f"role_desc: {clean_role}\n"
+        f"etag: {clean_etag}\n"
+        f"fencing_epoch: {epoch}\n"
+        f"updated_at: {clean_updated}\n"
+        "---\n\n"
+        f"{coerce_text(mask_secrets(coerce_text(content)))}"
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+    fd_handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        dir=target_dir,
+        prefix=f".{safe_slug}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    tmp_path = Path(fd_handle.name)
+    try:
+        with fd_handle:
+            fd_handle.write(document)
+            fd_handle.flush()
+        os.replace(tmp_path, target_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return target_path
+
+
+def _parse_local_bot_brief(text: str) -> Optional[Dict[str, Any]]:
+    """Parse one cached brief document; ``None`` for corrupt/empty files."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None
+    meta: Dict[str, str] = {}
+    close_idx = -1
+    for idx in range(1, len(lines)):
+        line = lines[idx].rstrip("\r").strip()
+        if line == "---":
+            close_idx = idx
+            break
+        if ":" in line:
+            key, _, value = line.partition(":")
+            meta[key.strip()] = value.strip()
+    if close_idx < 0:
+        return None
+    slug = meta.get("slug", "").strip()
+    if not slug or slug != sanitize_identifier(slug):
+        return None
+    body_start = close_idx + 1
+    if body_start < len(lines) and not lines[body_start].strip():
+        body_start += 1
+    try:
+        epoch = int(str(meta.get("fencing_epoch", "")).strip() or 0)
+    except (TypeError, ValueError):
+        epoch = 0
+    return {
+        "slug": slug,
+        "namespace": meta.get("namespace", "").strip(),
+        "role_desc": meta.get("role_desc", "").strip(),
+        "etag": meta.get("etag", "").strip(),
+        "fencing_epoch": epoch,
+        "updated_at": meta.get("updated_at", "").strip(),
+        "content": "\n".join(lines[body_start:]),
+    }
+
+
+def read_local_bot_briefs(
+    namespace: str = "", briefs_dir: Optional[Path] = None
+) -> List[Dict[str, Any]]:
+    """Read every cached brief; local FS only (0 ms, offline-safe).
+
+    Corrupt or empty ``*.md`` files are skipped silently. When ``namespace``
+    is non-empty, only entries whose frontmatter namespace matches exactly
+    are returned.
+    """
+    target_dir = get_local_bot_briefs_dir(briefs_dir)
+    want_ns = str(namespace or "")
+    entries: List[Dict[str, Any]] = []
+    try:
+        paths = sorted(target_dir.glob("*.md"))
+    except OSError:
+        return entries
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        entry = _parse_local_bot_brief(text)
+        if entry is None:
+            continue
+        if want_ns and entry.get("namespace") != want_ns:
+            continue
+        entries.append(entry)
+    return entries
 
 
 @dataclass
@@ -559,6 +732,33 @@ class EdgeRunner:
                 task = asyncio.create_task(self._delegate_skill_task(ws, frame))
                 self._pending.add(task)
                 task.add_done_callback(self._pending.discard)
+            elif ftype == "brief_sync":
+                bots = frame.get("bots")
+                if isinstance(bots, list):
+                    for bot in bots:
+                        if not isinstance(bot, dict):
+                            continue
+                        try:
+                            raw_slug = str(bot.get("slug") or "").strip()
+                            bot_status = str(bot.get("status") or "active").strip().lower()
+                            if bot_status != "active":
+                                safe_slug = sanitize_identifier(raw_slug)
+                                if safe_slug and safe_slug == raw_slug:
+                                    (get_local_bot_briefs_dir() / f"{safe_slug}.md").unlink(
+                                        missing_ok=True
+                                    )
+                                continue
+                            write_local_bot_brief(
+                                raw_slug,
+                                namespace=str(bot.get("namespace") or ""),
+                                role_desc=str(bot.get("role_desc") or ""),
+                                etag=str(bot.get("etag") or ""),
+                                fencing_epoch=bot.get("fencing_epoch", 0),
+                                content=str(bot.get("content") or ""),
+                                updated_at=str(bot.get("updated_at") or ""),
+                            )
+                        except Exception as exc:
+                            self._log.warning("brief_sync entry rejected (%s)", type(exc).__name__)
 
     async def run_once(self) -> str:
         """Run a single connect→serve session.
