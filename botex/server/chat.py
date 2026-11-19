@@ -1626,7 +1626,7 @@ async def stream_chat_turn(
             # has streamed the turn is committed and must not retry.
             response = await call_with_backoff(
                 provider_adapter,
-                lambda: client.chat.completions.create(**create_kwargs),
+                lambda _kw=create_kwargs: client.chat.completions.create(**_kw),
                 active_provider_cfg,
             )
         except Exception as exc:
@@ -1654,7 +1654,7 @@ async def stream_chat_turn(
                 try:
                     response = await call_with_backoff(
                         provider_adapter,
-                        lambda: client.chat.completions.create(**create_kwargs),
+                        lambda _kw=create_kwargs: client.chat.completions.create(**_kw),
                         active_provider_cfg,
                     )
                 except Exception as ctx_retry_exc:
@@ -1672,9 +1672,9 @@ async def stream_chat_turn(
                 try:
                     response = await call_with_backoff(
                         provider_adapter,
-                        lambda: client.chat.completions.create(
+                        lambda _msgs=_send_messages: client.chat.completions.create(
                             model=effective_model,
-                            messages=_send_messages,
+                            messages=_msgs,
                             max_tokens=max_tokens,
                             temperature=temperature,
                             extra_body=extra_body,

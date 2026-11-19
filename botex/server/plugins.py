@@ -310,7 +310,7 @@ class ZeroTrustSubprocessRunner:
             stdout_b, stdout_total, stderr_b, stderr_total = await asyncio.wait_for(
                 _io(), timeout=effective_timeout
             )
-        except (asyncio.TimeoutError, TimeoutError):
+        except (asyncio.TimeoutError, TimeoutError) as exc:
             proc.kill()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
@@ -318,7 +318,7 @@ class ZeroTrustSubprocessRunner:
                 pass
             raise PluginExecutionTimeout(
                 f"Plugin '{plugin.name}' exceeded the {effective_timeout:.1f}s execution limit."
-            )
+            ) from exc
 
         stdout_text = mask_secrets((stdout_b or b"").decode("utf-8", errors="replace"))
         stderr_text = mask_secrets((stderr_b or b"").decode("utf-8", errors="replace"))
@@ -346,7 +346,7 @@ class ZeroTrustSubprocessRunner:
             raise PluginExecutionError(
                 f"Plugin '{plugin.name}' violated the stdout contract — expected a JSON "
                 f"object, got unparseable output: {exc}"
-            )
+            ) from exc
         if not isinstance(parsed, dict):
             raise PluginExecutionError(
                 f"Plugin '{plugin.name}' violated the stdout contract — expected a JSON "

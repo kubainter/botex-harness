@@ -22,7 +22,6 @@ import logging
 import os
 import sys
 import urllib.parse
-from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Type
@@ -561,8 +560,8 @@ def sanitize_provider_error(exc: BaseException, max_chars: int = 1024) -> str:
     return text
 
 
-class BaseProvider(ABC):
-    """Abstract base class for model API providers."""
+class BaseProvider:
+    """Base class for model API providers."""
 
     default_base_url: str = "https://openrouter.ai/api/v1"
     default_api_key_env: str = "OPENROUTER_API_KEY"
@@ -1216,7 +1215,7 @@ class NvidiaProvider(BaseProvider):
         if os.environ.get("NVAPI_KEY"):
             return str(os.environ["NVAPI_KEY"])
         return super().resolve_api_key(
-            explicit_key=explicit_key,
+            explicit_key,
             *args,
             secrets_cfg=secrets_cfg,
             explicit=explicit,
@@ -1309,7 +1308,7 @@ class GoogleAIStudioProvider(BaseProvider):
         if google_key:
             return str(google_key)
         resolved = super().resolve_api_key(
-            explicit_key=explicit_key,
+            explicit_key,
             *args,
             secrets_cfg=secrets_cfg,
             explicit=explicit,

@@ -298,6 +298,18 @@ async def _send_ws_json_safe(ws: WebSocket, payload: Dict[str, Any]) -> bool:
         return False
 
 
+_BG_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_bg_task(
+    coro: Any, loop: Optional[asyncio.AbstractEventLoop] = None
+) -> asyncio.Task[Any]:
+    task = loop.create_task(coro) if loop is not None else asyncio.ensure_future(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
+
 def _broadcast_approval_request(action: PendingAction) -> None:
     """Notify connected WebSockets when an action requires operator approval."""
     if not _ACTIVE_WEBSOCKETS:
@@ -314,7 +326,7 @@ def _broadcast_approval_request(action: PendingAction) -> None:
         "action": botex_server.mask_secrets_recursive(action.to_dict()),
     }
     for ws in list(_ACTIVE_WEBSOCKETS.keys()):
-        loop.create_task(_send_ws_json_safe(ws, payload))
+        _spawn_bg_task(_send_ws_json_safe(ws, payload), loop=loop)
 
 
 default_approval_manager.add_listener(_broadcast_approval_request)
@@ -507,11 +519,11 @@ def _validate_delegate_params_safe(params: Any) -> Dict[str, Any]:
         )
     try:
         encoded = json.dumps(params, ensure_ascii=False).encode("utf-8")
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Delegation params must be JSON-serializable.",
-        )
+        ) from exc
     if len(encoded) > 32768:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1992,7 +2004,7 @@ async def _task_event_pump(task_id: str, em) -> None:
             _update_task_progress(task_id, ev)
             for ws, subs in list(_WS_TASK_SUBS.items()):
                 if task_id in subs:
-                    asyncio.ensure_future(
+                    _spawn_bg_task(
                         _send_ws_json_safe(
                             ws, {"type": "task_event", "task_id": task_id, "event": ev}
                         )
@@ -2661,7 +2673,7 @@ def _fanout_edge_brief_sync(payloads: List[Dict[str, Any]]) -> None:
         return
     for sess in list(_EDGE_SESSIONS.values()):
         if sess.is_live():
-            loop.create_task(_send_edge_brief_sync_safe(sess, payloads))
+            _spawn_bg_task(_send_edge_brief_sync_safe(sess, payloads), loop=loop)
 
 
 @app.get("/api/bots")
@@ -3460,22 +3472,22 @@ async def vision_inspect_endpoint(body: VisionInspectRequest) -> Dict[str, Any]:
     """Triage a visual defect screenshot through the vision pipeline."""
     try:
         from botex.vision import triage_visual_defect
-    except ImportError:
+    except ImportError as exc:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail="Vision pipeline is not available in this build.",
-        )
+        ) from exc
     import base64
     import binascii
     import inspect as _inspect
 
     try:
         image_bytes = base64.b64decode(body.image_base64 or "", validate=True)
-    except (binascii.Error, ValueError):
+    except (binascii.Error, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="image_base64 is not valid base64 data.",
-        )
+        ) from exc
     if not image_bytes or len(image_bytes) > 20 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -3520,7 +3532,7 @@ async def issue_edge_token(body: EdgeTokenIssueRequest) -> Dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=coerce_text(mask_secrets(str(exc))),
-        )
+        ) from exc
     return {
         "ok": True,
         "token": raw_credential,

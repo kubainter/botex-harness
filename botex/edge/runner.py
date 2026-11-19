@@ -837,6 +837,6 @@ class EdgeRunner:
         ws = self._ws
         if ws is not None:
             try:
-                asyncio.ensure_future(ws.close())
+                self._close_task = asyncio.ensure_future(ws.close())
             except RuntimeError:
                 pass

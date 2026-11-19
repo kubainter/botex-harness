@@ -677,7 +677,7 @@ def _read_instructions_excerpt(instructions_path: str) -> str:
 @mcp.tool()
 async def start_task(
     task: str,
-    files: list[str] = [],
+    files: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
     workspace_dir: str = "",
     model: str = "",
     profile: str = "",
@@ -690,8 +690,8 @@ async def start_task(
     allow_destructive: bool = False,
     allow_exec: bool = False,
     allow_net: bool = False,
-    net_allowed_hosts: list[str] = [],
-    net_allowed_urls: list[str] = [],
+    net_allowed_hosts: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
+    net_allowed_urls: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
     api_key: str = "",
     output_path: str = "",
     verify_command: str = "",
@@ -917,7 +917,7 @@ async def recommend_models(
 @mcp.tool()
 async def run_subagent(
     task: str,
-    files: list[str] = [],
+    files: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
     workspace_dir: str = "",
     model: str = "",
     profile: str = "",
@@ -932,8 +932,8 @@ async def run_subagent(
     api_key: str = "",
     output_path: str = "",
     allow_net: bool = False,
-    net_allowed_hosts: list[str] = [],
-    net_allowed_urls: list[str] = [],
+    net_allowed_hosts: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
+    net_allowed_urls: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
     verify_command: str = "",
     recipe: str = "",
     allow_non_zdr: bool = False,
@@ -2092,8 +2092,8 @@ def _interactive_confirm(
         if answer in ("c", "cancel", "abort"):
             raise TaskAbortedError(f"Task cancelled by operator during '{operation}'")
         return False
-    except (EOFError, KeyboardInterrupt):
-        raise TaskAbortedError(f"Task interrupted by operator during '{operation}'")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise TaskAbortedError(f"Task interrupted by operator during '{operation}'") from exc
 
 
 def _print_usage():

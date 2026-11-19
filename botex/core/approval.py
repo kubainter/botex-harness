@@ -159,6 +159,7 @@ class ApprovalManager:
         self._actions: Dict[str, PendingAction] = {}
         self._session_preapprovals: Dict[str, Set[str]] = {}  # task_id -> set of tool_names
         self._listeners: List[Callable[[PendingAction], Any]] = []
+        self._bg_tasks: Set[asyncio.Task[Any]] = set()
         self._lock = threading.RLock()
 
     def set_policy(self, policy: ApprovalPolicy) -> None:
@@ -279,7 +280,9 @@ class ApprovalManager:
             try:
                 res = listener(action)
                 if inspect.isawaitable(res):
-                    asyncio.create_task(res)
+                    task = asyncio.create_task(res)
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
             except Exception:
                 pass
 
@@ -299,11 +302,11 @@ class ApprovalManager:
             action.decision_reason = "Task aborted by operator"
             action.resolved_at = time.time()
             raise
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             action.status = ActionStatus.ABORTED
             action.decision_reason = "Task cancelled"
             action.resolved_at = time.time()
-            raise TaskAbortedError("Task cancelled")
+            raise TaskAbortedError("Task cancelled") from exc
 
     def resolve(
         self,
