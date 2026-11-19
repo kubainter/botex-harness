@@ -148,3 +148,38 @@ jobs:
           if [ "$rc" -gt 1 ]; then
             exit "$rc"
           fi
+
+  workflow-audit:
+    name: Workflow Security Audit (zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install zizmor (pinned)
+        run: python -m pip install --no-cache-dir "zizmor==1.32.0"
+
+      - name: Audit GitHub Actions workflows
+        run: |
+          set +e
+          zizmor --offline --no-progress --format plain .github/workflows > zizmor-report.txt
+          rc=$?
+          set -e
+          {
+            echo "## Zizmor Workflow Audit"
+            echo '```text'
+            cat zizmor-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat zizmor-report.txt
+          exit "$rc"
