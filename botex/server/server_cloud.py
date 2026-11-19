@@ -441,16 +441,16 @@ class EdgeDelegateRequest(BaseModel):
 
 
 class BotCreateRequest(BaseModel):
-    slug: str
-    namespace: str
-    role_desc: str = ""
-    instructions_path: str = ""
+    slug: str = Field(..., min_length=1, max_length=128)
+    namespace: str = Field(..., min_length=1, max_length=128)
+    role_desc: str = Field(default="", max_length=500)
+    instructions_path: str = Field(default="", max_length=512)
     status: str = "active"
-    brief_budget_tokens: int = 250
+    brief_budget_tokens: int = Field(default=250, ge=32, le=2000)
 
 
 class BotBriefUpdateRequest(BaseModel):
-    content: str
+    content: str = Field(..., max_length=16000)
 
 
 _DELEGATE_FORBIDDEN_PARAM_KEYS = frozenset(
@@ -2705,6 +2705,8 @@ async def create_or_update_bot(body: BotCreateRequest) -> Dict[str, Any]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(res.get("error") or "Failed to register bot."),
         )
+    if res.get("status") != "active":
+        _fanout_edge_brief_sync([{"slug": res["slug"], "status": res["status"]}])
     return botex_server.mask_secrets_recursive(res)
 
 
@@ -2756,7 +2758,12 @@ async def get_bot_brief_endpoint(
     if etag and _if_none_match_hits(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag_hdr})
     payload = botex_server.mask_secrets_recursive(
-        {"ok": True, "namespace": bot["namespace"], **brief}
+        {
+            "ok": True,
+            "namespace": bot["namespace"],
+            "role_desc": bot.get("role_desc", ""),
+            **brief,
+        }
     )
     return JSONResponse(content=payload, headers={"ETag": etag_hdr} if etag_hdr else {})
 
@@ -2789,18 +2796,24 @@ async def put_bot_brief_endpoint(slug: str, body: BotBriefUpdateRequest) -> Resp
         )
     etag = str(res.get("etag") or "")
     etag_hdr = f'"{etag}"' if etag else ""
-    _fanout_edge_brief_sync(
-        [
-            {
-                "slug": res["slug"],
-                "namespace": res["namespace"],
-                "etag": etag,
-                "fencing_epoch": res["fencing_epoch"],
-                "content": res["content"],
-                "updated_at": res["updated_at"],
-            }
-        ]
-    )
+    bot_status = str(res.get("status") or "active").strip().lower()
+    if bot_status == "active":
+        _fanout_edge_brief_sync(
+            [
+                {
+                    "slug": res["slug"],
+                    "namespace": res["namespace"],
+                    "role_desc": res.get("role_desc", ""),
+                    "status": "active",
+                    "etag": etag,
+                    "fencing_epoch": res["fencing_epoch"],
+                    "content": res["content"],
+                    "updated_at": res["updated_at"],
+                }
+            ]
+        )
+    else:
+        _fanout_edge_brief_sync([{"slug": res["slug"], "status": bot_status}])
     return JSONResponse(
         content=botex_server.mask_secrets_recursive(res),
         headers={"ETag": etag_hdr} if etag_hdr else {},
@@ -3903,8 +3916,15 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
         )
         try:
             initial_briefs = await asyncio.to_thread(list_active_brief_payloads)
-            if initial_briefs:
-                await session.send_frame({"type": "brief_sync", "bots": initial_briefs})
+            all_bots = await asyncio.to_thread(list_bots)
+            tombstones = [
+                {"slug": b["slug"], "status": b["status"]}
+                for b in all_bots
+                if str(b.get("status") or "active").strip().lower() != "active"
+            ]
+            initial_sync = [*initial_briefs, *tombstones]
+            if initial_sync:
+                await session.send_frame({"type": "brief_sync", "bots": initial_sync})
         except Exception:
             logger.debug("Failed sending initial brief_sync after hello_ack", exc_info=True)
         while True:

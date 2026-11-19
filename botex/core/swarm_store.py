@@ -219,38 +219,48 @@ def close_swarm_store_dbs() -> None:
 
 # On Windows, wrap shutil.rmtree to release pooled SQLite file locks when a
 # directory holding a swarm store is deleted (e.g. TemporaryDirectory in tests).
-_orig_rmtree = shutil.rmtree
+if not getattr(shutil.rmtree, "_botex_swarm_safe", False):
+    _orig_rmtree = shutil.rmtree
 
+    def _safe_rmtree(path: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            resolved = str(Path(path).resolve())
+            with _SWARM_LOCK:
+                conns = list(_ALL_SWARM_CONNS)
+            for c in conns:
+                db_p = getattr(c, "_db_path", None)
+                if db_p and (db_p == resolved or db_p.startswith(resolved + os.sep)):
+                    try:
+                        c.force_close()
+                    except Exception:
+                        pass
+                    with _SWARM_LOCK:
+                        _ALL_SWARM_CONNS.discard(c)
+                    with _SWARM_SCHEMA_LOCK:
+                        _SWARM_SCHEMA_READY.discard(db_p)
+                    if hasattr(_SWARM_CONNS, "conns"):
+                        _SWARM_CONNS.conns.pop(db_p, None)
+        except Exception:
+            pass
+        return _orig_rmtree(path, *args, **kwargs)
 
-def _safe_rmtree(path: Any, *args: Any, **kwargs: Any) -> Any:
-    try:
-        resolved = str(Path(path).resolve())
-        with _SWARM_LOCK:
-            conns = list(_ALL_SWARM_CONNS)
-        for c in conns:
-            db_p = getattr(c, "_db_path", None)
-            if db_p and (db_p == resolved or db_p.startswith(resolved + os.sep)):
-                try:
-                    c.force_close()
-                except Exception:
-                    pass
-                with _SWARM_LOCK:
-                    _ALL_SWARM_CONNS.discard(c)
-                with _SWARM_SCHEMA_LOCK:
-                    _SWARM_SCHEMA_READY.discard(db_p)
-                if hasattr(_SWARM_CONNS, "conns"):
-                    _SWARM_CONNS.conns.pop(db_p, None)
-    except Exception:
-        pass
-    return _orig_rmtree(path, *args, **kwargs)
-
-
-shutil.rmtree = _safe_rmtree
+    _safe_rmtree._botex_swarm_safe = True  # type: ignore[attr-defined]
+    shutil.rmtree = _safe_rmtree
 
 
 # ============================================================================
 # Bots registry
 # ============================================================================
+
+
+_VALID_BOT_STATUSES: Dict[str, str] = {
+    "active": "active",
+    "dormant": "dormant",
+    "disabled": "disabled",
+}
+_MIN_BRIEF_BUDGET_TOKENS = 32
+_MAX_BRIEF_BUDGET_TOKENS = 2000
+_MAX_ROLE_DESC_CHARS = 500
 
 
 def register_bot(
@@ -269,10 +279,19 @@ def register_bot(
     clean_ns = coerce_text(str(namespace or "")).strip()
     if not clean_ns:
         return {"ok": False, "error": "INVALID_NAMESPACE"}
-    clean_role = coerce_text(mask_secrets(str(role_desc or ""))).strip()
+    raw_role = str(role_desc or "")
+    if raw_role and _has_injection_pattern(raw_role):
+        return {"ok": False, "error": "INJECTION_DETECTED"}
+    clean_role = coerce_text(mask_secrets(raw_role)).strip()[:_MAX_ROLE_DESC_CHARS]
     clean_instructions = coerce_text(str(instructions_path or "")).strip()
-    clean_status = coerce_text(str(status or "active")).strip() or "active"
-    budget = _coerce_int(brief_budget_tokens, _default_brief_budget())
+    status_key = coerce_text(str(status or "active")).strip().lower() or "active"
+    clean_status = _VALID_BOT_STATUSES.get(status_key)
+    if clean_status is None:
+        return {"ok": False, "error": "INVALID_STATUS"}
+    budget = max(
+        _MIN_BRIEF_BUDGET_TOKENS,
+        min(_coerce_int(brief_budget_tokens, _default_brief_budget()), _MAX_BRIEF_BUDGET_TOKENS),
+    )
     now_iso = _utc_now_iso()
     conn = get_swarm_store_conn(db_path)
     with _SWARM_LOCK, conn:
@@ -299,12 +318,12 @@ def register_bot(
                 now_iso,
             ),
         )
-    row = conn.execute(
-        "SELECT slug, namespace, role_desc, instructions_path, status,"
-        " brief_budget_tokens, created_at, updated_at"
-        " FROM bots_registry WHERE slug = ?;",
-        (clean_slug,),
-    ).fetchone()
+        row = conn.execute(
+            "SELECT slug, namespace, role_desc, instructions_path, status,"
+            " brief_budget_tokens, created_at, updated_at"
+            " FROM bots_registry WHERE slug = ?;",
+            (clean_slug,),
+        ).fetchone()
     return {"ok": True, **dict(row)}
 
 
@@ -398,7 +417,8 @@ def upsert_bot_brief(
         conn.execute("BEGIN IMMEDIATE;")
         try:
             bot = conn.execute(
-                "SELECT slug, namespace, brief_budget_tokens FROM bots_registry WHERE slug = ?;",
+                "SELECT slug, namespace, role_desc, status, brief_budget_tokens"
+                " FROM bots_registry WHERE slug = ?;",
                 (clean_slug,),
             ).fetchone()
             if bot is None:
@@ -442,6 +462,8 @@ def upsert_bot_brief(
         "ok": True,
         "slug": clean_slug,
         "namespace": bot["namespace"],
+        "role_desc": bot["role_desc"],
+        "status": bot["status"],
         "content": masked,
         "etag": etag,
         "fencing_epoch": new_epoch,
@@ -475,10 +497,11 @@ def upsert_host_lease(
 ) -> dict:
     """Acquire/refresh a fenced lease ``<slug>:<scope>`` for a host.
 
-    An active lease (``expires_at > now``) carrying a strictly higher
-    ``fencing_token`` is never overwritten — the caller gets
-    ``stale_epoch`` and the current token instead. Expired leases and
-    equal/lower tokens are idempotently replaced.
+    On an active lease (``expires_at > now``), the same ``host_id`` may refresh
+    with an equal or higher ``fencing_token``; another host must supply a
+    strictly higher token or receive ``lease_held`` / ``stale_epoch``. On an
+    expired lease, the stored token advances monotonically to at least
+    ``existing_token + 1`` so a returning zombie host cannot reclaim it.
     """
     clean_slug = sanitize_identifier(str(bot_slug or ""))
     if not clean_slug:
@@ -502,20 +525,39 @@ def upsert_host_lease(
             conn.rollback()
         conn.execute("BEGIN IMMEDIATE;")
         try:
+            bot_row = conn.execute(
+                "SELECT status FROM bots_registry WHERE slug = ?;",
+                (clean_slug,),
+            ).fetchone()
+            if bot_row is not None and str(bot_row["status"] or "active").lower() != "active":
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "status": "bot_inactive",
+                    "bot_status": str(bot_row["status"]),
+                }
             existing = conn.execute(
-                "SELECT fencing_token, expires_at FROM host_leases WHERE lease_key = ?;",
+                "SELECT host_id, fencing_token, expires_at FROM host_leases WHERE lease_key = ?;",
                 (lease_key,),
             ).fetchone()
+            effective_token = token
             if existing is not None:
+                existing_host = str(existing["host_id"] or "")
                 existing_token = int(existing["fencing_token"])
                 existing_exp = float(existing["expires_at"])
-                if existing_exp > now and existing_token > token:
-                    conn.rollback()
-                    return {
-                        "ok": False,
-                        "status": "stale_epoch",
-                        "current_fencing_token": existing_token,
-                    }
+                if existing_exp > now:
+                    if token < existing_token or (
+                        token == existing_token and clean_host != existing_host
+                    ):
+                        conn.rollback()
+                        return {
+                            "ok": False,
+                            "status": "stale_epoch" if token < existing_token else "lease_held",
+                            "holder_host": existing_host,
+                            "current_fencing_token": existing_token,
+                        }
+                elif effective_token <= existing_token:
+                    effective_token = existing_token + 1
 
             conn.execute(
                 "INSERT INTO host_leases"
@@ -528,7 +570,15 @@ def upsert_host_lease(
                 "   fencing_token=excluded.fencing_token,"
                 "   expires_at=excluded.expires_at,"
                 "   summary=excluded.summary;",
-                (lease_key, clean_slug, clean_host, scope_raw, token, expires_at, clean_summary),
+                (
+                    lease_key,
+                    clean_slug,
+                    clean_host,
+                    scope_raw,
+                    effective_token,
+                    expires_at,
+                    clean_summary,
+                ),
             )
             conn.commit()
         except BaseException:
@@ -539,7 +589,7 @@ def upsert_host_lease(
         "ok": True,
         "status": "active",
         "lease_key": lease_key,
-        "fencing_token": token,
+        "fencing_token": effective_token,
         "expires_at": expires_at,
     }
 
@@ -573,8 +623,8 @@ def list_active_brief_payloads(db_path: Optional[Path] = None) -> list[dict]:
     """Join ``bots_registry`` + ``bot_briefs`` for every ``active`` bot."""
     conn = get_swarm_store_conn(db_path)
     rows = conn.execute(
-        "SELECT r.slug AS slug, r.namespace AS namespace, b.etag AS etag,"
-        " b.fencing_epoch AS fencing_epoch, b.content AS content,"
+        "SELECT r.slug AS slug, r.namespace AS namespace, r.role_desc AS role_desc,"
+        " b.etag AS etag, b.fencing_epoch AS fencing_epoch, b.content AS content,"
         " b.updated_at AS updated_at"
         " FROM bots_registry r"
         " JOIN bot_briefs b ON b.slug = r.slug"

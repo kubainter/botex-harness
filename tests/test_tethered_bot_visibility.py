@@ -205,6 +205,7 @@ def test_local_visibility_offline_without_cloud(_isolated_swarm_env, monkeypatch
     written = write_local_bot_brief(
         "ghost-1",
         namespace="edge",
+        role_desc="Edge specialist",
         etag="etag-ghost",
         fencing_epoch=3,
         content="cached ghost brief",
@@ -218,6 +219,7 @@ def test_local_visibility_offline_without_cloud(_isolated_swarm_env, monkeypatch
     bot = res["bots"][0]
     assert bot["slug"] == "ghost-1"
     assert bot["source"] == "local_cache"
+    assert bot["role_desc"] == "Edge specialist"
     assert bot["etag"] == "etag-ghost"
     assert bot["fencing_epoch"] == 3
     assert bot["active_leases"] == []
@@ -227,7 +229,9 @@ def test_local_visibility_offline_without_cloud(_isolated_swarm_env, monkeypatch
         "_gather_recall_context",
         lambda **kwargs: {"ok": True, "nodes": []},
     )
-    p = asyncio.run(botex_server._recall_memory_impl(workspace_dir=str(tmp_path), query="q"))
+    p = asyncio.run(
+        botex_server._recall_memory_impl(workspace_dir=str(tmp_path), query="q", project="edge")
+    )
     assert p["ok"] is True
     assert [g["slug"] for g in p["swarm_guardians"]] == ["ghost-1"]
     assert p["active_brief"]["slug"] == "ghost-1"
@@ -380,3 +384,57 @@ def test_concurrent_upsert_brief_and_lease_monotonicity(_isolated_swarm_env):
     active = swarm_store.get_active_leases(bot_slug="conc-bot")
     assert len(active) == 1
     assert active[0]["fencing_token"] == 15
+
+
+def test_piggyback_empty_namespace_skips_foreign_domain_and_respects_ttl(
+    monkeypatch, _isolated_swarm_env
+):
+    _register_and_brief("alpha-marketing", "marketing", "marketing brief")
+    p_foreign = botex_server._attach_swarm_visibility_piggyback(
+        {"ok": True}, namespace="", session_key="sess-ns"
+    )
+    assert "active_brief" not in p_foreign
+
+    _register_and_brief("zeta-swarm", "swarm", "global swarm brief")
+    p_global = botex_server._attach_swarm_visibility_piggyback(
+        {"ok": True}, namespace="", session_key="sess-ns"
+    )
+    assert p_global["active_brief"]["slug"] == "zeta-swarm"
+
+    # Immediate repeat deduped; expired TTL re-injects.
+    p_dedup = botex_server._attach_swarm_visibility_piggyback(
+        {"ok": True}, namespace="", session_key="sess-ns"
+    )
+    assert "active_brief" not in p_dedup
+    monkeypatch.setattr(botex_server, "_SEEN_BRIEF_ETAGS_TTL_S", -1.0)
+    p_expired = botex_server._attach_swarm_visibility_piggyback(
+        {"ok": True}, namespace="", session_key="sess-ns"
+    )
+    assert p_expired["active_brief"]["slug"] == "zeta-swarm"
+
+
+def test_sync_bot_briefs_prunes_disabled_bot_cache(_isolated_swarm_env, _cloud_state):
+    _register_and_brief("pb2", "swarm", "active brief")
+    briefs_dir = _isolated_swarm_env["briefs_dir"]
+    with TestClient(app) as client:
+        r1 = botex_server.sync_bot_briefs(
+            base_url="http://testserver", client=client, briefs_dir=briefs_dir
+        )
+        assert r1["ok"] and (briefs_dir / "pb2.md").is_file()
+
+        swarm_store.register_bot("pb2", "swarm", status="disabled")
+        r2 = botex_server.sync_bot_briefs(
+            base_url="http://testserver", client=client, briefs_dir=briefs_dir
+        )
+        assert r2["ok"] and r2["removed"] == 1
+        assert not (briefs_dir / "pb2.md").exists()
+
+        consult_disabled = asyncio.run(botex_server.bot_consult("pb2", "q"))
+        assert consult_disabled["ok"] is False
+        assert consult_disabled["error"] == "BOT_INACTIVE"
+
+        lease_disabled = asyncio.run(
+            botex_server.bot_report_activity("pb2", "/repo", "work", fencing_token=1)
+        )
+        assert lease_disabled["ok"] is False
+        assert lease_disabled["status"] == "bot_inactive"

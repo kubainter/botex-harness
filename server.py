@@ -540,7 +540,8 @@ def _resolve_call_origin(origin: str = "") -> str:
 # recall/read_memory piggybacks cheap — the same unchanged brief is never
 # re-broadcast within one client session.
 _SEEN_BRIEF_ETAGS_MAX = 4096
-_SEEN_BRIEF_ETAGS: "OrderedDict[tuple[str, str], str]" = OrderedDict()
+_SEEN_BRIEF_ETAGS_TTL_S = 1800.0
+_SEEN_BRIEF_ETAGS: "OrderedDict[tuple[str, str], tuple[str, float]]" = OrderedDict()
 
 
 def _reset_seen_brief_etags() -> None:
@@ -616,7 +617,7 @@ def _attach_swarm_visibility_piggyback(
     if ns:
         slugs = [g["slug"] for g in guardians if g["namespace"] == ns or g["slug"] == ns]
     else:
-        slugs = [g["slug"] for g in guardians]
+        slugs = [g["slug"] for g in guardians if g["namespace"] in ("swarm", "global")]
     if not slugs:
         return payload
     slug = slugs[0]
@@ -626,10 +627,16 @@ def _attach_swarm_visibility_piggyback(
     etag = str(brief.get("etag") or "")
     session_id = str(session_key or "").strip() or get_mcp_client_origin("botex")
     key = (session_id, slug)
-    if _SEEN_BRIEF_ETAGS.get(key) == etag:
+    now_mono = time.monotonic()
+    cached = _SEEN_BRIEF_ETAGS.get(key)
+    if (
+        cached is not None
+        and cached[0] == etag
+        and (now_mono - cached[1]) < _SEEN_BRIEF_ETAGS_TTL_S
+    ):
         _SEEN_BRIEF_ETAGS.move_to_end(key)
         return payload
-    _SEEN_BRIEF_ETAGS[key] = etag
+    _SEEN_BRIEF_ETAGS[key] = (etag, now_mono)
     _SEEN_BRIEF_ETAGS.move_to_end(key)
     while len(_SEEN_BRIEF_ETAGS) > _SEEN_BRIEF_ETAGS_MAX:
         _SEEN_BRIEF_ETAGS.popitem(last=False)
@@ -1618,12 +1625,12 @@ async def swarm_list_bots(namespace: str = "") -> dict[str, Any]:
     """
     ns = str(namespace or "").strip()
     try:
-        bots = _list_bots(namespace=ns) or []
+        bots = await asyncio.to_thread(_list_bots, namespace=ns) or []
     except Exception:
         bots = []
     leases_by_bot: dict[str, list] = {}
     try:
-        for lease in _get_active_leases():
+        for lease in await asyncio.to_thread(_get_active_leases):
             bslug = str(lease.get("bot_slug") or "")
             if bslug:
                 leases_by_bot.setdefault(bslug, []).append(lease)
@@ -1634,7 +1641,7 @@ async def swarm_list_bots(namespace: str = "") -> dict[str, Any]:
         slug = str(b.get("slug") or "")
         if not slug:
             continue
-        brief = _cloud_bot_brief(slug) or {}
+        brief = await asyncio.to_thread(_cloud_bot_brief, slug) or {}
         merged[slug] = {
             **b,
             "active_leases": list(leases_by_bot.get(slug) or []),
@@ -1643,14 +1650,14 @@ async def swarm_list_bots(namespace: str = "") -> dict[str, Any]:
             "brief_updated_at": str(brief.get("updated_at") or ""),
             "source": "cloud",
         }
-    for lb in _local_bot_briefs(namespace=ns):
+    for lb in await asyncio.to_thread(_local_bot_briefs, ns):
         slug = str(lb.get("slug") or "")
         if not slug or slug in merged:
             continue
         merged[slug] = {
             "slug": slug,
             "namespace": str(lb.get("namespace") or ""),
-            "role_desc": "",
+            "role_desc": str(lb.get("role_desc") or ""),
             "status": "active",
             "active_leases": list(leases_by_bot.get(slug) or []),
             "etag": str(lb.get("etag") or ""),
@@ -1678,20 +1685,26 @@ async def bot_consult(bot_id: str, query: str) -> dict[str, Any]:
     if not slug:
         return {"ok": False, "error": "INVALID_SLUG"}
     try:
-        bot = _get_bot(slug)
+        bot = await asyncio.to_thread(_get_bot, slug)
     except Exception:
         bot = None
     local_brief = None
     if bot is None:
-        local_brief = _local_brief_for_slug(slug)
+        local_brief = await asyncio.to_thread(_local_brief_for_slug, slug)
         if local_brief is None:
             return {"ok": False, "error": "BOT_NOT_FOUND"}
+    elif str(bot.get("status") or "active").strip().lower() != "active":
+        return {
+            "ok": False,
+            "error": "BOT_INACTIVE",
+            "status": str(bot.get("status") or ""),
+        }
     ns = str((bot or local_brief or {}).get("namespace") or "")
     instructions = ""
     ipath = str((bot or {}).get("instructions_path") or "").strip()
     if ipath:
-        instructions = _read_instructions_excerpt(ipath)
-    brief = _cloud_bot_brief(slug) or local_brief or {}
+        instructions = await asyncio.to_thread(_read_instructions_excerpt, ipath)
+    brief = await asyncio.to_thread(_cloud_bot_brief, slug) or local_brief or {}
     active_brief = {
         "slug": slug,
         "namespace": str(brief.get("namespace") or ns),
@@ -1701,7 +1714,8 @@ async def bot_consult(bot_id: str, query: str) -> dict[str, Any]:
     }
     nodes: list[dict[str, Any]] = []
     try:
-        ctx = _gather_recall_context(
+        ctx = await asyncio.to_thread(
+            _gather_recall_context,
             workspace_dir=resolve_workspace(""),
             query=str(query or ""),
             scope="all",
@@ -1764,7 +1778,8 @@ async def bot_report_activity(
     """
     host_id = get_mcp_client_origin("botex")
     try:
-        res = _upsert_host_lease(
+        res = await asyncio.to_thread(
+            _upsert_host_lease,
             bot_slug=str(bot_id or ""),
             host_id=host_id,
             scope_path=str(scope_path or ""),
@@ -1780,12 +1795,14 @@ async def bot_report_activity(
         from botex.edge.runner import write_local_bot_brief
 
         clean_slug = sanitize_identifier(str(bot_id or ""))
-        bot = _get_bot(clean_slug) if clean_slug else None
-        brief = _cloud_bot_brief(clean_slug) if clean_slug else None
+        bot = await asyncio.to_thread(_get_bot, clean_slug) if clean_slug else None
+        brief = await asyncio.to_thread(_cloud_bot_brief, clean_slug) if clean_slug else None
         if bot and brief:
-            write_local_bot_brief(
+            await asyncio.to_thread(
+                write_local_bot_brief,
                 str(bot.get("slug") or clean_slug),
                 namespace=str(bot.get("namespace") or ""),
+                role_desc=str(bot.get("role_desc") or ""),
                 etag=str(brief.get("etag") or ""),
                 fencing_epoch=int(brief.get("fencing_epoch") or 0),
                 content=str(brief.get("content") or ""),
@@ -3213,20 +3230,36 @@ class _UrllibSyncResponse:
         return json.loads(self._body.decode("utf-8"))
 
 
+_MAX_SYNC_RESPONSE_BYTES = 1_048_576
+
+
 class _UrllibSyncClient:
     def __init__(self, timeout: float = 10.0) -> None:
         self._timeout = timeout
 
     def get(self, url: str, headers: Optional[dict[str, str]] = None) -> _UrllibSyncResponse:
         import urllib.error
+        import urllib.parse
         import urllib.request
 
+        class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                new_req = super().redirect_request(req, fp, code, msg, hdrs, newurl)
+                if new_req is None:
+                    return None
+                old_p = urllib.parse.urlparse(req.full_url)
+                new_p = urllib.parse.urlparse(new_req.full_url)
+                if (old_p.scheme, old_p.netloc) != (new_p.scheme, new_p.netloc):
+                    new_req.remove_header("Authorization")
+                return new_req
+
+        opener = urllib.request.build_opener(_SafeRedirectHandler())
         req = urllib.request.Request(url, headers=headers or {}, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return _UrllibSyncResponse(int(resp.status), resp.read())
+            with opener.open(req, timeout=self._timeout) as resp:
+                return _UrllibSyncResponse(int(resp.status), resp.read(_MAX_SYNC_RESPONSE_BYTES))
         except urllib.error.HTTPError as exc:
-            body = exc.read() if hasattr(exc, "read") else b""
+            body = exc.read(_MAX_SYNC_RESPONSE_BYTES) if hasattr(exc, "read") else b""
             return _UrllibSyncResponse(int(exc.code), body)
 
     def close(self) -> None:
@@ -3251,7 +3284,11 @@ def sync_bot_briefs(
     if not url:
         url = str((load_config().get("cloud") or {}).get("url") or "").strip()
     try:
-        from botex.edge.runner import read_local_bot_briefs, write_local_bot_brief
+        from botex.edge.runner import (
+            get_local_bot_briefs_dir,
+            read_local_bot_briefs,
+            write_local_bot_brief,
+        )
     except Exception as exc:
         return {
             "ok": False,
@@ -3294,22 +3331,29 @@ def sync_bot_briefs(
         or str((load_config().get("cloud") or {}).get("token") or "").strip()
     )
     base_headers: dict[str, str] = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
-    updated = skipped = 0
+    updated = skipped = removed = 0
     bots: list[dict[str, Any]] = []
+    target_dir = get_local_bot_briefs_dir(briefs_dir)
     try:
         root = url.rstrip("/")
         res = http.get(f"{root}/api/bots", headers=base_headers)
         res.raise_for_status()
         data = res.json()
-        bots = [
-            b
-            for b in (data.get("bots") or [])
-            if str(b.get("status") or "active").strip().lower() == "active"
-        ]
-        for b in bots:
+        all_bots = data.get("bots") or []
+        for b in all_bots:
             slug = str(b.get("slug") or "")
             if not slug or slug != sanitize_identifier(slug):
                 continue
+            b_status = str(b.get("status") or "active").strip().lower()
+            if b_status != "active":
+                stale_file = target_dir / f"{slug}.md"
+                if stale_file.is_file():
+                    stale_file.unlink(missing_ok=True)
+                    removed += 1
+                continue
+            bots.append(b)
+        for b in bots:
+            slug = str(b.get("slug") or "")
             headers = dict(base_headers)
             local_etag = local_etags.get(slug)
             if local_etag:
@@ -3321,11 +3365,16 @@ def sync_bot_briefs(
             if r.status_code != 200:
                 continue
             payload = r.json()
+            try:
+                epoch_val = int(payload.get("fencing_epoch") or 0)
+            except (TypeError, ValueError):
+                epoch_val = 0
             write_local_bot_brief(
                 slug,
                 namespace=str(payload.get("namespace") or b.get("namespace") or ""),
+                role_desc=str(payload.get("role_desc") or b.get("role_desc") or ""),
                 etag=str(payload.get("etag") or ""),
-                fencing_epoch=int(payload.get("fencing_epoch") or 0),
+                fencing_epoch=epoch_val,
                 content=str(payload.get("content") or ""),
                 updated_at=str(payload.get("updated_at") or ""),
                 briefs_dir=briefs_dir,
@@ -3337,6 +3386,7 @@ def sync_bot_briefs(
             "bots": len(bots),
             "updated": updated,
             "skipped_304": skipped,
+            "removed": removed,
         }
     except Exception as exc:
         return {
@@ -3346,6 +3396,7 @@ def sync_bot_briefs(
             "on_startup": bool(on_startup),
             "updated": updated,
             "skipped_304": skipped,
+            "removed": removed,
         }
     finally:
         if owns_client and http is not None:

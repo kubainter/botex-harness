@@ -168,3 +168,41 @@ def test_edge_runner_serve_brief_sync_writes_valid_and_skips_malformed(tmp_path)
     assert entries[0]["etag"] == "etag-42"
     assert entries[0]["fencing_epoch"] == 3
     assert "Watch harness invariants." in entries[0]["content"]
+
+
+def test_write_local_bot_brief_skips_stale_epoch_preserves_role_desc_and_prunes_disabled(tmp_path):
+    from botex.edge.runner import _parse_local_bot_brief
+
+    assert _parse_local_bot_brief("---\nslug: ../evil\n---\nbody") is None
+
+    p_new = write_local_bot_brief(
+        "epoch-bot",
+        namespace="swarm",
+        role_desc="Guard invariants",
+        etag="etag-2",
+        fencing_epoch=2,
+        content="newer body",
+    )
+    assert p_new is not None
+    # Stale epoch=1 and epoch=0 must not overwrite epoch=2
+    write_local_bot_brief(
+        "epoch-bot",
+        namespace="swarm",
+        role_desc="Old role",
+        etag="etag-1",
+        fencing_epoch=1,
+        content="older body",
+    )
+    write_local_bot_brief(
+        "epoch-bot",
+        namespace="swarm",
+        role_desc="Zero role",
+        etag="etag-0",
+        fencing_epoch=0,
+        content="zero body",
+    )
+    entries = read_local_bot_briefs(namespace="swarm")
+    assert len(entries) == 1
+    assert entries[0]["fencing_epoch"] == 2
+    assert entries[0]["content"] == "newer body"
+    assert entries[0]["role_desc"] == "Guard invariants"

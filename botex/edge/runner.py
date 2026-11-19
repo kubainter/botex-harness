@@ -163,6 +163,7 @@ def write_local_bot_brief(
     slug: str,
     *,
     namespace: str = "",
+    role_desc: str = "",
     etag: str = "",
     fencing_epoch: int = 0,
     content: str = "",
@@ -173,8 +174,8 @@ def write_local_bot_brief(
 
     ``slug`` must survive ``sanitize_identifier`` unchanged — empty or
     traversal-bearing slugs (``..``, ``/``, ``\\``) return ``None`` without
-    touching the filesystem. The write is tmp-file + ``os.replace`` so
-    readers never observe a partial brief.
+    touching the filesystem. Stale writes (lower ``fencing_epoch`` than disk)
+    and identical-ETag no-ops are skipped before touching disk.
     """
     cleaned = str(slug or "").strip()
     safe_slug = sanitize_identifier(cleaned)
@@ -184,19 +185,42 @@ def write_local_bot_brief(
         epoch = int(fencing_epoch)
     except (TypeError, ValueError):
         epoch = 0
+    clean_ns = _brief_meta_field(namespace)
+    clean_role = _brief_meta_field(role_desc)[:500]
+    clean_etag = _brief_meta_field(etag)
+    clean_updated = _brief_meta_field(updated_at)
+    target_dir = get_local_bot_briefs_dir(briefs_dir)
+    target_path = target_dir / f"{safe_slug}.md"
+    if target_path.is_file():
+        try:
+            existing = _parse_local_bot_brief(
+                target_path.read_text(encoding="utf-8", errors="replace")
+            )
+        except OSError:
+            existing = None
+        if existing is not None:
+            existing_epoch = int(existing.get("fencing_epoch") or 0)
+            if existing_epoch > epoch:
+                return target_path
+            if (
+                clean_etag
+                and existing.get("etag") == clean_etag
+                and existing_epoch >= epoch
+                and existing.get("role_desc", "") == clean_role
+            ):
+                return target_path
     document = (
         "---\n"
         f"slug: {safe_slug}\n"
-        f"namespace: {_brief_meta_field(namespace)}\n"
-        f"etag: {_brief_meta_field(etag)}\n"
+        f"namespace: {clean_ns}\n"
+        f"role_desc: {clean_role}\n"
+        f"etag: {clean_etag}\n"
         f"fencing_epoch: {epoch}\n"
-        f"updated_at: {_brief_meta_field(updated_at)}\n"
+        f"updated_at: {clean_updated}\n"
         "---\n\n"
         f"{coerce_text(mask_secrets(coerce_text(content)))}"
     )
-    target_dir = get_local_bot_briefs_dir(briefs_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{safe_slug}.md"
     fd_handle = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
@@ -236,7 +260,7 @@ def _parse_local_bot_brief(text: str) -> Optional[Dict[str, Any]]:
     if close_idx < 0:
         return None
     slug = meta.get("slug", "").strip()
-    if not slug:
+    if not slug or slug != sanitize_identifier(slug):
         return None
     body_start = close_idx + 1
     if body_start < len(lines) and not lines[body_start].strip():
@@ -248,6 +272,7 @@ def _parse_local_bot_brief(text: str) -> Optional[Dict[str, Any]]:
     return {
         "slug": slug,
         "namespace": meta.get("namespace", "").strip(),
+        "role_desc": meta.get("role_desc", "").strip(),
         "etag": meta.get("etag", "").strip(),
         "fencing_epoch": epoch,
         "updated_at": meta.get("updated_at", "").strip(),
@@ -714,9 +739,19 @@ class EdgeRunner:
                         if not isinstance(bot, dict):
                             continue
                         try:
+                            raw_slug = str(bot.get("slug") or "").strip()
+                            bot_status = str(bot.get("status") or "active").strip().lower()
+                            if bot_status != "active":
+                                safe_slug = sanitize_identifier(raw_slug)
+                                if safe_slug and safe_slug == raw_slug:
+                                    (get_local_bot_briefs_dir() / f"{safe_slug}.md").unlink(
+                                        missing_ok=True
+                                    )
+                                continue
                             write_local_bot_brief(
-                                str(bot.get("slug") or ""),
+                                raw_slug,
                                 namespace=str(bot.get("namespace") or ""),
+                                role_desc=str(bot.get("role_desc") or ""),
                                 etag=str(bot.get("etag") or ""),
                                 fencing_epoch=bot.get("fencing_epoch", 0),
                                 content=str(bot.get("content") or ""),
