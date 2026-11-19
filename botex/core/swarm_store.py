@@ -37,12 +37,15 @@ __all__ = [
     "list_bots",
     "get_bot_brief",
     "upsert_bot_brief",
+    "record_bot_domain_turn",
+    "get_bot_turn_counter",
+    "list_bots_due_for_brief_review",
     "upsert_host_lease",
     "get_active_leases",
     "list_active_brief_payloads",
 ]
 
-SWARM_SCHEMA_VERSION = 1
+SWARM_SCHEMA_VERSION = 2
 
 
 # server/skills stay lazy-imported: core must not hard-depend on upper layers
@@ -150,12 +153,34 @@ CREATE TABLE IF NOT EXISTS work_orders (
 """
 
 
+_SCHEMA_V2_COUNTERS_SQL = """
+CREATE TABLE IF NOT EXISTS bot_turn_counters (
+    slug TEXT PRIMARY KEY,
+    pending_turns INTEGER DEFAULT 0,
+    last_activity_at REAL DEFAULT 0,
+    last_review_at REAL DEFAULT 0
+);
+"""
+
+
 def migrate_swarm_store(conn: sqlite3.Connection) -> None:
     """Apply in-place schema migrations gated by ``PRAGMA user_version``; idempotent."""
     row = conn.execute("PRAGMA user_version;").fetchone()
     current = int(row[0]) if row else 0
     if current < 1:
         conn.executescript(_SCHEMA_V1_SQL)
+        conn.execute("PRAGMA user_version = 1;")
+        conn.commit()
+    if current < 2:
+        cols = {
+            str(r["name"] if isinstance(r, sqlite3.Row) else r[1])
+            for r in conn.execute("PRAGMA table_info(bot_briefs);").fetchall()
+        }
+        if "pinned" not in cols:
+            conn.execute("ALTER TABLE bot_briefs ADD COLUMN pinned INTEGER DEFAULT 0;")
+        if "author" not in cols:
+            conn.execute("ALTER TABLE bot_briefs ADD COLUMN author TEXT DEFAULT 'human';")
+        conn.executescript(_SCHEMA_V2_COUNTERS_SQL)
         conn.execute("PRAGMA user_version = " + str(int(SWARM_SCHEMA_VERSION)) + ";")
         conn.commit()
 
@@ -261,6 +286,7 @@ _VALID_BOT_STATUSES: Dict[str, str] = {
 _MIN_BRIEF_BUDGET_TOKENS = 32
 _MAX_BRIEF_BUDGET_TOKENS = 2000
 _MAX_ROLE_DESC_CHARS = 500
+_MAX_NAMESPACE_CHARS = 128
 
 
 def register_bot(
@@ -276,7 +302,10 @@ def register_bot(
     clean_slug = sanitize_identifier(str(slug or ""))
     if not clean_slug:
         return {"ok": False, "error": "INVALID_SLUG"}
-    clean_ns = coerce_text(str(namespace or "")).strip()
+    raw_ns = str(namespace or "")
+    if raw_ns and _has_injection_pattern(raw_ns):
+        return {"ok": False, "error": "INJECTION_DETECTED"}
+    clean_ns = coerce_text(mask_secrets(raw_ns)).strip()[:_MAX_NAMESPACE_CHARS]
     if not clean_ns:
         return {"ok": False, "error": "INVALID_NAMESPACE"}
     raw_role = str(role_desc or "")
@@ -372,6 +401,12 @@ def list_bots(
 # ============================================================================
 
 
+_VALID_BRIEF_AUTHORS: Dict[str, str] = {
+    "human": "human",
+    "curator": "curator",
+}
+
+
 def get_bot_brief(slug: str, db_path: Optional[Path] = None) -> Optional[dict]:
     """Return the stored brief row for ``slug`` or None."""
     clean_slug = sanitize_identifier(str(slug or ""))
@@ -379,29 +414,42 @@ def get_bot_brief(slug: str, db_path: Optional[Path] = None) -> Optional[dict]:
         return None
     conn = get_swarm_store_conn(db_path)
     row = conn.execute(
-        "SELECT slug, content, etag, fencing_epoch, updated_at FROM bot_briefs WHERE slug = ?;",
+        "SELECT slug, content, etag, fencing_epoch, updated_at,"
+        " COALESCE(pinned, 0) AS pinned, COALESCE(author, 'human') AS author"
+        " FROM bot_briefs WHERE slug = ?;",
         (clean_slug,),
     ).fetchone()
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    out = dict(row)
+    out["pinned"] = bool(int(out.get("pinned") or 0))
+    return out
 
 
 def upsert_bot_brief(
     slug: str,
     content: str,
     *,
+    expected_etag: Optional[str] = None,
+    pinned: Optional[bool] = None,
+    author: str = "human",
+    decrement_turns: Optional[int] = None,
+    review_ts: Optional[float] = None,
     db_path: Optional[Path] = None,
 ) -> dict:
-    """Validate, mask and store a bot brief; bumps ``fencing_epoch`` per write.
+    """Validate, mask and store a bot brief; enforces CAS/pinned guards inside BEGIN IMMEDIATE.
 
-    Rejects with a structured error when the bot is unknown
-    (``BOT_NOT_FOUND``), the content trips the prompt-injection heuristics
-    (``INJECTION_DETECTED``), or the secret-masked payload exceeds the bot's
-    ``brief_budget_tokens`` (``BRIEF_TOO_LARGE``; tokens estimated as
-    ``ceil(len/4)``).
+    Rejects with ``BOT_NOT_FOUND``, ``BOT_INACTIVE`` (when ``author == 'curator'``),
+    ``INJECTION_DETECTED``, ``BRIEF_TOO_LARGE``, ``CURATOR_SKIPPED_PINNED``, or
+    ``ETAG_MISMATCH``. When ``author == 'curator'`` or ``decrement_turns`` is
+    provided, decrements ``bot_turn_counters.pending_turns`` atomically.
     """
     clean_slug = sanitize_identifier(str(slug or ""))
     if not clean_slug:
         return {"ok": False, "error": "INVALID_SLUG"}
+    clean_author = _VALID_BRIEF_AUTHORS.get(str(author or "human").strip().lower())
+    if clean_author is None:
+        return {"ok": False, "error": "INVALID_AUTHOR"}
 
     raw = str(content or "")
     if _has_injection_pattern(raw):
@@ -409,6 +457,7 @@ def upsert_bot_brief(
     masked = coerce_text(mask_secrets(raw))
     etag = hashlib.sha256(masked.encode("utf-8")).hexdigest()[:32]
     now_iso = _utc_now_iso()
+    rev_ts = float(review_ts) if review_ts is not None else time.time()
 
     conn = get_swarm_store_conn(db_path)
     with _SWARM_LOCK:
@@ -424,6 +473,9 @@ def upsert_bot_brief(
             if bot is None:
                 conn.rollback()
                 return {"ok": False, "error": "BOT_NOT_FOUND"}
+            if clean_author == "curator" and str(bot["status"] or "active").lower() != "active":
+                conn.rollback()
+                return {"ok": False, "error": "BOT_INACTIVE"}
 
             budget = _coerce_int(bot["brief_budget_tokens"], _default_brief_budget())
             est_tokens = math.ceil(len(masked) / 4) if masked else 0
@@ -437,22 +489,65 @@ def upsert_bot_brief(
                 }
 
             existing = conn.execute(
-                "SELECT fencing_epoch FROM bot_briefs WHERE slug = ?;",
+                "SELECT fencing_epoch, etag, COALESCE(pinned, 0) AS pinned"
+                " FROM bot_briefs WHERE slug = ?;",
                 (clean_slug,),
             ).fetchone()
+            existing_pinned = int(existing["pinned"] or 0) if existing is not None else 0
+            existing_etag = str(existing["etag"] or "") if existing is not None else ""
+            if clean_author == "curator" and existing_pinned == 1:
+                conn.rollback()
+                return {"ok": False, "error": "CURATOR_SKIPPED_PINNED"}
+            if expected_etag is not None and existing_etag != str(expected_etag):
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "error": "ETAG_MISMATCH",
+                    "current_etag": existing_etag,
+                }
+
             prev_epoch = _coerce_int(existing["fencing_epoch"], 0) if existing is not None else 0
             new_epoch = prev_epoch + 1
+            new_pinned = (
+                int(bool(pinned))
+                if (pinned is not None and clean_author == "human")
+                else existing_pinned
+            )
 
             conn.execute(
-                "INSERT INTO bot_briefs (slug, content, etag, fencing_epoch, updated_at)"
-                " VALUES (?, ?, ?, ?, ?)"
+                "INSERT INTO bot_briefs"
+                " (slug, content, etag, fencing_epoch, updated_at, pinned, author)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(slug) DO UPDATE SET"
                 "   content=excluded.content,"
                 "   etag=excluded.etag,"
                 "   fencing_epoch=excluded.fencing_epoch,"
-                "   updated_at=excluded.updated_at;",
-                (clean_slug, masked, etag, new_epoch, now_iso),
+                "   updated_at=excluded.updated_at,"
+                "   pinned=excluded.pinned,"
+                "   author=excluded.author;",
+                (clean_slug, masked, etag, new_epoch, now_iso, new_pinned, clean_author),
             )
+            if decrement_turns is not None or clean_author == "curator":
+                dec = max(0, _coerce_int(decrement_turns, 0))
+                conn.execute(
+                    "INSERT INTO bot_turn_counters"
+                    " (slug, pending_turns, last_activity_at, last_review_at)"
+                    " VALUES (?, 0, 0, ?)"
+                    " ON CONFLICT(slug) DO UPDATE SET"
+                    "   pending_turns=MAX(0, pending_turns - ?),"
+                    "   last_review_at=?;",
+                    (clean_slug, rev_ts, dec, rev_ts),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO bot_turn_counters"
+                    " (slug, pending_turns, last_activity_at, last_review_at)"
+                    " VALUES (?, 0, 0, ?)"
+                    " ON CONFLICT(slug) DO UPDATE SET"
+                    "   pending_turns=0,"
+                    "   last_review_at=?;",
+                    (clean_slug, rev_ts, rev_ts),
+                )
             conn.commit()
         except BaseException:
             if conn.in_transaction:
@@ -464,11 +559,151 @@ def upsert_bot_brief(
         "namespace": bot["namespace"],
         "role_desc": bot["role_desc"],
         "status": bot["status"],
+        "pinned": bool(new_pinned),
+        "author": clean_author,
         "content": masked,
         "etag": etag,
         "fencing_epoch": new_epoch,
         "updated_at": now_iso,
     }
+
+
+def record_bot_domain_turn(
+    namespace_or_slug: str,
+    inc: int = 1,
+    *,
+    now: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Increment ``pending_turns`` for active bots matching ``slug`` or ``namespace``."""
+    target = coerce_text(str(namespace_or_slug or "")).strip()
+    if not target:
+        return 0
+    step = max(1, _coerce_int(inc, 1))
+    now_val = float(now) if now is not None else time.time()
+    conn = get_swarm_store_conn(db_path)
+    with _SWARM_LOCK:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            rows = conn.execute(
+                "SELECT slug FROM bots_registry"
+                " WHERE status = 'active' AND (slug = ? OR namespace = ?);",
+                (target, target),
+            ).fetchall()
+            for r in rows:
+                conn.execute(
+                    "INSERT INTO bot_turn_counters"
+                    " (slug, pending_turns, last_activity_at, last_review_at)"
+                    " VALUES (?, ?, ?, 0)"
+                    " ON CONFLICT(slug) DO UPDATE SET"
+                    "   pending_turns=pending_turns + excluded.pending_turns,"
+                    "   last_activity_at=MAX(last_activity_at, excluded.last_activity_at);",
+                    (str(r["slug"]), step, now_val),
+                )
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+    return len(rows)
+
+
+def get_bot_turn_counter(slug: str, db_path: Optional[Path] = None) -> dict:
+    """Return turn-counter metadata for ``slug`` (zeros when not yet tracked)."""
+    clean_slug = sanitize_identifier(str(slug or ""))
+    if not clean_slug:
+        return {"slug": "", "pending_turns": 0, "last_activity_at": 0.0, "last_review_at": 0.0}
+    conn = get_swarm_store_conn(db_path)
+    row = conn.execute(
+        "SELECT slug, pending_turns, last_activity_at, last_review_at"
+        " FROM bot_turn_counters WHERE slug = ?;",
+        (clean_slug,),
+    ).fetchone()
+    if row is None:
+        return {
+            "slug": clean_slug,
+            "pending_turns": 0,
+            "last_activity_at": 0.0,
+            "last_review_at": 0.0,
+        }
+    return {
+        "slug": str(row["slug"]),
+        "pending_turns": int(row["pending_turns"] or 0),
+        "last_activity_at": float(row["last_activity_at"] or 0.0),
+        "last_review_at": float(row["last_review_at"] or 0.0),
+    }
+
+
+def list_bots_due_for_brief_review(
+    now: Optional[float] = None,
+    *,
+    turn_threshold: Optional[int] = None,
+    idle_s: Optional[int] = None,
+    min_idle_turns: Optional[int] = None,
+    min_review_interval_s: Optional[int] = None,
+    limit: Optional[int] = None,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Return active, unpinned bots satisfying turn-threshold or idle-debounce triggers."""
+    cfg = _bots_cfg()
+    now_val = float(now) if now is not None else time.time()
+    t_thresh = max(
+        1,
+        int(turn_threshold)
+        if turn_threshold is not None
+        else _coerce_int(cfg.get("brief_review_turn_threshold"), 20),
+    )
+    idle_win = max(
+        1,
+        int(idle_s) if idle_s is not None else _coerce_int(cfg.get("brief_review_idle_s"), 900),
+    )
+    min_idle = max(
+        1,
+        int(min_idle_turns)
+        if min_idle_turns is not None
+        else _coerce_int(cfg.get("brief_review_min_idle_turns"), 3),
+    )
+    cooldown = max(
+        0,
+        int(min_review_interval_s)
+        if min_review_interval_s is not None
+        else _coerce_int(cfg.get("brief_review_cooldown_s"), 300),
+    )
+    sql = (
+        "SELECT r.slug, r.namespace, r.role_desc, r.brief_budget_tokens,"
+        " COALESCE(b.etag, '') AS current_etag,"
+        " COALESCE(b.fencing_epoch, 0) AS fencing_epoch,"
+        " COALESCE(c.pending_turns, 0) AS pending_turns,"
+        " COALESCE(c.last_activity_at, 0.0) AS last_activity_at,"
+        " COALESCE(c.last_review_at, 0.0) AS last_review_at"
+        " FROM bots_registry r"
+        " JOIN bot_turn_counters c ON c.slug = r.slug"
+        " LEFT JOIN bot_briefs b ON b.slug = r.slug"
+        " WHERE r.status = 'active'"
+        "   AND COALESCE(b.pinned, 0) = 0"
+        "   AND (COALESCE(c.last_review_at, 0.0) <= 0"
+        "        OR (? - COALESCE(c.last_review_at, 0.0)) >= ?)"
+        "   AND ("
+        "       COALESCE(c.pending_turns, 0) >= ?"
+        "       OR ("
+        "           COALESCE(c.pending_turns, 0) >= ?"
+        "           AND COALESCE(c.last_activity_at, 0.0) > 0"
+        "           AND (? - COALESCE(c.last_activity_at, 0.0)) >= ?"
+        "       )"
+        "   )"
+        " ORDER BY c.pending_turns DESC, r.slug ASC"
+    )
+    params: list[Any] = [now_val, cooldown, t_thresh, min_idle, now_val, idle_win]
+    if limit is not None:
+        lim = max(1, _coerce_int(limit, 1))
+        sql += " LIMIT ?"
+        params.append(lim)
+    sql += ";"
+    conn = get_swarm_store_conn(db_path)
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ============================================================================

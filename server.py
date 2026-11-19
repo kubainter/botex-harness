@@ -12,6 +12,7 @@ optimization to any MCP-compatible client.
 import asyncio
 import atexit
 import json
+import logging
 import os
 import re
 import sys
@@ -98,6 +99,9 @@ from botex.core.swarm_store import (
     list_bots as _list_bots,
 )
 from botex.core.swarm_store import (
+    record_bot_domain_turn as _record_bot_domain_turn,
+)
+from botex.core.swarm_store import (
     upsert_host_lease as _upsert_host_lease,
 )
 from botex.memory import (
@@ -144,6 +148,7 @@ except ImportError:
     resolve_edge_executor = None
 
 mcp = MCPServer("BoteX-Harness")
+logger = logging.getLogger(__name__)
 atexit.register(close_index_dbs)
 
 
@@ -546,6 +551,18 @@ _SEEN_BRIEF_ETAGS: "OrderedDict[tuple[str, str], tuple[str, float]]" = OrderedDi
 
 def _reset_seen_brief_etags() -> None:
     _SEEN_BRIEF_ETAGS.clear()
+
+
+def _record_turn_for_projects(projects: Any) -> None:
+    """Increment domain turn counters best-effort for matching active bots."""
+    items = projects if isinstance(projects, (list, tuple, set)) else [projects]
+    for item in items:
+        slug_or_ns = str(item or "").strip()
+        if slug_or_ns and slug_or_ns != "_unassigned":
+            try:
+                _record_bot_domain_turn(slug_or_ns)
+            except Exception:
+                logger.debug("record_bot_domain_turn skipped", exc_info=True)
 
 
 def _local_bot_briefs(namespace: str = "") -> list[dict[str, Any]]:
@@ -1178,7 +1195,7 @@ async def save_memory(
         if str(scope).strip().lower() == "global" and is_cross_host_windows_path(workspace_dir)
         else resolve_workspace(workspace_dir)
     )
-    return _save_memory(
+    res = _save_memory(
         workspace_dir=ws,
         title=title,
         content=content,
@@ -1190,6 +1207,16 @@ async def save_memory(
         confidence=confidence,
         project=project,
     )
+    norm_proj = str(res.get("project") or project or "").strip() if isinstance(res, dict) else ""
+    if (
+        isinstance(res, dict)
+        and res.get("ok")
+        and norm_proj
+        and norm_proj != "_unassigned"
+        and str(res.get("status") or "active").strip().lower() == "active"
+    ):
+        await asyncio.to_thread(_record_turn_for_projects, norm_proj)
+    return res
 
 
 @mcp.tool()
@@ -1554,8 +1581,9 @@ async def patch_memory_section(
         origin: Optional provenance identifier '<agent>@<host>'. Falls back to X-Agent-Id@X-Host session header or 'botex'.
     """
     effective_origin = _resolve_call_origin(origin)
+    ws = resolve_workspace(workspace_dir)
     res = _patch_memory_section(
-        workspace_dir=resolve_workspace(workspace_dir),
+        workspace_dir=ws,
         memory_id=memory_id,
         section=section,
         new_content=new_content,
@@ -1563,6 +1591,20 @@ async def patch_memory_section(
         append=append,
     )
     res["origin"] = effective_origin
+    if res.get("ok"):
+        try:
+            note = await asyncio.to_thread(
+                _read_memory, workspace_dir=ws, memory_id=memory_id, scope=scope
+            )
+            meta = note.get("metadata") if isinstance(note, dict) and note.get("ok") else None
+            if (
+                isinstance(meta, dict)
+                and meta.get("project")
+                and str(meta.get("status") or "active").strip().lower() == "active"
+            ):
+                await asyncio.to_thread(_record_turn_for_projects, meta.get("project"))
+        except Exception:
+            pass
     return res
 
 
@@ -1808,6 +1850,11 @@ async def bot_report_activity(
                 content=str(brief.get("content") or ""),
                 updated_at=str(brief.get("updated_at") or ""),
             )
+    except Exception:
+        pass
+    try:
+        clean_slug = sanitize_identifier(str(bot_id or ""))
+        await asyncio.to_thread(_record_bot_domain_turn, clean_slug or str(bot_id or ""))
     except Exception:
         pass
     return res

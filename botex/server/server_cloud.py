@@ -83,6 +83,7 @@ from botex.config import (
     MCP_CLIENT_ORIGIN,
     WorkspaceOutOfBounds,
     analytics_setting,
+    get_bots_config,
     get_tasks_dir,
     resolve_provider,
     resolve_workspace,
@@ -100,6 +101,8 @@ from botex.core.swarm_store import (
     get_bot_brief,
     list_active_brief_payloads,
     list_bots,
+    list_bots_due_for_brief_review,
+    record_bot_domain_turn,
     register_bot,
     upsert_bot_brief,
 )
@@ -463,6 +466,7 @@ class BotCreateRequest(BaseModel):
 
 class BotBriefUpdateRequest(BaseModel):
     content: str = Field(..., max_length=16000)
+    pinned: Optional[bool] = None
 
 
 _DELEGATE_FORBIDDEN_PARAM_KEYS = frozenset(
@@ -1197,6 +1201,57 @@ async def _breaker_prober_loop() -> None:
         await asyncio.sleep(_BREAKER_PROBE_INTERVAL_S)
 
 
+_BRIEF_CURATOR_INTERVAL_S = 60.0
+
+
+async def _brief_curator_tick(
+    *,
+    now: Optional[float] = None,
+    max_per_tick: Optional[int] = None,
+    workspace_dir: str = "",
+    db_path: Optional[Path] = None,
+    llm_fn: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Run one background brief-curator sweep for due bots."""
+    from botex.ops.curator import brief_curator
+
+    cap = (
+        max(1, int(max_per_tick))
+        if max_per_tick is not None
+        else max(1, int(get_bots_config().get("brief_review_max_per_tick") or 3))
+    )
+    due = await asyncio.to_thread(
+        list_bots_due_for_brief_review, now=now, limit=cap, db_path=db_path
+    )
+    results: List[Dict[str, Any]] = []
+    for entry in due:
+        slug = str(entry.get("slug") or "")
+        if not slug:
+            continue
+        try:
+            res = await brief_curator.refresh_bot_brief(
+                slug, now=now, workspace_dir=workspace_dir, db_path=db_path, llm_fn=llm_fn
+            )
+        except Exception:
+            logger.exception("brief curator refresh failed for bot %s", slug)
+            results.append({"ok": False, "error": "REFRESH_FAILED", "slug": slug})
+            continue
+        results.append(res)
+        if res.get("ok"):
+            _fanout_brief_result(res)
+    return results
+
+
+async def _brief_curator_loop() -> None:
+    await asyncio.sleep(_BRIEF_CURATOR_INTERVAL_S)
+    while True:
+        try:
+            await _brief_curator_tick()
+        except Exception:
+            logger.exception("brief curator tick failed")
+        await asyncio.sleep(_BRIEF_CURATOR_INTERVAL_S)
+
+
 async def _analytics_digest_loop() -> None:
     """Periodic digest writer — runs only when analytics.digest_enabled=true."""
     interval = float(analytics_setting("digest_interval_s") or 3600)
@@ -1242,6 +1297,9 @@ async def _base_lifespan(app: FastAPI):
     if analytics_setting("digest_enabled"):
         digest_task = asyncio.create_task(_analytics_digest_loop())
     prober_task = asyncio.create_task(_breaker_prober_loop())
+    brief_curator_task: Optional[asyncio.Task] = None
+    if get_bots_config().get("brief_curator_enabled", True):
+        brief_curator_task = asyncio.create_task(_brief_curator_loop())
     try:
         yield
     finally:
@@ -1261,6 +1319,10 @@ async def _base_lifespan(app: FastAPI):
         prober_task.cancel()
         with suppress(asyncio.CancelledError):
             await prober_task
+        if brief_curator_task is not None:
+            brief_curator_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await brief_curator_task
         try:
             from botex.providers.http_pool import close_http_pool
 
@@ -2516,6 +2578,16 @@ async def post_memory(body: MemorySaveRequest) -> Dict[str, Any]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to save memory entry.",
         )
+    norm_proj = str(res.get("project") or body.project or "").strip()
+    if (
+        norm_proj
+        and norm_proj != "_unassigned"
+        and str(res.get("status") or "active").strip().lower() == "active"
+    ):
+        try:
+            await asyncio.to_thread(record_bot_domain_turn, norm_proj)
+        except Exception:
+            logger.debug("record_bot_domain_turn skipped for project", exc_info=True)
     return botex_server.mask_secrets_recursive(res)
 
 
@@ -2656,6 +2728,20 @@ def _if_none_match_hits(header_val: Optional[str], etag: str) -> bool:
     return False
 
 
+def _parse_if_match(header_val: Optional[str]) -> Optional[str]:
+    """Extract first entity-tag from ``If-Match`` (``None`` when absent or ``*``)."""
+    raw = str(header_val or "").strip()
+    if not raw or raw == "*":
+        return None
+    first = raw.split(",")[0].strip()
+    if first == "*":
+        return None
+    if first.startswith("W/"):
+        first = first[2:].strip()
+    token = first.strip('"').strip()
+    return token or None
+
+
 async def _send_edge_brief_sync_safe(sess: _EdgeSession, payloads: List[Dict[str, Any]]) -> None:
     try:
         if sess.is_live():
@@ -2780,8 +2866,34 @@ async def get_bot_brief_endpoint(
     return JSONResponse(content=payload, headers={"ETag": etag_hdr} if etag_hdr else {})
 
 
+def _fanout_brief_result(res: Dict[str, Any]) -> None:
+    """Broadcast updated active brief payload or tombstone to connected edge hosts."""
+    bot_status = str(res.get("status") or "active").strip().lower()
+    if bot_status == "active":
+        _fanout_edge_brief_sync(
+            [
+                {
+                    "slug": res["slug"],
+                    "namespace": res["namespace"],
+                    "role_desc": res.get("role_desc", ""),
+                    "status": "active",
+                    "etag": str(res.get("etag") or ""),
+                    "fencing_epoch": res["fencing_epoch"],
+                    "content": res["content"],
+                    "updated_at": res["updated_at"],
+                }
+            ]
+        )
+    else:
+        _fanout_edge_brief_sync([{"slug": res["slug"], "status": bot_status}])
+
+
 @app.put("/api/bots/{slug}/brief")
-async def put_bot_brief_endpoint(slug: str, body: BotBriefUpdateRequest) -> Response:
+async def put_bot_brief_endpoint(
+    slug: str,
+    body: BotBriefUpdateRequest,
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
+) -> Response:
     """Validate, store, and push an updated domain brief for ``slug``."""
     clean_slug = sanitize_identifier(slug)
     if not clean_slug:
@@ -2789,13 +2901,25 @@ async def put_bot_brief_endpoint(slug: str, body: BotBriefUpdateRequest) -> Resp
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid bot slug format.",
         )
-    res = await asyncio.to_thread(upsert_bot_brief, clean_slug, body.content)
+    res = await asyncio.to_thread(
+        upsert_bot_brief,
+        clean_slug,
+        body.content,
+        expected_etag=_parse_if_match(if_match),
+        pinned=body.pinned,
+        author="human",
+    )
     if not res.get("ok"):
         err = str(res.get("error") or "")
         if err == "BOT_NOT_FOUND":
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Bot '{clean_slug}' not found.",
+            )
+        if err in ("ETAG_MISMATCH", "CURATOR_SKIPPED_PINNED"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=botex_server.mask_secrets_recursive(res),
             )
         if err in ("INJECTION_DETECTED", "BRIEF_TOO_LARGE"):
             raise HTTPException(
@@ -2808,28 +2932,70 @@ async def put_bot_brief_endpoint(slug: str, body: BotBriefUpdateRequest) -> Resp
         )
     etag = str(res.get("etag") or "")
     etag_hdr = f'"{etag}"' if etag else ""
-    bot_status = str(res.get("status") or "active").strip().lower()
-    if bot_status == "active":
-        _fanout_edge_brief_sync(
-            [
-                {
-                    "slug": res["slug"],
-                    "namespace": res["namespace"],
-                    "role_desc": res.get("role_desc", ""),
-                    "status": "active",
-                    "etag": etag,
-                    "fencing_epoch": res["fencing_epoch"],
-                    "content": res["content"],
-                    "updated_at": res["updated_at"],
-                }
-            ]
-        )
-    else:
-        _fanout_edge_brief_sync([{"slug": res["slug"], "status": bot_status}])
+    _fanout_brief_result(res)
     return JSONResponse(
         content=botex_server.mask_secrets_recursive(res),
         headers={"ETag": etag_hdr} if etag_hdr else {},
     )
+
+
+@app.post("/api/bots/{slug}/brief/refresh")
+async def refresh_bot_brief_endpoint(
+    slug: str,
+    force: bool = Query(default=False),
+) -> Response:
+    """Trigger immediate Background Brief Curator synthesis for ``slug``."""
+    from botex.ops.curator import brief_curator
+
+    clean_slug = sanitize_identifier(slug)
+    if not clean_slug:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid bot slug format.",
+        )
+    if brief_curator.is_brief_curator_inflight(clean_slug):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"ok": False, "status": "already_running", "slug": clean_slug},
+        )
+    try:
+        res = await brief_curator.refresh_bot_brief(clean_slug, force=force)
+    except Exception:
+        logger.exception("brief refresh failed for bot %s", clean_slug)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Brief synthesis failed.",
+        ) from None
+    if res.get("ok"):
+        etag = str(res.get("etag") or "")
+        etag_hdr = f'"{etag}"' if etag else ""
+        _fanout_brief_result(res)
+        return JSONResponse(
+            content=botex_server.mask_secrets_recursive(res),
+            headers={"ETag": etag_hdr} if etag_hdr else {},
+        )
+    err_code = str(res.get("error") or res.get("status") or "")
+    if err_code == "BOT_NOT_FOUND":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bot '{clean_slug}' not found.",
+        )
+    if err_code in ("BOT_INACTIVE", "CURATOR_SKIPPED_PINNED", "ETAG_MISMATCH", "already_running"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=botex_server.mask_secrets_recursive(res),
+        )
+    if err_code == "llm_unavailable":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=botex_server.mask_secrets_recursive(res),
+        )
+    if err_code in ("INJECTION_DETECTED", "EMPTY_BRIEF", "INVALID_BRIEF", "BRIEF_TOO_LARGE"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=botex_server.mask_secrets_recursive(res),
+        )
+    return JSONResponse(content=botex_server.mask_secrets_recursive(res))
 
 
 def _fetch_memory_graph_sync(ws: Path, scope: str) -> Dict[str, Any]:
