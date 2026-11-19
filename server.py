@@ -2175,6 +2175,7 @@ def _print_usage():
   {c("botex cloud [--host H] [--port P]")}   {d(t("usage.cloud"))}
   {c("botex edge [--server WSS] [-w DIR]")}    {d("Outbound WSS edge runner for BoteX Cloud")}
   {c("botex bots sync [--url URL]")}        {d("Sync tethered-bot briefs into the local fast-cache")}
+  {c("botex night-pulse [--once]")}         {d("Sync host leases, fence stale epochs, and run verify gate")}
   {c("botex setup")}                         {d("Print Cloud MCP + Edge .env setup guide")}
   {c("botex skills <list|export>")}         {d("List or export the bundled BoteX caller skill")}
 
@@ -3490,6 +3491,229 @@ def _cli_bots(argv: list[str]) -> None:
     sys.exit(0 if args.on_startup else 1)
 
 
+def _execute_night_pulse_cycle(
+    *,
+    base_url: str = "",
+    origin_repo: Optional[Path | str] = None,
+    worktree_root: Optional[Path | str] = None,
+    verify_jobs: Optional[list[dict[str, Any]]] = None,
+    fence_jobs: Optional[list[dict[str, Any]]] = None,
+    client: Optional[Any] = None,
+    briefs_dir: Optional[Path] = None,
+    ledger_path: Optional[Path | str] = None,
+) -> dict[str, Any]:
+    from botex.core.swarm_store import get_active_leases, get_swarm_store_conn
+    from botex.edge.host_os_driver import default_swarm_home, fence_local_epoch
+    from botex.edge.verify_gate import run_external_verify
+
+    resolved_url = (
+        str(base_url or "").strip()
+        or os.environ.get("BOTEX_CLOUD_URL", "").strip()
+        or str((load_config().get("cloud") or {}).get("url") or "").strip()
+    )
+    if resolved_url or client is not None:
+        sync_res = sync_bot_briefs(
+            base_url=resolved_url,
+            on_startup=True,
+            briefs_dir=briefs_dir,
+            client=client,
+        )
+    else:
+        sync_res = {"ok": True, "skipped": True, "reason": "NO_CLOUD_URL"}
+
+    leases = get_active_leases()
+    wt_root = (
+        Path(worktree_root).expanduser().resolve()
+        if worktree_root is not None
+        else (default_swarm_home() / "worktrees")
+    )
+    repo_path = Path(origin_repo).expanduser().resolve() if origin_repo is not None else Path.cwd()
+
+    fenced_results: list[dict[str, Any]] = []
+    seen_fences: set[tuple[str, int]] = set()
+
+    for job in fence_jobs or []:
+        oid = str(job.get("order_id") or "")
+        ep = int(job.get("epoch") or 0)
+        j_repo = job.get("origin_repo", repo_path)
+        j_wt = job.get("wt_path") or (wt_root / f"{oid}_e{ep}")
+        fenced_results.append(
+            fence_local_epoch(
+                oid,
+                ep,
+                j_repo,
+                j_wt,
+                job_guard=job.get("job_guard"),
+            )
+        )
+        seen_fences.add((oid, ep))
+
+    conn = get_swarm_store_conn()
+    fenced_rows = conn.execute(
+        "SELECT order_id, epoch FROM work_orders WHERE status = 'FENCED';"
+    ).fetchall()
+    for row in fenced_rows:
+        oid = str(row["order_id"] or "")
+        ep = int(row["epoch"] or 0)
+        candidates = [ep]
+        if ep > 0:
+            candidates.append(ep - 1)
+        for cand_ep in candidates:
+            if (oid, cand_ep) in seen_fences:
+                continue
+            cand_wt = wt_root / f"{oid}_e{cand_ep}"
+            if cand_wt.exists():
+                fenced_results.append(fence_local_epoch(oid, cand_ep, repo_path, cand_wt))
+                seen_fences.add((oid, cand_ep))
+
+    verified_results: list[dict[str, Any]] = []
+    for vjob in verify_jobs or []:
+        verified_results.append(
+            run_external_verify(
+                vjob.get("origin_repo", repo_path),
+                vjob["wt_path"],
+                vjob["verify_command"],
+                order_id=str(vjob.get("order_id") or ""),
+                epoch=int(vjob.get("epoch") or 0),
+                diff_text=vjob.get("diff_text"),
+                changed_files=vjob.get("changed_files"),
+                allow_test_mutation=bool(vjob.get("allow_test_mutation", False)),
+                ledger_path=vjob.get("ledger_path", ledger_path),
+            )
+        )
+
+    return {
+        "sync": sync_res,
+        "active_leases": len(leases),
+        "leases": leases,
+        "fenced": fenced_results,
+        "verified": verified_results,
+    }
+
+
+def run_night_pulse(
+    *,
+    base_url: str = "",
+    once: bool = True,
+    interval_s: float = 60.0,
+    max_cycles: Optional[int] = None,
+    lock_path: Optional[Path | str] = None,
+    origin_repo: Optional[Path | str] = None,
+    worktree_root: Optional[Path | str] = None,
+    verify_jobs: Optional[list[dict[str, Any]]] = None,
+    fence_jobs: Optional[list[dict[str, Any]]] = None,
+    client: Optional[Any] = None,
+    briefs_dir: Optional[Path] = None,
+    ledger_path: Optional[Path | str] = None,
+) -> dict[str, Any]:
+    """Run single-instance Night-Pulse sync, epoch fencing, and external verification."""
+    import time
+
+    from botex.edge.host_os_driver import SingleInstanceLock, SingleInstanceLockError
+
+    lock = SingleInstanceLock(lock_path)
+    try:
+        lock.__enter__()
+    except SingleInstanceLockError as exc:
+        return {
+            "ok": False,
+            "error": "LOCK_HELD",
+            "detail": coerce_text(mask_secrets(str(exc))),
+            "cycles": 0,
+        }
+
+    cycles = 0
+    last_cycle: dict[str, Any] = {}
+    try:
+        while True:
+            cycles += 1
+            last_cycle = _execute_night_pulse_cycle(
+                base_url=base_url,
+                origin_repo=origin_repo,
+                worktree_root=worktree_root,
+                verify_jobs=verify_jobs,
+                fence_jobs=fence_jobs,
+                client=client,
+                briefs_dir=briefs_dir,
+                ledger_path=ledger_path,
+            )
+            if once or (max_cycles is not None and cycles >= max_cycles):
+                break
+            time.sleep(max(0.1, float(interval_s)))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        lock.release()
+
+    return {"ok": True, "cycles": cycles, **last_cycle}
+
+
+def _cli_night_pulse(argv: list[str]) -> None:
+    """CLI handler for ``botex night-pulse [--once]``."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="botex night-pulse",
+        description="Synchronize host leases, fence stale epochs, and execute pending verify checks.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Execute a single Night-Pulse cycle and exit",
+    )
+    parser.add_argument(
+        "--url",
+        default="",
+        help="Cloud gateway base URL (default: BOTEX_CLOUD_URL or config cloud.url)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=60.0,
+        help="Poll interval in seconds when running continuously (default: 60)",
+    )
+    parser.add_argument(
+        "--workspace",
+        "-w",
+        default=".",
+        help="Origin repository directory (default: cwd)",
+    )
+    parser.add_argument(
+        "--worktree-root",
+        default="",
+        help="Override epoch worktree root directory",
+    )
+    parser.add_argument(
+        "--lock-path",
+        default="",
+        help="Override single-instance lock file path",
+    )
+    args = parser.parse_args(argv)
+    res = run_night_pulse(
+        base_url=str(args.url or ""),
+        once=bool(args.once),
+        interval_s=float(args.interval),
+        lock_path=args.lock_path or None,
+        origin_repo=args.workspace or ".",
+        worktree_root=args.worktree_root or None,
+    )
+    if res.get("ok"):
+        print(
+            ok(
+                f"night-pulse: {res['cycles']} cycle(s), "
+                f"{res.get('active_leases', 0)} active lease(s), "
+                f"{len(res.get('fenced') or [])} fenced, "
+                f"{len(res.get('verified') or [])} verified"
+            )
+        )
+        sys.exit(0)
+    print(
+        err(f"night-pulse failed: {res.get('error') or 'unknown'} {res.get('detail') or ''}"),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _cli_maintenance(argv: list[str]) -> None:
     """Run L2 maintenance jobs manually — local parity for the VPS
     ``botex-maintenance.timer`` (Windows dev has no systemd)."""
@@ -3850,6 +4074,8 @@ def main():
         _cli_edge(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "bots":
         _cli_bots(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "night-pulse":
+        _cli_night_pulse(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "setup":
         _cli_setup()
     elif len(sys.argv) > 1 and sys.argv[1] == "skills":
