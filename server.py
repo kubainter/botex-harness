@@ -3555,10 +3555,21 @@ def _execute_night_pulse_cycle(
     for row in fenced_rows:
         oid = str(row["order_id"] or "")
         ep = int(row["epoch"] or 0)
-        candidates = [ep]
+        candidates = {ep}
         if ep > 0:
-            candidates.append(ep - 1)
-        for cand_ep in candidates:
+            candidates.add(ep - 1)
+        if oid:
+            prefix = f"{oid}_e"
+            try:
+                for wt_dir in wt_root.iterdir():
+                    if not wt_dir.name.startswith(prefix):
+                        continue
+                    suffix = wt_dir.name[len(prefix) :]
+                    if suffix.isdigit() and int(suffix) <= ep:
+                        candidates.add(int(suffix))
+            except OSError:
+                pass
+        for cand_ep in sorted(candidates):
             if (oid, cand_ep) in seen_fences:
                 continue
             cand_wt = wt_root / f"{oid}_e{cand_ep}"

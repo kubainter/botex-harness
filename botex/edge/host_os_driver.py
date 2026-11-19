@@ -217,6 +217,8 @@ def kill_posix_process_group(pgid: int, sig: Optional[int] = None) -> bool:
     killpg_fn = getattr(os, "killpg", None)
     if not callable(killpg_fn):
         return False
+    if isinstance(pgid, bool) or int(pgid) <= 0:
+        return False
     target_sig = getattr(signal, "SIGKILL", signal.SIGTERM) if sig is None else int(sig)
     try:
         killpg_fn(int(pgid), target_sig)
@@ -264,6 +266,8 @@ class WindowsJobGuard:
 
     def register_cancel_callback(self, cb: Callable[[], Any]) -> None:
         """Register an external daemon cancel callback (e.g., devin_cancel/devin_kill)."""
+        if self._closed:
+            raise RuntimeError("WindowsJobGuard is closed")
         self._cancel_callbacks.append(cb)
 
     def assign(self, pid: int) -> None:
@@ -273,6 +277,8 @@ class WindowsJobGuard:
         if isinstance(pid, bool) or int(pid) <= 0:
             raise ValueError(f"Invalid PID: {pid!r}")
         pid_int = int(pid)
+        if pid_int == os.getpid():
+            raise ValueError("Cannot assign current supervisor process PID to WindowsJobGuard")
         if self._use_win_job:
             assert _KERNEL32 is not None
             h_proc = _KERNEL32.OpenProcess(
@@ -294,43 +300,63 @@ class WindowsJobGuard:
 
     def kill_all(self, exit_code: int = 1) -> dict[str, Any]:
         """Terminate all assigned processes/groups and run daemon cancel callbacks."""
+        if self._closed:
+            return {
+                "ok": True,
+                "terminated_win_job": False,
+                "killed_pgids": [],
+                "kill_errors": [],
+                "callbacks_invoked": 0,
+                "callback_errors": [],
+            }
         terminated_win_job = False
         killed_pgids: list[int] = []
+        kill_errors: list[str] = []
         callback_errors: list[str] = []
         callbacks_invoked = 0
 
-        if self.h_job is not None and _KERNEL32 is not None:
-            ok = _KERNEL32.TerminateJobObject(self.h_job, int(exit_code))
-            terminated_win_job = bool(ok)
-            _KERNEL32.CloseHandle(self.h_job)
-            self.h_job = None
+        try:
+            if self.h_job is not None and _KERNEL32 is not None:
+                ok = _KERNEL32.TerminateJobObject(self.h_job, int(exit_code))
+                terminated_win_job = bool(ok)
+                _KERNEL32.CloseHandle(self.h_job)
+                self.h_job = None
 
-        if not self._use_win_job:
-            getpgid_fn = getattr(os, "getpgid", None)
-            getpgrp_fn = getattr(os, "getpgrp", None)
-            sig = getattr(signal, "SIGKILL", signal.SIGTERM)
-            for pid in self.assigned_pids:
-                pgid = pid
-                same_group = False
-                if callable(getpgid_fn):
-                    try:
-                        resolved_pgid = getpgid_fn(pid)
-                        if callable(getpgrp_fn) and resolved_pgid == getpgrp_fn():
-                            same_group = True
-                        else:
-                            pgid = resolved_pgid
-                    except OSError:
-                        pgid = pid
-                if same_group:
-                    try:
-                        os.kill(pid, sig)
-                        killed_pgids.append(pid)
-                    except ProcessLookupError:
-                        pass
-                elif kill_posix_process_group(pgid, sig):
-                    killed_pgids.append(pgid)
-
-        self._closed = True
+            if not self._use_win_job:
+                getpgid_fn = getattr(os, "getpgid", None)
+                getpgrp_fn = getattr(os, "getpgrp", None)
+                sig = getattr(signal, "SIGKILL", signal.SIGTERM)
+                for pid in self.assigned_pids:
+                    pgid = pid
+                    same_group = False
+                    if callable(getpgid_fn):
+                        try:
+                            resolved_pgid = getpgid_fn(pid)
+                            if callable(getpgrp_fn) and resolved_pgid == getpgrp_fn():
+                                same_group = True
+                            else:
+                                pgid = resolved_pgid
+                        except OSError:
+                            pgid = pid
+                    if same_group:
+                        try:
+                            os.kill(pid, sig)
+                            killed_pgids.append(pid)
+                        except ProcessLookupError:
+                            pass
+                        except OSError as exc:
+                            kill_errors.append(coerce_text(mask_secrets(str(exc))))
+                    else:
+                        try:
+                            if kill_posix_process_group(pgid, sig):
+                                killed_pgids.append(pgid)
+                        except ProcessLookupError:
+                            pass
+                        except OSError as exc:
+                            kill_errors.append(coerce_text(mask_secrets(str(exc))))
+        finally:
+            self.assigned_pids.clear()
+            self._closed = True
 
         for cb in self._cancel_callbacks:
             try:
@@ -340,9 +366,10 @@ class WindowsJobGuard:
                 callback_errors.append(coerce_text(mask_secrets(str(exc))))
 
         return {
-            "ok": not callback_errors,
+            "ok": not callback_errors and not kill_errors,
             "terminated_win_job": terminated_win_job,
             "killed_pgids": killed_pgids,
+            "kill_errors": kill_errors,
             "callbacks_invoked": callbacks_invoked,
             "callback_errors": callback_errors,
         }
@@ -363,7 +390,7 @@ class WindowsJobGuard:
 def _remove_readonly(func: Callable[..., Any], path: str, exc: BaseException) -> None:
     """Python 3.12+/3.14 ``shutil.rmtree(..., onexc=...)`` readonly cleanup handler."""
     try:
-        os.chmod(path, stat.S_IWRITE)
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
     except OSError:
         pass
     func(path)
@@ -416,7 +443,13 @@ def _validate_order_and_epoch(order_id: str, epoch: int) -> tuple[str, int]:
 
 def _validate_git_ref(ref: str, name: str) -> str:
     clean = str(ref or "").strip()
-    if not clean or clean.startswith("-") or any(ch.isspace() for ch in clean):
+    forbidden = (":", "..", "~", "^", "@{", "\\")
+    if (
+        not clean
+        or clean.startswith("-")
+        or any(ch.isspace() or ord(ch) < 32 for ch in clean)
+        or any(token in clean for token in forbidden)
+    ):
         raise ValueError(f"Invalid {name}: {ref!r}")
     return clean
 
@@ -427,18 +460,33 @@ def _run_git(
     *,
     check: bool = True,
     force_lf: bool = False,
+    timeout_s: float = 120.0,
 ) -> subprocess.CompletedProcess[str]:
     cmd = ["git", "-C", str(repo_dir)]
     if force_lf:
         cmd.extend(["-c", "core.autocrlf=false", "-c", "core.eol=lf"])
     cmd.extend(args)
-    res = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    git_env = dict(os.environ)
+    git_env.pop("GIT_DIR", None)
+    git_env.pop("GIT_WORK_TREE", None)
+    git_env["GIT_TERMINAL_PROMPT"] = "0"
+    git_env["GIT_ASKPASS"] = "true"
+    git_env["SSH_ASKPASS"] = "true"
+    git_env["GCM_INTERACTIVE"] = "never"
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+            env=git_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        if check:
+            raise RuntimeError(f"git {' '.join(args)} timed out after {timeout_s}s") from exc
+        return subprocess.CompletedProcess(cmd, 124, stdout="", stderr="timeout")
     if check and res.returncode != 0:
         detail = coerce_text(mask_secrets((res.stderr or res.stdout or "").strip()))
         raise RuntimeError(f"git {' '.join(args)} failed ({res.returncode}): {detail}")
@@ -495,7 +543,7 @@ def prepare_epoch_worktree(
     branch = f"swarm/wip/{clean_order}/e{epoch_int}"
 
     start_ref = clean_base
-    if clean_remote and clean_remote != "origin":
+    if clean_remote and clean_remote != "origin" and clean_base != "HEAD":
         remotes_res = _run_git(origin_path, ["remote"], check=False)
         remotes = {r.strip() for r in remotes_res.stdout.splitlines() if r.strip()}
         if clean_remote in remotes:
@@ -504,13 +552,13 @@ def prepare_epoch_worktree(
                 if clean_base.startswith(f"{clean_remote}/")
                 else clean_base
             )
-            fetch_res = _run_git(
+            _run_git(
                 origin_path,
                 ["fetch", clean_remote, fetch_ref],
-                check=False,
+                check=True,
                 force_lf=True,
             )
-            if fetch_res.returncode == 0 and fetch_ref != "HEAD":
+            if fetch_ref != "HEAD":
                 remote_tracking = f"refs/remotes/{clean_remote}/{fetch_ref}"
                 if _git_ref_exists(origin_path, remote_tracking):
                     start_ref = f"{clean_remote}/{fetch_ref}"
@@ -633,7 +681,12 @@ def _extract_blocklist_rules(data: Any, cli_key: str) -> list[dict[str, str]]:
         rules.extend(_extract_blocklist_rules(data["blocked"], cli_key))
 
     runtimes = data.get("runtimes") if isinstance(data.get("runtimes"), dict) else data
-    entry = runtimes.get(cli_key) if isinstance(runtimes, dict) else None
+    entry = None
+    if isinstance(runtimes, dict):
+        for runtime_key, runtime_val in runtimes.items():
+            if str(runtime_key).strip().lower() == cli_key:
+                entry = runtime_val
+                break
     if isinstance(entry, dict):
         reason = str(entry.get("reason") or "blocked runtime").strip()
         for ver_key in ("versions", "blocked_versions"):
@@ -693,6 +746,17 @@ def check_runtime_blocklist(
             "version": ver_str,
             "sha256": sha256_hex,
             "reason": f"Malformed runtime blocklist: {coerce_text(mask_secrets(str(exc)))}",
+        }
+
+    if not isinstance(data, (dict, list)):
+        return {
+            "ok": False,
+            "status": "infra_blocked_runtime",
+            "error": "infra_blocked_runtime",
+            "cli": cli_key,
+            "version": ver_str,
+            "sha256": sha256_hex,
+            "reason": "Malformed runtime blocklist: root must be object or array",
         }
 
     for rule in _extract_blocklist_rules(data, cli_key):

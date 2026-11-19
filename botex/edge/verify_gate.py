@@ -142,6 +142,8 @@ def build_clean_verify_env(
 
 def _normalize_rel_path(raw: str) -> str:
     norm = str(raw or "").strip().replace("\\", "/")
+    if len(norm) >= 2 and norm.startswith('"') and norm.endswith('"'):
+        norm = norm[1:-1]
     if norm.startswith("./"):
         norm = norm[2:]
     if norm.startswith(("a/", "b/")):
@@ -189,14 +191,18 @@ def _is_test_file(norm_path: str) -> bool:
 
 def _extract_diff_paths(diff_text: str) -> set[str]:
     paths: set[str] = set()
+    in_hunk = False
     for line in str(diff_text or "").splitlines():
         if line.startswith("diff --git "):
+            in_hunk = False
             parts = line.split()
             if len(parts) >= 4:
                 for cand in (parts[2], parts[3]):
                     if cand != "/dev/null":
                         paths.add(_normalize_rel_path(cand))
-        elif line.startswith(("--- ", "+++ ")):
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif not in_hunk and line.startswith(("--- ", "+++ ")):
             raw = line[4:].strip()
             if raw and raw != "/dev/null":
                 paths.add(_normalize_rel_path(raw.split("\t", 1)[0]))
@@ -227,23 +233,28 @@ def scan_test_taint(
 
     current_file = ""
     is_new_file = False
+    in_hunk = False
     for line in str(diff_text or "").splitlines():
         if line.startswith("diff --git "):
+            in_hunk = False
             is_new_file = False
             parts = line.split()
             current_file = _normalize_rel_path(parts[3]) if len(parts) >= 4 else ""
             continue
-        if line.startswith("new file mode "):
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk and line.startswith("new file mode "):
             is_new_file = True
             continue
-        if line.startswith("--- "):
+        if not in_hunk and line.startswith("--- "):
             src = line[4:].strip().split("\t", 1)[0]
             if src == "/dev/null":
                 is_new_file = True
             elif not current_file:
                 current_file = _normalize_rel_path(src)
             continue
-        if line.startswith("+++ "):
+        if not in_hunk and line.startswith("+++ "):
             dst = line[4:].strip().split("\t", 1)[0]
             if dst != "/dev/null":
                 current_file = _normalize_rel_path(dst)
@@ -251,18 +262,20 @@ def scan_test_taint(
 
         if line.startswith("+"):
             added = line[1:]
-            if not _is_test_file(current_file):
-                for probe_name, pat in _ENV_PROBE_PATTERNS:
-                    if pat.search(added):
-                        env_probes.append(
-                            {
-                                "file": current_file or "<unknown>",
-                                "probe": probe_name,
-                                "line": coerce_text(mask_secrets(added.strip()))[:200],
-                            }
-                        )
-                        reasons.append(f"env_probe:{probe_name}:{current_file or '<unknown>'}")
-            elif allow_test_mutation and not is_new_file:
+            protected_test_loc = _matches_test_protected(current_file)
+            for probe_name, pat in _ENV_PROBE_PATTERNS:
+                if probe_name != "SWARM_VERIFY_RUN" and protected_test_loc:
+                    continue
+                if pat.search(added):
+                    env_probes.append(
+                        {
+                            "file": current_file or "<unknown>",
+                            "probe": probe_name,
+                            "line": coerce_text(mask_secrets(added.strip()))[:200],
+                        }
+                    )
+                    reasons.append(f"env_probe:{probe_name}:{current_file or '<unknown>'}")
+            if _is_test_file(current_file) and allow_test_mutation and not is_new_file:
                 for skip_pat in _SKIP_XFAIL_PATTERNS:
                     if skip_pat.search(added):
                         weakened_tests.append(
@@ -346,6 +359,7 @@ def _read_git_diff_and_files(wt_path: Path) -> tuple[str, list[str]]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        timeout=30,
     )
     status_res = subprocess.run(
         ["git", "-C", str(wt_path), "status", "--porcelain"],
@@ -353,16 +367,53 @@ def _read_git_diff_and_files(wt_path: Path) -> tuple[str, list[str]]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        timeout=30,
     )
     files: list[str] = []
+    untracked: list[str] = []
     if status_res.returncode == 0:
         for line in status_res.stdout.splitlines():
             if len(line) > 3:
                 candidate = line[3:].strip()
+                if line.startswith("?? "):
+                    files.append(candidate)
+                    untracked.append(candidate)
+                    continue
                 if " -> " in candidate:
                     candidate = candidate.split(" -> ", 1)[1]
                 files.append(candidate)
-    return (diff_res.stdout if diff_res.returncode == 0 else ""), files
+    diff_text = diff_res.stdout if diff_res.returncode == 0 else ""
+    wt_root = wt_path.resolve()
+    for rel in untracked:
+        rel_clean = rel
+        if len(rel_clean) >= 2 and rel_clean.startswith('"') and rel_clean.endswith('"'):
+            rel_clean = rel_clean[1:-1]
+        norm_rel = _normalize_rel_path(rel_clean)
+        if not norm_rel:
+            continue
+        raw_cand = wt_root / rel_clean
+        try:
+            if raw_cand.is_symlink() or not raw_cand.is_file():
+                continue
+            cand = raw_cand.resolve()
+            try:
+                cand.relative_to(wt_root)
+            except ValueError:
+                continue
+            if cand.stat().st_size > 256 * 1024:
+                continue
+            content = cand.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        lines = content.splitlines()
+        diff_text += (
+            f"diff --git a/{norm_rel} b/{norm_rel}\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            f"+++ b/{norm_rel}\n"
+            f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{ln}\n" for ln in lines)
+        )
+    return diff_text, files
 
 
 def run_external_verify(
@@ -417,6 +468,7 @@ def run_external_verify(
             "reason": reason,
             "taint": taint,
             "returncode": None,
+            "duration_ms": 0,
             "stdout": "",
             "stderr": "",
             "ledger_path": str(ledger_file),
@@ -425,6 +477,7 @@ def run_external_verify(
     clean_env = build_clean_verify_env(origin_repo, wt_resolved, base_env=base_env)
     started = time.monotonic()
     timed_out = False
+    spawn_failed = False
     stdout = ""
     stderr = ""
     returncode: Optional[int] = None
@@ -451,17 +504,27 @@ def run_external_verify(
         stderr = coerce_text(
             mask_secrets((exc.stderr or "") if isinstance(exc.stderr, str) else "")
         )
+    except OSError as exc:
+        spawn_failed = True
+        stderr = coerce_text(mask_secrets(str(exc)))
 
     duration_ms = int((time.monotonic() - started) * 1000)
     if timed_out:
         verdict = "TIMEOUT"
         passed = False
+        reason = "timeout"
+    elif spawn_failed:
+        verdict = "FAILED"
+        passed = False
+        reason = "spawn_error"
     elif returncode == 0:
         verdict = "DONE"
         passed = True
+        reason = ""
     else:
         verdict = "FAILED"
         passed = False
+        reason = "verify_command_failed"
 
     ledger_file = append_supervisor_ledger(
         {
@@ -470,6 +533,7 @@ def run_external_verify(
             "worktree": str(wt_resolved),
             "command": cmd_args,
             "verdict": verdict,
+            "reason": reason,
             "returncode": returncode,
             "duration_ms": duration_ms,
             "taint": taint,
@@ -482,6 +546,7 @@ def run_external_verify(
         "ok": passed,
         "status": verdict,
         "verdict": verdict,
+        "reason": reason,
         "taint": taint,
         "returncode": returncode,
         "duration_ms": duration_ms,

@@ -21,8 +21,10 @@ from botex.edge.host_os_driver import (
     SingleInstanceLock,
     SingleInstanceLockError,
     WindowsJobGuard,
+    _validate_git_ref,
     check_runtime_blocklist,
     fence_local_epoch,
+    kill_posix_process_group,
     prepare_epoch_worktree,
 )
 
@@ -121,6 +123,22 @@ def test_prepare_epoch_worktree_fetches_explicit_swarm_remote_only(tmp_path: Pat
     assert _git(wt_path, "rev-parse", "--abbrev-ref", "HEAD") == "swarm/wip/ord-remote/e3"
 
 
+def test_validate_git_ref_rejects_unsafe_refs():
+    assert _validate_git_ref("HEAD", "base_ref") == "HEAD"
+    assert _validate_git_ref("swarm/main", "base_ref") == "swarm/main"
+    for bad in (
+        "main:refs/heads/pwn",
+        "main..evil",
+        "main~1",
+        "main^0",
+        "main@{1}",
+        "main\\evil",
+        "main\x01x",
+    ):
+        with pytest.raises(ValueError, match="Invalid base_ref"):
+            _validate_git_ref(bad, "base_ref")
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object test")
 def test_windows_job_guard_kills_child_process_and_guards_reuse():
     proc = subprocess.Popen(
@@ -167,6 +185,79 @@ def test_job_guard_posix_killpg_and_external_cancel_cb(monkeypatch):
     assert len(killed) == 1 and killed[0][0] == 5242
     with pytest.raises(RuntimeError, match="closed"):
         guard.assign(4242)
+
+
+def test_kill_posix_process_group_rejects_nonpositive_pgid(monkeypatch):
+    calls: list[int] = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append(pgid), raising=False)
+    assert kill_posix_process_group(0) is False
+    assert kill_posix_process_group(-7) is False
+    assert kill_posix_process_group(True) is False
+    assert calls == []
+    assert kill_posix_process_group(1234) is True
+    assert calls == [1234]
+
+
+def test_job_guard_kill_all_idempotent_and_survives_killpg_permission_error(monkeypatch):
+    cancelled: list[str] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", fake_killpg, raising=False)
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid + 1000, raising=False)
+    monkeypatch.setattr(os, "getpgrp", lambda: 1, raising=False)
+
+    guard = WindowsJobGuard(
+        external_cancel_cb=lambda: cancelled.append("sess-1"),
+        use_win_job=False,
+    )
+    guard.assign(os.getpid() + 1)
+
+    first = guard.kill_all()
+    assert first["callbacks_invoked"] == 1
+    assert first["kill_errors"]
+    assert first["ok"] is False
+    assert cancelled == ["sess-1"]
+
+    second = guard.kill_all()
+    assert second == {
+        "ok": True,
+        "terminated_win_job": False,
+        "killed_pgids": [],
+        "kill_errors": [],
+        "callbacks_invoked": 0,
+        "callback_errors": [],
+    }
+    assert cancelled == ["sess-1"]
+    with pytest.raises(RuntimeError, match="closed"):
+        guard.register_cancel_callback(lambda: None)
+
+
+def test_job_guard_kill_all_records_os_kill_permission_error(monkeypatch):
+    def fake_kill(pid: int, sig: int) -> None:
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "kill", fake_kill, raising=False)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None, raising=False)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 777, raising=False)
+    monkeypatch.setattr(os, "getpgrp", lambda: 777, raising=False)
+
+    cancelled: list[bool] = []
+    guard = WindowsJobGuard(external_cancel_cb=lambda: cancelled.append(True), use_win_job=False)
+    guard.assign(os.getpid() + 2)
+
+    res = guard.kill_all()
+    assert res["ok"] is False
+    assert res["kill_errors"]
+    assert res["callbacks_invoked"] == 1
+    assert cancelled == [True]
+
+
+def test_job_guard_assign_rejects_supervisor_pid():
+    guard = WindowsJobGuard(use_win_job=False)
+    with pytest.raises(ValueError, match="current supervisor process PID"):
+        guard.assign(os.getpid())
 
 
 def test_single_instance_lock_prevents_concurrent_acquisition(tmp_path: Path):
@@ -247,6 +338,45 @@ def test_runtime_blocklist_blocks_matching_sha256_and_version(tmp_path: Path):
 
     driver = HostOSDriver(blocklist_path=blocklist)
     allowed = driver.preflight_runtime("zcode", other_bin, version="0.9.2")
+    assert allowed["ok"] is True
+    assert allowed["status"] == "allowed"
+
+
+def test_runtime_blocklist_malformed_json_and_scalar_root(tmp_path: Path):
+    cli_bin = tmp_path / "zcode.cjs"
+    cli_bin.write_bytes(b"console.log('x');\n")
+
+    bad_syntax = tmp_path / "bad_syntax.json"
+    bad_syntax.write_text("{ not valid json", encoding="utf-8")
+    res = check_runtime_blocklist("zcode", cli_bin, blocklist_path=bad_syntax)
+    assert res["ok"] is False
+    assert res["status"] == "infra_blocked_runtime"
+    assert "Malformed runtime blocklist" in res["reason"]
+
+    for idx, scalar in enumerate(("42", '"foo"', "null")):
+        scalar_path = tmp_path / f"scalar_{idx}.json"
+        scalar_path.write_text(scalar, encoding="utf-8")
+        res = check_runtime_blocklist("zcode", cli_bin, blocklist_path=scalar_path)
+        assert res["ok"] is False
+        assert res["status"] == "infra_blocked_runtime"
+        assert res["reason"] == "Malformed runtime blocklist: root must be object or array"
+
+
+def test_runtime_blocklist_runtimes_key_is_case_insensitive(tmp_path: Path):
+    cli_bin = tmp_path / "zcode.cjs"
+    cli_bin.write_bytes(b"console.log('x');\n")
+    blocklist = tmp_path / "runtime_blocklist.json"
+    blocklist.write_text(
+        json.dumps({"runtimes": {"ZCode": {"versions": ["9.9.9"], "reason": "blocked ver"}}}),
+        encoding="utf-8",
+    )
+
+    res = check_runtime_blocklist("zcode", cli_bin, version="9.9.9", blocklist_path=blocklist)
+    assert res["ok"] is False
+    assert res["status"] == "infra_blocked_runtime"
+    assert res["reason"] == "blocked ver"
+
+    allowed = check_runtime_blocklist("zcode", cli_bin, version="1.0.0", blocklist_path=blocklist)
     assert allowed["ok"] is True
     assert allowed["status"] == "allowed"
 

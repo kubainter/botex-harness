@@ -3112,6 +3112,18 @@ def _fence_swarm_order_sync(
                     " WHERE bot_slug = ? AND fencing_token < ?;",
                     (new_epoch, effective_bot, new_epoch),
                 )
+            if clean_host and clean_scope:
+                conn.execute(
+                    "UPDATE host_leases SET fencing_token = ?"
+                    " WHERE host_id = ? AND scope_path = ? AND fencing_token < ?;",
+                    (new_epoch, clean_host, clean_scope, new_epoch),
+                )
+            elif clean_host and not effective_bot:
+                conn.execute(
+                    "UPDATE host_leases SET fencing_token = ?"
+                    " WHERE host_id = ? AND fencing_token < ?;",
+                    (new_epoch, clean_host, new_epoch),
+                )
             conn.commit()
         except BaseException:
             if conn.in_transaction:
