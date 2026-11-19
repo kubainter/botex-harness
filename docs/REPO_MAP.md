@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 67 Python modules (`server.py` + `botex/`), 83 test files (`tests/`).
+- **Codebase footprint:** 69 Python modules (`server.py` + `botex/`), 85 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -25,8 +25,8 @@ targeted + integration tests.
 
 | Module | File | Imported By (modules) | Direct Tests |
 |---|---|---:|---:|
-| `botex.tools.security` | `botex/tools/security.py` | 34 | 9 |
-| `botex.server.config` | `botex/server/config.py` | 22 | 18 |
+| `botex.tools.security` | `botex/tools/security.py` | 36 | 9 |
+| `botex.server.config` | `botex/server/config.py` | 22 | 19 |
 | `botex.memory.memory` | `botex/memory/memory.py` | 9 | 5 |
 | `botex.providers` | `botex/providers/__init__.py` | 8 | 12 |
 | `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 5 |
@@ -58,7 +58,7 @@ targeted + integration tests.
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/core/__init__.py` | — | `test_blackbox_penal.py`, `test_brief_curator.py`, `test_spiral_guard.py`, `test_swarm_store.py`, +2 more |
+| `botex/core/__init__.py` | — | `test_blackbox_penal.py`, `test_brief_curator.py`, `test_host_os_driver.py`, `test_spiral_guard.py`, +3 more |
 | `botex/core/approval.py` | `ActionStatus`, `TaskAbortedError`, `ApprovalPolicy`, `PendingAction`, `ApprovalManager`, `format_action_preview` | `test_approval.py`, `test_edge_delegation_api.py`, `test_server_cloud.py` |
 | `botex/core/blackbox.py` | `normalize_actor_id`, `normalize_workspace_id`, `record_incident`, `get_rap_sheet`, `format_rap_sheet_warning`, `format_audit_hint` | `test_blackbox_penal.py`, `test_spiral_guard.py` |
 | `botex/core/capabilities.py` | `RiskLevel`, `ToolPolicy`, `resolve_mode_name`, `resolve_capabilities`, `tool_allowed`, `check_agency_policy`, `+1 more` | `test_approval.py`, `test_botex.py` |
@@ -70,7 +70,7 @@ targeted + integration tests.
 | `botex/core/events.py` | `EventKind`, `TaskEventEmitter`, `get_emitter`, `emitter_or_none`, `drop_emitter` | `test_analytics.py`, `test_containment_recall_gate.py`, `test_events.py`, `test_security_hardening.py`, +2 more |
 | `botex/core/meta_harness.py` | `SpiralTracker`, `classify_task_taxonomy`, `is_infra_failure`, `get_relevant_meta_lessons`, `extract_meta_lesson`, `pack_lessons_within_budget`, `+4 more` | `test_meta_harness.py` |
 | `botex/core/state.py` | `CanonicalAgentTurn`, `InFlightTaskState`, `save_inflight_checkpoint`, `load_inflight_checkpoints`, `clear_inflight_checkpoint` | `test_context_inclusion.py`, `test_edge_ws_gateway.py`, `test_state_checkpoint.py` |
-| `botex/core/swarm_store.py` | `migrate_swarm_store`, `get_swarm_store_conn`, `close_swarm_store_dbs`, `register_bot`, `get_bot`, `list_bots`, `+8 more` | `test_brief_curator.py`, `test_swarm_store.py`, `test_tethered_bot_visibility.py` |
+| `botex/core/swarm_store.py` | `migrate_swarm_store`, `get_swarm_store_conn`, `close_swarm_store_dbs`, `register_bot`, `get_bot`, `list_bots`, `+8 more` | `test_brief_curator.py`, `test_host_os_driver.py`, `test_swarm_store.py`, `test_tethered_bot_visibility.py` |
 | `botex/core/tool_executor.py` | `ToolExecutor`, `LocalToolExecutor`, `register_edge_executor_resolver`, `resolve_edge_executor` | `test_edge_ws_gateway.py`, `test_tool_executor.py` |
 | `botex/core/tracing.py` | `NullSpan`, `get_tracer`, `get_current_trace_id`, `start_span`, `resolve_tracing_config`, `init_tracing` | `test_tracing.py`, `test_tracing_wiring.py` |
 
@@ -80,7 +80,9 @@ targeted + integration tests.
 |---|---|---|
 | `botex/edge/__init__.py` | — | `test_edge_brief_sync.py`, `test_edge_delegation.py`, `test_edge_integration.py`, `test_edge_runner.py` |
 | `botex/edge/delegation.py` | `DelegationError`, `EdgeSkillSpec`, `EdgeDelegationPolicy`, `EdgeDelegationHandler`, `validate_params`, `verify_skill_digest` | `test_edge_delegation.py` |
+| `botex/edge/host_os_driver.py` | `SingleInstanceLockError`, `SingleInstanceLock`, `WindowsJobGuard`, `HostOSDriver`, `default_swarm_home`, `kill_posix_process_group`, `+3 more` | `test_host_os_driver.py` |
 | `botex/edge/runner.py` | `EdgeCapabilities`, `EdgeRunner`, `get_local_bot_briefs_dir`, `write_local_bot_brief`, `read_local_bot_briefs` | `test_edge_brief_sync.py`, `test_edge_runner.py`, `test_tethered_bot_visibility.py` |
+| `botex/edge/verify_gate.py` | `default_supervisor_ledger_path`, `build_clean_verify_env`, `scan_test_taint`, `append_supervisor_ledger`, `run_external_verify` | `test_verify_gate.py` |
 
 ### `botex.memory`
 
@@ -132,10 +134,10 @@ targeted + integration tests.
 |---|---|---|
 | `botex/server/__init__.py` | — | `test_brief_curator.py`, `test_containment_recall_gate.py`, `test_edge_delegation_api.py`, `test_edge_integration.py`, +5 more |
 | `botex/server/chat.py` | `ChatMessage`, `ChatSession`, `ChatManager`, `execute_chat_tool`, `stream_chat_turn`, `chat_turn` | `test_chat.py`, `test_chat_error_observability.py`, `test_server_f4_provenance.py`, `test_stage_4_8.py` |
-| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +14 more |
+| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +15 more |
 | `botex/server/i18n.py` | `detect_language`, `init_language`, `set_language`, `get_language`, `t` | — |
 | `botex/server/plugins.py` | `PluginError`, `PluginValidationError`, `PluginExecutionError`, `PluginExecutionTimeout`, `PluginPermissionError`, `BoteXPluginDefinition`, `+5 more` | `test_approval.py`, `test_plugins_creator.py` |
-| `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+61 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +14 more |
+| `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+65 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +15 more |
 | `botex/server/ui.py` | `colors_enabled`, `paint`, `title`, `accent`, `ok`, `warn`, `+3 more` | `test_botex.py` |
 
 ### `botex.skills`
@@ -163,5 +165,5 @@ targeted + integration tests.
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/__init__.py` | — | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m7_concurrency.py`, `test_curator_and_migration_f4.py`, +22 more |
-| `server.py` | `SubagentAttemptResult`, `SubagentTaskResult`, `mask_secrets_recursive`, `mask_stream_chunk`, `start_task`, `get_task_status`, `+27 more` | `test_analytics.py`, `test_approval.py`, `test_blackbox_penal.py`, `test_botex.py`, +24 more |
+| `botex/__init__.py` | — | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m7_concurrency.py`, `test_curator_and_migration_f4.py`, +23 more |
+| `server.py` | `SubagentAttemptResult`, `SubagentTaskResult`, `mask_secrets_recursive`, `mask_stream_chunk`, `start_task`, `get_task_status`, `+28 more` | `test_analytics.py`, `test_approval.py`, `test_blackbox_penal.py`, `test_botex.py`, +25 more |

@@ -95,16 +95,19 @@ from botex.core.device_tokens import (
     default_device_token_store,
 )
 from botex.core.swarm_store import (
+    _SWARM_LOCK,
     SWARM_SCHEMA_VERSION,
     get_active_leases,
     get_bot,
     get_bot_brief,
+    get_swarm_store_conn,
     list_active_brief_payloads,
     list_bots,
     list_bots_due_for_brief_review,
     record_bot_domain_turn,
     register_bot,
     upsert_bot_brief,
+    upsert_host_lease,
 )
 from botex.core.tool_executor import (
     ToolExecutor,
@@ -467,6 +470,25 @@ class BotCreateRequest(BaseModel):
 class BotBriefUpdateRequest(BaseModel):
     content: str = Field(..., max_length=16000)
     pinned: Optional[bool] = None
+
+
+class SwarmLeaseRenewRequest(BaseModel):
+    bot_slug: str = Field(..., min_length=1, max_length=128)
+    host_id: str = Field(..., min_length=1, max_length=128)
+    scope_path: str = Field(..., min_length=1, max_length=512)
+    summary: str = Field(default="", max_length=1000)
+    fencing_token: int = Field(default=0, ge=0)
+    ttl_s: Optional[int] = Field(default=None, ge=1, le=86400)
+
+
+class SwarmOrderFenceRequest(BaseModel):
+    local_epoch: Optional[int] = Field(default=None, ge=0)
+    expected_epoch: Optional[int] = Field(default=None, ge=0)
+    bot_slug: str = Field(default="", max_length=128)
+    host_id: str = Field(default="", max_length=128)
+    scope_path: str = Field(default="", max_length=512)
+    reason: str = Field(default="", max_length=500)
+    status: str = Field(default="FENCED", max_length=64)
 
 
 _DELEGATE_FORBIDDEN_PARAM_KEYS = frozenset(
@@ -2996,6 +3018,205 @@ async def refresh_bot_brief_endpoint(
             detail=botex_server.mask_secrets_recursive(res),
         )
     return JSONResponse(content=botex_server.mask_secrets_recursive(res))
+
+
+_VALID_FENCE_STATUSES: Dict[str, str] = {
+    "FENCED": "FENCED",
+    "HANDOFF": "HANDOFF",
+    "STUCK": "STUCK",
+    "BLOCKED": "BLOCKED",
+}
+
+
+def _fence_swarm_order_sync(
+    order_id: str,
+    req_epoch: int,
+    *,
+    bot_slug: str = "",
+    host_id: str = "",
+    scope_path: str = "",
+    reason: str = "",
+    next_status: str = "FENCED",
+) -> Dict[str, Any]:
+    clean_bot = sanitize_identifier(bot_slug) if bot_slug else ""
+    clean_reason = coerce_text(mask_secrets(reason)).strip()
+    clean_host = coerce_text(mask_secrets(host_id)).strip()
+    clean_scope = coerce_text(mask_secrets(scope_path)).strip()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_swarm_store_conn()
+    with _SWARM_LOCK:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            row = conn.execute(
+                "SELECT order_id, bot_slug, epoch, status, payload_json"
+                " FROM work_orders WHERE order_id = ?;",
+                (order_id,),
+            ).fetchone()
+            remote_epoch = int(row["epoch"] or 0) if row is not None else 0
+            if remote_epoch != req_epoch:
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "error": "EPOCH_MISMATCH",
+                    "status": "stale_epoch",
+                    "order_id": order_id,
+                    "remote_epoch": remote_epoch,
+                    "local_epoch": req_epoch,
+                }
+            new_epoch = remote_epoch + 1
+            effective_bot = clean_bot or (str(row["bot_slug"] or "") if row is not None else "")
+            payload: Dict[str, Any] = {}
+            if row is not None and row["payload_json"]:
+                try:
+                    parsed = json.loads(str(row["payload_json"]))
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                except json.JSONDecodeError:
+                    payload = {}
+            if clean_reason:
+                payload["fence_reason"] = clean_reason
+            if clean_host:
+                payload["fenced_by_host"] = clean_host
+            if clean_scope:
+                payload["scope_path"] = clean_scope
+            payload["fenced_at"] = now_iso
+            payload_str = coerce_text(mask_secrets(json.dumps(payload, ensure_ascii=False)))
+
+            if row is None:
+                conn.execute(
+                    "INSERT INTO work_orders"
+                    " (order_id, bot_slug, epoch, status, payload_json, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?);",
+                    (
+                        order_id,
+                        effective_bot,
+                        new_epoch,
+                        next_status,
+                        payload_str,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE work_orders"
+                    " SET bot_slug = ?, epoch = ?, status = ?, payload_json = ?, updated_at = ?"
+                    " WHERE order_id = ?;",
+                    (effective_bot, new_epoch, next_status, payload_str, now_iso, order_id),
+                )
+            if effective_bot:
+                conn.execute(
+                    "UPDATE host_leases SET fencing_token = ?"
+                    " WHERE bot_slug = ? AND fencing_token < ?;",
+                    (new_epoch, effective_bot, new_epoch),
+                )
+            if clean_host and clean_scope:
+                conn.execute(
+                    "UPDATE host_leases SET fencing_token = ?"
+                    " WHERE host_id = ? AND scope_path = ? AND fencing_token < ?;",
+                    (new_epoch, clean_host, clean_scope, new_epoch),
+                )
+            elif clean_host and not effective_bot:
+                conn.execute(
+                    "UPDATE host_leases SET fencing_token = ?"
+                    " WHERE host_id = ? AND fencing_token < ?;",
+                    (new_epoch, clean_host, new_epoch),
+                )
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "bot_slug": effective_bot,
+        "previous_epoch": remote_epoch,
+        "fencing_epoch": new_epoch,
+        "epoch": new_epoch,
+        "status": next_status,
+        "updated_at": now_iso,
+    }
+
+
+@app.post("/api/swarm/leases/renew")
+async def renew_swarm_lease_endpoint(body: SwarmLeaseRenewRequest) -> Dict[str, Any]:
+    """Acquire or renew a fenced host lease in ``swarm_store.db``."""
+    res = await asyncio.to_thread(
+        upsert_host_lease,
+        body.bot_slug,
+        body.host_id,
+        body.scope_path,
+        body.summary,
+        fencing_token=body.fencing_token,
+        ttl_s=body.ttl_s,
+    )
+    if not res.get("ok"):
+        err_code = str(res.get("error") or res.get("status") or "")
+        if err_code in ("stale_epoch", "lease_held", "bot_inactive"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=botex_server.mask_secrets_recursive(res),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=botex_server.mask_secrets_recursive(res),
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.post("/api/swarm/orders/{order_id}/fence")
+async def fence_swarm_order_endpoint(
+    order_id: str,
+    body: SwarmOrderFenceRequest,
+) -> Dict[str, Any]:
+    """Atomically increment work-order epoch after ``remote_epoch == local_epoch`` check."""
+    clean_order = sanitize_identifier(order_id)
+    if not clean_order or clean_order != str(order_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid order_id format.",
+        )
+    if body.local_epoch is not None and body.expected_epoch is not None:
+        if body.local_epoch != body.expected_epoch:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Conflicting local_epoch and expected_epoch values.",
+            )
+    if body.local_epoch is not None:
+        req_epoch = body.local_epoch
+    elif body.expected_epoch is not None:
+        req_epoch = body.expected_epoch
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="local_epoch or expected_epoch is required.",
+        )
+    norm_status = _VALID_FENCE_STATUSES.get(str(body.status or "FENCED").strip().upper())
+    if norm_status is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid fence status.",
+        )
+
+    res = await asyncio.to_thread(
+        _fence_swarm_order_sync,
+        clean_order,
+        req_epoch,
+        bot_slug=body.bot_slug,
+        host_id=body.host_id,
+        scope_path=body.scope_path,
+        reason=body.reason,
+        next_status=norm_status,
+    )
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=botex_server.mask_secrets_recursive(res),
+        )
+    return botex_server.mask_secrets_recursive(res)
 
 
 def _fetch_memory_graph_sync(ws: Path, scope: str) -> Dict[str, Any]:
