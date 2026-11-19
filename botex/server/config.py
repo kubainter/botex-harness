@@ -549,11 +549,17 @@ DEFAULTS: Dict[str, Any] = {
         # unrestricted (local MCP sessions keep today's semantics).
         "allowed_workspaces": []
     },
-    # Cloud Soul (Plan 035): per-bot brief token budget (est. ceil(len/4))
-    # and the default host-lease TTL when a caller passes ttl_s=None.
+    # Cloud Soul (Plan 035 / Plan 040): per-bot brief token budget (est. ceil(len/4)),
+    # default host-lease TTL when ttl_s=None, and Background Brief Curator trigger thresholds.
     "bots": {
         "brief_budget_tokens": 250,
         "default_lease_ttl_s": 900,
+        "brief_curator_enabled": True,
+        "brief_review_turn_threshold": 20,
+        "brief_review_idle_s": 900,
+        "brief_review_min_idle_turns": 3,
+        "brief_review_cooldown_s": 300,
+        "brief_review_max_per_tick": 3,
     },
     "security": {
         # Browser drive-by guard on mutating /api/* routes and /api/chat/ws.

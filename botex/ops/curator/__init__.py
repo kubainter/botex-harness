@@ -7,6 +7,7 @@ Option A: Deterministic + Multi-Tier LLM Batch Curation with Zero Recipe Polluti
 Living Beacon note: curator_health_status.md in Memory Vault.
 """
 
+from .brief_curator import is_brief_curator_inflight, refresh_bot_brief
 from .curator_service import (
     CuratorResult,
     CuratorService,
@@ -21,6 +22,8 @@ __all__ = [
     "CuratorResult",
     "CuratorService",
     "get_curator_status",
+    "is_brief_curator_inflight",
+    "refresh_bot_brief",
     "run_curation_async",
     "run_curation_sync",
     "synthesize_recall",
