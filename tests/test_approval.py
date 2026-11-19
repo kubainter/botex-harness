@@ -65,7 +65,7 @@ def test_approval_policy_tool_map():
         "read_url",
     }
     # Read-only tools should never be gated by approval policies
-    for policy, tools in POLICY_TOOL_MAP.items():
+    for _policy, tools in POLICY_TOOL_MAP.items():
         assert "get_file_outline" not in tools
         assert "read_file_lines" not in tools
         assert "read_file" not in tools

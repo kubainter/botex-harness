@@ -602,7 +602,7 @@ def test_concurrent_tool_calls_reply_cleanly(tmp_path):
                     }
                 )
             )
-        for i in range(n_calls):
+        for _ in range(n_calls):
             msg = json.loads(await ws.recv())
             assert msg["type"] == "tool_result"
             replies[msg["call_id"]] = msg["result"]

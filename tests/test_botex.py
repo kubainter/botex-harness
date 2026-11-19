@@ -354,7 +354,7 @@ def test_capability_modes():
     # 3. Unknown mode fails closed
     try:
         resolve_capabilities("godmode")
-        assert False, "Unknown mode must raise"
+        raise AssertionError("Unknown mode must raise")
     except ValueError:
         pass
 
@@ -362,7 +362,7 @@ def test_capability_modes():
     for flag in ("allow_destructive", "allow_exec"):
         try:
             resolve_capabilities("readonly", **{flag: True})
-            assert False, f"readonly must reject {flag}"
+            raise AssertionError(f"readonly must reject {flag}")
         except ValueError:
             pass
     assert resolve_capabilities("edit", allow_net=True) == {CAP_READ, CAP_WRITE, CAP_NET}

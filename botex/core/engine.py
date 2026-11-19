@@ -2369,7 +2369,7 @@ async def _run_botex_task_once_impl(
         packed_lessons = pack_lessons_within_budget(meta_lessons, max_bytes=800, base_dir=root_path)
         packed_counts = collections.Counter(packed_lessons)
         kept_ids: List[str] = []
-        for ml, lid in zip(meta_lessons, applied_lesson_ids):
+        for ml, lid in zip(meta_lessons, applied_lesson_ids, strict=False):
             if packed_counts.get(ml, 0) > 0:
                 packed_counts[ml] -= 1
                 kept_ids.append(lid)
@@ -2605,9 +2605,12 @@ async def _run_botex_task_once_impl(
         # a mid-stream failure escapes a wrapper that only covers create().
         # Retried errors are unbilled rejections (429/conn, Google 503
         # overload); billed or ambiguous failures pass straight through.
-        async def _run_model_request() -> Any:
-            if use_stream:
-                stream_resp = await client.chat.completions.create(**create_kwargs)
+        async def _run_model_request(
+            _use_stream: bool = use_stream,
+            _create_kwargs: Dict[str, Any] = create_kwargs,
+        ) -> Any:
+            if _use_stream:
+                stream_resp = await client.chat.completions.create(**_create_kwargs)
                 if hasattr(stream_resp, "__aiter__"):
                     chunks = []
                     try:
@@ -2629,7 +2632,7 @@ async def _run_botex_task_once_impl(
                 if hasattr(stream_resp, "__iter__") and not hasattr(stream_resp, "choices"):
                     return normalize_streaming_chunks(list(stream_resp), raw_model=model)
                 return normalize_response(stream_resp)
-            raw_api_resp = await client.chat.completions.create(**create_kwargs)
+            raw_api_resp = await client.chat.completions.create(**_create_kwargs)
             return normalize_response(raw_api_resp)
 
         def _on_retry_wait(delay, exc):
@@ -3784,7 +3787,9 @@ async def _run_botex_task_once_impl(
                     if res.get("file_sha256"):
                         last_read_sha256[norm_p] = str(res["file_sha256"])
 
-        def _finalize_tool_result(tc: Any, fn_name: str, tool_result: Dict[str, Any]) -> None:
+        def _finalize_tool_result(
+            tc: Any, fn_name: str, tool_result: Dict[str, Any], _turn: int = turn
+        ) -> None:
             nonlocal ok_tool_calls, turn_mutated, fold_pending
             if isinstance(tool_result, dict) and tool_result.get("ok"):
                 ok_tool_calls += 1
@@ -3795,7 +3800,7 @@ async def _run_botex_task_once_impl(
                 EventKind.TOOL_CALL,
                 tool=fn_name,
                 ok=bool(isinstance(tool_result, dict) and tool_result.get("ok")),
-                turn=turn,
+                turn=_turn,
             )
             messages.append(
                 {
@@ -3857,7 +3862,7 @@ async def _run_botex_task_once_impl(
                     batch_results += [
                         {"ok": False, "error": "Tool executor returned a malformed batch result."}
                     ] * (len(batch_entries) - len(batch_results))
-                for b, res in zip(batch_entries, batch_results):
+                for b, res in zip(batch_entries, batch_results, strict=False):
                     _record_readonly_result(b["fn_name"], b["args"], res)
                     _finalize_tool_result(b["tc"], b["fn_name"], res)
                 continue

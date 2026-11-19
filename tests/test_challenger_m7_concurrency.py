@@ -350,7 +350,7 @@ def test_sqlite_pool_and_ddl_memoization_20_threads_concurrency():
             memory.close_index_dbs()
 
             # All 20 connections must be closed in SQLite
-            for idx, c in enumerate(thread_conns):
+            for _idx, c in enumerate(thread_conns):
                 with pytest.raises(sqlite3.ProgrammingError):
                     c.execute("SELECT 1;")
 
