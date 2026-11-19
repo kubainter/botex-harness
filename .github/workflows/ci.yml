@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.13
         uses: actions/setup-python@v5
@@ -45,6 +47,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -81,6 +85,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
@@ -100,3 +106,45 @@ jobs:
       - name: Build PWA (type check + bundle)
         working-directory: web
         run: npm run build
+
+  pr-review:
+    name: PR Review (Skylos done + change map)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Pinned CLI-only install (no Skylos Cloud upload, no --danger SAST due to
+      # false positives on dict.get() / alias grafts). Expand flags selectively
+      # once upstream matures.
+      - name: Install Skylos (pinned)
+        run: python -m pip install --no-cache-dir "skylos==5.6.0"
+
+      - name: Run Skylos anti-regression & change map
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set +e
+          skylos done --base "origin/${BASE_REF}" --no-tests --map --format markdown > skylos-report.md
+          rc=$?
+          set -e
+          if [ -s skylos-report.md ]; then
+            cat skylos-report.md >> "$GITHUB_STEP_SUMMARY"
+            cat skylos-report.md
+          fi
+          # --no-tests intentionally exits 1 (UNFINISHED) because pytest runs in the `test` job.
+          if [ "$rc" -gt 1 ]; then
+            exit "$rc"
+          fi
