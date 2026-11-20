@@ -240,6 +240,42 @@ def _resolve_mode(
     return target, None
 
 
+_BOTEX_DEFAULT_PROVIDER = "openrouter-free"
+# Preference order when the spec carries no sub-provider and no explicit
+# operator choice exists: free-tier providers first, never a silent paid hop.
+_BOTEX_FREE_PROVIDER_PREF = ("openrouter-free", "nvidia", "google", "ollama")
+
+
+def _botex_dispatch_provider(sub_provider: str) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Explicit provider for a ``botex`` dispatch spec — sub-specifier wins
+    (alias-resolved and validated), else a configured free provider."""
+    sub = (sub_provider or "").strip().lower()
+    try:
+        from botex.server.config import load_config, resolve_provider
+
+        provs = load_config().get("providers") or {}
+    except Exception:
+        provs = {}
+
+        def resolve_provider(name):  # type: ignore[no-redef]
+            return name, {}
+
+    if sub:
+        canon, pcfg = resolve_provider(sub)
+        if not pcfg:
+            return None, {
+                "ok": False,
+                "status": "BLOCKED",
+                "reason": "unknown_provider",
+                "provider": sub,
+            }
+        return canon, None
+    for name in _BOTEX_FREE_PROVIDER_PREF:
+        if name in provs:
+            return name, None
+    return _BOTEX_DEFAULT_PROVIDER, None
+
+
 def translate_work_order(
     order: Any,
     target_harness: str,
@@ -252,8 +288,12 @@ def translate_work_order(
     Never emits ``--resume``: every hop runs clean in a new epoch worktree
     ``e<N+1>`` on ``swarm/wip/<order_id>/e<N+1>``. ``blind_alley_note`` carries
     the concise anti-spiral context (secret-masked) into the next hop.
+
+    ``target_harness`` may carry a sub-provider specifier (``botex:nvidia``);
+    for ``botex`` targets the result always names an explicit ``provider``.
     """
-    elig = check_harness_eligible(target_harness)
+    target_name, _, sub_provider = str(target_harness or "").partition(":")
+    elig = check_harness_eligible(target_name)
     if not elig.get("ok"):
         return dict(elig)
     harness = str(elig["harness"])
@@ -345,6 +385,13 @@ def translate_work_order(
         "blind_alley_note": masked_note,
         "anti_spiral_reset": anti_spiral,
     }
+    if harness == "botex":
+        provider, prov_err = _botex_dispatch_provider(sub_provider)
+        if prov_err is not None:
+            prov_err["harness"] = harness
+            prov_err["order_id"] = order_id
+            return prov_err
+        result["provider"] = provider
     if result["transport"] == "acp":
         result["transport_fallback"] = "stdout"
         result["acp"] = {"protocol": "agent-client-protocol", "framing": "json-rpc/stdio"}

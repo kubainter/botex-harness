@@ -706,7 +706,7 @@ async def start_task(
     provider: Annotated[
         str,
         Field(
-            description="openrouter|nvidia|google|openrouter-free|ollama. REQUIRED — empty silently routes to paid openrouter."
+            description="openrouter-free|nvidia|google|ollama|openrouter. REQUIRED unless BOTEX_PROVIDER is set."
         ),
     ] = "",
     mode: Annotated[
@@ -753,8 +753,9 @@ async def start_task(
 ) -> dict[str, Any]:
     """Async version of `run_subagent`: queues a task and returns `{task_id, status: "QUEUED"}` for `get_task_status`."""
     _cleanup_tasks()
-    if not (provider and provider.strip()) and not os.environ.get("BOTEX_PROVIDER", "").strip():
-        avail_provs = ", ".join((load_config().get("providers") or {}).keys())
+    effective_prov = (provider or "").strip() or os.environ.get("BOTEX_PROVIDER", "").strip()
+    avail_provs = ", ".join((load_config().get("providers") or {}).keys())
+    if not effective_prov:
         return {
             "ok": False,
             "status": "CONFIG_ERROR",
@@ -764,22 +765,17 @@ async def start_task(
                 f"silently routes to paid 'openrouter'. Specify one of: {avail_provs}."
             ),
         }
-    if provider and provider.strip():
-        # Mirror create_task: an unknown provider must never fall through to a
-        # generic client silently bound to the paid OpenRouter endpoint.
-        from botex.server.config import resolve_provider
-
-        _resolved_prov, _prov_cfg = resolve_provider(provider.strip())
-        if not _prov_cfg:
-            avail_provs = ", ".join((load_config().get("providers") or {}).keys())
-            return {
-                "ok": False,
-                "status": "CONFIG_ERROR",
-                "failure_kind": "security_or_policy_block",
-                "message": (
-                    f"Unknown provider '{provider.strip()}'. Available providers: {avail_provs}."
-                ),
-            }
+    _resolved_prov, _prov_cfg = resolve_provider(effective_prov)
+    if not _prov_cfg:
+        return {
+            "ok": False,
+            "status": "CONFIG_ERROR",
+            "failure_kind": "security_or_policy_block",
+            "message": (
+                f"Unknown provider '{effective_prov}'. Available providers: {avail_provs}."
+            ),
+        }
+    provider = _resolved_prov
     max_queued = int(load_config().get("engine", {}).get("max_queued_tasks", 32))
     active_count = sum(entry.get("status") in {"QUEUED", "RUNNING"} for entry in _TASKS.values())
     if active_count >= max_queued:
@@ -965,7 +961,7 @@ async def run_subagent(
     provider: Annotated[
         str,
         Field(
-            description="openrouter|nvidia|google|openrouter-free|ollama. REQUIRED — empty silently routes to paid openrouter."
+            description="openrouter-free|nvidia|google|ollama|openrouter. REQUIRED unless BOTEX_PROVIDER is set."
         ),
     ] = "",
     mode: Annotated[
@@ -1011,53 +1007,44 @@ async def run_subagent(
     origin: str = "",
 ) -> Annotated[CallToolResult, SubagentTaskResult]:
     """Run BoteX synchronously inside `workspace_dir`; call `recommend_models` first if model is unspecified (`ok` is true only when `status == DONE`)."""
-    if not (provider and provider.strip()) and not os.environ.get("BOTEX_PROVIDER", "").strip():
-        avail_provs = ", ".join((load_config().get("providers") or {}).keys())
+    effective_prov = (provider or "").strip() or os.environ.get("BOTEX_PROVIDER", "").strip()
+    avail_provs = ", ".join((load_config().get("providers") or {}).keys())
+    _err_base = {
+        "ok": False,
+        "status": "CONFIG_ERROR",
+        "failure_kind": "security_or_policy_block",
+        "files_touched": [],
+        "exec_ran": False,
+        "steps": 0,
+        "attempts": [],
+        "duration_s": 0.0,
+        "cost_usd": 0.0,
+    }
+    if not effective_prov:
         err_res = {
-            "ok": False,
-            "status": "CONFIG_ERROR",
-            "failure_kind": "security_or_policy_block",
+            **_err_base,
             "message": (
                 "Explicit 'provider' is required — delegation without one "
                 f"silently routes to paid 'openrouter'. Specify one of: {avail_provs}."
             ),
-            "files_touched": [],
-            "exec_ran": False,
-            "steps": 0,
-            "attempts": [],
-            "duration_s": 0.0,
-            "cost_usd": 0.0,
         }
         return CallToolResult(
             content=[TextContent(type="text", text=_format_result_text(err_res))],
             structured_content=err_res,
         )
-    if provider and provider.strip():
-        # Mirror create_task: reject unknown providers instead of silently
-        # binding them to the generic (paid OpenRouter) client.
-        from botex.server.config import resolve_provider
-
-        _resolved_prov, _prov_cfg = resolve_provider(provider.strip())
-        if not _prov_cfg:
-            avail_provs = ", ".join((load_config().get("providers") or {}).keys())
-            err_res = {
-                "ok": False,
-                "status": "CONFIG_ERROR",
-                "failure_kind": "security_or_policy_block",
-                "message": (
-                    f"Unknown provider '{provider.strip()}'. Available providers: {avail_provs}."
-                ),
-                "files_touched": [],
-                "exec_ran": False,
-                "steps": 0,
-                "attempts": [],
-                "duration_s": 0.0,
-                "cost_usd": 0.0,
-            }
-            return CallToolResult(
-                content=[TextContent(type="text", text=_format_result_text(err_res))],
-                structured_content=err_res,
-            )
+    _resolved_prov, _prov_cfg = resolve_provider(effective_prov)
+    if not _prov_cfg:
+        err_res = {
+            **_err_base,
+            "message": (
+                f"Unknown provider '{effective_prov}'. Available providers: {avail_provs}."
+            ),
+        }
+        return CallToolResult(
+            content=[TextContent(type="text", text=_format_result_text(err_res))],
+            structured_content=err_res,
+        )
+    provider = _resolved_prov
     edge_exec = None
     if resolve_edge_executor is not None and workspace_dir and str(workspace_dir).strip():
         edge_exec = resolve_edge_executor(str(workspace_dir).strip())

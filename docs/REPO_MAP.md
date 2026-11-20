@@ -26,7 +26,7 @@ targeted + integration tests.
 | Module | File | Imported By (modules) | Direct Tests |
 |---|---|---:|---:|
 | `botex.tools.security` | `botex/tools/security.py` | 38 | 9 |
-| `botex.server.config` | `botex/server/config.py` | 23 | 20 |
+| `botex.server.config` | `botex/server/config.py` | 24 | 20 |
 | `botex.memory.memory` | `botex/memory/memory.py` | 9 | 5 |
 | `botex.providers` | `botex/providers/__init__.py` | 8 | 12 |
 | `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 5 |
