@@ -2394,16 +2394,15 @@ async def create_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Task prompt exceeds maximum allowed length (65536 characters).",
         )
-    has_model = bool(req.model and req.model.strip())
     has_provider = bool(req.provider and req.provider.strip())
     env_prov = os.environ.get("BOTEX_PROVIDER", "").strip()
-    if has_model and not has_provider and not env_prov:
+    if not has_provider and not env_prov:
         avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Explicit 'provider' is required when 'model' ('{req.model.strip()}') is specified. "
-                f"Specify one of: {avail_provs}."
+                "Explicit 'provider' is required — delegation without one "
+                f"silently routes to paid 'openrouter'. Specify one of: {avail_provs}."
             ),
         )
     if has_provider:

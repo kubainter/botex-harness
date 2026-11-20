@@ -864,7 +864,7 @@ def test_async_task_registry():
         )
 
     async def exercise():
-        payload = await server.start_task("background test")
+        payload = await server.start_task("background test", provider="openrouter")
         task_id = payload["task_id"]
         assert payload["status"] == "QUEUED"
         await asyncio.sleep(0.02)
@@ -903,10 +903,12 @@ def test_dcp_list_tasks_and_collection():
         )
 
     async def exercise():
-        payload = await server.start_task("collect me", origin="tester@host-a")
+        payload = await server.start_task(
+            "collect me", provider="openrouter", origin="tester@host-a"
+        )
         done_id = payload["task_id"]
         await asyncio.sleep(0.02)
-        slow_id = (await server.start_task("hang"))["task_id"]
+        slow_id = (await server.start_task("hang", provider="openrouter"))["task_id"]
 
         # Wait for the fast task to reach a terminal state without calling
         # get_task_status — a terminal delivery marks the entry collected.
@@ -1730,7 +1732,9 @@ def test_mcp_structured_output():
             }
 
         with patch.object(server, "run_botex_task", fake_engine):
-            res = await server.mcp.call_tool("run_subagent", {"task": "x"})
+            res = await server.mcp.call_tool(
+                "run_subagent", {"task": "x", "provider": "openrouter"}
+            )
         assert res.content[0].text.startswith("[SUCCESS]")
         assert res.structured_content["status"] == "DONE"
         assert res.structured_content["files_touched"] == ["a.py"]

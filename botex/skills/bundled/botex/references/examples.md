@@ -11,6 +11,7 @@
   "files": ["src/auth/jwt.py"],
   "mode": "readonly",
   "recipe": "security-reviewer",
+  "provider": "openrouter-free",
   "profile": "fast",
   "api_key": ""
 }
@@ -24,6 +25,7 @@
   "workspace_dir": "C:/Projects/my-app",
   "files": ["src/auth/register.py"],
   "mode": "edit",
+  "provider": "openrouter-free",
   "profile": "coding",
   "api_key": ""
 }
@@ -39,6 +41,7 @@
   "mode": "edit",
   "verify_command": "pytest tests/test_billing.py",
   "allow_exec": true,
+  "provider": "openrouter-free",
   "profile": "coding",
   "api_key": ""
 }
@@ -53,6 +56,7 @@
   "workspace_dir": "C:/Projects/my-app",
   "files": ["src/db/migrations/"],
   "mode": "edit",
+  "provider": "openrouter-free",
   "profile": "coding",
   "api_key": ""
 }

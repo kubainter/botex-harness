@@ -705,7 +705,9 @@ async def start_task(
     ] = "",
     provider: Annotated[
         str,
-        Field(description="openrouter|nvidia|google|openrouter-free|ollama. Required with model."),
+        Field(
+            description="openrouter|nvidia|google|openrouter-free|ollama. REQUIRED — empty silently routes to paid openrouter."
+        ),
     ] = "",
     mode: Annotated[
         str, Field(description="readonly|edit|destructive|full (empty = config).")
@@ -751,20 +753,15 @@ async def start_task(
 ) -> dict[str, Any]:
     """Async version of `run_subagent`: queues a task and returns `{task_id, status: "QUEUED"}` for `get_task_status`."""
     _cleanup_tasks()
-    if (
-        model
-        and model.strip()
-        and not (provider and provider.strip())
-        and not os.environ.get("BOTEX_PROVIDER", "").strip()
-    ):
+    if not (provider and provider.strip()) and not os.environ.get("BOTEX_PROVIDER", "").strip():
         avail_provs = ", ".join((load_config().get("providers") or {}).keys())
         return {
             "ok": False,
             "status": "CONFIG_ERROR",
             "failure_kind": "security_or_policy_block",
             "message": (
-                f"Explicit 'provider' is required when 'model' ('{model.strip()}') is specified. "
-                f"Specify one of: {avail_provs}."
+                "Explicit 'provider' is required — delegation without one "
+                f"silently routes to paid 'openrouter'. Specify one of: {avail_provs}."
             ),
         }
     if provider and provider.strip():
@@ -967,7 +964,9 @@ async def run_subagent(
     ] = "",
     provider: Annotated[
         str,
-        Field(description="openrouter|nvidia|google|openrouter-free|ollama. Required with model."),
+        Field(
+            description="openrouter|nvidia|google|openrouter-free|ollama. REQUIRED — empty silently routes to paid openrouter."
+        ),
     ] = "",
     mode: Annotated[
         str, Field(description="readonly|edit|destructive|full ('readonly' is hard read-only).")
@@ -1012,20 +1011,15 @@ async def run_subagent(
     origin: str = "",
 ) -> Annotated[CallToolResult, SubagentTaskResult]:
     """Run BoteX synchronously inside `workspace_dir`; call `recommend_models` first if model is unspecified (`ok` is true only when `status == DONE`)."""
-    if (
-        model
-        and model.strip()
-        and not (provider and provider.strip())
-        and not os.environ.get("BOTEX_PROVIDER", "").strip()
-    ):
+    if not (provider and provider.strip()) and not os.environ.get("BOTEX_PROVIDER", "").strip():
         avail_provs = ", ".join((load_config().get("providers") or {}).keys())
         err_res = {
             "ok": False,
             "status": "CONFIG_ERROR",
             "failure_kind": "security_or_policy_block",
             "message": (
-                f"Explicit 'provider' is required when 'model' ('{model.strip()}') is specified. "
-                f"Specify one of: {avail_provs}."
+                "Explicit 'provider' is required — delegation without one "
+                f"silently routes to paid 'openrouter'. Specify one of: {avail_provs}."
             ),
             "files_touched": [],
             "exec_ran": False,
