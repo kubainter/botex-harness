@@ -458,18 +458,14 @@ DEFAULTS: Dict[str, Any] = {
         "timeout_s": 120,
         "max_output_bytes": 20000,
     },
-    # OpenTelemetry export (Stage 4.8): disabled by default — every span is
-    # a NullSpan until an operator opts in AND installs the `otel` extra.
-    # exporter: none | otlp | console; endpoint falls back to
-    # OTEL_EXPORTER_OTLP_ENDPOINT; OTEL_SDK_DISABLED always wins.
+    # OpenTelemetry export: NullSpan until enabled + otel extra installed (OTEL_SDK_DISABLED wins).
     "tracing": {
         "enabled": False,
         "exporter": "none",
         "endpoint": "",
         "sample_ratio": 1.0,
     },
-    # Context-Guard: large tool output is offloaded to the Memory Vault and
-    # replaced by a failure-aware preview + Vault reference.
+    # Offload large tool output to Memory Vault, returning failure-aware preview + ref.
     "context_guard": {
         "enabled": True,
         "threshold_bytes": 2048,
@@ -485,7 +481,7 @@ DEFAULTS: Dict[str, Any] = {
         "analytics_file": ".agent_analytics.json",
         "global_memory_dir": "~/.botex/memory",
         # Third READ-ONLY search root for memory scope "swarm"/"all"
-        # (arena-recall S.3). Empty = OFF — no implicit cross-workspace
+        # Empty = OFF — no implicit cross-workspace
         # reads; write tools never inherit this root.
         "swarm_memory_dir": "",
         # Cloud Soul store (botex/core/swarm_store.py). Empty = default
@@ -496,20 +492,14 @@ DEFAULTS: Dict[str, Any] = {
         "env_file": "",
     },
     "app": {
-        # Optional HTTP-Referer sent to OpenRouter for app attribution.
-        # The product name ("BoteX") is NOT configurable — it is the harness'
-        # released identity.
+        # Optional HTTP-Referer for OpenRouter app attribution (product name "BoteX" is fixed).
         "referer": "",
     },
     "analytics": {
-        # When False (default), persisted run summaries are secret-masked and
-        # truncated to a preview; the full text survives only as a SHA-256 hash.
-        # When True, the full (still secret-masked) summary text is stored.
+        # False = secret-masked preview + SHA-256 hash; True = full secret-masked summary.
         "store_full_text": False,
         "preview_chars": 160,
-        # Periodic local-LLM digest (e.g. Bielik via Ollama). Disabled by default;
-        # the prompt stays under ~500 tokens because small ARM-class local models
-        # cannot process large payloads. Manual trigger: POST /api/analytics/digest.
+        # Periodic local-LLM digest (<500 tok prompt for small local models); manual: POST /api/analytics/digest.
         "digest_enabled": False,
         "digest_interval_s": 3600,
         "digest_provider": "",
@@ -518,7 +508,7 @@ DEFAULTS: Dict[str, Any] = {
         "digest_timeout_s": 180,
     },
     "memory": {
-        # Recall cascade tiers (arena-recall S.2/S.4). Schema v2 invariants:
+        # Recall cascade tiers. Schema v2 invariants:
         # local free tier first, quota tiers as fallback. Env vars
         # BOTEX_RECALL_*_MODEL remain per-run overrides.
         "recall": {
@@ -543,13 +533,13 @@ DEFAULTS: Dict[str, Any] = {
         }
     },
     "cloud": {
-        # VPS containment (arena-recall S.6): realpath allowlist for
+        # VPS containment: realpath allowlist for
         # workspace_dir on memory routes over non-loopback callers.
         # Empty list = default_workspace only. Loopback callers are
         # unrestricted (local MCP sessions keep today's semantics).
         "allowed_workspaces": []
     },
-    # Cloud Soul (Plan 035 / Plan 040): per-bot brief token budget (est. ceil(len/4)),
+    # Cloud Soul: per-bot brief token budget (est. ceil(len/4)),
     # default host-lease TTL when ttl_s=None, and Background Brief Curator trigger thresholds.
     "bots": {
         "brief_budget_tokens": 250,
@@ -562,13 +552,7 @@ DEFAULTS: Dict[str, Any] = {
         "brief_review_max_per_tick": 3,
     },
     "security": {
-        # Browser drive-by guard on mutating /api/* routes and /api/chat/ws.
-        # Browsers always send an Origin header on cross-origin writes and WS
-        # handshakes; headless clients (curl/agents) omit it, so the check
-        # activates only when Origin is present. [] = the Origin host must
-        # equal the request Host host (same-origin PWA; the Vite dev server
-        # on a different port of the same host still passes). Exact origin
-        # entries allow additional cross-origin PWAs. ["*"] = opt-out.
+        # Browser Origin guard on mutating /api/* & /api/chat/ws (active when Origin header present; [] = same host, ["*"] = opt-out).
         "allowed_origins": [],
     },
     "ui": {

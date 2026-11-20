@@ -1627,6 +1627,15 @@ def _sanitize_mcp_client_origin(raw: str) -> str:
     return sanitize_origin_claim(raw) or "cloud_api"
 
 
+def _request_origin(request: Request) -> str:
+    """Sanitized '<agent>@<host>' provenance for the calling HTTP request."""
+    headers = {
+        key.encode("latin1", errors="ignore"): value.encode("latin1", errors="ignore")
+        for key, value in request.headers.items()
+    }
+    return sanitize_origin_claim(_extract_mcp_origin_from_headers(headers)) or "cloud_api"
+
+
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
@@ -2352,6 +2361,7 @@ async def _run_task_worker(task_id: str, req: TaskCreateRequest) -> None:
 @app.post("/api/tasks", status_code=status.HTTP_202_ACCEPTED)
 async def create_task(
     req: TaskCreateRequest,
+    request: Request,
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ) -> Dict[str, Any]:
     """Delegate autonomous code editing task in the background with WAN idempotency protection."""
@@ -2420,6 +2430,7 @@ async def create_task(
     entry = {
         "task_id": task_id,
         "task": mask_secrets(req.task),  # ZDR: scrub sensitive tokens
+        "origin": _request_origin(request),
         # Original request params (masked) — enables retry/clone from the PWA.
         "request": botex_server.mask_secrets_recursive(req.model_dump(exclude_none=True)),
         "status": "QUEUED",
@@ -2449,29 +2460,65 @@ async def create_task(
 
 
 @app.get("/api/tasks")
-async def list_tasks() -> Dict[str, Any]:
-    """List all registered background tasks."""
+async def list_tasks(
+    uncollected_only: bool = Query(default=False),
+    origin: str = Query(default=""),
+) -> Dict[str, Any]:
+    """List registered background tasks (DCP sweep surface).
+
+    `uncollected_only` narrows to terminal tasks whose result payload was
+    never delivered (collected != true); `origin` filters by exact stored
+    dispatch origin.
+    """
     await asyncio.to_thread(_load_tasks_persistent)
     tasks = []
     for tid, entry in _TASKS.items():
+        status = entry.get("status")
+        terminal = status in {"DONE", "FAILED", "CANCELLED"}
+        if uncollected_only and (not terminal or entry.get("collected") is True):
+            continue
+        if origin and entry.get("origin") != origin:
+            continue
         tasks.append(
             {
                 "task_id": tid,
-                "status": entry.get("status"),
+                "status": status,
                 "created_at": entry.get("created_at"),
                 "finished_at": entry.get("finished_at"),
+                "origin": entry.get("origin", ""),
+                "collected": entry.get("collected") is True,
             }
         )
     return {"tasks": tasks, "count": len(tasks)}
 
 
 @app.get("/api/tasks/{task_id}")
-async def get_task(task_id: str) -> Dict[str, Any]:
-    """Get status and structured result of a background task."""
+async def get_task(task_id: str, request: Request) -> Dict[str, Any]:
+    """Get status and structured result of a background task.
+
+    DCP: returning a terminal payload marks the task `collected`
+    (accounting-only; never gates access) and best-effort persists the
+    flag so it survives restarts.
+    """
     clean_tid = sanitize_identifier(task_id)
     if not clean_tid or clean_tid not in _TASKS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     entry = _TASKS[clean_tid]
+    if (
+        entry.get("status") in {"DONE", "FAILED", "CANCELLED"}
+        and entry.get("collected") is not True
+    ):
+        # Mark only as the terminal payload is actually returned.
+        entry["collected"] = True
+        entry["collected_at"] = time.time()
+        entry["collected_by"] = _request_origin(request)
+        # Re-persist so the flag survives restarts (the worker's finally-save
+        # ran before collection). Edge-dispatched tasks persist to the
+        # default tasks dir, mirroring the worker's persist_ws decision.
+        persist_ws = (entry.get("request") or {}).get("workspace_dir") or ""
+        if _resolve_active_edge_executor(persist_ws) is not None:
+            persist_ws = ""
+        await asyncio.to_thread(_save_task_persistent, clean_tid, entry, persist_ws)
     return {
         "task_id": clean_tid,
         "status": entry.get("status"),
@@ -2485,6 +2532,10 @@ async def get_task(task_id: str) -> Dict[str, Any]:
         "progress": entry.get("progress"),
         "session_id": entry.get("session_id") or (entry.get("result_data") or {}).get("session_id"),
         "turns": entry.get("turns") or [],
+        "origin": entry.get("origin", ""),
+        "collected": entry.get("collected") is True,
+        "collected_at": entry.get("collected_at"),
+        "collected_by": entry.get("collected_by", ""),
     }
 
 
