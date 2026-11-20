@@ -1689,15 +1689,25 @@ def provider_forbids_stream(
 
     Cloudflare Workers AI drops ``tool_calls`` deltas on streamed
     responses, so a stray ``stream: true`` — from config or a caller —
-    must never reach the wire. Detected by canonical name, any alias,
-    or the configured ``base_url`` so un-resolved aliases still fail
-    closed.
+    must never reach the wire. Detected via the resolved provider class
+    or the configured endpoint's hostname so un-resolved aliases still
+    fail closed.
     """
-    name = (provider_name or "").lower()
-    if "cloudflare" in name or "workers-ai" in name or "workers_ai" in name:
-        return True
+    name = (provider_name or "").lower().strip()
+    if name:
+        try:
+            if issubclass(ProviderRegistry.get_provider_class(name), CloudflareWorkersAIProvider):
+                return True
+        except Exception:
+            pass
     if isinstance(provider_cfg, dict):
-        return "cloudflare.com" in str(provider_cfg.get("base_url") or "")
+        base = str(provider_cfg.get("base_url") or "").strip()
+        if base:
+            try:
+                host = (urllib.parse.urlparse(base).hostname or "").lower()
+            except ValueError:
+                host = ""
+            return host == "api.cloudflare.com" or host.endswith(".cloudflare.com")
     return False
 
 

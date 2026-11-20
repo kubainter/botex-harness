@@ -230,7 +230,17 @@ def test_provider_forbids_stream_cloudflare():
 
     assert provider_forbids_stream("cloudflare") is True
     assert provider_forbids_stream("workers-ai") is True
-    assert provider_forbids_stream("cf_workers_ai") is True
+    assert provider_forbids_stream("workers_ai") is True
+    assert provider_forbids_stream("cf-workers-ai") is True
+    # Unregistered alias names resolve upstream; the endpoint hostname is
+    # the fail-closed backstop for them.
+    assert (
+        provider_forbids_stream(
+            "cf_workers_ai",
+            {"base_url": "https://api.cloudflare.com/client/v4/accounts/x/ai/v1"},
+        )
+        is True
+    )
     assert (
         provider_forbids_stream(
             "custom", {"base_url": "https://api.cloudflare.com/client/v4/x/ai/v1"}
