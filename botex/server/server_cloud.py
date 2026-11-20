@@ -2078,12 +2078,20 @@ async def get_models(
     provider: Optional[str] = Query(default=None),
     force_refresh: bool = Query(default=False),
 ) -> List[Dict[str, Any]]:
-    """Return consolidated model catalog across configured providers (openrouter, openrouter-free, nvidia, ollama, google)."""
+    """Return consolidated model catalog across configured providers (openrouter, openrouter-free, nvidia, ollama, google, groq, cloudflare)."""
     if provider and provider.strip():
         norm_prov, _ = resolve_provider(provider.strip())
         providers_seq = (norm_prov.lower(),)
     else:
-        providers_seq = ("openrouter", "openrouter-free", "nvidia", "ollama", "google")
+        providers_seq = (
+            "openrouter",
+            "openrouter-free",
+            "nvidia",
+            "ollama",
+            "google",
+            "groq",
+            "cloudflare",
+        )
     cfg = botex_server.load_config() if force_refresh else _cfg
     models = await asyncio.to_thread(
         get_consolidated_models,

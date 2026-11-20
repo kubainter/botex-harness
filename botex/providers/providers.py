@@ -241,6 +241,7 @@ _REASONING_SLUG_TOKENS = (
     "opus-4",
     "gemini-2.5",
     "deepseek-v3.2",
+    "gpt-oss",
 )
 
 
@@ -1341,6 +1342,183 @@ class GoogleAIStudioProvider(BaseProvider):
         return status_code_of(exc) == 503 and "overload" in str(exc).lower()
 
 
+class GroqProvider(BaseProvider):
+    """Adapter for GroqCloud's OpenAI-compatible API.
+
+    Endpoint: ``https://api.groq.com/openai/v1``. Key resolution follows
+    the base contract: configured ``api_key_env`` (default
+    ``GROQ_API_KEY``), then ``secrets.<name>_api_key``. Free-plan limits
+    are per-model RPM/RPD/TPM/TPD enforced org-wide — declared under
+    ``rate_limits.groq``; there is no credits API. Unsupported OpenAI
+    fields (``messages[].name``, ``logprobs``, ``n != 1``) are rejected
+    upstream with HTTP 400 — the engine never emits them.
+    """
+
+    default_base_url: str = "https://api.groq.com/openai/v1"
+    default_api_key_env: str = "GROQ_API_KEY"
+
+    def get_credits(self, api_key: Optional[str] = None) -> CreditsInfo:
+        return CreditsInfo(
+            supported=False,
+            provider=self.name,
+            label="GroqCloud (no credits API)",
+        )
+
+
+class CloudflareWorkersAIProvider(BaseProvider):
+    """Adapter for Cloudflare Workers AI's OpenAI-compatible endpoint.
+
+    Endpoint: ``https://api.cloudflare.com/client/v4/accounts/
+    {account_id}/ai/v1`` — ``{account_id}`` resolves from the provider
+    config ``account_id`` key, then the ``CLOUDFLARE_ACCOUNT_ID`` env
+    var; an explicit literal ``base_url`` without the placeholder is
+    used verbatim. Auth is ``Authorization: Bearer <token>`` via
+    ``api_key_env`` (default ``CLOUDFLARE_API_TOKEN``, ``CF_API_TOKEN``
+    accepted as fallback).
+
+    Model ids are namespaced (``@cf/<author>/<model>``). The free
+    allocation is 10,000 Neurons/day (resets 00:00 UTC); over-quota
+    requests fail with HTTP 429 rather than billing. There is no
+    credits API. ``fetch_catalog`` tries the OpenAI-style ``/models``
+    route first, then the native ``/ai/models/search`` endpoint.
+    """
+
+    default_api_key_env: str = "CLOUDFLARE_API_TOKEN"
+    _ACCOUNT_ID_PLACEHOLDER = "{account_id}"
+    _ACCOUNT_ID_ENV = "CLOUDFLARE_ACCOUNT_ID"
+    _BASE_URL_TEMPLATE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+
+    @property
+    def base_url(self) -> str:
+        raw = str(self.config.get("base_url") or self._BASE_URL_TEMPLATE).strip()
+        if self._ACCOUNT_ID_PLACEHOLDER in raw:
+            acct = self._account_id()
+            # Keep the placeholder when unresolved so _require_account_id
+            # can still detect the missing account id.
+            if acct:
+                return raw.replace(self._ACCOUNT_ID_PLACEHOLDER, acct)
+        return raw
+
+    def _account_id(self) -> str:
+        cfg_id = str(self.config.get("account_id") or "").strip()
+        if cfg_id:
+            return cfg_id
+        return str(os.environ.get(self._ACCOUNT_ID_ENV) or "").strip()
+
+    def _require_account_id(self) -> None:
+        if self._ACCOUNT_ID_PLACEHOLDER in self.base_url:
+            raise ValueError(
+                "Cloudflare Workers AI provider requires an account id: set "
+                "providers.cloudflare.account_id in botex.config(.local).json "
+                f"or the {self._ACCOUNT_ID_ENV} env var."
+            )
+
+    def get_client(self, *args: Any, **kwargs: Any) -> Any:
+        self._require_account_id()
+        # BaseProvider.get_client prefers an explicit provider_cfg["base_url"];
+        # inject the account-id-resolved URL so the {account_id} placeholder
+        # never reaches the HTTP client.
+        if "provider_cfg" in kwargs:
+            pcfg = dict(kwargs["provider_cfg"] or {})
+            pcfg["base_url"] = self.base_url
+            kwargs["provider_cfg"] = pcfg
+        elif len(args) >= 3:
+            args = list(args)
+            pcfg = dict(args[2] or {})
+            pcfg["base_url"] = self.base_url
+            args[2] = pcfg
+        else:
+            kwargs["provider_cfg"] = {"base_url": self.base_url}
+        return super().get_client(*args, **kwargs)
+
+    def resolve_api_key(
+        self,
+        explicit_key: Optional[str] = None,
+        *args: Any,
+        secrets_cfg: Optional[Dict[str, Any]] = None,
+        explicit: Optional[str] = None,
+        provider_cfg: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> str:
+        key = explicit_key if explicit_key is not None else explicit
+        if key:
+            return str(key)
+        key_env = (
+            (provider_cfg or {}).get("api_key_env")
+            or self.config.get("api_key_env")
+            or self.api_key_env
+        )
+        for env_name in (key_env, "CLOUDFLARE_API_TOKEN", "CF_API_TOKEN"):
+            val = os.environ.get(env_name)
+            if val:
+                return str(val)
+        resolved = super().resolve_api_key(
+            explicit_key,
+            *args,
+            secrets_cfg=secrets_cfg,
+            explicit=explicit,
+            provider_cfg=provider_cfg,
+            **kwargs,
+        )
+        if resolved:
+            return resolved
+        # Cross-name secrets aliases — a provider registered under the
+        # "workers-ai"/"cf-workers-ai" alias still finds the canonical key.
+        sec = secrets_cfg or {}
+        for sec_key in ("cloudflare_api_key", "workers_ai_api_key", "cf_api_key"):
+            found = sec.get(sec_key)
+            if found:
+                return str(found)
+        return ""
+
+    def fetch_catalog(
+        self,
+        api_key: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> List[Dict[str, Any]]:
+        """Fetch the model list, falling back to the native search route.
+
+        The OpenAI-style ``GET {base_url}/models`` is tried first; when
+        the account/plan does not expose it, the native
+        ``GET {account_base}/ai/models/search`` endpoint is queried and
+        its ``result[].name`` values normalized to OpenAI ``{data: [...]}``
+        entries so catalog parsing stays shape-agnostic.
+        """
+        self._require_account_id()
+        try:
+            return super().fetch_catalog(api_key=api_key, timeout=timeout)
+        except Exception:
+            pass
+        account_base = self.base_url.rstrip("/")
+        if account_base.endswith("/ai/v1"):
+            account_base = account_base[: -len("/ai/v1")]
+        url = f"{account_base}/ai/models/search"
+        resolved_key = self.resolve_api_key(explicit_key=api_key)
+        headers = {"Accept": "application/json"}
+        if resolved_key:
+            headers["Authorization"] = f"Bearer {resolved_key}"
+        from botex.providers.http_pool import get_sync_client
+
+        resp = get_sync_client().get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json() or {}
+        items = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return []
+        return [
+            {"id": item["name"]}
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
+        ]
+
+    def get_credits(self, api_key: Optional[str] = None) -> CreditsInfo:
+        return CreditsInfo(
+            supported=False,
+            provider=self.name,
+            label="Cloudflare Workers AI (no credits API)",
+        )
+
+
 class GenericOpenAIProvider(BaseProvider):
     """Adapter for generic OpenAI-compatible API endpoints."""
 
@@ -1582,6 +1760,11 @@ class ProviderRegistry:
         cls.register("generic_openai", GenericOpenAIProvider)
         cls.register("generic", GenericOpenAIProvider)
         cls.register("openai", GenericOpenAIProvider)
+        cls.register("groq", GroqProvider)
+        cls.register("cloudflare", CloudflareWorkersAIProvider)
+        cls.register("workers-ai", CloudflareWorkersAIProvider)
+        cls.register("workers_ai", CloudflareWorkersAIProvider)
+        cls.register("cf-workers-ai", CloudflareWorkersAIProvider)
 
 
 # Initialize default registrations

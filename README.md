@@ -56,9 +56,12 @@ BoteX handles provider keys internally, so calling MCP clients don't need to pas
 ```env
 OPENROUTER_API_KEY=sk-or-v1-...
 # GEMINI_API_KEY=AIza...        # only for provider "google" (GOOGLE_API_KEY works as fallback)
+# GROQ_API_KEY=gsk_...          # only for provider "groq"
+# CLOUDFLARE_API_TOKEN=...      # only for provider "cloudflare" (Workers AI)
+# CLOUDFLARE_ACCOUNT_ID=...     # account id for the cloudflare provider (or providers.cloudflare.account_id)
 ```
 
-*Key lookup order: `OPENROUTER_API_KEY` env var → local `.env` → custom `paths.env_file` → `botex.config.local.json` (gitignored). For provider `google`, the key resolves via `GEMINI_API_KEY` → `GOOGLE_API_KEY` → `secrets.google_api_key` in config.*
+*Key lookup order: `OPENROUTER_API_KEY` env var → local `.env` → custom `paths.env_file` → `botex.config.local.json` (gitignored). For provider `google`, the key resolves via `GEMINI_API_KEY` → `GOOGLE_API_KEY` → `secrets.google_api_key` in config; `cloudflare` resolves via `CLOUDFLARE_API_TOKEN` → `CF_API_TOKEN` → `secrets.cloudflare_api_key`.*
 
 ### 3. Connect to your MCP client
 
@@ -180,7 +183,7 @@ BoteX provides an in-process, deterministic Context Inclusion Layer (`botex/core
 | `task` | *(required)* | Clear description of what needs to be implemented or fixed. |
 | `files` | `[]` | List of primary target files to nudge the agent toward (target hints, not a security allowlist; `workspace_dir` is the hard boundary). |
 | `workspace_dir` | `""` | Root directory the agent is restricted to. Empty = `engine.default_workspace` from config, else the server's current directory. For Remote SSE (`botex cloud`), `workspace_dir` is on the BoteX host. |
-| `provider` | `""` | API provider from `botex.config.json` (`openrouter`, `nvidia`, `google`, `openrouter-free`, `ollama`; empty = configured default or `BOTEX_PROVIDER`). |
+| `provider` | `""` | API provider from `botex.config.json` (`openrouter`, `nvidia`, `google`, `openrouter-free`, `ollama`, `groq`, `cloudflare`; empty = configured default or `BOTEX_PROVIDER`). |
 | `model` | `""` | Explicit provider model ID; overrides `profile`. |
 | `profile` | `""` | Model profile from `botex.config.json` (`default`, `coding`, `auto-beta`, `review`, `fast`). Empty = picked per mode via `engine.mode_profiles`. |
 | `api_key` | `""` | Provider API key per-request (keep empty in examples; do not pass secrets in task or memory). |

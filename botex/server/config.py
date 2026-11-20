@@ -258,6 +258,171 @@ DEFAULTS: Dict[str, Any] = {
                 "fast": ["gemini-2.5-flash"],
             },
         },
+        # GroqCloud (Groq) via its OpenAI-compatible endpoint
+        # (https://console.groq.com/docs/openai). Free-plan limits are
+        # per-model RPM/RPD/TPM/TPD enforced org-wide — mirrored under
+        # rate_limits.groq; there is no credits API and /models
+        # publishes no pricing, so free_tier keeps the pricing gate off
+        # (flip to false on a paid Developer plan). The denylist keeps
+        # non-chat families (speech/guard/safeguard) and enterprise-gated
+        # slugs out of agent profiles. reasoning_effort caps hidden
+        # thinking on the gpt-oss reasoning models, same trade-off as
+        # the google provider.
+        "groq": {
+            "default": False,
+            "base_url": "https://api.groq.com/openai/v1",
+            "api_key_env": "GROQ_API_KEY",
+            "stream": True,
+            "free_tier": True,
+            "zdr": {"enabled": False},
+            "extra_body": {"reasoning_effort": "low"},
+            "retry": {"enabled": True, "max_waits": 2, "max_wait_s": 60.0, "jitter_s": 1.5},
+            "denylist": [
+                "*whisper*",
+                "*orpheus*",
+                "*prompt-guard*",
+                "*safeguard*",
+                "*guard*",
+                "*tts*",
+                "*speech*",
+                "*audio*",
+                "*transcribe*",
+                "*playai*",
+                "*lyria*",
+                "*music*",
+                "llama-3.1-8b-instant",
+                "llama-3.3-70b-versatile",
+                "meta-models/*",
+                "minimaxai/*",
+            ],
+            "profile_denylists": {},
+            "capabilities": {
+                "openai/gpt-oss-120b": {"supports_tools": True, "context_length": 131072},
+                "openai/gpt-oss-20b": {"supports_tools": True, "context_length": 131072},
+                "qwen/qwen3.8-27b": {"supports_tools": True, "context_length": 131072},
+            },
+            "models": {
+                "default": "openai/gpt-oss-120b",
+                "coding": "openai/gpt-oss-120b",
+                "fast": "openai/gpt-oss-20b",
+            },
+            "model_fallbacks": {
+                "default": ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
+                "coding": ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
+                "fast": ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"],
+            },
+        },
+        # Cloudflare Workers AI via its OpenAI-compatible endpoint
+        # (https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/).
+        # {account_id} resolves from providers.cloudflare.account_id or the
+        # CLOUDFLARE_ACCOUNT_ID env var — never commit a real account id.
+        # Free allocation: 10,000 Neurons/day (resets 00:00 UTC); over-quota
+        # calls fail HTTP 429 instead of billing. The denylist keeps
+        # non-chat families (embeddings/image/TTS/ASR/translation/
+        # classification/vision-only/lora-bases/guard) and Workers-Paid-
+        # gated frontier models (@cf/moonshotai/*, @cf/zai-org/glm-5*,
+        # @cf/deepseek-ai/deepseek-v4*, @cf/thinkingmachines/*) out of
+        # agent profiles; clef/clairic decision models are rejected by
+        # is_decisions_model, not the denylist.
+        "cloudflare": {
+            "default": False,
+            "base_url": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+            "api_key_env": "CLOUDFLARE_API_TOKEN",
+            "account_id": "",
+            "free_tier": True,
+            "zdr": {"enabled": False},
+            "extra_body": {},
+            "retry": {"enabled": True, "max_waits": 2, "max_wait_s": 60.0, "jitter_s": 1.5},
+            "denylist": [
+                "*embedding*",
+                "*embed*",
+                "@cf/baai/*",
+                "@cf/plamo/*",
+                "@cf/qwen/qwen3-embedding*",
+                "@cf/google/embeddinggemma*",
+                "@cf/black-forest-labs/*",
+                "@cf/bytedance/*",
+                "@cf/leonardo/*",
+                "@cf/runwayml/*",
+                "@cf/stabilityai/*",
+                "@cf/lykon/*",
+                "*flux*",
+                "@cf/deepgram/*",
+                "@cf/myshell/*",
+                "@cf/openai/whisper*",
+                "*whisper*",
+                "*tts*",
+                "*speech*",
+                "*audio*",
+                "*aura*",
+                "*melotts*",
+                "@cf/pipecat/*",
+                "@cf/ai4bharat/*",
+                "*m2m100*",
+                "*indictrans*",
+                "@cf/huggingface/*",
+                "*distilbert*",
+                "*resnet*",
+                "@cf/moondream/*",
+                "*llava*",
+                "*lora",
+                "@cf/meta/llama-2-*",
+                "@cf/meta/llama-guard*",
+                "*guard*",
+                "@cf/swiss-ai/*",
+                "@cf/utter-project/*",
+                "@cf/moonshotai/*",
+                "@cf/zai-org/glm-5*",
+                "@cf/deepseek-ai/deepseek-v4*",
+                "@cf/thinkingmachines/*",
+            ],
+            "profile_denylists": {},
+            "capabilities": {
+                "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {
+                    "supports_tools": True,
+                    "context_length": 131072,
+                },
+                "@cf/meta/llama-3.1-8b-instruct-fp8": {
+                    "supports_tools": True,
+                    "context_length": 131072,
+                },
+                "@cf/qwen/qwen2.5-coder-32b-instruct": {
+                    "supports_tools": True,
+                    "context_length": 32768,
+                },
+                "@cf/qwen/qwen3-30b-a3b-fp8": {
+                    "supports_tools": True,
+                    "context_length": 32768,
+                },
+                "@cf/qwen/qwen3.8-27b": {
+                    "supports_tools": True,
+                    "context_length": 131072,
+                },
+                "@cf/openai/gpt-oss-120b": {
+                    "supports_tools": True,
+                    "context_length": 131072,
+                },
+                "@cf/openai/gpt-oss-20b": {
+                    "supports_tools": True,
+                    "context_length": 131072,
+                },
+                "@cf/zai-org/glm-4.7-flash": {
+                    "supports_tools": True,
+                    "context_length": 131072,
+                },
+            },
+            "models": {
+                "default": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                "coding": "@cf/qwen/qwen2.5-coder-32b-instruct",
+                "fast": "@cf/meta/llama-3.1-8b-instruct-fp8",
+            },
+            "model_fallbacks": {
+                "default": ["@cf/qwen/qwen3-30b-a3b-fp8", "@cf/zai-org/glm-4.7-flash"],
+                "coding": ["@cf/qwen/qwen3.8-27b", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
+                "fast": ["@cf/qwen/qwen3-30b-a3b-fp8", "@cf/zai-org/glm-4.7-flash"],
+            },
+            "decisions_models": ["@cf/cloudflare/clef*", "@cf/cloudflare/clairic*"],
+        },
         "ollama": {
             "default": False,
             "base_url": "http://127.0.0.1:11434/v1",
@@ -813,6 +978,18 @@ _PROVIDER_ALIASES: Dict[str, str] = {
     "ollama_local": "ollama",
     "bielik": "ollama",
     "bielik-local": "ollama",
+    "groq": "groq",
+    "groqcloud": "groq",
+    "groq-cloud": "groq",
+    "groq_cloud": "groq",
+    "cloudflare": "cloudflare",
+    "cloudflare-workers-ai": "cloudflare",
+    "cloudflare_workers_ai": "cloudflare",
+    "workers-ai": "cloudflare",
+    "workers_ai": "cloudflare",
+    "cf-workers-ai": "cloudflare",
+    "cf_workers_ai": "cloudflare",
+    "cfai": "cloudflare",
 }
 
 

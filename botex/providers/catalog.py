@@ -557,6 +557,13 @@ _VALID_PROVIDERS_MAP: Dict[str, str] = {
     "google": "google",
     "aistudio": "google",
     "gemini": "google",
+    "groq": "groq",
+    # Cloudflare Workers AI aliases collapse onto the canonical entry.
+    "cloudflare": "cloudflare",
+    "workers-ai": "cloudflare",
+    "workers_ai": "cloudflare",
+    "cf-workers-ai": "cloudflare",
+    "cf_workers_ai": "cloudflare",
 }
 
 _KNOWN_DISPLAY_NAMES: Dict[str, str] = {
@@ -703,7 +710,15 @@ _CONSOLIDATED_MEM_CACHE: Dict[str, Any] = {
 
 
 def get_consolidated_models(
-    providers: Sequence[str] = ("openrouter", "openrouter-free", "nvidia", "ollama", "google"),
+    providers: Sequence[str] = (
+        "openrouter",
+        "openrouter-free",
+        "nvidia",
+        "ollama",
+        "google",
+        "groq",
+        "cloudflare",
+    ),
     config: Optional[Dict[str, Any]] = None,
     cache_file: Optional[Path | str] = None,
     ttl_seconds: float = 300.0,
@@ -728,7 +743,15 @@ def get_consolidated_models(
         if isinstance(p, str) and p.strip().lower() in _VALID_PROVIDERS_MAP
     )
     if not norm_providers:
-        norm_providers = ("openrouter", "openrouter-free", "nvidia", "ollama", "google")
+        norm_providers = (
+            "openrouter",
+            "openrouter-free",
+            "nvidia",
+            "ollama",
+            "google",
+            "groq",
+            "cloudflare",
+        )
 
     if (
         not force_refresh

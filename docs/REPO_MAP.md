@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 71 Python modules (`server.py` + `botex/`), 87 test files (`tests/`).
+- **Codebase footprint:** 71 Python modules (`server.py` + `botex/`), 88 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -26,16 +26,16 @@ targeted + integration tests.
 | Module | File | Imported By (modules) | Direct Tests |
 |---|---|---:|---:|
 | `botex.tools.security` | `botex/tools/security.py` | 38 | 9 |
-| `botex.server.config` | `botex/server/config.py` | 24 | 20 |
+| `botex.server.config` | `botex/server/config.py` | 24 | 21 |
 | `botex.memory.memory` | `botex/memory/memory.py` | 9 | 5 |
 | `botex.providers` | `botex/providers/__init__.py` | 8 | 12 |
-| `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 5 |
-| `botex.providers.denylist` | `botex/providers/denylist.py` | 7 | 5 |
+| `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 6 |
+| `botex.providers.denylist` | `botex/providers/denylist.py` | 7 | 6 |
 | `botex.skills.skills` | `botex/skills/skills.py` | 7 | 2 |
 | `botex.memory` | `botex/memory/__init__.py` | 6 | 20 |
 | `botex.tools.file_tools` | `botex/tools/file_tools.py` | 6 | 2 |
 | `botex.core.context_guard` | `botex/core/context_guard.py` | 5 | 1 |
-| `botex.providers.providers` | `botex/providers/providers.py` | 5 | 7 |
+| `botex.providers.providers` | `botex/providers/providers.py` | 5 | 8 |
 | `botex.tools.net_tools` | `botex/tools/net_tools.py` | 5 | 1 |
 
 ## Domain Dependencies
@@ -118,14 +118,14 @@ targeted + integration tests.
 | `botex/providers/__init__.py` | — | `test_botex.py`, `test_catalog.py`, `test_challenger_m5_empiric.py`, `test_credits_stress.py`, +8 more |
 | `botex/providers/adapters/__init__.py` | — | — |
 | `botex/providers/adapters/zai.py` | `ProviderQuotaExceededError`, `ZaiGLMProvider` | `test_challenger_m8_empirical.py`, `test_e2e_contracts.py`, `test_zai_provider.py` |
-| `botex/providers/analytics.py` | `is_free_model`, `calculate_cost_usd`, `load_analytics`, `save_analytics`, `log_run`, `check_budget_limit`, `+6 more` | `test_analytics.py`, `test_botex.py`, `test_idle_layers_l1.py`, `test_learning_status.py`, +1 more |
+| `botex/providers/analytics.py` | `is_free_model`, `calculate_cost_usd`, `load_analytics`, `save_analytics`, `log_run`, `check_budget_limit`, `+6 more` | `test_analytics.py`, `test_botex.py`, `test_groq_cloudflare_providers.py`, `test_idle_layers_l1.py`, +2 more |
 | `botex/providers/benchmarks.py` | `fetch_openrouter_benchmarks`, `get_recommended_models`, `estimate_task_tier`, `normalize_task_tier`, `resolve_tier_profile` | `test_challenger_m5_empiric.py`, `test_integration.py`, `test_nvidia_streaming.py`, `test_stage_4_6.py`, +2 more |
 | `botex/providers/catalog.py` | `ModelMetadata`, `ModelCatalog`, `get_consolidated_models`, `get_free_tier_failover_candidates` | `test_catalog.py`, `test_challenger_m5_empiric.py`, `test_challenger_m8_empiric.py`, `test_challenger_m8_empirical.py`, +2 more |
-| `botex/providers/denylist.py` | `DenialRecord`, `DenylistFilter`, `matches_pattern`, `get_default_denylist_filter`, `check_model_denylist`, `filter_model_candidates` | `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_denylist.py`, `test_integration.py`, +1 more |
-| `botex/providers/http_pool.py` | `NonClosingAsyncClient`, `get_async_client`, `get_sync_client`, `close_http_pool`, `reset_http_pool` | `test_challenger_m7_concurrency.py`, `test_challenger_m7_empirical.py`, `test_credits_stress.py`, `test_e2e_contracts.py`, +2 more |
+| `botex/providers/denylist.py` | `DenialRecord`, `DenylistFilter`, `matches_pattern`, `get_default_denylist_filter`, `check_model_denylist`, `filter_model_candidates` | `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_denylist.py`, `test_groq_cloudflare_providers.py`, +2 more |
+| `botex/providers/http_pool.py` | `NonClosingAsyncClient`, `get_async_client`, `get_sync_client`, `close_http_pool`, `reset_http_pool` | `test_challenger_m7_concurrency.py`, `test_challenger_m7_empirical.py`, `test_credits_stress.py`, `test_e2e_contracts.py`, +3 more |
 | `botex/providers/pricing.py` | `load_catalog`, `model_price`, `model_supports_tools`, `check_model_tools`, `check_model_price` | `test_botex.py`, `test_providers.py` |
 | `botex/providers/prompt_cache.py` | `CachePolicy`, `resolve_policy`, `apply_prompt_cache`, `map_usage`, `should_disable_cache` | `test_prompt_cache.py` |
-| `botex/providers/providers.py` | `NormalizedToolCall`, `NormalizedUsage`, `NormalizedResponse`, `GenerationStats`, `CreditsInfo`, `BaseProvider`, `+15 more` | `test_challenger_m8_empiric.py`, `test_challenger_m8_empirical.py`, `test_e2e_contracts.py`, `test_http_pool.py`, +3 more |
+| `botex/providers/providers.py` | `NormalizedToolCall`, `NormalizedUsage`, `NormalizedResponse`, `GenerationStats`, `CreditsInfo`, `BaseProvider`, `+17 more` | `test_challenger_m8_empiric.py`, `test_challenger_m8_empirical.py`, `test_e2e_contracts.py`, `test_groq_cloudflare_providers.py`, +4 more |
 | `botex/providers/rate_limiter.py` | `TokenBucket`, `ProviderLimit`, `ProviderRateLimiter`, `parse_rate_limits`, `default_state_path`, `get_rate_limiter`, `+1 more` | `test_idle_layers_l1.py`, `test_rate_limiter.py` |
 | `botex/providers/retry.py` | `CircuitBreakerOpenError`, `ProviderCircuitBreaker`, `resolve_retry_config`, `resolve_circuit_breaker_config`, `status_code_of`, `parse_retry_delay`, `+5 more` | `test_circuit_breaker.py`, `test_idle_layers_l1.py`, `test_integration.py`, `test_retry.py`, +1 more |
 | `botex/providers/wallet.py` | `OpenRouterKeyData`, `OpenRouterCreditsData`, `WalletService`, `parse_openrouter_key_data`, `parse_openrouter_credits_data`, `parse_openrouter_payloads`, `+2 more` | `test_challenger_m5_empiric.py`, `test_challenger_m8_empiric.py`, `test_challenger_m8_empirical.py`, `test_credits_stress.py`, +4 more |
@@ -136,7 +136,7 @@ targeted + integration tests.
 |---|---|---|
 | `botex/server/__init__.py` | — | `test_brief_curator.py`, `test_containment_recall_gate.py`, `test_edge_delegation_api.py`, `test_edge_integration.py`, +5 more |
 | `botex/server/chat.py` | `ChatMessage`, `ChatSession`, `ChatManager`, `execute_chat_tool`, `stream_chat_turn`, `chat_turn` | `test_chat.py`, `test_chat_error_observability.py`, `test_server_f4_provenance.py`, `test_stage_4_8.py` |
-| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +16 more |
+| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +17 more |
 | `botex/server/i18n.py` | `detect_language`, `init_language`, `set_language`, `get_language`, `t` | — |
 | `botex/server/plugins.py` | `PluginError`, `PluginValidationError`, `PluginExecutionError`, `PluginExecutionTimeout`, `PluginPermissionError`, `BoteXPluginDefinition`, `+5 more` | `test_approval.py`, `test_plugins_creator.py` |
 | `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+68 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +16 more |

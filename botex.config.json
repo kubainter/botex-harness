@@ -92,6 +92,51 @@
         ]
       }
     },
+    "groq": {
+      "api_key_env": "GROQ_API_KEY",
+      "models": {
+        "default": "openai/gpt-oss-120b",
+        "coding": "openai/gpt-oss-120b",
+        "fast": "openai/gpt-oss-20b"
+      },
+      "model_fallbacks": {
+        "default": [
+          "qwen/qwen3.8-27b",
+          "openai/gpt-oss-20b"
+        ],
+        "coding": [
+          "qwen/qwen3.8-27b",
+          "openai/gpt-oss-20b"
+        ],
+        "fast": [
+          "qwen/qwen3.8-27b",
+          "openai/gpt-oss-120b"
+        ]
+      }
+    },
+    "cloudflare": {
+      "api_key_env": "CLOUDFLARE_API_TOKEN",
+      "account_id": "",
+      "models": {
+        "default": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "coding": "@cf/qwen/qwen2.5-coder-32b-instruct",
+        "fast": "@cf/meta/llama-3.1-8b-instruct-fp8"
+      },
+      "model_fallbacks": {
+        "default": [
+          "@cf/qwen/qwen3-30b-a3b-fp8",
+          "@cf/zai-org/glm-4.7-flash"
+        ],
+        "coding": [
+          "@cf/qwen/qwen3.8-27b",
+          "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+        ],
+        "fast": [
+          "@cf/qwen/qwen3-30b-a3b-fp8",
+          "@cf/zai-org/glm-4.7-flash"
+        ]
+      }
+    },
     "ollama": {
       "api_key_env": "OLLAMA_API_KEY",
       "zdr": {
@@ -205,6 +250,18 @@
       "burst_multiplier": 1,
       "cooldown_s": 60
     },
+    "groq": {
+      "rpm": 30,
+      "tpm": 8000,
+      "burst_multiplier": 1.2,
+      "cooldown_s": 60
+    },
+    "cloudflare": {
+      "rpm": 300,
+      "tpm": 100000,
+      "burst_multiplier": 1.5,
+      "cooldown_s": 30
+    },
     "openrouter": {
       "rpm": 200,
       "tpm": 2000000,
@@ -225,6 +282,16 @@
     "google": [
       "nvidia",
       "openrouter-free"
+    ],
+    "groq": [
+      "openrouter-free",
+      "nvidia",
+      "google"
+    ],
+    "cloudflare": [
+      "openrouter-free",
+      "nvidia",
+      "google"
     ]
   },
   "paths": {

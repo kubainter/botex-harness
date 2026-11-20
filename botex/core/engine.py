@@ -1248,7 +1248,14 @@ async def run_botex_task(
         elif isinstance(configured_fb, str) and configured_fb != _zdr_pname:
             fallback_providers = [configured_fb]
         # Free/quota providers never silently spill over into paid openrouter.
-        _free_quota_providers = {"openrouter-free", "nvidia", "google", "ollama"}
+        _free_quota_providers = {
+            "openrouter-free",
+            "nvidia",
+            "google",
+            "ollama",
+            "groq",
+            "cloudflare",
+        }
         if _zdr_pname in _free_quota_providers:
             fallback_providers = [p for p in fallback_providers if p in _free_quota_providers]
 
