@@ -546,7 +546,9 @@ def test_worker_successful_result_no_cooldown(client):
             new=AsyncMock(return_value={"ok": True, "status": "DONE"}),
         ),
     ):
-        resp = client.post("/api/tasks", json={"task": "t", "mode": "readonly"})
+        resp = client.post(
+            "/api/tasks", json={"task": "t", "mode": "readonly", "provider": "openrouter"}
+        )
         assert _wait_terminal(client, resp.json()["task_id"]) == "DONE"
     lim.report_limited.assert_not_called()
 

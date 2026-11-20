@@ -189,7 +189,10 @@ def test_origin_guard_allows_same_origin(client):
 
 def test_origin_guard_ignores_missing_origin(client):
     """Requests without an Origin header (curl/agents) are unaffected."""
-    resp = client.post("/api/tasks", json={"task": "no origin", "mode": "readonly"})
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "no origin", "mode": "readonly", "provider": "openrouter"},
+    )
     assert resp.status_code != 403
 
 

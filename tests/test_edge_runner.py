@@ -706,7 +706,7 @@ def test_start_task_routes_edge_workspace(monkeypatch):
     monkeypatch.setattr(server, "run_subagent", fake_run_subagent)
 
     async def main():
-        res = await server.start_task(task="t", workspace_dir="edge-ws-1")
+        res = await server.start_task(task="t", workspace_dir="edge-ws-1", provider="openrouter")
         await server._TASKS[res["task_id"]]["task"]
         return res
 
@@ -735,7 +735,7 @@ def test_start_task_local_workspace_unchanged(monkeypatch):
     monkeypatch.setattr(server, "run_subagent", fake_run_subagent)
 
     async def main():
-        res = await server.start_task(task="t", workspace_dir="")
+        res = await server.start_task(task="t", workspace_dir="", provider="openrouter")
         await server._TASKS[res["task_id"]]["task"]
         return res
 
@@ -763,7 +763,9 @@ def test_run_subagent_routes_edge_executor(monkeypatch):
         }
 
     monkeypatch.setattr(server, "run_botex_task", fake_engine)
-    result = asyncio.run(server.run_subagent(task="t", workspace_dir="edge-ws-9"))
+    result = asyncio.run(
+        server.run_subagent(task="t", workspace_dir="edge-ws-9", provider="openrouter")
+    )
     assert seen[0] == "edge-ws-9"
     assert captured["tool_executor"] is sentinel
     # Engine gets the local scratch dir, not the logical edge ID.
@@ -789,7 +791,7 @@ def test_run_subagent_local_path_no_executor(monkeypatch):
         }
 
     monkeypatch.setattr(server, "run_botex_task", fake_engine)
-    asyncio.run(server.run_subagent(task="t", workspace_dir=""))
+    asyncio.run(server.run_subagent(task="t", workspace_dir="", provider="openrouter"))
     assert captured["tool_executor"] is None
 
 

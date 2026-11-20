@@ -502,6 +502,7 @@ def test_per_call_origin_across_mcp_tools(tmp_path: Path, monkeypatch):
             task="noop",
             workspace_dir=str(tmp_path),
             origin="devin@Botek",
+            provider="openrouter",
         )
     )
     assert sub_res.structured_content["origin"] == "devin@Botek"
@@ -512,6 +513,7 @@ def test_per_call_origin_across_mcp_tools(tmp_path: Path, monkeypatch):
             task="noop",
             workspace_dir=str(tmp_path),
             origin="zcode@Botek",
+            provider="openrouter",
         )
         assert started["status"] == "QUEUED"
         assert started["origin"] == "zcode@Botek"
