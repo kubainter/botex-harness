@@ -127,7 +127,7 @@ def test_lease_ttl_expiry_bumps_epoch_and_failovers_host_x_to_y(
     """When Host X's lease exceeds TTL=10min without heartbeat, fencing_epoch bumps e2 -> e3,
     WorkOrder fails over from last checkpoint to healthy Host Y, and Host X receives fence_epoch on reconnect."""
     db_file = tmp_path / "swarm_store.db"
-    monkeypatch.setenv("BOTEX_SWARM_DB_PATH", str(db_file))
+    monkeypatch.setenv("BOTEX_SWARM_STORE_DB", str(db_file))
     close_swarm_store_dbs()
     server_cloud._PENDING_HOST_FENCES.clear()
 
@@ -271,7 +271,7 @@ def test_pre_push_epoch_mismatch_aborts_stale_push(tmp_path: Path) -> None:
         push_fn=fake_push,
     )
     assert ok_res["ok"] is True
-    assert ok_res["status"] == "checkpoint_pushed"
+    assert ok_res["status"] == "pushed"
     assert ok_res["branch"] == "swarm/wip/order-88/e3"
     assert len(pushed_calls) == 1
     assert runner.record_order_turn("order-88", mutated_files=False) is False
@@ -408,7 +408,7 @@ def test_sweep_skips_fenced_and_needs_human_orders_without_epoch_inflation(
 ) -> None:
     """NEEDS_HUMAN and FENCED orders must not be re-fenced or re-handed off on repeated sweeps."""
     db_file = tmp_path / "swarm_store.db"
-    monkeypatch.setenv("BOTEX_SWARM_DB_PATH", str(db_file))
+    monkeypatch.setenv("BOTEX_SWARM_STORE_DB", str(db_file))
     close_swarm_store_dbs()
     server_cloud._PENDING_HOST_FENCES.clear()
 
@@ -484,3 +484,192 @@ def test_sweep_skips_fenced_and_needs_human_orders_without_epoch_inflation(
     finally:
         close_swarm_store_dbs()
         server_cloud._PENDING_HOST_FENCES.clear()
+
+
+def test_sweep_skips_healthy_host_orders_for_same_bot_slug(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1-2: Expired lease on host-x must never fence a healthy RUNNING order on host-y for same bot."""
+    db_file = tmp_path / "swarm_store.db"
+    monkeypatch.setenv("BOTEX_SWARM_STORE_DB", str(db_file))
+    close_swarm_store_dbs()
+    server_cloud._PENDING_HOST_FENCES.clear()
+
+    try:
+        assert register_bot("night-coder", "harness", "Coder", db_path=db_file)["ok"] is True
+        # host-x lease expired, host-y lease active
+        assert (
+            upsert_host_lease(
+                "night-coder",
+                "host-x",
+                "repo/a",
+                "stale",
+                fencing_token=1,
+                ttl_s=10,
+                db_path=db_file,
+            )["ok"]
+            is True
+        )
+        assert (
+            upsert_host_lease(
+                "night-coder",
+                "host-y",
+                "repo/b",
+                "healthy",
+                fencing_token=1,
+                ttl_s=600,
+                db_path=db_file,
+            )["ok"]
+            is True
+        )
+        conn = get_swarm_store_conn(db_file)
+        conn.execute(
+            "INSERT INTO work_orders (order_id, bot_slug, epoch, status, payload_json, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+            (
+                "ord-healthy-y",
+                "night-coder",
+                1,
+                "RUNNING",
+                json.dumps({"assigned_host": "host-y", "scope_path": "repo/b"}),
+                "2026-11-19T00:00:00+00:00",
+                "2026-11-19T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+        # Only host-x (ttl=10) is expired at now + 30; host-y (ttl=600) is still active.
+        asyncio.run(
+            server_cloud.sweep_expired_host_leases(
+                now=time.time() + 30.0,
+                candidate_hosts=["host-y"],
+                db_path=db_file,
+            )
+        )
+        row_y = conn.execute(
+            "SELECT epoch, status FROM work_orders WHERE order_id = 'ord-healthy-y';"
+        ).fetchone()
+        assert int(row_y["epoch"]) == 1
+        assert row_y["status"] == "RUNNING"
+    finally:
+        close_swarm_store_dbs()
+        server_cloud._PENDING_HOST_FENCES.clear()
+
+
+def test_auto_checkpoint_epoch_stages_and_commits_new_file_before_push(tmp_path: Path) -> None:
+    """P1-3: EdgeRunner.auto_checkpoint_epoch must stage+commit new working-dir files before push."""
+    import subprocess
+
+    remote_bare = tmp_path / "remote.git"
+    work_repo = tmp_path / "work"
+    subprocess.run(["git", "init", "--bare", str(remote_bare)], check=True, capture_output=True)
+    subprocess.run(["git", "init", str(work_repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work_repo), "config", "user.email", "bot@example.invalid"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(work_repo), "config", "user.name", "Bot Test"],
+        check=True,
+        capture_output=True,
+    )
+    (work_repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work_repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work_repo), "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(work_repo), "remote", "add", "swarm", str(remote_bare)],
+        check=True,
+        capture_output=True,
+    )
+
+    runner = EdgeRunner(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="host-x",
+        workspace_id="ws-git",
+        workspace_root=work_repo,
+    )
+    # Modify/create a new file without manually committing it
+    (work_repo / "new_feature.py").write_text("VALUE = 42\n", encoding="utf-8")
+    for _ in range(5):
+        runner.record_order_turn("order-git", mutated_files=True)
+
+    res = runner.auto_checkpoint_epoch(
+        "order-git",
+        local_epoch=1,
+        remote_epoch=1,
+        swarm_remote="swarm",
+    )
+    assert res["ok"] is True, res
+    tree = subprocess.run(
+        ["git", "-C", str(remote_bare), "ls-tree", "-r", "--name-only", "swarm/wip/order-git/e1"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "new_feature.py" in tree.stdout.splitlines()
+
+
+def test_loopback_control_allowlist_and_body_size_guard(tmp_path: Path) -> None:
+    """P2-2: POST /control rejects disallowed frame types (400) and bodies > 65536 bytes (413)."""
+    runner = EdgeRunner(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="dev-ctl",
+        workspace_id="ws-ctl",
+        workspace_root=tmp_path,
+    )
+
+    async def _exercise() -> None:
+        info = await runner.start_loopback_ipc(
+            port=0,
+            loopback_token="tok-ctl",
+            state_file=tmp_path / "edge_daemon.json",
+        )
+        try:
+            port = int(info["port"])
+
+            # 1. Oversized Content-Length -> 413 without reading truncated JSON
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                req = (
+                    f"POST /control HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{port}\r\n"
+                    f"X-Loopback-Token: tok-ctl\r\n"
+                    f"Content-Length: 70000\r\n\r\n"
+                )
+                writer.write(req.encode("ascii"))
+                await writer.drain()
+                raw = await asyncio.wait_for(reader.read(4096), timeout=2.0)
+                assert b"413 Payload Too Large" in raw
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+            # 2. Disallowed control frame type -> 400 Bad Request
+            reader2, writer2 = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                body = json.dumps({"frame": {"type": "arbitrary_exec"}}).encode("utf-8")
+                req2 = (
+                    f"POST /control HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{port}\r\n"
+                    f"X-Loopback-Token: tok-ctl\r\n"
+                    f"Content-Length: {len(body)}\r\n\r\n"
+                ).encode("ascii") + body
+                writer2.write(req2)
+                await writer2.drain()
+                raw2 = await asyncio.wait_for(reader2.read(4096), timeout=2.0)
+                assert b"400 Bad Request" in raw2
+            finally:
+                writer2.close()
+                await writer2.wait_closed()
+        finally:
+            await runner.stop_loopback_ipc()
+
+    asyncio.run(_exercise())

@@ -80,7 +80,7 @@ targeted + integration tests.
 | File | Key Public Symbols | Tests |
 |---|---|---|
 | `botex/edge/__init__.py` | — | `test_edge_brief_sync.py`, `test_edge_delegation.py`, `test_edge_integration.py`, `test_edge_runner.py` |
-| `botex/edge/adapters.py` | `EpochCheckpointManager`, `check_harness_eligible`, `translate_work_order`, `build_anti_spiral_reset`, `finalize_verified_work_order` | — |
+| `botex/edge/adapters.py` | `EpochCheckpointManager`, `check_harness_eligible`, `translate_work_order`, `build_anti_spiral_reset`, `finalize_verified_work_order` | `test_work_order_supervisor.py` |
 | `botex/edge/delegation.py` | `DelegationError`, `EdgeSkillSpec`, `EdgeDelegationPolicy`, `EdgeDelegationHandler`, `validate_params`, `verify_skill_digest` | `test_edge_delegation.py` |
 | `botex/edge/host_os_driver.py` | `SingleInstanceLockError`, `SingleInstanceLock`, `WindowsJobGuard`, `HostOSDriver`, `default_swarm_home`, `kill_posix_process_group`, `+3 more` | `test_host_os_driver.py` |
 | `botex/edge/runner.py` | `EdgeCapabilities`, `EdgeRunner`, `frame_qos_priority`, `get_local_bot_briefs_dir`, `write_local_bot_brief`, `read_local_bot_briefs`, `+3 more` | `test_edge_brief_sync.py`, `test_edge_qos_daemon.py`, `test_edge_runner.py`, `test_tethered_bot_visibility.py` |

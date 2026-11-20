@@ -28,7 +28,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -3318,20 +3318,29 @@ async def fence_swarm_order_endpoint(
 
 
 _HOST_LEASE_TTL_S = 600.0
-_PENDING_HOST_FENCES: Dict[str, List[Dict[str, Any]]] = {}
+_MAX_PENDING_FENCE_HOSTS = 256
+_MAX_PENDING_FENCES_PER_HOST = 64
+_PENDING_HOST_FENCES: "OrderedDict[str, deque[Dict[str, Any]]]" = OrderedDict()
 
 
 def queue_pending_host_fence(host_id: str, fence_frame: Dict[str, Any]) -> None:
     clean_host = coerce_text(mask_secrets(str(host_id or ""))).strip()
     if not clean_host:
         return
-    bucket = _PENDING_HOST_FENCES.setdefault(clean_host, [])
+    bucket = _PENDING_HOST_FENCES.get(clean_host)
+    if bucket is None:
+        while len(_PENDING_HOST_FENCES) >= _MAX_PENDING_FENCE_HOSTS:
+            _PENDING_HOST_FENCES.popitem(last=False)
+        bucket = deque(maxlen=_MAX_PENDING_FENCES_PER_HOST)
+        _PENDING_HOST_FENCES[clean_host] = bucket
+    else:
+        _PENDING_HOST_FENCES.move_to_end(clean_host)
     bucket.append(dict(fence_frame))
 
 
 async def deliver_pending_host_fences(session: _EdgeSession) -> List[Dict[str, Any]]:
     """Flush any pending Control Lane ``fence_epoch`` frames queued for ``session.device_id``."""
-    pending = _PENDING_HOST_FENCES.pop(session.device_id, [])
+    pending = list(_PENDING_HOST_FENCES.pop(session.device_id, ()))
     delivered: List[Dict[str, Any]] = []
     for frame in pending:
         try:
@@ -3389,7 +3398,27 @@ def _sweep_expired_host_leases_sync(
                     (bot_slug,),
                 ).fetchall()
 
-                if not order_rows:
+                matched_orders = []
+                for orow in order_rows:
+                    payload: Dict[str, Any] = {}
+                    if orow["payload_json"]:
+                        try:
+                            parsed = json.loads(str(orow["payload_json"]))
+                            if isinstance(parsed, dict):
+                                payload = parsed
+                        except json.JSONDecodeError:
+                            payload = {}
+                    assigned_host = str(
+                        payload.get("assigned_host") or payload.get("host_id") or ""
+                    ).strip()
+                    if assigned_host and assigned_host != stale_host:
+                        continue
+                    order_scope = str(payload.get("scope_path") or "").strip()
+                    if order_scope and scope_path and order_scope != scope_path:
+                        continue
+                    matched_orders.append((orow, payload))
+
+                if not matched_orders:
                     lease_summary = str(lrow["summary"] or "")
                     if not target_host and "[fenced]" in lease_summary:
                         continue
@@ -3425,18 +3454,10 @@ def _sweep_expired_host_leases_sync(
                     failovers.append(fence_frame)
                     continue
 
-                for orow in order_rows:
+                for orow, payload in matched_orders:
                     order_id = str(orow["order_id"] or "")
                     prev_epoch = max(int(orow["epoch"] or 0), old_token)
                     new_epoch = prev_epoch + 1
-                    payload: Dict[str, Any] = {}
-                    if orow["payload_json"]:
-                        try:
-                            parsed = json.loads(str(orow["payload_json"]))
-                            if isinstance(parsed, dict):
-                                payload = parsed
-                        except json.JSONDecodeError:
-                            payload = {}
                     last_checkpoint = str(
                         payload.get("last_checkpoint_ref") or f"swarm/wip/{order_id}/e{prev_epoch}"
                     )
@@ -3457,8 +3478,14 @@ def _sweep_expired_host_leases_sync(
                             order_id,
                         ),
                     )
+                    lease_summary = str(lrow["summary"] or "")
+                    next_summary = (
+                        lease_summary
+                        if next_status != "FENCED" or "[fenced]" in lease_summary
+                        else (f"{lease_summary} [fenced]".strip())
+                    )
                     conn.execute(
-                        "UPDATE host_leases SET fencing_token = ?, host_id = ?, expires_at = ?"
+                        "UPDATE host_leases SET fencing_token = ?, host_id = ?, expires_at = ?, summary = ?"
                         " WHERE lease_key = ?;",
                         (
                             new_epoch,
@@ -3466,6 +3493,7 @@ def _sweep_expired_host_leases_sync(
                             now_ts + _HOST_LEASE_TTL_S
                             if target_host
                             else float(lrow["expires_at"]),
+                            next_summary,
                             lease_key,
                         ),
                     )

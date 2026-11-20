@@ -277,8 +277,14 @@ def translate_work_order(
             "order_id": raw_oid,
         }
 
-    base_epoch = max(0, _coerce_int(_order_field(order, "epoch", 0), 0))
-    new_epoch = base_epoch + 1
+    cur_status = str(_order_field(order, "status", "") or "").strip().upper()
+    raw_epoch = max(0, _coerce_int(_order_field(order, "epoch", 0), 0))
+    if cur_status == "HANDOFF" and raw_epoch > 0:
+        base_epoch = raw_epoch - 1
+        new_epoch = raw_epoch
+    else:
+        base_epoch = raw_epoch
+        new_epoch = raw_epoch + 1
     branch = f"swarm/wip/{order_id}/e{new_epoch}"
 
     mode_request = _order_field(order, "mode_request", "edit")
@@ -850,7 +856,15 @@ class EpochCheckpointManager:
                 }
             push_res = _run_git(
                 repo,
-                ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "push", rem, br],
+                [
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "core.eol=lf",
+                    "push",
+                    rem,
+                    f"HEAD:refs/heads/{br}",
+                ],
                 timeout_s=timeout_s,
             )
             if push_res.returncode != 0:
@@ -928,7 +942,7 @@ def _transition_order_status(
     if not isinstance(order, WorkOrder):
         return None
     try:
-        return WorkOrderSupervisor(audit=False).transition(
+        return WorkOrderSupervisor().transition(
             order, status, reason=reason, via_verify_gate=via_verify_gate
         )
     except Exception as exc:
@@ -946,19 +960,12 @@ def _apply_order_status(
     via_verify_gate: bool = False,
     reason: str = "",
 ) -> tuple[bool, str]:
-    """Set ``order.status`` — canonical supervisor transition first, direct fallback.
-
-    Returns ``(status_set, via)`` where ``via`` is ``"supervisor"``, ``"direct"``
-    or ``"failed"``. A rejected state-machine edge on a non-terminal order falls
-    back to a direct set: the external verify evidence already gates ``DONE``.
-    """
+    """Set ``order.status`` — canonical supervisor transition for ``WorkOrder``, direct for dicts."""
     tr = _transition_order_status(order, status, via_verify_gate=via_verify_gate, reason=reason)
     if tr is not None:
         if tr.get("ok"):
             return True, "supervisor"
-        if _set_order_status(order, status):
-            return True, "direct_fallback"
-        return False, "failed"
+        return False, "rejected"
     if _set_order_status(order, status):
         return True, "direct"
     return False, "failed"
@@ -1022,33 +1029,50 @@ def finalize_verified_work_order(
         }
     kind = _verify_kind(order)
 
-    if kind == "none":
+    try:
+        from botex.core.work_orders import WorkOrder, WorkOrderSupervisor
+    except Exception:
+        WorkOrder = None  # type: ignore[assignment]
+
+    if WorkOrder is not None and isinstance(order, WorkOrder):
+        sup_out = WorkOrderSupervisor().apply_verify_result(order, verify_result)
+        if not sup_out.get("ok") or order.status != "DONE":
+            return {
+                "ok": False,
+                "status": order.status,
+                "reason": _masked(sup_out.get("reason") or "", 300),
+                "order_id": order_id,
+                "verify_kind": kind,
+            }
+        status_set, status_via = True, "WorkOrderSupervisor.apply_verify_result"
+    else:
+        if kind == "none":
+            status_set, status_via = _apply_order_status(
+                order, "NEEDS_HUMAN", reason="verify_kind_none"
+            )
+            return {
+                "ok": False,
+                "status": "NEEDS_HUMAN",
+                "reason": "verify_kind_none",
+                "order_id": order_id,
+                "verify_kind": kind,
+                "status_set": status_set,
+                "status_via": status_via,
+            }
+
+        res = verify_result if isinstance(verify_result, Mapping) else {}
+        if res.get("ok") is not True:
+            return {
+                "ok": False,
+                "status": str(res.get("status") or res.get("verdict") or "VERIFY_FAILED"),
+                "reason": _masked(res.get("reason") or "", 300),
+                "order_id": order_id,
+                "verify_kind": kind,
+            }
+
         status_set, status_via = _apply_order_status(
-            order, "NEEDS_HUMAN", reason="verify_kind_none"
+            order, "DONE", via_verify_gate=True, reason="external_verify_passed"
         )
-        return {
-            "ok": False,
-            "status": "NEEDS_HUMAN",
-            "reason": "verify_kind_none",
-            "order_id": order_id,
-            "verify_kind": kind,
-            "status_set": status_set,
-            "status_via": status_via,
-        }
-
-    res = verify_result if isinstance(verify_result, Mapping) else {}
-    if res.get("ok") is not True:
-        return {
-            "ok": False,
-            "status": str(res.get("status") or res.get("verdict") or "VERIFY_FAILED"),
-            "reason": _masked(res.get("reason") or "", 300),
-            "order_id": order_id,
-            "verify_kind": kind,
-        }
-
-    status_set, status_via = _apply_order_status(
-        order, "DONE", via_verify_gate=True, reason="external_verify_passed"
-    )
 
     brief: Dict[str, Any] = {"skipped": True}
     target_fn = refresh_brief_fn

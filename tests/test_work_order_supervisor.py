@@ -588,3 +588,86 @@ def test_audit_import_failure_logs_warning(tmp_path, monkeypatch, caplog):
     assert order.status == WorkOrderStatus.FENCED
     assert any("verify_gate import failed" in r.getMessage() for r in caplog.records)
     assert not (tmp_path / "supervisor_ledger.jsonl").exists()
+
+
+def test_handoff_epoch_consistent_across_supervisor_adapter_and_checkpoint(tmp_path):
+    """P1-1: handle_failure -> translate_work_order -> checkpoint_and_push must agree on epoch e1."""
+    from botex.edge.adapters import EpochCheckpointManager, translate_work_order
+
+    sup = _sup()
+    order = _order(
+        order_id="ord-p1-1",
+        epoch=0,
+        status=WorkOrderStatus.RUNNING,
+        handoff_policy=_policy(),
+    )
+    fail_out = sup.handle_failure(order, "botex", failure_kind="rate_limit", error_text="HTTP 429")
+    assert fail_out["ok"] is True
+    assert order.status == WorkOrderStatus.HANDOFF
+    assert order.epoch == 1
+
+    spec = translate_work_order(order, fail_out["target_harness"])
+    assert spec["ok"] is True
+    assert spec["epoch"] == 1
+    assert spec["base_epoch"] == 0
+    assert spec["branch"] == "swarm/wip/ord-p1-1/e1"
+
+    mgr = EpochCheckpointManager(
+        order_id=order.order_id,
+        epoch=spec["epoch"],
+        origin_repo=tmp_path,
+    )
+    push_res = mgr.checkpoint_and_push(
+        repo_dir=tmp_path,
+        commit=False,
+        fetch_remote_epoch_fn=lambda **_kw: 1,
+        push_fn=lambda **_kw: {"ok": True},
+    )
+    assert push_res["ok"] is True
+    assert push_res["epoch"] == 1
+    assert push_res["branch"] == "swarm/wip/ord-p1-1/e1"
+
+
+def test_finalize_verified_work_order_enforces_state_machine_and_fail_transition():
+    """P1-4: WorkOrder cannot jump RUNNING -> DONE, and ok=False moves VERIFYING -> FAILED."""
+    from botex.edge.adapters import finalize_verified_work_order
+
+    running_order = _order(order_id="ord-running", status=WorkOrderStatus.RUNNING)
+    res_illegal = finalize_verified_work_order(running_order, {"ok": True})
+    assert res_illegal["ok"] is False
+    assert running_order.status == WorkOrderStatus.RUNNING
+
+    verifying_order = _order(order_id="ord-fail", status=WorkOrderStatus.VERIFYING)
+    res_fail = finalize_verified_work_order(
+        verifying_order, {"ok": False, "reason": "pytest_failed"}
+    )
+    assert res_fail["ok"] is False
+    assert verifying_order.status == WorkOrderStatus.FAILED
+
+
+def test_auth_regex_word_boundaries_and_deterministic_blocks_handoff():
+    """P2-1: 'author'/'oauth' in tracebacks must not match auth, and deterministic failures block handoff."""
+    sup = _sup()
+    traceback_order = _order(
+        order_id="ord-author", status=WorkOrderStatus.RUNNING, handoff_policy=_policy()
+    )
+    res_author = sup.handle_failure(
+        traceback_order,
+        "botex",
+        failure_kind="",
+        error_text="AttributeError: 'Author' object has no attribute 'oauth_id'",
+    )
+    assert res_author["ok"] is False
+    assert res_author["reason"] == "unclassified_failure"
+    assert traceback_order.status == WorkOrderStatus.BLOCKED
+
+    det_order = _order(order_id="ord-det", status=WorkOrderStatus.RUNNING, handoff_policy=_policy())
+    res_det = sup.handle_failure(
+        det_order,
+        "botex",
+        failure_kind="verification_failed",
+        error_text="pytest failed 2 assertions",
+    )
+    assert res_det["ok"] is False
+    assert res_det["reason"] == "deterministic_failure_no_handoff"
+    assert det_order.status == WorkOrderStatus.BLOCKED

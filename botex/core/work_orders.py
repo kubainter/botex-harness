@@ -566,7 +566,14 @@ _FAILURE_TEXT_RULES: Tuple[Tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b429\b|rate.?limit", re.I), "rate_limit"),
     (re.compile(r"quota|budget", re.I), "quota"),
     (re.compile(r"timed?\s*out|timeout|deadline", re.I), "timeout"),
-    (re.compile(r"unauthorized|forbidden|api.?key|auth", re.I), "auth"),
+    (
+        re.compile(
+            r"\b(?:unauthorized|forbidden|invalid[_ -]?api[_ -]?key|"
+            r"auth(?:entication|orization)?[_ -]?(?:error|failed))\b",
+            re.I,
+        ),
+        "auth",
+    ),
     (re.compile(r"connection (?:error|refused|reset)|econn", re.I), "provider_unavailable"),
     (re.compile(r"spiral|stagnant|no.progress", re.I), "spiral"),
     (re.compile(r"max.?turns|token.?limit", re.I), "turns_exhausted"),
@@ -808,6 +815,22 @@ class WorkOrderSupervisor:
                 "ok": False,
                 "status": out.get("status", order.status),
                 "reason": "unclassified_failure",
+                "confidence": triage["confidence"],
+            }
+        if triage["failure_class"] == "deterministic":
+            out = self.transition(
+                order, WorkOrderStatus.BLOCKED, reason="deterministic_failure_no_handoff"
+            )
+            self._audit(
+                order,
+                "blocked",
+                reason="deterministic_failure_no_handoff",
+                failure_class="deterministic",
+            )
+            return {
+                "ok": False,
+                "status": out.get("status", order.status),
+                "reason": "deterministic_failure_no_handoff",
                 "confidence": triage["confidence"],
             }
 

@@ -32,7 +32,6 @@ import random
 import re
 import secrets
 import socket
-import subprocess
 import tempfile
 import time
 import urllib.error
@@ -508,7 +507,7 @@ class EdgeRunner:
         self.hello_ack: Optional[Dict[str, Any]] = None
         self._session_established = False
         self.fenced_epochs: List[Dict[str, Any]] = []
-        self._mutating_turns_by_order: Dict[str, int] = {}
+        self._checkpoint_managers: Dict[str, Any] = {}
         self._checkpoint_min_turns = 5
         self._checkpoint_max_turns = 8
         self._loopback_server: Optional[asyncio.AbstractServer] = None
@@ -792,6 +791,29 @@ class EdgeRunner:
         async with self._send_lock:
             await ws.send(json.dumps(frame, ensure_ascii=False))
 
+    def _get_checkpoint_manager(
+        self,
+        order_id: str,
+        *,
+        local_epoch: int = 0,
+        wt_path: Optional[Path] = None,
+        swarm_remote: str = "swarm",
+    ) -> Any:
+        from botex.edge.adapters import EpochCheckpointManager
+
+        clean_id = sanitize_identifier(str(order_id or "")) or str(order_id or "")
+        mgr = self._checkpoint_managers.get(clean_id)
+        if mgr is None:
+            mgr = EpochCheckpointManager(
+                order_id=clean_id,
+                epoch=int(local_epoch),
+                origin_repo=Path(wt_path) if wt_path is not None else self.workspace_root,
+                swarm_remote=swarm_remote,
+                interval=self._checkpoint_min_turns,
+            )
+            self._checkpoint_managers[clean_id] = mgr
+        return mgr
+
     def record_order_turn(
         self,
         order_id: str,
@@ -799,15 +821,10 @@ class EdgeRunner:
         mutated_files: bool = False,
         green_test: bool = False,
     ) -> bool:
-        """Track file-mutating turns for ``order_id`` and return True when checkpoint is due."""
-        clean_id = sanitize_identifier(str(order_id or "")) or str(order_id or "")
-        count = int(self._mutating_turns_by_order.get(clean_id, 0))
-        if mutated_files:
-            count += 1
-            self._mutating_turns_by_order[clean_id] = count
-        if green_test and count > 0:
-            return True
-        return count >= self._checkpoint_min_turns
+        """Track file-mutating turns for ``order_id`` via ``EpochCheckpointManager``."""
+        mgr = self._get_checkpoint_manager(order_id)
+        snap = mgr.record_turn(mutated_files=mutated_files, green_test=green_test)
+        return bool(snap.get("should_checkpoint"))
 
     def auto_checkpoint_epoch(
         self,
@@ -815,81 +832,71 @@ class EdgeRunner:
         local_epoch: int,
         *,
         remote_epoch: Optional[int] = None,
-        fetch_remote_epoch_fn: Optional[Callable[[str], int]] = None,
+        fetch_remote_epoch_fn: Optional[Callable[..., Any]] = None,
         wt_path: Optional[Path] = None,
         swarm_remote: str = "swarm",
-        push_fn: Optional[Callable[[Path, str, str], Dict[str, Any]]] = None,
+        push_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+        commit: bool = True,
+        commit_message: str = "",
     ) -> Dict[str, Any]:
-        """Assert ``remote_epoch == local_epoch`` before pushing ``swarm/wip/<order_id>/e<epoch>``."""
+        """Delegate stage+commit+epoch-fenced push to ``EpochCheckpointManager``."""
         clean_id = sanitize_identifier(str(order_id or ""))
         if not clean_id:
             return {"ok": False, "status": "invalid_order_id", "error": "INVALID_ORDER_ID"}
-        loc_ep = int(local_epoch)
-        rem_ep = (
-            int(remote_epoch)
-            if remote_epoch is not None
-            else (
-                int(fetch_remote_epoch_fn(clean_id))
-                if fetch_remote_epoch_fn is not None
-                else loc_ep
-            )
-        )
-        if rem_ep != loc_ep:
+        clean_remote = sanitize_identifier(swarm_remote)
+        if push_fn is None and (not clean_remote or clean_remote.lower() == "origin"):
             return {
                 "ok": False,
-                "status": "stale_epoch",
-                "error": "EPOCH_MISMATCH",
-                "order_id": clean_id,
-                "local_epoch": loc_ep,
-                "remote_epoch": rem_ep,
+                "status": "forbidden_remote",
+                "error": "Auto-push to origin is forbidden; use explicit swarm remote.",
             }
-        branch = f"swarm/wip/{clean_id}/e{loc_ep}"
-        target_wt = Path(wt_path) if wt_path is not None else self.workspace_root
-        if push_fn is not None:
-            push_res = push_fn(target_wt, swarm_remote, branch)
-            if not push_res.get("ok", True):
-                return push_res
+        mgr = self._get_checkpoint_manager(
+            clean_id,
+            local_epoch=int(local_epoch),
+            wt_path=wt_path,
+            swarm_remote=swarm_remote,
+        )
+        epoch_cb: Callable[..., Any]
+        if remote_epoch is not None:
+            fixed_remote = int(remote_epoch)
+            epoch_cb = lambda **_kw: fixed_remote  # noqa: E731
+        elif fetch_remote_epoch_fn is not None:
+            user_cb = fetch_remote_epoch_fn
+
+            def epoch_cb(order_id: str = clean_id, **_kw: Any) -> Any:
+                try:
+                    return user_cb(order_id=order_id)
+                except TypeError:
+                    return user_cb(order_id)
         else:
-            clean_remote = sanitize_identifier(swarm_remote)
-            if not clean_remote or clean_remote.lower() == "origin":
-                return {
-                    "ok": False,
-                    "status": "forbidden_remote",
-                    "error": "Auto-push to origin is forbidden; use explicit swarm remote.",
-                }
-            proc = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(target_wt),
-                    "-c",
-                    "core.autocrlf=false",
-                    "-c",
-                    "core.eol=lf",
-                    "push",
-                    clean_remote,
-                    f"HEAD:refs/heads/{branch}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            if proc.returncode != 0:
-                return {
-                    "ok": False,
-                    "status": "push_failed",
-                    "error": coerce_text(mask_secrets(proc.stderr or proc.stdout))[:300],
-                    "branch": branch,
-                }
-        self._mutating_turns_by_order[clean_id] = 0
-        return {
-            "ok": True,
-            "status": "checkpoint_pushed",
-            "order_id": clean_id,
-            "epoch": loc_ep,
-            "branch": branch,
-        }
+            fixed_local = int(local_epoch)
+            epoch_cb = lambda **_kw: fixed_local  # noqa: E731
+
+        wrapped_push_fn: Optional[Callable[..., Any]] = None
+        if push_fn is not None:
+            user_push = push_fn
+
+            def wrapped_push_fn(**kw: Any) -> Dict[str, Any]:
+                try:
+                    return user_push(**kw)
+                except TypeError:
+                    return user_push(
+                        Path(kw.get("repo_dir") or self.workspace_root),
+                        str(kw.get("remote") or swarm_remote),
+                        str(kw.get("branch") or ""),
+                    )
+
+        target_wt = Path(wt_path) if wt_path is not None else self.workspace_root
+        return mgr.checkpoint_and_push(
+            repo_dir=target_wt,
+            remote=swarm_remote,
+            order_id=clean_id,
+            epoch=int(local_epoch),
+            commit=commit,
+            commit_message=commit_message,
+            fetch_remote_epoch_fn=epoch_cb,
+            push_fn=wrapped_push_fn,
+        )
 
     async def _tool_call_task(self, ws: Any, frame: Dict[str, Any]) -> None:
         call_id = str(frame.get("call_id") or "")
@@ -1157,12 +1164,23 @@ class EdgeRunner:
                 "workspace_id": self.workspace_id,
                 "started_at": time.time(),
             }
-            target_state.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            raw_json = json.dumps(payload, indent=2)
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=target_state.parent,
+                prefix=".edge_daemon_",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_f:
+                tmp_f.write(raw_json)
+                tmp_path = Path(tmp_f.name)
             if os.name != "nt":
                 try:
-                    os.chmod(target_state, 0o600)
+                    os.chmod(tmp_path, 0o600)
                 except OSError:
                     pass
+            os.replace(tmp_path, target_state)
         except OSError:
             pass
 
@@ -1276,10 +1294,17 @@ class EdgeRunner:
                 return
 
             content_len = int(headers.get("content-length") or 0)
+            if content_len > 65536:
+                await self._write_loopback_http(
+                    writer,
+                    413,
+                    {"ok": False, "error": "body_too_large"},
+                )
+                return
             body_obj: Dict[str, Any] = {}
             if content_len > 0:
                 raw_body = await asyncio.wait_for(
-                    reader.readexactly(min(content_len, 65536)),
+                    reader.readexactly(content_len),
                     timeout=5.0,
                 )
                 try:
@@ -1307,7 +1332,18 @@ class EdgeRunner:
 
             if method == "POST" and path.startswith("/control"):
                 frame = body_obj.get("frame")
-                if isinstance(frame, dict) and self._ws is not None:
+                allowed_control = frozenset({"lease_heartbeat", "fence_ack", "ping"})
+                ftype = (
+                    str(frame.get("type") or "").strip().lower() if isinstance(frame, dict) else ""
+                )
+                if not isinstance(frame, dict) or ftype not in allowed_control:
+                    await self._write_loopback_http(
+                        writer,
+                        400,
+                        {"ok": False, "error": "forbidden_control_frame_type"},
+                    )
+                    return
+                if self._ws is not None:
                     await self._send_json(
                         self._ws,
                         frame,
@@ -1375,6 +1411,7 @@ class EdgeRunner:
     ) -> None:
         reasons = {
             200: "OK",
+            400: "Bad Request",
             401: "Unauthorized",
             403: "Forbidden",
             404: "Not Found",
@@ -1503,6 +1540,28 @@ def attach_or_spawn_edge_daemon(
     try:
         lock.acquire()
     except SingleInstanceLockError:
+        for _attempt in range(3):
+            time.sleep(0.15)
+            if st_path.is_file():
+                try:
+                    state = json.loads(st_path.read_text(encoding="utf-8"))
+                    if isinstance(state, dict):
+                        existing_port = int(state.get("port") or 0)
+                        existing_tok = str(state.get("loopback_token") or "")
+                        if existing_port > 0 and existing_tok:
+                            probe = probe_edge_daemon_loopback(existing_port, existing_tok)
+                            if probe.get("ok"):
+                                return {
+                                    "ok": True,
+                                    "mode": "attached",
+                                    "pid": probe.get("pid") or state.get("pid"),
+                                    "port": existing_port,
+                                    "device_id": probe.get("device_id") or state.get("device_id"),
+                                    "workspace_id": probe.get("workspace_id")
+                                    or state.get("workspace_id"),
+                                }
+                except Exception:
+                    pass
         return {
             "ok": True,
             "mode": "attached",
