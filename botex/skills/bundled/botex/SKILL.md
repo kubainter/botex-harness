@@ -1,6 +1,6 @@
 ---
 name: botex
-version: "2.5.0"
+version: "2.6.0"
 description: Use when delegating bounded code inspection, surgical patching, verification, or Memory Vault operations to the BoteX MCP harness.
 taxonomy: [general]
 metadata:
@@ -30,7 +30,7 @@ Define the normative caller-facing contract for AI orchestrators delegating boun
 
 ## 1. Delegation Rules & Verifier Firewall
 
-Delegate to BoteX (`run_subagent` synchronous or `start_task` + `get_task_status` asynchronous) for bounded file inspection, surgical patching, test-verified bug fixes, or Memory Vault operations. Do **not** delegate general knowledge questions, server/daemon administration, or vague unbounded requests.
+Delegate to BoteX (prefer `run_subagent` synchronous by default; `start_task` + `get_task_status` asynchronous only when the fan-out criteria of Global Rule 5.1 hold — and then it REQUIRES a dispatch-ledger entry (Rule 5.2; `list_tasks` is the sweep/recovery surface since Phase 2) plus collection via `get_task_status` before turn end (Rule 5.3)) for bounded file inspection, surgical patching, test-verified bug fixes, or Memory Vault operations. Do **not** delegate general knowledge questions, server/daemon administration, or vague unbounded requests.
 
 - **Verifier Firewall:** When delegating a review or verification task (`reviewer`, `security-reviewer`), pass ONLY the target artifact/files, the governing contract, and the review checklist. NEVER pass the builder agent's reasoning, excuses, or self-reported "all tests pass" claims.
 - **Fail-Stop Protocol:** If BoteX terminates with `BLOCKED` or `UNSUPPORTED`, do NOT blindly retry the identical prompt; inspect `failure_kind` and fix permissions/constraints or escalate.
@@ -49,8 +49,8 @@ BoteX enforces **Read-Before-Write** on existing files, confines all paths to `w
 
 ## 3. Caller vs Internal Worker Tools
 
-Caller-facing MCP tools (25):
-MCP tools: `bot_consult`, `bot_report_activity`, `botex_get_rap_sheet`, `botex_report_violation`, `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `find_graph_health`, `get_backlinks`, `get_outline`, `get_stats`, `get_task_status`, `init_obsidian_vault`, `patch_memory_section`, `read_memory`, `read_scratchpad`, `recall_memory`, `recommend_models`, `reflect_memory`, `run_subagent`, `save_memory`, `search_memory`, `start_task`, `swarm_list_bots`
+Caller-facing MCP tools (26):
+MCP tools: `bot_consult`, `bot_report_activity`, `botex_get_rap_sheet`, `botex_report_violation`, `check_health`, `clean_snapshots`, `delete_memory`, `fetch_url`, `find_graph_health`, `get_backlinks`, `get_outline`, `get_stats`, `get_task_status`, `init_obsidian_vault`, `list_tasks`, `patch_memory_section`, `read_memory`, `read_scratchpad`, `recall_memory`, `recommend_models`, `reflect_memory`, `run_subagent`, `save_memory`, `search_memory`, `start_task`, `swarm_list_bots`
 - **Internal Worker Tools (Sandbox Only):** `get_file_outline`, `read_file_lines`, `read_file`, `list_dir`, `apply_patch`, `create_file`, `delete_file`, `move_file`, `run_command`, `read_url`, `read_scratchpad`. Callers MUST NOT invoke internal worker tools over MCP.
 
 ## 4. Concrete Usage Examples

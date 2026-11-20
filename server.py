@@ -837,26 +837,81 @@ async def start_task(
 
 
 @mcp.tool()
-async def get_task_status(task_id: str) -> dict[str, Any]:
-    """Return status and `result_data` for a `start_task` run (check `result_data.ok` for verified outcome)."""
+async def get_task_status(
+    task_id: str,
+    timeout_s: Annotated[int, Field(description="Server-side long-poll cap up to 600s.")] = 0,
+    collected_by: Annotated[str, Field(description="Optional collector origin override.")] = "",
+) -> dict[str, Any]:
+    """Return status and `result_data` for a `start_task` run (check `result_data.ok` for verified outcome; delivery marks `collected`)."""
     _cleanup_tasks()
     entry = _TASKS.get(task_id)
     if not entry:
         return {"ok": False, "status": "NOT_FOUND", "task_id": task_id}
-    result: dict[str, Any] = {
-        "ok": True,
-        "task_id": task_id,
-        "status": entry["status"],
-    }
-    if entry.get("origin"):
-        result["origin"] = entry["origin"]
-    if entry.get("status") in {"DONE", "FAILED", "CANCELLED"}:
-        # `result` is the pretty-text report (legacy); `result_data` is the
-        # structured engine result (status, failure_kind, attempts, ...).
-        result["result"] = entry.get("result", "")
-        if entry.get("result_data"):
-            result["result_data"] = entry["result_data"]
-    return result
+    deadline = time.monotonic() + max(0, min(int(timeout_s), 600))
+    while True:
+        if entry.get("status") in {"DONE", "FAILED", "CANCELLED"}:
+            result: dict[str, Any] = {
+                "ok": True,
+                "task_id": task_id,
+                "status": entry["status"],
+                "collected": True,
+            }
+            if entry.get("origin"):
+                result["origin"] = entry["origin"]
+            # `result` is the pretty-text report (legacy); `result_data` is the
+            # structured engine result (status, failure_kind, attempts, ...).
+            result["result"] = entry.get("result", "")
+            if entry.get("result_data"):
+                result["result_data"] = entry["result_data"]
+            # Mark collected only as the terminal payload is actually being
+            # returned — deadline and abort paths must never touch the flag.
+            entry["collected"] = True
+            entry["collected_at"] = time.time()
+            entry["collected_by"] = _resolve_call_origin(collected_by)
+            return result
+        if time.monotonic() >= deadline:
+            return {
+                "ok": True,
+                "task_id": task_id,
+                "status": entry["status"],
+                "deadline_expires": True,
+            }
+        await asyncio.sleep(1.5)
+
+
+@mcp.tool()
+async def list_tasks(
+    uncollected_only: Annotated[
+        bool, Field(description="Only terminal tasks not yet collected.")
+    ] = False,
+    origin: Annotated[str, Field(description="Filter by exact '<agent>@<host>' origin.")] = "",
+    limit: Annotated[int, Field(description="Max rows (1..200, newest first).")] = 50,
+) -> dict[str, Any]:
+    """List background tasks (`{task_id, status, created_at, origin, collected}`) for orphan/startup recovery."""
+    _cleanup_tasks()
+    max_rows = max(1, min(int(limit), 200))
+    entries = sorted(_TASKS.items(), key=lambda kv: kv[1].get("created_at") or 0, reverse=True)
+    tasks = []
+    for tid, entry in entries:
+        status = entry.get("status")
+        if uncollected_only and (
+            status not in {"DONE", "FAILED", "CANCELLED"} or entry.get("collected") is True
+        ):
+            continue
+        if origin and entry.get("origin") != origin:
+            continue
+        tasks.append(
+            {
+                "task_id": tid,
+                "status": status,
+                "created_at": entry.get("created_at"),
+                "origin": entry.get("origin", ""),
+                "collected": entry.get("collected") is True,
+            }
+        )
+        if len(tasks) >= max_rows:
+            break
+    return {"ok": True, "tasks": tasks, "count": len(tasks)}
 
 
 @mcp.tool()

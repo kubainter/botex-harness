@@ -882,6 +882,80 @@ def test_async_task_registry():
     print("[PASS] Async Task Registry Tests")
 
 
+def test_dcp_list_tasks_and_collection():
+    """DCP Phase 2: list_tasks sweep surface, implicit collection on terminal
+    get_task_status delivery, origin filter, deadline-path non-collection."""
+    import asyncio
+    import time as _time
+    from types import SimpleNamespace
+    import server
+
+    original = server.run_subagent
+
+    async def fake_run(**kwargs):
+        if kwargs.get("task") == "hang":
+            await asyncio.sleep(30)
+            return SimpleNamespace(content=[], structured_content={})
+        await asyncio.sleep(0)
+        return SimpleNamespace(
+            content=[SimpleNamespace(text="fake result")],
+            structured_content={"ok": True, "status": "DONE"},
+        )
+
+    async def exercise():
+        payload = await server.start_task("collect me", origin="tester@host-a")
+        done_id = payload["task_id"]
+        await asyncio.sleep(0.02)
+        slow_id = (await server.start_task("hang"))["task_id"]
+
+        # Wait for the fast task to reach a terminal state without calling
+        # get_task_status — a terminal delivery marks the entry collected.
+        for _ in range(200):
+            if server._TASKS[done_id].get("status") in {"DONE", "FAILED", "CANCELLED"}:
+                break
+            await asyncio.sleep(0.01)
+        assert server._TASKS[done_id]["status"] == "DONE"
+
+        pending = await server.list_tasks(uncollected_only=True)
+        assert any(t["task_id"] == done_id and t["collected"] is False for t in pending["tasks"])
+        by_origin = await server.list_tasks(origin="tester@host-a")
+        assert done_id in [t["task_id"] for t in by_origin["tasks"]]
+        by_other = await server.list_tasks(origin="nobody@nowhere")
+        assert done_id not in [t["task_id"] for t in by_other["tasks"]]
+
+        status = await server.get_task_status(done_id, collected_by="sweeper@host-b")
+        assert status["status"] == "DONE" and status["collected"] is True
+        entry = server._TASKS[done_id]
+        assert entry["collected"] is True and entry["collected_by"] == "sweeper@host-b"
+
+        after = await server.list_tasks(uncollected_only=True)
+        assert done_id not in [t["task_id"] for t in after["tasks"]]
+        match = next(t for t in (await server.list_tasks())["tasks"] if t["task_id"] == done_id)
+        assert match["collected"] is True
+
+        t0 = _time.monotonic()
+        deadline_status = await server.get_task_status(slow_id, timeout_s=1)
+        elapsed = _time.monotonic() - t0
+        assert deadline_status["deadline_expires"] is True
+        assert deadline_status["status"] in ("QUEUED", "RUNNING")
+        assert 0.5 < elapsed < 6
+        assert server._TASKS[slow_id].get("collected") is not True
+        return done_id, slow_id
+
+    try:
+        server.run_subagent = fake_run
+        done_id, slow_id = asyncio.run(exercise())
+        task_obj = server._TASKS.get(slow_id, {}).get("task")
+        if task_obj is not None and not task_obj.done():
+            task_obj.cancel()
+    finally:
+        server.run_subagent = original
+        for name in ("done_id", "slow_id"):
+            if name in locals():
+                server._TASKS.pop(locals()[name], None)
+    print("[PASS] DCP List & Collection Tests")
+
+
 def test_engine_write_guards():
     """
     Engine-loop guards (fake API client, zero network): false DONE without a
@@ -2942,6 +3016,7 @@ def test_mcp_tool_surface():
         "run_subagent",
         "start_task",
         "get_task_status",
+        "list_tasks",
         "fetch_url",
         "recommend_models",
         "get_outline",

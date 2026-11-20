@@ -379,6 +379,91 @@ def test_tasks_lifecycle(client):
         assert task_entry["status"] in ("QUEUED", "RUNNING", "DONE")
 
 
+def test_task_detail_get_marks_collected(client):
+    """DCP: GET /api/tasks/{id} returning a terminal payload marks the task
+    collected (accounting-only) and clears it from the uncollected filter."""
+    import time
+
+    # Patch the worker itself: under TestClient its scheduling is
+    # nondeterministic and it would flip the entry back to RUNNING after
+    # the test drives it to DONE.
+    with patch("botex.server_cloud._run_task_worker", new=AsyncMock()):
+        create_resp = client.post("/api/tasks", json={"task": "dcp collect", "mode": "readonly"})
+        assert create_resp.status_code == 202
+        task_id = create_resp.json()["task_id"]
+
+    # The endpoint marking logic is under test, so drive the entry to
+    # terminal directly.
+    entry = server_cloud._TASKS[task_id]
+    entry["status"] = "DONE"
+    entry["result"] = "done"
+    entry["finished_at"] = time.time()
+
+    before = client.get("/api/tasks", params={"uncollected_only": "true"}).json()
+    assert task_id in [t["task_id"] for t in before["tasks"]]
+
+    detail = client.get(f"/api/tasks/{task_id}")
+    assert detail.status_code == 200
+    assert detail.json()["collected"] is True
+
+    after = client.get("/api/tasks", params={"uncollected_only": "true"}).json()
+    assert task_id not in [t["task_id"] for t in after["tasks"]]
+    listed = client.get("/api/tasks").json()
+    match = next(t for t in listed["tasks"] if t["task_id"] == task_id)
+    assert match["collected"] is True
+
+
+def test_task_list_origin_filter(client):
+    """DCP: POST /api/tasks stores header-derived origin; GET /api/tasks
+    filters by exact origin for orchestrator sweeps."""
+    with patch("botex.server_cloud._run_task_worker", new=AsyncMock()):
+        create_resp = client.post(
+            "/api/tasks",
+            json={"task": "dcp origin filter", "mode": "readonly"},
+            headers={"X-Agent-Id": "devin", "X-Host": "kubai-workstation"},
+        )
+        assert create_resp.status_code == 202
+        task_id = create_resp.json()["task_id"]
+
+    matched = client.get("/api/tasks", params={"origin": "devin@kubai-workstation"}).json()
+    assert task_id in [t["task_id"] for t in matched["tasks"]]
+    other = client.get("/api/tasks", params={"origin": "nobody@nowhere"}).json()
+    assert task_id not in [t["task_id"] for t in other["tasks"]]
+
+
+def test_task_collected_flag_persists(client):
+    """DCP: the collected flag is re-persisted on collection so it survives
+    server restarts (_load_tasks_persistent restores it)."""
+    import json as _json
+    import time as _time
+    from botex.config import get_tasks_dir
+
+    task_id = uuid.uuid4().hex[:12]
+    server_cloud._TASKS[task_id] = {
+        "task_id": task_id,
+        "task": "dcp persist",
+        "request": {"workspace_dir": ""},
+        "status": "DONE",
+        "created_at": _time.time(),
+        "finished_at": _time.time(),
+        "result": "done",
+        "result_data": {"ok": True, "status": "DONE"},
+        "async_task": None,
+    }
+    try:
+        detail = client.get(f"/api/tasks/{task_id}")
+        assert detail.status_code == 200 and detail.json()["collected"] is True
+        persisted_path = get_tasks_dir("") / f"{task_id}.json"
+        persisted = _json.loads(persisted_path.read_text(encoding="utf-8"))
+        assert persisted.get("collected") is True
+    finally:
+        server_cloud._TASKS.pop(task_id, None)
+        try:
+            persisted_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def test_task_requires_provider_when_model_specified(client, monkeypatch):
     """Explicit model without provider must be rejected with 400 Bad Request."""
     monkeypatch.delenv("BOTEX_PROVIDER", raising=False)
