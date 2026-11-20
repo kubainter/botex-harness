@@ -4540,3 +4540,51 @@ async def test_allow_expensive_model_gate_behavior():
         import shutil
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_mcp_tool_descriptions_budget():
+    """Enforce Safe Diet token budget and schema hygiene across all MCP tools."""
+    import asyncio
+    import json
+
+    import server
+
+    tools = asyncio.run(server.mcp.list_tools())
+    assert len(tools) >= 25
+    desc_chars = 0
+    total_chars = 0
+    for tool in tools:
+        desc = tool.description or ""
+        assert "\nArgs:" not in desc and "Args:" not in desc, f"{tool.name} has Args: in desc"
+        assert "\nReturns:" not in desc, f"{tool.name} has Returns: in desc"
+        assert len(desc) <= 220, f"{tool.name} description exceeds 220 chars ({len(desc)})"
+        schema = (
+            getattr(tool, "input_schema", None)
+            or getattr(tool, "inputSchema", None)
+            or getattr(tool, "parameters", None)
+            or {}
+        )
+        desc_chars += len(desc)
+        total_chars += len(desc) + len(json.dumps(schema, separators=(",", ":")))
+
+    assert desc_chars // 4 <= 2000, f"Total description tokens too high: ~{desc_chars // 4}"
+    assert total_chars // 4 <= 5500, f"Total tools/list tokens too high: ~{total_chars // 4}"
+
+    by_name = {t.name: t for t in tools}
+    for tool_name, param_name in (
+        ("run_subagent", "mode"),
+        ("run_subagent", "budget_limit_usd"),
+        ("start_task", "mode"),
+        ("save_memory", "kind"),
+        ("save_memory", "scope"),
+        ("botex_report_violation", "violation_code"),
+        ("botex_report_violation", "severity"),
+        ("bot_report_activity", "fencing_token"),
+    ):
+        sch = (
+            getattr(by_name[tool_name], "input_schema", None)
+            or getattr(by_name[tool_name], "parameters", None)
+            or {}
+        )
+        prop = sch.get("properties", {}).get(param_name, {})
+        assert prop.get("description"), f"{tool_name}.{param_name} missing schema description"

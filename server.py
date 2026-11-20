@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Optional, Tuple
 
+from pydantic import Field
 from typing_extensions import TypedDict
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -695,71 +696,60 @@ def _read_instructions_excerpt(instructions_path: str) -> str:
 async def start_task(
     task: str,
     files: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
-    workspace_dir: str = "",
+    workspace_dir: Annotated[
+        str, Field(description="Workspace path or 'edge://<dev>/<ws>'. Empty = default.")
+    ] = "",
     model: str = "",
-    profile: str = "",
-    provider: str = "",
-    mode: str = "",
-    max_turns: int = 0,
-    max_tokens: int = 0,
-    max_duration_s: int = 0,
-    budget_limit_usd: float = -1.0,
-    allow_destructive: bool = False,
-    allow_exec: bool = False,
-    allow_net: bool = False,
+    profile: Annotated[
+        str, Field(description="Config profile ('default'|'coding'|'auto-beta'|'fast').")
+    ] = "",
+    provider: Annotated[
+        str,
+        Field(description="openrouter|nvidia|google|openrouter-free|ollama. Required with model."),
+    ] = "",
+    mode: Annotated[
+        str, Field(description="readonly|edit|destructive|full (empty = config).")
+    ] = "",
+    max_turns: Annotated[int, Field(description="Max loop steps (0 = config).")] = 0,
+    max_tokens: Annotated[
+        int, Field(description="Per-turn token cap (0 = config; ~8000+ for reasoning).")
+    ] = 0,
+    max_duration_s: Annotated[
+        int, Field(description="Wall-clock limit in seconds (0 = config).")
+    ] = 0,
+    budget_limit_usd: Annotated[
+        float, Field(description="Daily USD cap (<0 = config, 0 = unlimited).")
+    ] = -1.0,
+    allow_destructive: Annotated[
+        bool, Field(description="Permit delete_file/move_file (needs user consent).")
+    ] = False,
+    allow_exec: Annotated[
+        bool, Field(description="Permit run_command; not a sandbox (needs user consent).")
+    ] = False,
+    allow_net: Annotated[bool, Field(description="Permit read-only read_url.")] = False,
     net_allowed_hosts: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
     net_allowed_urls: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
     api_key: str = "",
-    output_path: str = "",
-    verify_command: str = "",
-    recipe: str = "",
-    allow_non_zdr: bool = False,
+    output_path: Annotated[
+        str, Field(description="Required workspace-relative output file for DONE.")
+    ] = "",
+    verify_command: Annotated[
+        str, Field(description="Allowlisted command that must pass before DONE.")
+    ] = "",
+    recipe: Annotated[
+        str,
+        Field(
+            description="Workflow persona (planner|code-explorer|reviewer|security-reviewer|build-resolver|tdd)."
+        ),
+    ] = "",
+    allow_non_zdr: Annotated[
+        bool, Field(description="Consent to relax Zero Data Retention (needed for :free).")
+    ] = False,
     allow_expensive_model: bool = False,
-    approval_policy: str = "",
+    approval_policy: Annotated[str, Field(description="none|high_risk|mutations|all_risky.")] = "",
     origin: str = "",
 ) -> dict[str, Any]:
-    """Start a detached BoteX task and return its task_id immediately.
-
-    Runs the same engine as `run_subagent`, but returns instantly with a
-    `task_id` for polling via `get_task_status`. Concurrency is bounded by
-    engine.max_concurrent_tasks and the queue by engine.max_queued_tasks —
-    a full queue returns status TOO_MANY_QUEUED.
-
-    The capability/limits arguments are identical to `run_subagent` —
-    same contracts, same pre-authorization semantics:
-
-    - mode: capability preset — 'readonly' (read tools only; the contract
-      is an analysis report), 'edit' (read + write; default), 'destructive'
-      (+ delete/move), 'full' (+ run_command). Empty = engine.default_mode.
-    - allow_destructive / allow_exec / allow_net widen ordinary presets,
-      never narrow them. 'readonly' and 'chat' are hard read-only modes and
-      cannot gain local writes, destructive operations, or command execution.
-      allow_exec additionally requires exec.enabled=true in the config.
-      None of these is a sandbox: grant them only with the user's consent.
-    - output_path makes the contract file_output: DONE requires the file
-      to exist, be non-empty, and pass the syntax gate (mutating mode).
-    - verify_command is an allowlisted command that must pass before DONE
-      is accepted — it runs even when the task made no writes. Requires
-      exec authorization.
-    - recipe: Optional operational persona / workflow prompt (e.g. 'planner',
-      'code-explorer', 'reviewer', 'security-reviewer', 'build-resolver', 'tdd').
-    - max_turns / max_tokens / max_duration_s / budget_limit_usd:
-      0 (negative for budget) = config value; a non-positive max_turns is
-      clamped to 1.
-    - net_allowed_hosts / net_allowed_urls narrow or replace the net
-      scope per run according to net.policy (see run_subagent).
-    - allow_non_zdr: per-run consent to relax Zero Data Retention — needed
-      for free (:free) models whose endpoints may log or train on prompts.
-      Same semantics as in run_subagent.
-    - approval_policy: Operator approval policy for risky operations:
-      'none', 'high_risk', 'mutations', or 'all_risky'.
-
-    Returns:
-        {"task_id": str, "status": "QUEUED"} — poll with get_task_status.
-        The finished task's `result_data` carries the full engine result
-        (status, failure_kind, ok, files_touched, exec_ran,
-        rollback_verified, attempts[], cost_usd, ...).
-    """
+    """Async version of `run_subagent`: queues a task and returns `{task_id, status: "QUEUED"}` for `get_task_status`."""
     _cleanup_tasks()
     if (
         model
@@ -848,15 +838,7 @@ async def start_task(
 
 @mcp.tool()
 async def get_task_status(task_id: str) -> dict[str, Any]:
-    """Return status and result for a task started with start_task.
-
-    `status` is the task lifecycle (QUEUED | RUNNING | DONE | FAILED |
-    CANCELLED) — DONE here means "finished", not "succeeded"; check
-    `result_data.status` / `result_data.ok` for the engine outcome.
-    `result` is the pretty-text report; `result_data` is the structured
-    engine result (status, failure_kind, ok, files_touched, exec_ran,
-    rollback_verified, attempts[], cost_usd, ...).
-    """
+    """Return status and `result_data` for a `start_task` run (check `result_data.ok` for verified outcome)."""
     _cleanup_tasks()
     entry = _TASKS.get(task_id)
     if not entry:
@@ -878,16 +860,11 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def fetch_url(url: str, max_bytes: int = 0) -> dict[str, Any]:
-    """
-    Fetch one public http(s) text document for caller-side research.
-
-    This tool is intentionally separate from BoteX's internal read_url: the
-    orchestrating agent chooses the URL, so arbitrary public hosts do not have
-    to be configured in net.allowed_hosts. SSRF protections, redirect
-    revalidation, content-type checks, byte limits, and secret masking still
-    apply. In net.policy='allowlist', only configured hosts may be fetched.
-    """
+async def fetch_url(
+    url: str,
+    max_bytes: Annotated[int, Field(description="Max response bytes (0 = default cap).")] = 0,
+) -> dict[str, Any]:
+    """Fetch one public http(s) text document with SSRF guards and secret masking."""
     net_cfg = load_config().get("net", {})
     return await _fetch_url(
         url,
@@ -900,25 +877,16 @@ async def fetch_url(url: str, max_bytes: int = 0) -> dict[str, Any]:
 async def recommend_models(
     task_type: str = "coding",
     limit: int = 5,
-    include_free: bool = False,
+    include_free: Annotated[
+        bool,
+        Field(description="Include :free non-ZDR models (needs allow_non_zdr or openrouter-free)."),
+    ] = False,
     provider: str = "",
     profile: str = "",
     tier: str = "auto",
     recipe: str = "",
 ) -> str:
-    """
-    [EN] Fetches the most cost-effective and capable models from OpenRouter based on live benchmarks.
-    USE THIS TOOL BEFORE calling `run_subagent` if you are unsure which model ID to use or want to optimize for cost/quality.
-    include_free=True also admits ':free' variants (non-ZDR — prompts may be
-    logged/trained on); they require allow_non_zdr or the openrouter-free
-    provider to actually run.
-
-    [PL] Pobiera rekomendacje modeli z OpenRouter na podstawie benchmarków.
-    Użyj tego narzędzia ZANIM wywołasz `run_subagent`, jeśli nie znasz dokładnego ID modelu.
-    include_free=True dopuszcza warianty ':free' (non-ZDR — prompty mogą być
-    logowane/trenowane); do uruchomienia wymagają allow_non_zdr albo
-    providera openrouter-free.
-    """
+    """Rank cost-effective models from benchmarks; call before `run_subagent`/`start_task` if model is unspecified."""
     results = get_recommended_models(
         task_type,
         limit,
@@ -935,122 +903,60 @@ async def recommend_models(
 async def run_subagent(
     task: str,
     files: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
-    workspace_dir: str = "",
+    workspace_dir: Annotated[
+        str, Field(description="Workspace path or 'edge://<dev>/<ws>'. Empty = default.")
+    ] = "",
     model: str = "",
-    profile: str = "",
-    provider: str = "",
-    mode: str = "",
-    max_turns: int = 0,
-    max_tokens: int = 0,
-    max_duration_s: int = 0,
-    budget_limit_usd: float = -1.0,
-    allow_destructive: bool = False,
-    allow_exec: bool = False,
+    profile: Annotated[
+        str, Field(description="Config profile ('default'|'coding'|'auto-beta'|'fast').")
+    ] = "",
+    provider: Annotated[
+        str,
+        Field(description="openrouter|nvidia|google|openrouter-free|ollama. Required with model."),
+    ] = "",
+    mode: Annotated[
+        str, Field(description="readonly|edit|destructive|full ('readonly' is hard read-only).")
+    ] = "",
+    max_turns: Annotated[int, Field(description="Max loop steps (0 = config).")] = 0,
+    max_tokens: Annotated[
+        int, Field(description="Per-turn token cap (0 = config; ~8000+ for reasoning).")
+    ] = 0,
+    max_duration_s: Annotated[
+        int, Field(description="Wall-clock limit in seconds (0 = config).")
+    ] = 0,
+    budget_limit_usd: Annotated[
+        float, Field(description="Daily USD cap (<0 = config, 0 = unlimited).")
+    ] = -1.0,
+    allow_destructive: Annotated[
+        bool, Field(description="Permit delete_file/move_file (needs user consent).")
+    ] = False,
+    allow_exec: Annotated[
+        bool, Field(description="Permit run_command; not a sandbox (needs user consent).")
+    ] = False,
     api_key: str = "",
-    output_path: str = "",
-    allow_net: bool = False,
+    output_path: Annotated[
+        str, Field(description="Required workspace-relative output file for DONE.")
+    ] = "",
+    allow_net: Annotated[bool, Field(description="Permit read-only read_url.")] = False,
     net_allowed_hosts: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
     net_allowed_urls: list[str] = [],  # noqa: B006  # FastMCP JSON schema default
-    verify_command: str = "",
-    recipe: str = "",
-    allow_non_zdr: bool = False,
+    verify_command: Annotated[
+        str, Field(description="Allowlisted command that must pass before DONE.")
+    ] = "",
+    recipe: Annotated[
+        str,
+        Field(
+            description="Workflow persona (planner|code-explorer|reviewer|security-reviewer|build-resolver|tdd)."
+        ),
+    ] = "",
+    allow_non_zdr: Annotated[
+        bool, Field(description="Consent to relax Zero Data Retention (needed for :free).")
+    ] = False,
     allow_expensive_model: bool = False,
-    approval_policy: str = "",
+    approval_policy: Annotated[str, Field(description="none|high_risk|mutations|all_risky.")] = "",
     origin: str = "",
 ) -> Annotated[CallToolResult, SubagentTaskResult]:
-    """
-    Runs BoteX — an autonomous code execution engine (agent-agnostic harness).
-    BoteX performs multi-step tasks on local files inside workspace_dir.
-
-    TIP: If the user didn't specify a model, DO NOT guess. Use the `recommend_models` tool first to find the best model for this task!
-
-    Key engine features:
-    - Outline-First and Context Pruning: ~90% token savings.
-    - Pre-write Syntax Check: in-memory code validation before touching disk.
-    - Multi-tier Fuzzy Patching: tolerant of CRLF/LF and indentation drift.
-    - Hard Zero-Retention on OpenRouter (provider: data_collection=deny)
-      and DLP secret censoring.
-    - Automatic Snapshot Rollback on loops or critical failures.
-
-    Args:
-        task: Precise description of the coding or refactoring task.
-        files: Optional list of primary files affected by the task.
-        workspace_dir: Project directory path. Empty = engine.default_workspace
-               from the config, else the server's current directory.
-        model: Any model from the provider's catalog. Empty = model from config
-               (see 'profile' and botex.config.json).
-        profile: Model profile from botex.config.json (e.g. 'default', 'coding',
-               'auto-beta', 'fast'). When both 'model' and 'profile' are empty,
-               the capability mode picks the tier via engine.mode_profiles
-               (readonly -> 'fast', destructive/full -> 'coding'). Ignored when
-               'model' is given explicitly.
-        provider: API provider from the 'providers' section of botex.config.json
-               ('openrouter', 'nvidia', 'google', 'openrouter-free', 'ollama').
-               Empty = provider marked 'default: true' in the configuration.
-        mode: Capability preset: 'readonly' (read only — the contract is an
-               analysis report, DONE requires non-empty findings), 'edit'
-               (read + edit — default), 'destructive' (+delete/move),
-               'full' (+run_command). Empty = engine.default_mode from
-               config. Explicit allow_* flags may widen ordinary presets,
-                but 'readonly' and 'chat' are hard read-only modes and cannot
-                gain local writes, destructive operations, or command execution.
-               In headless mode this is pre-authorization — grant it
-               consciously.
-        max_turns: Maximum tool-loop steps (0 = config value).
-        max_tokens: Per-turn completion cap (0 = config value; reasoning
-               models need ~8000+ since thinking shares this budget).
-        max_duration_s: Total wall-clock limit in seconds (0 = config value,
-               0 disables only when config is also 0). Checked between turns.
-        budget_limit_usd: Daily spend limit in USD (negative = config value,
-               0 = no limit).
-        allow_destructive: Authorize destructive operations (delete_file/
-               move_file) for this task. Headless mode cannot confirm
-               mid-run — grant ONLY with the user's consent.
-        allow_exec: Authorize run_command for this task (also requires
-               exec.enabled=true in config). WARNING: this is NOT a sandbox —
-               commands run with operator privileges. Grant only for trusted
-               workspaces with the user's consent.
-        api_key: Optional provider API key passed per-request (highest
-               priority — overrides env/.env/config). Empty = resolved
-               internally by the harness.
-        output_path: Optional required output file (workspace-relative).
-               Sets the file_output contract: DONE is accepted only when
-               the file exists on disk, is non-empty, and passes the
-               syntax gate; a DONE response carrying the payload as text
-               is salvaged to disk. Requires a mutating mode.
-        allow_net: Explicitly authorizes the read-only public web tool for
-               this run. It is never enabled by a capability mode.
-        net_allowed_hosts: Optional per-run host authorization. In
-               net.policy='caller' these replace config defaults; in 'public'
-               they narrow public access; in 'allowlist' they must stay inside
-               net.allowed_hosts.
-        net_allowed_urls: Optional per-run URL authorization rules. A URL
-               ending in '/' authorizes that subtree; otherwise it authorizes
-               the exact URL including its query string.
-        verify_command: Optional allowlisted command that must pass before
-               DONE is accepted — it runs against the workspace as it
-               stands, including when the task made no writes (a passing
-               verifier validates a legitimate no-change result). Requires
-               exec.enabled=true in config and exec authorization.
-        recipe: Optional operational persona / workflow prompt (e.g. 'planner',
-               'code-explorer', 'reviewer', 'security-reviewer', 'build-resolver', 'tdd').
-        allow_non_zdr: Per-run consent to relax the Zero Data Retention
-               gate. Required for free (:free) models whose endpoints may
-               log or train on prompts — it also switches the wire
-               provider.data_collection flag to 'allow'. Grant only with
-               the operator's consent; the result carries
-               zdr_enforced=false. The openrouter-free provider preset is
-               the persistent config-level alternative.
-        approval_policy: Operator approval policy for risky operations: 'none',
-               'high_risk' (default), 'mutations', 'all_risky'.
-
-    Returns:
-        A pretty-text report in the text content (unchanged format for legacy
-        clients) plus the full engine result as structuredContent (status,
-        failure_kind, ok, files_touched, exec_ran, rollback_verified,
-        attempts[], cost_usd, ...). `ok` is true only when status == DONE —
-        i.e. the task contract was verified, not merely claimed by the model.
-    """
+    """Run BoteX synchronously inside `workspace_dir`; call `recommend_models` first if model is unspecified (`ok` is true only when `status == DONE`)."""
     if (
         model
         and model.strip()
@@ -1149,11 +1055,11 @@ async def run_subagent(
 
 
 @mcp.tool()
-async def get_outline(path: str, workspace_dir: str = "") -> dict[str, Any]:
-    """
-    Returns a lightweight file skeleton (classes, methods, functions, headers,
-    line numbers) without reading the whole file. Saves ~90% of tokens.
-    """
+async def get_outline(
+    path: str,
+    workspace_dir: Annotated[str, Field(description="Workspace root (empty = default).")] = "",
+) -> dict[str, Any]:
+    """Return file skeleton (classes, functions, line numbers) without reading the full file."""
     return _get_file_outline(path, resolve_workspace(workspace_dir))
 
 
@@ -1161,34 +1067,25 @@ async def get_outline(path: str, workspace_dir: str = "") -> dict[str, Any]:
 async def save_memory(
     title: str,
     content: str,
-    workspace_dir: str = "",
-    kind: str = "context",
+    workspace_dir: Annotated[
+        str, Field(description="Workspace root (empty = default; use '' for global swarm on VPS).")
+    ] = "",
+    kind: Annotated[
+        str, Field(description="context|decision|handoff|lesson|belief|heuristic.")
+    ] = "context",
     tags: Optional[list[str]] = None,
     memory_id: str = "",
-    scope: str = "local",
-    confidence: float = 1.0,
-    project: Optional[str] = None,
-    origin: str = "",
+    scope: Annotated[str, Field(description="local|global.")] = "local",
+    confidence: Annotated[float, Field(description="Score in [0.0, 1.0].")] = 1.0,
+    project: Annotated[
+        Optional[str], Field(description="Project slug (e.g. 'swarm', 'botex').")
+    ] = None,
+    origin: Annotated[
+        str,
+        Field(description="'<agent>@<host>'; reserved claims (human/curator/operator) rejected."),
+    ] = "",
 ) -> dict[str, Any]:
-    """
-    Saves a persistent context note, architectural decision, task handoff, lesson,
-    belief, or heuristic into the workspace or global shared Memory Vault.
-    Masks secrets and provides directory isolation.
-
-    Args:
-        title: Short descriptive title of the memory entry.
-        content: Detailed markdown notes, architectural rationale, or handoff context.
-        workspace_dir: Workspace root directory. Empty = engine.default_workspace
-               from the config, else the server's current directory.
-        kind: Entry category ('context' | 'decision' | 'handoff' | 'lesson' | 'belief' | 'heuristic').
-        tags: Optional list of keyword tags for filtering and discovery.
-        memory_id: Optional custom identifier (alphanumeric/hyphen/underscore). Auto-generated if omitted.
-        scope: Storage scope ('local' for workspace, 'global' for cross-workspace). Default is 'local'.
-        confidence: Certainty score in [0.0, 1.0] for belief/heuristic-style entries. Default 1.0.
-        project: Optional project slug (e.g. 'botex', 'tw3se', 'swarm') for logical partitioning.
-        origin: Optional provenance identifier '<agent>@<host>'. Falls back to X-Agent-Id@X-Host session header or 'botex'.
-               Reserved identity claims ('human', 'human-curated', 'operator', 'curator') are rejected.
-    """
+    """Save a persistent note into the Memory Vault (secret-masked); never log penal violations here."""
     effective_origin = _resolve_call_origin(origin)
     ws = (
         "."
@@ -1221,34 +1118,19 @@ async def save_memory(
 
 @mcp.tool()
 async def search_memory(
-    workspace_dir: str = "",
+    workspace_dir: Annotated[str, Field(description="Workspace root (empty = default).")] = "",
     query: str = "",
     tag: str = "",
-    kind: str = "",
-    scope: str = "local",
-    since: str = "",
-    until: str = "",
+    kind: Annotated[
+        str, Field(description="context|decision|handoff|lesson|belief|heuristic.")
+    ] = "",
+    scope: Annotated[str, Field(description="local|global|all.")] = "local",
+    since: Annotated[str, Field(description="ISO-8601 lower bound.")] = "",
+    until: Annotated[str, Field(description="ISO-8601 upper bound.")] = "",
     min_confidence: Optional[float] = None,
     project: str = "",
 ) -> dict[str, Any]:
-    """
-    Searches the Memory Vault by keyword query, tag, or entry kind
-    (context, decision, handoff, lesson, belief, heuristic) across local,
-    global, or all scopes. Directly linked notes surface via spreading
-    activation over the wikilink graph.
-
-    Args:
-        workspace_dir: Workspace root directory. Empty = engine.default_workspace
-               from the config, else the server's current directory.
-        query: Free-text search string matched against title, content, and tags.
-        tag: Filter by specific tag.
-        kind: Filter by entry kind ('context', 'decision', 'handoff', 'lesson', 'belief', 'heuristic').
-        scope: Search scope ('local', 'global', or 'all'). Default is 'local'.
-        since: Optional ISO-8601 date/datetime lower bound on entry timestamps.
-        until: Optional ISO-8601 date/datetime upper bound on entry timestamps.
-        min_confidence: Optional minimum certainty threshold in [0.0, 1.0].
-        project: Optional project slug filter (or '_unassigned' for entries without a project).
-    """
+    """Search Memory Vault metadata by keyword, tag, kind, or time range (prefer `recall_memory` first)."""
     res = _search_memory(
         workspace_dir=resolve_workspace(workspace_dir),
         query=query,
@@ -1269,28 +1151,13 @@ async def search_memory(
 @mcp.tool()
 async def reflect_memory(
     query: str,
-    workspace_dir: str = "",
+    workspace_dir: Annotated[str, Field(description="Workspace root (empty = default).")] = "",
     topic: Optional[str] = None,
     min_confidence: float = 0.5,
-    scope: str = "all",
+    scope: Annotated[str, Field(description="local|global|all.")] = "all",
     project: str = "",
 ) -> dict[str, Any]:
-    """
-    Synthesizes gathered facts, decisions, beliefs, and heuristics from the
-    Memory Vault into an ordered reasoning digest (Hindsight-style reflection).
-    Entries are grouped by kind (decisions, beliefs, heuristics, lessons,
-    handoffs, context) and ranked by confidence and recency — fully
-    deterministic and local, with no LLM calls.
-
-    Args:
-        query: Free-text query steering which memories to reflect on.
-        workspace_dir: Workspace root directory. Empty = engine.default_workspace
-               from the config, else the server's current directory.
-        topic: Optional tag restricting the reflection to a thematic bucket.
-        min_confidence: Minimum certainty threshold in [0.0, 1.0]. Default 0.5.
-        scope: Reflection scope ('local', 'global', or 'all'). Default is 'all'.
-        project: Optional project slug filter.
-    """
+    """Deterministically group and rank vault entries by kind, confidence, and recency (no LLM)."""
     return _reflect_memory(
         workspace_dir=resolve_workspace(workspace_dir),
         query=query,
@@ -1304,32 +1171,12 @@ async def reflect_memory(
 @mcp.tool()
 async def recall_memory(
     query: str,
-    workspace_dir: str = "",
+    workspace_dir: Annotated[str, Field(description="Workspace root (empty = default).")] = "",
     topic: Optional[str] = None,
-    scope: str = "all",
+    scope: Annotated[str, Field(description="local|global|all.")] = "all",
     project: str = "",
 ) -> dict[str, Any]:
-    """
-    One-shot recall: ask the Memory Vault a natural-language question and get a
-    synthesized answer with sources in a single call. BoteX gathers the top
-    search hits plus their 1-hop graph neighbourhood (wikilinks + backlinks),
-    then a server-side curator model (Ollama -> NVIDIA -> Gemini -> OpenRouter
-    free) answers strictly from those notes. Falls back to a deterministic
-    digest when no model is available. Use read_memory on a returned source
-    only when you need the full raw note.
-
-    Args:
-        query: Natural-language question or topic.
-        workspace_dir: Workspace root directory. Empty = engine.default_workspace
-               from the config, else the server's current directory.
-        topic: Optional tag restricting the search to a thematic bucket.
-        scope: 'local', 'global', or 'all'. Default is 'all'.
-        project: Optional project slug filter restricting initial search hits.
-
-    Returns:
-        {ok, answer, sources, confidence (HIGH|MEDIUM|LOW|NOT_FOUND), tier_used,
-         context_nodes, truncated}
-    """
+    """Default first call for memory lookup: returns 1-hop graph synthesis with sources (`read_memory` for raw notes)."""
     return await _recall_memory_impl(
         workspace_dir=resolve_workspace(workspace_dir),
         query=query,
@@ -1470,17 +1317,9 @@ async def _recall_memory_impl(
 async def read_memory(
     memory_id: str,
     workspace_dir: str = "",
-    scope: str = "local",
+    scope: Annotated[str, Field(description="local|global|all.")] = "local",
 ) -> dict[str, Any]:
-    """
-    Reads the full content and metadata of a specific memory entry by ID from the Memory Vault.
-
-    Args:
-        memory_id: The ID of the memory entry to retrieve (e.g. 'mem_a1b2c3d4').
-        workspace_dir: Workspace root directory. Empty = engine.default_workspace
-               from the config, else the server's current directory.
-        scope: Lookup scope ('local', 'global', or 'all'). Default is 'local'.
-    """
+    """Read full raw content and metadata of a Memory Vault entry by ID."""
     payload = _read_memory(
         workspace_dir=resolve_workspace(workspace_dir),
         memory_id=memory_id,
@@ -1498,18 +1337,9 @@ async def read_memory(
 async def delete_memory(
     memory_id: str,
     workspace_dir: str = "",
-    scope: str = "local",
+    scope: Annotated[str, Field(description="local|global|all.")] = "local",
 ) -> dict[str, Any]:
-    """
-    Deletes a specific memory entry by ID from the workspace or global Memory Vault
-    and removes its index/graph links.
-
-    Args:
-        memory_id: The ID of the memory entry to delete (e.g. 'mem_a1b2c3d4').
-        workspace_dir: Workspace root directory. Empty = engine.default_workspace
-               from the config, else the server's current directory.
-        scope: Lookup scope ('local', 'global', or 'all'). Default is 'local'.
-    """
+    """Delete a Memory Vault entry by ID and clean its graph links."""
     return _delete_memory(
         workspace_dir=resolve_workspace(workspace_dir),
         memory_id=memory_id,
@@ -1522,14 +1352,7 @@ async def read_scratchpad(
     memory_id: str,
     workspace_dir: str = "",
 ) -> dict[str, Any]:
-    """
-    Reads the full execution or terminal log offloaded to the scratchpad (.botex/scratchpad/<memory_id>.log).
-
-    Args:
-        memory_id: The ID of the scratchpad entry (e.g. 'mem_exec_a1b2c3d4').
-        workspace_dir: Workspace root directory. Empty = engine.default_workspace
-               from the config, else the server's current directory.
-    """
+    """Read full offloaded execution or terminal log from `.botex/scratchpad/<memory_id>.log`."""
     return _read_scratchpad(
         memory_id=memory_id,
         cwd=resolve_workspace(workspace_dir),
@@ -1540,16 +1363,9 @@ async def read_scratchpad(
 async def get_backlinks(
     memory_id: str,
     workspace_dir: str = "",
-    scope: str = "local",
+    scope: Annotated[str, Field(description="local|global|all.")] = "local",
 ) -> dict[str, Any]:
-    """
-    Finds all memories that link TO the given memory_id via [[wikilinks]].
-
-    Args:
-        memory_id: Target memory ID (e.g. 'mem_a1b2c3d4').
-        workspace_dir: Workspace root directory.
-        scope: Lookup scope ('local', 'global', or 'all').
-    """
+    """Find all Memory Vault entries linking to `memory_id` via `[[wikilinks]]`."""
     return _get_backlinks(
         workspace_dir=resolve_workspace(workspace_dir),
         memory_id=memory_id,
@@ -1563,23 +1379,11 @@ async def patch_memory_section(
     section: str = "Compiled Truth",
     new_content: str = "",
     workspace_dir: str = "",
-    scope: str = "local",
+    scope: Annotated[str, Field(description="local|global.")] = "local",
     append: bool = False,
     origin: str = "",
 ) -> dict[str, Any]:
-    """
-    Surgically updates a Markdown section (e.g. '## Compiled Truth') in a memory note
-    without modifying frontmatter, other sections, or the Timeline audit trail.
-
-    Args:
-        memory_id: Target memory ID to patch.
-        section: Section heading to replace or create (default 'Compiled Truth').
-        new_content: New Markdown text for the section.
-        workspace_dir: Workspace root directory.
-        scope: Lookup scope ('local' or 'global').
-        append: Whether to append to existing section content instead of replacing.
-        origin: Optional provenance identifier '<agent>@<host>'. Falls back to X-Agent-Id@X-Host session header or 'botex'.
-    """
+    """Update or append a Markdown section in a memory note without altering frontmatter or other sections."""
     effective_origin = _resolve_call_origin(origin)
     ws = resolve_workspace(workspace_dir)
     res = _patch_memory_section(
@@ -1611,15 +1415,9 @@ async def patch_memory_section(
 @mcp.tool()
 async def find_graph_health(
     workspace_dir: str = "",
-    scope: str = "local",
+    scope: Annotated[str, Field(description="local|global|all.")] = "local",
 ) -> dict[str, Any]:
-    """
-    Audits Memory Vault knowledge graph integrity: reports broken links, orphan notes, and cycles.
-
-    Args:
-        workspace_dir: Workspace root directory.
-        scope: Lookup scope ('local', 'global', or 'all').
-    """
+    """Audit Memory Vault graph integrity (broken links, orphan notes, cycles)."""
     return _find_graph_health(
         workspace_dir=resolve_workspace(workspace_dir),
         scope=scope,
@@ -1629,20 +1427,11 @@ async def find_graph_health(
 @mcp.tool()
 async def init_obsidian_vault(
     workspace_dir: str = "",
-    scope: str = "local",
+    scope: Annotated[str, Field(description="local|global.")] = "local",
     override_existing: bool = False,
     export_index: bool = True,
 ) -> dict[str, Any]:
-    """
-    Initializes or syncs Obsidian PKM vault configuration (.obsidian/graph.json, app.json)
-    with preset color profiles for #decision, #lesson, #handoff, #context.
-
-    Args:
-        workspace_dir: Workspace root directory.
-        scope: Target scope ('local' or 'global').
-        override_existing: Whether to overwrite existing .obsidian config files.
-        export_index: Also generate dynamic _GRAPH_INDEX.md note.
-    """
+    """Initialize or sync Obsidian vault config and optional `_GRAPH_INDEX.md`."""
     ws = resolve_workspace(workspace_dir)
     res = _init_obsidian_vault(workspace_dir=ws, scope=scope, override_existing=override_existing)
     if export_index and res.get("ok"):
@@ -1656,15 +1445,10 @@ async def init_obsidian_vault(
 
 
 @mcp.tool()
-async def swarm_list_bots(namespace: str = "") -> dict[str, Any]:
-    """
-    Lists registered Tethered Bots with their active host leases and brief
-    metadata. Cloud Soul store is authoritative; entries that exist only in
-    the local edge fast-cache are merged in and marked ``source: local_cache``.
-
-    Args:
-        namespace: Optional exact namespace filter (empty = all namespaces).
-    """
+async def swarm_list_bots(
+    namespace: Annotated[str, Field(description="Optional namespace filter (empty = all).")] = "",
+) -> dict[str, Any]:
+    """List registered Tethered Bots, active host leases, and brief metadata."""
     ns = str(namespace or "").strip()
     try:
         bots = await asyncio.to_thread(_list_bots, namespace=ns) or []
@@ -1712,17 +1496,11 @@ async def swarm_list_bots(namespace: str = "") -> dict[str, Any]:
 
 
 @mcp.tool()
-async def bot_consult(bot_id: str, query: str) -> dict[str, Any]:
-    """
-    Single-hop (ttl_hops=1) consult of a registered Tethered Bot: returns its
-    identity, bounded instructions excerpt, active brief, and a recall over
-    the shared Memory Vault restricted to ACTIVE notes only. Bots unknown to
-    both the Cloud Soul store and the local fast-cache get BOT_NOT_FOUND.
-
-    Args:
-        bot_id: Registered bot slug (alphanumeric/-/_ only).
-        query: Natural-language question for the vault recall.
-    """
+async def bot_consult(
+    bot_id: Annotated[str, Field(description="Registered bot slug.")],
+    query: str,
+) -> dict[str, Any]:
+    """Single-hop (ttl_hops=1) consult of a Tethered Bot: returns its brief and active-only vault recall."""
     slug = sanitize_identifier(str(bot_id or ""))
     if not slug:
         return {"ok": False, "error": "INVALID_SLUG"}
@@ -1801,23 +1579,13 @@ async def bot_consult(bot_id: str, query: str) -> dict[str, Any]:
 @mcp.tool()
 async def bot_report_activity(
     bot_id: str,
-    scope_path: str,
+    scope_path: Annotated[str, Field(description="Lease scope (workspace path or identifier).")],
     summary: str,
-    fencing_token: int = 0,
+    fencing_token: Annotated[
+        int, Field(description="Monotonic fencing token; higher wins on a live lease.")
+    ] = 0,
 ) -> dict[str, Any]:
-    """
-    Reports a bot's lease/heartbeat on a scope path into the Cloud Soul
-    ``host_leases`` table. ``host_id`` is bound to the real MCP session
-    provenance (X-Agent-Id@X-Host) — caller-supplied values are never used.
-    A fenced-out write (stale fencing token) returns the rejection payload
-    unchanged and does NOT refresh the local fast-cache.
-
-    Args:
-        bot_id: Registered bot slug.
-        scope_path: Lease scope (workspace path or identifier).
-        summary: Short activity note (secret-masked before storage).
-        fencing_token: Monotonic fencing token; higher wins on a live lease.
-    """
+    """Acquire or refresh a fenced activity lease on `scope_path` for `bot_id` (returns `stale_epoch` if out-fenced)."""
     host_id = get_mcp_client_origin("botex")
     try:
         res = await asyncio.to_thread(
@@ -1861,13 +1629,10 @@ async def bot_report_activity(
 
 
 @mcp.tool()
-async def get_stats(period: str = "week") -> str:
-    """
-    Returns an analytics summary of executed BoteX tasks (USD costs, token
-    usage, code-line balance).
-    Args:
-        period: 'week' (last 7 days) or 'month' (last 30 days).
-    """
+async def get_stats(
+    period: Annotated[str, Field(description="week|month.")] = "week",
+) -> str:
+    """Return USD cost, token usage, and code-line balance summary for executed BoteX tasks."""
     days = 30 if period == "month" else 7
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     records = [r for r in load_analytics() if r.get("timestamp", "") >= cutoff]
@@ -1985,34 +1750,20 @@ def _resolve_blackbox_workspace(workspace_dir: str = "") -> str:
 
 @mcp.tool()
 async def botex_report_violation(
-    offender: str,
-    violation_code: str,
-    severity: str = "REJECT",
+    offender: Annotated[str, Field(description="Target agent or model ID.")],
+    violation_code: Annotated[str, Field(description="SEC_01|SKILL_01|SCOPE_01|HAL_01|LOOP_01.")],
+    severity: Annotated[str, Field(description="WARN|REJECT|CRITICAL.")] = "REJECT",
     skill_recipe: str = "",
-    evidence_snippet: str = "",
-    workspace_dir: str = "",
-    enforcement_action: str = "PENALTY_LOGGED",
+    evidence_snippet: Annotated[
+        str, Field(description="Concise log/diff excerpt (secret-masked).")
+    ] = "",
+    workspace_dir: Annotated[str, Field(description="Workspace path or 'edge://<dev>/<ws>'.")] = "",
+    enforcement_action: Annotated[
+        str, Field(description="PENALTY_LOGGED|HANDOFF_REJECTED|ESCALATED.")
+    ] = "PENALTY_LOGGED",
     origin: str = "",
 ) -> dict[str, Any]:
-    """
-    Records a swarm agent/model rule violation into the isolated BlackBox penal ledger
-    (.botex/penal_vault.db), completely separated from the Memory Vault.
-
-    When to call: during cross-review or handoff verification when you observe a verified
-    contract breach (SEC_01 secrets/workspace breach, SKILL_01 skipped tests or test theater,
-    SCOPE_01 diff explosion, HAL_01 hallucinated tools/paths, LOOP_01 3+ identical failures).
-    Never log violations or penalties into save_memory.
-
-    Args:
-        offender: Target agent or model identifier (e.g. 'zcode-headless', 'botex:glm-5.3-flash').
-        violation_code: Canonical code ('SEC_01', 'SKILL_01', 'SCOPE_01', 'HAL_01', 'LOOP_01').
-        severity: Incident severity ('WARN', 'REJECT', 'CRITICAL'). Default 'REJECT'.
-        skill_recipe: Optional skill/recipe active during the infraction.
-        evidence_snippet: Concise log/diff excerpt (automatically secret-masked).
-        workspace_dir: Target workspace path or 'edge://<device_id>/<workspace_id>' URI.
-        enforcement_action: Action label ('PENALTY_LOGGED', 'HANDOFF_REJECTED', 'ESCALATED').
-        origin: Optional provenance identifier '<agent>@<host>' of the reporting agent.
-    """
+    """Record a verified peer rule violation into the isolated BlackBox penal ledger (never log violations to `save_memory`)."""
     reporter = str(_resolve_call_origin(origin) or "").strip() or "peer-client"
     if reporter.lower().startswith("botex"):
         # Prevent peer MCP callers from spoofing internal engine auto-logs.
@@ -2037,24 +1788,14 @@ async def botex_report_violation(
 
 @mcp.tool()
 async def botex_get_rap_sheet(
-    actor_agent: str = "",
-    workspace_dir: str = "",
-    limit: int = 20,
-    window_days: int = 30,
+    actor_agent: Annotated[
+        str, Field(description="Offender filter (empty = all in workspace).")
+    ] = "",
+    workspace_dir: Annotated[str, Field(description="Workspace path or 'edge://<dev>/<ws>'.")] = "",
+    limit: Annotated[int, Field(description="Max incidents (1..200).")] = 20,
+    window_days: Annotated[int, Field(description="Lookback days (1..365).")] = 30,
 ) -> dict[str, Any]:
-    """
-    Queries the isolated BlackBox penal ledger for an agent/model or workspace rap sheet.
-    Returned evidence snippets are wrapped as untrusted data to block prompt injection.
-
-    When to call: at cross-review start or when taking over a local or Edge workspace
-    ('edge://<device_id>/<workspace_id>') from another agent to check recurring mistakes.
-
-    Args:
-        actor_agent: Optional offender filter (empty = all actors in workspace).
-        workspace_dir: Target workspace path or 'edge://<device_id>/<workspace_id>' URI.
-        limit: Max incidents to return (clamped to 1..200).
-        window_days: Trailing lookback window in days (clamped to 1..365).
-    """
+    """Query the isolated BlackBox penal ledger for an agent/workspace incident history before review or delegation."""
     try:
         ws_key = _resolve_blackbox_workspace(workspace_dir)
         sheet = await asyncio.to_thread(
