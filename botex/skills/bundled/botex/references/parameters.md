@@ -10,7 +10,7 @@
 | `mode` | `string` | `"edit"` | Capability preset: `"readonly"`, `"edit"`, `"destructive"`, `"full"`. |
 | `recipe` | `string` | `""` | Persona prompt injection: `"planner"`, `"code-explorer"`, `"reviewer"`, `"security-reviewer"`, `"build-resolver"`, `"tdd"`, `"architecture-adr"`, `"security-taint-hardener"`, `"ui-craftsman"`. |
 | `profile` | `string` | `""` | Provider profile from config (`"default"`, `"coding"`, `"auto-beta"`, `"fast"`, `"review"`). |
-| `provider` | `string` | *(required)* | Provider name (`"openrouter"`, `"nvidia"`, `"google"`, `"ollama"`, `"openrouter-free"`). No silent fallback — an omitted provider is rejected (`CONFIG_ERROR`/400) because it would route to paid `openrouter`. Only server-set `BOTEX_PROVIDER` exempts. |
+| `provider` | `string` | *(required)* | Provider name (`"openrouter"`, `"nvidia"`, `"google"`, `"ollama"`, `"openrouter-free"`, `"groq"`, `"cloudflare"`). No silent fallback — an omitted provider is rejected (`CONFIG_ERROR`/400) because it would route to paid `openrouter`. Only server-set `BOTEX_PROVIDER` exempts. |
 | `model` | `string` | `""` | Explicit model slug; overrides `profile`. |
 | `max_turns` | `integer` | `0` | Maximum tool-loop iterations (`0` uses configured default, e.g. 45 for edit, 30 for readonly). |
 | `max_tokens` | `integer` | `0` | Per-turn completion token cap (`0` uses config default; reasoning models require 8000+). |

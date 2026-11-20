@@ -243,7 +243,14 @@ def _resolve_mode(
 _BOTEX_DEFAULT_PROVIDER = "openrouter-free"
 # Preference order when the spec carries no sub-provider and no explicit
 # operator choice exists: free-tier providers first, never a silent paid hop.
-_BOTEX_FREE_PROVIDER_PREF = ("openrouter-free", "nvidia", "google", "ollama")
+_BOTEX_FREE_PROVIDER_PREF = (
+    "openrouter-free",
+    "nvidia",
+    "google",
+    "cloudflare",
+    "groq",
+    "ollama",
+)
 
 
 def _botex_dispatch_provider(sub_provider: str) -> tuple[Optional[str], Optional[Dict[str, Any]]]:

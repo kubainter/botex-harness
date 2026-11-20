@@ -122,7 +122,9 @@ def test_from_config_missing_section_is_empty():
     assert ProviderRateLimiter.from_config({}).providers() == []
     # None falls back to the merged repo config (rate_limits committed there).
     assert ProviderRateLimiter.from_config(None).providers() == [
+        "cloudflare",
         "google",
+        "groq",
         "nvidia",
         "openrouter",
         "openrouter-free",

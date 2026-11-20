@@ -210,7 +210,7 @@ class ZaiGLMProvider(BaseProvider):
     def quota_url(self) -> str:
         return str(self.config.get("quota_url") or self.default_quota_url)
 
-    def get_extra_body(self, allow_non_zdr: bool = False) -> Dict[str, Any]:
+    def get_extra_body(self, allow_non_zdr: bool = False, model: str = "") -> Dict[str, Any]:
         """Return extra_body cleansed of OpenRouter-specific configuration."""
         raw_extra = copy.deepcopy(self.config.get("extra_body") or {})
         for k in _OPENROUTER_ONLY_KEYS:
@@ -235,7 +235,7 @@ class ZaiGLMProvider(BaseProvider):
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "extra_body": self.get_extra_body(allow_non_zdr=allow_non_zdr),
+            "extra_body": self.get_extra_body(allow_non_zdr=allow_non_zdr, model=model),
         }
         if tools:
             payload["tools"] = tools

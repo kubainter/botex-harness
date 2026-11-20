@@ -234,8 +234,9 @@ def check_model_price(
     Applies strictly to paid, token-billed providers that dynamically
     publish model pricing in their catalog (e.g. OpenRouter) or carry explicit
     operator ``pricing_overrides``. Free-tier / quota-bound providers
-    (``nvidia``, ``google`` / ``gemini``, ``openrouter-free``, ``ollama``)
-    bypass the price gate.
+    (``nvidia``, ``google`` / ``gemini``, ``openrouter-free``, ``ollama``,
+    and any provider flagged ``free_tier: true`` such as ``groq`` /
+    ``cloudflare``) bypass the price gate.
 
     ``pricing.paid_consent_required`` tightens the gate from "under the cap"
     to "provably free": any non-free model with a positive price — or with no

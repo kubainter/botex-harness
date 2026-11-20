@@ -35,6 +35,7 @@ try:
     from botex.providers.providers import (
         ProviderRegistry,
         build_async_client,
+        provider_forbids_stream,
         resolve_local_llm_base_url,
         resolve_model_for_openai_client,
         sanitize_provider_error,
@@ -90,6 +91,7 @@ except (ImportError, ValueError):
     from providers import (
         ProviderRegistry,
         build_async_client,
+        provider_forbids_stream,
         resolve_local_llm_base_url,
         resolve_model_for_openai_client,
         sanitize_provider_error,
@@ -1517,7 +1519,9 @@ async def stream_chat_turn(
             return
 
     provider_adapter = ProviderRegistry.get(active_provider_name, active_provider_cfg)
-    extra_body = provider_adapter.get_extra_body(allow_non_zdr=effective_allow_non_zdr)
+    extra_body = provider_adapter.get_extra_body(
+        allow_non_zdr=effective_allow_non_zdr, model=effective_model
+    )
 
     async def _release_client() -> None:
         """Close a client this turn created — never an injected one.
@@ -1610,6 +1614,7 @@ async def stream_chat_turn(
         if _cache_helper is not None and _cache_policy is not None:
             _send_messages, _ = _cache_helper.apply_prompt_cache(request_messages, _cache_policy)
 
+        _allow_stream = not provider_forbids_stream(active_provider_name, active_provider_cfg)
         try:
             create_kwargs: dict[str, Any] = {
                 "model": effective_model,
@@ -1617,7 +1622,7 @@ async def stream_chat_turn(
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "extra_body": extra_body,
-                "stream": True,
+                "stream": _allow_stream,
             }
             if use_tools_this_turn:
                 create_kwargs["tools"] = active_tools
@@ -1672,13 +1677,15 @@ async def stream_chat_turn(
                 try:
                     response = await call_with_backoff(
                         provider_adapter,
-                        lambda _msgs=_send_messages: client.chat.completions.create(
-                            model=effective_model,
-                            messages=_msgs,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                            extra_body=extra_body,
-                            stream=True,
+                        lambda _msgs=_send_messages, _s=_allow_stream: (
+                            client.chat.completions.create(
+                                model=effective_model,
+                                messages=_msgs,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                extra_body=extra_body,
+                                stream=_s,
+                            )
                         ),
                         active_provider_cfg,
                     )
