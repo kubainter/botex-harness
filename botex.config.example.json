@@ -118,11 +118,11 @@
       "models": {
         "default": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
         "coding": "@cf/qwen/qwen2.5-coder-32b-instruct",
-        "fast": "@cf/meta/llama-3.1-8b-instruct-fp8"
+        "fast": "@cf/zai-org/glm-4.7-flash"
       },
       "model_fallbacks": {
         "default": [
-          "@cf/qwen/qwen3-30b-a3b-fp8",
+          "@cf/qwen/qwen3.8-27b",
           "@cf/zai-org/glm-4.7-flash"
         ],
         "coding": [
@@ -130,8 +130,8 @@
           "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
         ],
         "fast": [
-          "@cf/qwen/qwen3-30b-a3b-fp8",
-          "@cf/zai-org/glm-4.7-flash"
+          "@cf/qwen/qwen3.8-27b",
+          "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
         ]
       }
     },

@@ -376,6 +376,10 @@ DEFAULTS: Dict[str, Any] = {
                 "@cf/zai-org/glm-5*",
                 "@cf/deepseek-ai/deepseek-v4*",
                 "@cf/thinkingmachines/*",
+                # Deprecated upstream 2026-11-20 (HTTP 410) — CF's catalog
+                # still lists them, so keep them out of agent profiles.
+                "@cf/meta/llama-3.1-8b-instruct-fp8",
+                "@cf/qwen/qwen3-30b-a3b-fp8",
             ],
             "profile_denylists": {},
             "capabilities": {
@@ -383,15 +387,7 @@ DEFAULTS: Dict[str, Any] = {
                     "supports_tools": True,
                     "context_length": 131072,
                 },
-                "@cf/meta/llama-3.1-8b-instruct-fp8": {
-                    "supports_tools": True,
-                    "context_length": 131072,
-                },
                 "@cf/qwen/qwen2.5-coder-32b-instruct": {
-                    "supports_tools": True,
-                    "context_length": 32768,
-                },
-                "@cf/qwen/qwen3-30b-a3b-fp8": {
                     "supports_tools": True,
                     "context_length": 32768,
                 },
@@ -415,12 +411,12 @@ DEFAULTS: Dict[str, Any] = {
             "models": {
                 "default": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
                 "coding": "@cf/qwen/qwen2.5-coder-32b-instruct",
-                "fast": "@cf/meta/llama-3.1-8b-instruct-fp8",
+                "fast": "@cf/zai-org/glm-4.7-flash",
             },
             "model_fallbacks": {
-                "default": ["@cf/qwen/qwen3-30b-a3b-fp8", "@cf/zai-org/glm-4.7-flash"],
+                "default": ["@cf/qwen/qwen3.8-27b", "@cf/zai-org/glm-4.7-flash"],
                 "coding": ["@cf/qwen/qwen3.8-27b", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
-                "fast": ["@cf/qwen/qwen3-30b-a3b-fp8", "@cf/zai-org/glm-4.7-flash"],
+                "fast": ["@cf/qwen/qwen3.8-27b", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
             },
             "decisions_models": ["@cf/cloudflare/clef*", "@cf/cloudflare/clairic*"],
         },
