@@ -189,7 +189,10 @@ def test_origin_guard_allows_same_origin(client):
 
 def test_origin_guard_ignores_missing_origin(client):
     """Requests without an Origin header (curl/agents) are unaffected."""
-    resp = client.post("/api/tasks", json={"task": "no origin", "mode": "readonly"})
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "no origin", "mode": "readonly", "provider": "openrouter"},
+    )
     assert resp.status_code != 403
 
 
@@ -388,7 +391,10 @@ def test_task_detail_get_marks_collected(client):
     # nondeterministic and it would flip the entry back to RUNNING after
     # the test drives it to DONE.
     with patch("botex.server_cloud._run_task_worker", new=AsyncMock()):
-        create_resp = client.post("/api/tasks", json={"task": "dcp collect", "mode": "readonly"})
+        create_resp = client.post(
+            "/api/tasks",
+            json={"task": "dcp collect", "mode": "readonly", "provider": "openrouter"},
+        )
         assert create_resp.status_code == 202
         task_id = create_resp.json()["task_id"]
 
@@ -419,7 +425,7 @@ def test_task_list_origin_filter(client):
     with patch("botex.server_cloud._run_task_worker", new=AsyncMock()):
         create_resp = client.post(
             "/api/tasks",
-            json={"task": "dcp origin filter", "mode": "readonly"},
+            json={"task": "dcp origin filter", "mode": "readonly", "provider": "openrouter"},
             headers={"X-Agent-Id": "devin", "X-Host": "kubai-workstation"},
         )
         assert create_resp.status_code == 202
@@ -479,6 +485,33 @@ def test_task_requires_provider_when_model_specified(client, monkeypatch):
     assert "Explicit 'provider' is required" in resp.json()["detail"]
 
 
+def test_task_requires_provider_even_without_model(client, monkeypatch):
+    """Provider is mandatory on every delegation — an omitted provider would
+    silently route to paid 'openrouter', so model-less tasks are rejected too."""
+    monkeypatch.delenv("BOTEX_PROVIDER", raising=False)
+    resp = client.post(
+        "/api/tasks",
+        json={"task": "No provider at all", "mode": "readonly"},
+    )
+    assert resp.status_code == 400
+    assert "Explicit 'provider' is required" in resp.json()["detail"]
+
+
+def test_task_provider_env_exemption(client, monkeypatch):
+    """BOTEX_PROVIDER env is the operator's explicit default — it satisfies
+    the provider requirement when the request omits one."""
+    monkeypatch.setenv("BOTEX_PROVIDER", "nvidia")
+    with patch(
+        "botex.server_cloud.run_botex_task",
+        new=AsyncMock(return_value={"ok": True, "status": "DONE"}),
+    ):
+        resp = client.post(
+            "/api/tasks",
+            json={"task": "Env-provided provider", "mode": "readonly"},
+        )
+    assert resp.status_code == 202
+
+
 def test_task_provider_alias_resolution(client):
     """Provider aliases like 'nvmi' or 'or-free' resolve cleanly to canonical provider."""
     with patch(
@@ -523,7 +556,10 @@ def test_list_tasks_offloads_disk_load_to_thread(client, monkeypatch):
 
 def test_task_cancellation(client):
     """Task cancellation aborts background execution and pending approvals."""
-    create_resp = client.post("/api/tasks", json={"task": "Long running task", "mode": "edit"})
+    create_resp = client.post(
+        "/api/tasks",
+        json={"task": "Long running task", "mode": "edit", "provider": "openrouter"},
+    )
     task_id = create_resp.json()["task_id"]
 
     cancel_resp = client.post(f"/api/tasks/{task_id}/cancel")
@@ -545,7 +581,7 @@ def test_task_cancellation(client):
 def test_task_idempotency_key(client):
     """Submitting duplicate task with same Idempotency-Key returns existing task without re-execution."""
     headers = {"Idempotency-Key": "test-idem-key-42"}
-    payload = {"task": "Idempotent task execution", "mode": "readonly"}
+    payload = {"task": "Idempotent task execution", "mode": "readonly", "provider": "openrouter"}
 
     resp1 = client.post("/api/tasks", json=payload, headers=headers)
     assert resp1.status_code == 202

@@ -1,6 +1,6 @@
 ---
 name: botex
-version: "2.6.0"
+version: "2.7.0"
 description: Use when delegating bounded code inspection, surgical patching, verification, or Memory Vault operations to the BoteX MCP harness.
 taxonomy: [general]
 metadata:
@@ -32,6 +32,7 @@ Define the normative caller-facing contract for AI orchestrators delegating boun
 
 Delegate to BoteX (prefer `run_subagent` synchronous by default; `start_task` + `get_task_status` asynchronous only when the fan-out criteria of Global Rule 5.1 hold — and then it REQUIRES a dispatch-ledger entry (Rule 5.2; `list_tasks` is the sweep/recovery surface since Phase 2) plus collection via `get_task_status` before turn end (Rule 5.3)) for bounded file inspection, surgical patching, test-verified bug fixes, or Memory Vault operations. Do **not** delegate general knowledge questions, server/daemon administration, or vague unbounded requests.
 
+- **`provider` is REQUIRED:** every `run_subagent`/`start_task`/`POST /api/tasks` call MUST name an explicit provider (`openrouter`, `nvidia`, `google`, `openrouter-free`, `ollama`). An omitted provider no longer falls back — the request is rejected upfront with `CONFIG_ERROR`/HTTP 400 (empty provider would otherwise silently route to paid `openrouter`). Only `BOTEX_PROVIDER` set server-side exempts the requirement. Prefer `openrouter-free`/`nvidia`/`google` for unpaid work; `openrouter` additionally requires `allow_expensive_model=true` or a `paid_allowlist` entry under `pricing.paid_consent_required`.
 - **Verifier Firewall:** When delegating a review or verification task (`reviewer`, `security-reviewer`), pass ONLY the target artifact/files, the governing contract, and the review checklist. NEVER pass the builder agent's reasoning, excuses, or self-reported "all tests pass" claims.
 - **Fail-Stop Protocol:** If BoteX terminates with `BLOCKED` or `UNSUPPORTED`, do NOT blindly retry the identical prompt; inspect `failure_kind` and fix permissions/constraints or escalate.
 - **Verified Ledger:** A task is `verified` ONLY when `ok == true && status == "DONE"` (`result_data` for `start_task`, `structuredContent` for `run_subagent`). Lifecycle `status == "DONE"` alone only means the run finished.
@@ -63,6 +64,7 @@ MCP tools: `bot_consult`, `bot_report_activity`, `botex_get_rap_sheet`, `botex_r
   "files": ["src/auth/jwt.py"],
   "mode": "readonly",
   "recipe": "security-reviewer",
+  "provider": "openrouter-free",
   "api_key": ""
 }
 ```
@@ -74,6 +76,7 @@ MCP tools: `bot_consult`, `bot_report_activity`, `botex_get_rap_sheet`, `botex_r
   "workspace_dir": "C:/Projects/my-app",
   "files": ["src/billing.py", "tests/test_billing.py"],
   "mode": "edit",
+  "provider": "openrouter-free",
   "verify_command": "pytest tests/test_billing.py",
   "allow_exec": true,
   "api_key": ""
@@ -118,6 +121,7 @@ Peer cross-review violation tracking, isolated from the Memory Vault:
 | Error | Cause | Solution |
 |---|---|---|
 | `CONFIG_ERROR` | Mutating flag (`allow_exec`, `allow_destructive`) or `output_path` passed with `mode="readonly"`. | Remove mutating flags/`output_path` for `readonly`, or switch to `edit`/`full`. |
+| `CONFIG_ERROR` | `provider` omitted from the delegation call. | Pass an explicit `provider` — there is no silent fallback; unscoped calls would route to paid `openrouter`. |
 | `BLOCKED` | Headless task attempted `run_command` or `delete_file` without pre-authorization. | Pass `mode="full"` / `allow_exec=true` or `mode="destructive"` / `allow_destructive=true`. |
 | `VERIFICATION_FAILED` | `verify_command` exited non-zero 3 times; changes rolled back. | Read `summary` or `read_scratchpad(memory_id)`, fix the root error, and re-dispatch. |
 | `TOKEN_LIMIT` | Reasoning model exhausted `max_tokens` before tool call/response. | Set `max_tokens: 8000` or higher, or switch to a non-reasoning coding profile. |

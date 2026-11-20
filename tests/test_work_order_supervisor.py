@@ -671,3 +671,34 @@ def test_auth_regex_word_boundaries_and_deterministic_blocks_handoff():
     assert res_det["ok"] is False
     assert res_det["reason"] == "deterministic_failure_no_handoff"
     assert det_order.status == WorkOrderStatus.BLOCKED
+
+
+def test_botex_target_always_emits_explicit_provider():
+    """P2-1: a botex dispatch spec carries a non-empty provider — the
+    sub-specifier wins (alias-resolved), else a configured free provider."""
+    adapters = pytest.importorskip("botex.edge.adapters")
+    translate = adapters.translate_work_order
+
+    res = translate(_order(mode_request="readonly"), "botex")
+    assert res["ok"] is True, res
+    assert isinstance(res["provider"], str) and res["provider"]
+    assert res["provider"] == "openrouter-free"
+
+    for spec, want in (
+        ("botex:nvidia", "nvidia"),
+        ("botex:openrouter-free", "openrouter-free"),
+        ("botex:google", "google"),
+        ("botex:or-free", "openrouter-free"),
+    ):
+        res = translate(_order(mode_request="readonly"), spec)
+        assert res["ok"] is True, (spec, res)
+        assert res["provider"] == want, (spec, res)
+
+    res = translate(_order(mode_request="readonly"), "botex:not-a-provider")
+    assert res["ok"] is False
+    assert res["reason"] == "unknown_provider"
+
+    for other in ("zcode", "devin"):
+        res = translate(_order(mode_request="readonly"), other)
+        assert res["ok"] is True, res
+        assert "provider" not in res

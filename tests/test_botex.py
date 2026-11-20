@@ -864,7 +864,7 @@ def test_async_task_registry():
         )
 
     async def exercise():
-        payload = await server.start_task("background test")
+        payload = await server.start_task("background test", provider="openrouter")
         task_id = payload["task_id"]
         assert payload["status"] == "QUEUED"
         await asyncio.sleep(0.02)
@@ -903,10 +903,12 @@ def test_dcp_list_tasks_and_collection():
         )
 
     async def exercise():
-        payload = await server.start_task("collect me", origin="tester@host-a")
+        payload = await server.start_task(
+            "collect me", provider="openrouter", origin="tester@host-a"
+        )
         done_id = payload["task_id"]
         await asyncio.sleep(0.02)
-        slow_id = (await server.start_task("hang"))["task_id"]
+        slow_id = (await server.start_task("hang", provider="openrouter"))["task_id"]
 
         # Wait for the fast task to reach a terminal state without calling
         # get_task_status — a terminal delivery marks the entry collected.
@@ -1730,7 +1732,9 @@ def test_mcp_structured_output():
             }
 
         with patch.object(server, "run_botex_task", fake_engine):
-            res = await server.mcp.call_tool("run_subagent", {"task": "x"})
+            res = await server.mcp.call_tool(
+                "run_subagent", {"task": "x", "provider": "openrouter"}
+            )
         assert res.content[0].text.startswith("[SUCCESS]")
         assert res.structured_content["status"] == "DONE"
         assert res.structured_content["files_touched"] == ["a.py"]
@@ -4663,3 +4667,90 @@ def test_mcp_tool_descriptions_budget():
         )
         prop = sch.get("properties", {}).get(param_name, {})
         assert prop.get("description"), f"{tool_name}.{param_name} missing schema description"
+
+
+def test_mcp_provider_gate_env_fallback(monkeypatch):
+    """PR#94 P2: start_task + run_subagent share one provider gate — no
+    provider and no env yields CONFIG_ERROR without touching the engine; a
+    valid BOTEX_PROVIDER (incl. alias) passes canonicalized; a bad env
+    value is rejected on validation rather than queued."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import server
+
+    calls = []
+    real_run_subagent = server.run_subagent
+
+    async def sentinel_engine(**kwargs):
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "status": "DONE",
+            "files_touched": [],
+            "attempts": [],
+            "steps": 0,
+            "duration_s": 0.0,
+            "cost_usd": 0.0,
+        }
+
+    run_kwargs = []
+
+    async def sentinel_run(**kwargs):
+        run_kwargs.append(kwargs)
+        await asyncio.sleep(0)
+        return SimpleNamespace(
+            content=[SimpleNamespace(text="fake result")],
+            structured_content={"ok": True, "status": "DONE"},
+        )
+
+    async def exercise():
+        # 1. No provider, no env -> both tools reject before the engine runs.
+        st = await server.start_task("no provider")
+        assert st["ok"] is False and st["status"] == "CONFIG_ERROR"
+        assert st["failure_kind"] == "security_or_policy_block"
+        assert "openrouter-free" in st["message"], st["message"]
+        rs = await real_run_subagent(task="no provider")
+        rsd = rs.structured_content
+        assert rsd["ok"] is False and rsd["status"] == "CONFIG_ERROR"
+        assert rsd["failure_kind"] == "security_or_policy_block"
+        assert "openrouter-free" in rsd["message"], rsd["message"]
+        assert not calls, calls
+
+        # 2. Env alias satisfies the gate; run_subagent passes canonical name.
+        monkeypatch.setenv("BOTEX_PROVIDER", "or-free")
+        rs2 = await real_run_subagent(task="env provider")
+        assert rs2.structured_content["status"] == "DONE", rs2.structured_content
+        assert calls and calls[-1].get("provider") == "openrouter-free", calls
+
+        # 3. Invalid env value is rejected on validation by both tools.
+        monkeypatch.setenv("BOTEX_PROVIDER", "invalid-prov-xyz")
+        st3 = await server.start_task("bad env provider")
+        assert st3["ok"] is False and st3["status"] == "CONFIG_ERROR"
+        assert "Unknown provider" in st3["message"], st3["message"]
+        rs3 = await real_run_subagent(task="bad env provider")
+        assert rs3.structured_content["status"] == "CONFIG_ERROR"
+        assert "Unknown provider" in rs3.structured_content["message"]
+
+        # 4. Env fallback canonicalizes into the queued task request too.
+        monkeypatch.setenv("BOTEX_PROVIDER", "or-free")
+        server.run_subagent = sentinel_run
+        try:
+            st4 = await server.start_task("env provider queued")
+            assert st4["status"] == "QUEUED", st4
+            tid = st4["task_id"]
+            await asyncio.sleep(0.02)
+            assert run_kwargs and run_kwargs[-1].get("provider") == "openrouter-free"
+            server._TASKS.pop(tid, None)
+        finally:
+            server.run_subagent = real_run_subagent
+
+    monkeypatch.delenv("BOTEX_PROVIDER", raising=False)
+    real_run_botex_task = server.run_botex_task
+    server.run_botex_task = sentinel_engine
+    try:
+        asyncio.run(exercise())
+    finally:
+        server.run_subagent = real_run_subagent
+        server.run_botex_task = real_run_botex_task
+    print("[PASS] MCP provider gate env-fallback tests")

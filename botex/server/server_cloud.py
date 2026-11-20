@@ -2394,27 +2394,23 @@ async def create_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Task prompt exceeds maximum allowed length (65536 characters).",
         )
-    has_model = bool(req.model and req.model.strip())
-    has_provider = bool(req.provider and req.provider.strip())
-    env_prov = os.environ.get("BOTEX_PROVIDER", "").strip()
-    if has_model and not has_provider and not env_prov:
-        avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
+    effective_prov = (req.provider or "").strip() or os.environ.get("BOTEX_PROVIDER", "").strip()
+    avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
+    if not effective_prov:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Explicit 'provider' is required when 'model' ('{req.model.strip()}') is specified. "
-                f"Specify one of: {avail_provs}."
+                "Explicit 'provider' is required — delegation without one "
+                f"silently routes to paid 'openrouter'. Specify one of: {avail_provs}."
             ),
         )
-    if has_provider:
-        resolved_prov, prov_cfg = resolve_provider(req.provider)
-        if not prov_cfg:
-            avail_provs = ", ".join((botex_server.load_config().get("providers") or {}).keys())
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unknown provider '{req.provider}'. Available providers: {avail_provs}.",
-            )
-        req.provider = resolved_prov
+    resolved_prov, prov_cfg = resolve_provider(effective_prov)
+    if not prov_cfg:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown provider '{effective_prov}'. Available providers: {avail_provs}.",
+        )
+    req.provider = resolved_prov
     if req.max_turns and req.max_turns > 100:
         req.max_turns = 100
     if req.max_tokens and req.max_tokens > 32768:
