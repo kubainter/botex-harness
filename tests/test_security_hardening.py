@@ -180,12 +180,17 @@ _EXEC_POLICY = {
         "ls ..",
         "ls ../etc",
         "ls foo/../bar",
-        "ls ..\\etc",
         "pytest ../../tests",
     ],
 )
 def test_exec_deny_args_block_path_redirects_and_installs(cmd):
     err = exec_tools.command_policy_error(cmd, **_EXEC_POLICY)
+    assert "denied" in err
+
+
+def test_exec_deny_args_block_windows_backslash_traversal(monkeypatch):
+    monkeypatch.setattr(exec_tools.os, "name", "nt")
+    err = exec_tools.command_policy_error(r"ls ..\etc", **_EXEC_POLICY)
     assert "denied" in err
 
 
