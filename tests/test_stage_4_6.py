@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """
-Stage 4.6 & TODO #1 Comprehensive Test Suite
-============================================
+Rate-Limit Introspection, Model Routing & Telemetry Test Suite
+==============================================================
 Covers:
 1. OpenRouter Live Key & Rate-Limit Introspection (GET /api/v1/auth/key, /api/key/status, low_budget_warning)
 2. Multi-Layer Model Routing (openrouter/pareto-code, validated extra_body["models"] 5-gate filter & dirty-workspace cutoff)

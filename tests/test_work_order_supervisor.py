@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Tests for Plan 038: WorkOrder state machine, handoff_policy, CostLedger, supervisor."""
+"""Tests for WorkOrder state machine, handoff_policy, CostLedger, supervisor."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Guard tests for the ``ops`` → ``botex.ops`` package rename (arena B2)."""
+"""Guard tests for the ``ops`` → ``botex.ops`` package rename."""
 
 import importlib
 

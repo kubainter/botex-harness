@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""BoteX Cloud Soul — versioned swarm identity store (Plan 035).
+"""BoteX Cloud Soul — versioned swarm identity store.
 
 Single SQLite WAL store holding the swarm's bot registry, per-bot briefs
 (souls) with etag/fencing metadata, host leases with fencing tokens, and

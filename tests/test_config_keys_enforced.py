@@ -1,8 +1,8 @@
-"""Enforce-or-delete guard for config keys (arena v2.1.0 proactive #1).
+"""Enforce-or-delete guard for config keys.
 
 A config key advertised in botex.config.json without a code consumer is a
-dead control (arena finding: cloud.allowed_workspaces and recall_rpm lived
-unconsumed for a week). If you intentionally remove or rename a consumer,
+dead control: cloud.allowed_workspaces and recall_rpm once lived
+unconsumed for a week. If you intentionally remove or rename a consumer,
 update BOTH the key and docs/IMPORT_MAP.md — and this test.
 """
 

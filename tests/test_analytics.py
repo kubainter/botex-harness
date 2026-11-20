@@ -2,7 +2,7 @@
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """Unit tests for analytics free-model pricing and zero-cost budget rules.
 
-Stage 4.7: ``:free`` / ``openrouter-free/`` / ``openrouter/free`` / ``ollama/`` /
+``:free`` / ``openrouter-free/`` / ``openrouter/free`` / ``ollama/`` /
 ``nvidia/`` models and providers that cannot bill per request (``local: true``
 or a static ``api_key_fallback``) must never accrue pseudo-cost and must never
 be aborted by the daily BUDGET_BLOCK.
@@ -695,7 +695,7 @@ def test_engine_shadow_advice_never_overrides_model(monkeypatch: pytest.MonkeyPa
 
 
 # ---------------------------------------------------------------------------
-# Plan 020 — cost_source persistence, catalog-first pricing, new aggregations
+# cost_source persistence, catalog-first pricing, new aggregations
 # ---------------------------------------------------------------------------
 
 

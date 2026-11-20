@@ -125,6 +125,7 @@
       "npm exec",
       "npx",
       "npm install",
+      "npm i",
       "npm ci",
       "pip install",
       "pip uninstall",

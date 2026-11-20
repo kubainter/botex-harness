@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Unit tests for Stage 4.7 Prep features: recipes metadata, dynamic benchmarks, and Ollama adapter."""
+"""Unit tests for recipes metadata, dynamic benchmarks, and Ollama adapter."""
 
 from __future__ import annotations
 

@@ -4,8 +4,7 @@
 BoteX Memory Recall - Layer A LLM Synthesis Cascade
 ====================================================
 Multi-tier model cascade that synthesizes a structured, hallucination-free
-answer from pre-gathered Memory Vault notes for the ``recall_memory`` tool
-(arena-recall synthesis S, interface contract v1.0 §3).
+answer from pre-gathered Memory Vault notes for the ``recall_memory`` tool.
 
 Cascade order (first VALID structured answer wins):
 1. local-ollama    - native POST /api/chat with keep_alive (fallback: /v1 shim);
@@ -315,7 +314,7 @@ async def _try_local_ollama(prompt: str, tcfg: dict) -> Optional[str]:
     """Tier 1 request: native POST /api/chat with keep_alive (model stays hot).
 
     Fallback: OpenAI-compatible /v1 shim — keep_alive is unsupported there
-    (shim path is untested upstream; see arena-recall ACCEPTED-COST).
+    (shim path is untested upstream).
     """
     model = tcfg["model"]
     timeout_s = float(tcfg["timeout_s"])

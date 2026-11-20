@@ -473,7 +473,7 @@ def pack_lessons_within_budget(
 
 
 # ---------------------------------------------------------------------------
-# TokenEconomizer primitives (Plan 024): deterministic, zero-LLM spiral
+# TokenEconomizer primitives: deterministic, zero-LLM spiral
 # detection (SpiralTracker) and environment-fact distillation (envfacts).
 # ---------------------------------------------------------------------------
 
@@ -643,7 +643,7 @@ class SpiralTracker:
 
 
 # ---------------------------------------------------------------------------
-# EnvFactsDistiller (Plan 024): deterministic environment-fact lessons from
+# EnvFactsDistiller: deterministic environment-fact lessons from
 # the command log — command-form repairs and absent-tool facts.
 # ---------------------------------------------------------------------------
 

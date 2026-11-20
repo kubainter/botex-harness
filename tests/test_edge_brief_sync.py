@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Unit & loopback tests for Edge fast-cache bot brief sync (ADR-SWARM-02 Phase 1)."""
+"""Unit & loopback tests for Edge fast-cache bot brief sync."""
 
 from __future__ import annotations
 

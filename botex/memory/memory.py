@@ -100,7 +100,7 @@ _VALID_STATUSES_MAP: dict[str, str] = {
 }
 VALID_STATUSES = frozenset(_VALID_STATUSES_MAP.keys())
 
-# Recall admission gate (arena-recall S.1): OR-matching admits single-token
+# Recall admission gate: OR-matching admits single-token
 # noise, so admission needs >=2 distinct matched tokens — a lone match only
 # passes when the token is not a common stop-word.
 _RECALL_MIN_COVERAGE = 2
@@ -128,7 +128,7 @@ _RECALL_STOP_TOKENS = frozenset(
 
 
 def get_swarm_memory_dir() -> Optional[Path]:
-    """Third READ-ONLY search root (arena-recall S.3): paths.swarm_memory_dir.
+    """Third READ-ONLY search root: paths.swarm_memory_dir.
 
     Returns None unless configured AND the directory exists — no implicit
     cross-workspace reads. Read-only tools only; write paths never inherit."""
@@ -146,8 +146,7 @@ def get_swarm_memory_dir() -> Optional[Path]:
         if not resolved.is_dir():
             return None
         # Guard against misconfiguration pointing at a repo root: indexing
-        # AGENTS.md/pyproject.toml neighbors as "notes" poisons the graph
-        # (arena latent bug: swarm_memory_dir == workspace root).
+        # AGENTS.md/pyproject.toml neighbors as "notes" poisons the graph.
         if any(
             (resolved / marker).exists()
             for marker in ("pyproject.toml", "package.json", "AGENTS.md")

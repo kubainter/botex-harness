@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """
-Stage 4.8 Tests: Server-Side Skill Vault, L0 Triage & Memory Deletion
-=====================================================================
+Server-Side Skill Vault, L0 Triage & Memory Deletion Tests
+==========================================================
 Tests for:
 1. Memory Vault deletion (`delete_memory`, SQLite FTS5 & edges cleanup, MCP tool, REST endpoint).
 2. Server-Side Skills Manager (`botex/skills.py`: install, list, get, delete, GitHub URL resolver,

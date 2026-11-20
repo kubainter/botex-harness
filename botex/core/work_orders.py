@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """
-Cross-Harness WorkOrder Supervisor (Plan 038 / ADR-SWARM-02 Phase 2b)
+Cross-Harness WorkOrder Supervisor
 =====================================================================
 Canonical ``WorkOrder`` state machine, signed ``HandoffPolicy``,
 unit-separated ``CostLedger``, deterministic failure-signature dedup and a

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Tests for Plan 037: external verify_gate, clean env builder, and Test-Taint Guard."""
+"""Tests for external verify_gate, clean env builder, and Test-Taint Guard."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Tests for Plan 038 Step 3: Two-tier QoS Control Lane, Lease TTL Failover, and --edge-daemon Loopback IPC."""
+"""Tests for Two-tier QoS Control Lane, Lease TTL Failover, and --edge-daemon Loopback IPC."""
 
 from __future__ import annotations
 
