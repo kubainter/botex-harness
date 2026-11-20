@@ -1,6 +1,6 @@
 ---
 name: botex
-version: "2.7.0"
+version: "2.8.0"
 description: Use when delegating bounded code inspection, surgical patching, verification, or Memory Vault operations to the BoteX MCP harness.
 taxonomy: [general]
 metadata:

@@ -2,6 +2,7 @@
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """Registration, config, and URL-resolution tests for Groq + Cloudflare Workers AI."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -211,3 +212,142 @@ def test_cloudflare_denylist_and_decisions_models():
     assert is_decisions_model("@cf/cloudflare/clef", cf_cfg) is True
     assert is_decisions_model("@cf/cloudflare/clef-flash", cf_cfg) is True
     assert is_decisions_model("@cf/meta/llama-3.3-70b-instruct-fp8-fast", cf_cfg) is False
+
+
+def test_groq_reasoning_effort_is_per_model():
+    """gpt-oss accepts only low/medium/high ('none' -> HTTP 400); qwen3 gets 'none'."""
+    p = GroqProvider("groq", {})
+    for slug in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
+        effort = p.get_extra_body(model=slug)["reasoning_effort"]
+        assert effort == "low", slug
+        assert effort != "none", slug
+    assert p.get_extra_body(model="qwen/qwen3.8-27b")["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in p.get_extra_body(model="meta-llama/llama-4-scout")
+
+
+def test_provider_forbids_stream_cloudflare():
+    from botex.providers.providers import provider_forbids_stream
+
+    assert provider_forbids_stream("cloudflare") is True
+    assert provider_forbids_stream("workers-ai") is True
+    assert provider_forbids_stream("cf_workers_ai") is True
+    assert (
+        provider_forbids_stream(
+            "custom", {"base_url": "https://api.cloudflare.com/client/v4/x/ai/v1"}
+        )
+        is True
+    )
+    assert provider_forbids_stream("groq", {"stream": True}) is False
+    assert provider_forbids_stream("nvidia") is False
+    assert provider_forbids_stream("") is False
+
+
+def test_cloudflare_catalog_skips_unresolved_account_id(monkeypatch, tmp_path):
+    """Token set but no account id -> provider treated as unconfigured, not an error."""
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "tok")
+    from botex.providers.catalog import get_consolidated_models
+
+    cfg = {"providers": {"cloudflare": {"api_key_env": "CLOUDFLARE_API_TOKEN", "account_id": ""}}}
+    models = get_consolidated_models(
+        providers=("cloudflare",),
+        config=cfg,
+        cache_file=tmp_path / "models_cache.json",
+        force_refresh=True,
+    )
+    assert models == []
+
+
+def test_paid_consent_gate_treats_new_providers_as_free():
+    """free_tier providers bypass paid_consent_required without allow_expensive_model."""
+    from botex.providers.pricing import check_model_price
+
+    pricing_cfg = {"enabled": True, "paid_consent_required": True}
+    cases = (
+        ("groq", "openai/gpt-oss-120b", {"free_tier": True}),
+        ("cloudflare", "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {"free_tier": True}),
+    )
+    for prov, model, pcfg in cases:
+        pcfg = dict(pcfg, base_url="https://example.invalid/v1")
+        ok, _msg = check_model_price(model, pcfg, pricing_cfg, provider_name=prov)
+        assert ok is True, prov
+
+
+def test_provider_blocks_parity_across_config_sources():
+    """groq/cloudflare must agree 1:1 across DEFAULTS, botex.config.json, example.json."""
+    import json
+
+    from botex.server.config import DEFAULTS
+
+    repo = Path(__file__).resolve().parent.parent
+    live = json.loads((repo / "botex.config.json").read_text("utf-8"))
+    example = json.loads((repo / "botex.config.example.json").read_text("utf-8"))
+    defaults = DEFAULTS["providers"]
+
+    expected_key_env = {"groq": "GROQ_API_KEY", "cloudflare": "CLOUDFLARE_API_TOKEN"}
+    for prov, key_env in expected_key_env.items():
+        sources = (
+            defaults[prov],
+            live["providers"][prov],
+            example["providers"][prov],
+        )
+        for src in sources:
+            assert src["api_key_env"] == key_env, prov
+        assert (
+            defaults[prov]["models"]
+            == live["providers"][prov]["models"]
+            == example["providers"][prov]["models"]
+        ), prov
+        assert (
+            defaults[prov]["model_fallbacks"]
+            == live["providers"][prov]["model_fallbacks"]
+            == example["providers"][prov]["model_fallbacks"]
+        ), prov
+
+    for prov in ("groq", "cloudflare"):
+        live_rl = live["rate_limits"][prov]
+        ex_rl = example["rate_limits"][prov]
+        assert live_rl["rpm"] == ex_rl["rpm"]
+        assert live_rl["tpm"] == ex_rl["tpm"]
+    assert live["rate_limits"]["groq"]["tpm"] == 8000
+    assert live["rate_limits"]["cloudflare"]["tpm"] == 100000
+    assert live["provider_fallbacks"]["groq"] == example["provider_fallbacks"]["groq"]
+    assert live["provider_fallbacks"]["cloudflare"] == example["provider_fallbacks"]["cloudflare"]
+
+
+def test_groq_extra_body_config_stays_empty():
+    """reasoning_effort is model-scoped in GroqProvider — config must not pin one value."""
+    cfg = load_config()
+    assert "reasoning_effort" not in (cfg["providers"]["groq"].get("extra_body") or {})
+    repo = Path(__file__).resolve().parent.parent
+    live = json.loads((repo / "botex.config.json").read_text("utf-8"))
+    assert "reasoning_effort" not in (live["providers"]["groq"].get("extra_body") or {})
+    example = json.loads((repo / "botex.config.example.json").read_text("utf-8"))
+    assert "reasoning_effort" not in (example["providers"]["groq"].get("extra_body") or {})
+
+
+def test_groq_denylist_preserved_after_audit_fixes():
+    from botex.providers.denylist import check_model_denylist
+
+    cfg = load_config()
+    for slug in ("llama-3.3-70b-versatile", "llama-3.1-8b-instant"):
+        ok, _reason = check_model_denylist(slug, "groq", config=cfg)
+        assert ok is False, slug
+
+
+def test_botex_free_provider_pref_includes_new_providers_in_order():
+    from botex.edge.adapters import _BOTEX_FREE_PROVIDER_PREF
+
+    assert _BOTEX_FREE_PROVIDER_PREF == (
+        "openrouter-free",
+        "nvidia",
+        "google",
+        "cloudflare",
+        "groq",
+        "ollama",
+    )
+    assert (
+        _BOTEX_FREE_PROVIDER_PREF.index("cloudflare")
+        < _BOTEX_FREE_PROVIDER_PREF.index("groq")
+        < _BOTEX_FREE_PROVIDER_PREF.index("ollama")
+    )

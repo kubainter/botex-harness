@@ -47,6 +47,7 @@ try:
         is_reasoning_capable_slug,
         normalize_response,
         normalize_streaming_chunks,
+        provider_forbids_stream,
         resolve_api_key,
         sanitize_provider_error,
     )
@@ -216,6 +217,7 @@ except (ImportError, ValueError):
         is_reasoning_capable_slug,
         normalize_response,
         normalize_streaming_chunks,
+        provider_forbids_stream,
         resolve_api_key,
         sanitize_provider_error,
     )
@@ -2184,7 +2186,9 @@ async def _run_botex_task_once_impl(
     # providers that never declared a data policy (e.g. NVIDIA) must not
     # grow OpenRouter-specific fields on their requests.
     prov_adapter = ProviderRegistry.get(provider_name, provider_cfg)
-    provider_extra_body = prov_adapter.get_extra_body(allow_non_zdr=bool(allow_non_zdr))
+    provider_extra_body = prov_adapter.get_extra_body(
+        allow_non_zdr=bool(allow_non_zdr), model=model
+    )
     zdr_on = zdr_enforced(provider_cfg, bool(allow_non_zdr))
     if not zdr_on:
         provider_extra_body = copy.deepcopy(provider_extra_body)
@@ -2575,7 +2579,13 @@ async def _run_botex_task_once_impl(
         else:
             turn_extra_body.pop("models", None)
         is_nvidia = "nvidia" in provider_name.lower()
-        use_stream = bool(is_nvidia or provider_cfg.get("stream", False))
+        use_stream = bool(
+            is_nvidia
+            or (
+                provider_cfg.get("stream", False)
+                and not provider_forbids_stream(provider_name, provider_cfg)
+            )
+        )
         # Cache transform returns a COPY — `messages` stays canonical for
         # Context-Guard folds and checkpointing (fallback-safe).
         fold_now, fold_pending = fold_pending, False

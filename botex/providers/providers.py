@@ -686,7 +686,7 @@ class BaseProvider:
         """Alias for get_client preserving polymorphic dispatch for subclasses."""
         return self.get_client(*args, **kwargs)
 
-    def get_extra_body(self, allow_non_zdr: bool = False) -> Dict[str, Any]:
+    def get_extra_body(self, allow_non_zdr: bool = False, model: str = "") -> Dict[str, Any]:
         """Return a deep copy of extra_body payload dictionary."""
         return copy.deepcopy(self.config.get("extra_body") or {})
 
@@ -707,7 +707,7 @@ class BaseProvider:
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "extra_body": self.get_extra_body(allow_non_zdr=allow_non_zdr),
+            "extra_body": self.get_extra_body(allow_non_zdr=allow_non_zdr, model=model),
         }
         if tools:
             payload["tools"] = tools
@@ -1161,7 +1161,7 @@ class NvidiaProvider(BaseProvider):
             return app_headers()
         return None
 
-    def get_extra_body(self, allow_non_zdr: bool = False) -> Dict[str, Any]:
+    def get_extra_body(self, allow_non_zdr: bool = False, model: str = "") -> Dict[str, Any]:
         extra = copy.deepcopy(self.config.get("extra_body") or {})
         if "chat_template_kwargs" not in extra:
             extra["chat_template_kwargs"] = {"enable_thinking": True}
@@ -1184,7 +1184,7 @@ class NvidiaProvider(BaseProvider):
             "max_tokens": max(max_tokens, 4000),
             "temperature": temperature,
             "top_p": 0.95,
-            "extra_body": self.get_extra_body(allow_non_zdr=allow_non_zdr),
+            "extra_body": self.get_extra_body(allow_non_zdr=allow_non_zdr, model=model),
         }
         if tools:
             payload["tools"] = tools
@@ -1265,7 +1265,7 @@ class GoogleAIStudioProvider(BaseProvider):
             return app_headers()
         return None
 
-    def get_extra_body(self, allow_non_zdr: bool = False) -> Dict[str, Any]:
+    def get_extra_body(self, allow_non_zdr: bool = False, model: str = "") -> Dict[str, Any]:
         """Return extra_body with OpenRouter-only routing keys stripped.
 
         ``reasoning_effort`` and ``google.*`` options pass through; the
@@ -1356,6 +1356,24 @@ class GroqProvider(BaseProvider):
 
     default_base_url: str = "https://api.groq.com/openai/v1"
     default_api_key_env: str = "GROQ_API_KEY"
+
+    def get_extra_body(self, allow_non_zdr: bool = False, model: str = "") -> Dict[str, Any]:
+        """extra_body with per-model ``reasoning_effort``.
+
+        ``openai/gpt-oss-*`` accepts only ``low``/``medium``/``high`` —
+        ``"none"`` is rejected upstream with HTTP 400 — while Qwen3
+        reasoning models take ``"none"`` to disable thinking. Any other
+        slug gets no ``reasoning_effort`` key at all.
+        """
+        extra = super().get_extra_body(allow_non_zdr=allow_non_zdr, model=model)
+        slug = (model or "").lower()
+        if "gpt-oss" in slug:
+            extra["reasoning_effort"] = "low"
+        elif "qwen3" in slug:
+            extra["reasoning_effort"] = "none"
+        else:
+            extra.pop("reasoning_effort", None)
+        return extra
 
     def get_credits(self, api_key: Optional[str] = None) -> CreditsInfo:
         return CreditsInfo(
@@ -1661,6 +1679,26 @@ async def resolve_model_for_openai_client(client: Any, requested_model: str) -> 
         return resolve_local_model_id(requested_model, ids)
     except Exception:
         return requested_model
+
+
+def provider_forbids_stream(
+    provider_name: str,
+    provider_cfg: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when the provider must be called non-streaming.
+
+    Cloudflare Workers AI drops ``tool_calls`` deltas on streamed
+    responses, so a stray ``stream: true`` — from config or a caller —
+    must never reach the wire. Detected by canonical name, any alias,
+    or the configured ``base_url`` so un-resolved aliases still fail
+    closed.
+    """
+    name = (provider_name or "").lower()
+    if "cloudflare" in name or "workers-ai" in name or "workers_ai" in name:
+        return True
+    if isinstance(provider_cfg, dict):
+        return "cloudflare.com" in str(provider_cfg.get("base_url") or "")
+    return False
 
 
 class ProviderRegistry:

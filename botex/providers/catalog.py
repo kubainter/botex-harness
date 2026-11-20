@@ -843,6 +843,16 @@ def get_consolidated_models(
     deny_filter = DenylistFilter(config)
     for prov_name in norm_providers:
         pcfg = providers_cfg.get(prov_name) if isinstance(providers_cfg, dict) else None
+        # A provider whose endpoint still carries an unresolved runtime
+        # placeholder (e.g. Cloudflare {account_id} without
+        # CLOUDFLARE_ACCOUNT_ID) is treated as unconfigured — skip the
+        # tier instead of emitting errors for the whole catalog.
+        try:
+            _probe = ProviderRegistry.get(prov_name, pcfg if isinstance(pcfg, dict) else None)
+            if "{account_id}" in str(getattr(_probe, "base_url", "") or ""):
+                continue
+        except Exception:
+            pass
         cat = ModelCatalog(
             provider_name=prov_name,
             provider_cfg=pcfg if isinstance(pcfg, dict) else None,

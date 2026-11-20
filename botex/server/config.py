@@ -265,9 +265,10 @@ DEFAULTS: Dict[str, Any] = {
         # publishes no pricing, so free_tier keeps the pricing gate off
         # (flip to false on a paid Developer plan). The denylist keeps
         # non-chat families (speech/guard/safeguard) and enterprise-gated
-        # slugs out of agent profiles. reasoning_effort caps hidden
-        # thinking on the gpt-oss reasoning models, same trade-off as
-        # the google provider.
+        # slugs out of agent profiles. GroqProvider injects
+        # reasoning_effort per model slug (gpt-oss -> low, qwen3 ->
+        # none) — keep extra_body empty so no single value leaks onto
+        # models that reject it.
         "groq": {
             "default": False,
             "base_url": "https://api.groq.com/openai/v1",
@@ -275,7 +276,7 @@ DEFAULTS: Dict[str, Any] = {
             "stream": True,
             "free_tier": True,
             "zdr": {"enabled": False},
-            "extra_body": {"reasoning_effort": "low"},
+            "extra_body": {},
             "retry": {"enabled": True, "max_waits": 2, "max_wait_s": 60.0, "jitter_s": 1.5},
             "denylist": [
                 "*whisper*",
