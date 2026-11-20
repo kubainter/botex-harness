@@ -30,16 +30,26 @@ import logging
 import os
 import random
 import re
+import secrets
 import socket
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from botex import __version__
 from botex.edge.delegation import EdgeDelegationHandler, EdgeDelegationPolicy
+from botex.edge.host_os_driver import (
+    SingleInstanceLock,
+    SingleInstanceLockError,
+    default_swarm_home,
+    fence_local_epoch,
+)
 from botex.tools.exec_tools import run_command
 from botex.tools.file_tools import (
     create_file,
@@ -107,6 +117,30 @@ _TRUNCATED_MARKER = "\n[truncated on edge]"
 
 _IDEM_MAXLEN = 256
 _IDEM_TTL_S = 600.0
+
+QOS_PRIORITY_CONTROL = 0
+QOS_PRIORITY_DATA = 1
+
+CONTROL_LANE_FRAME_TYPES = frozenset(
+    {
+        "fence_epoch",
+        "fence_ack",
+        "heartbeat",
+        "ping",
+        "pong",
+        "brief_sync",
+        "hello",
+        "hello_ack",
+    }
+)
+
+
+def frame_qos_priority(frame: Dict[str, Any]) -> int:
+    """Return QoS lane priority: 0 for Control Lane, 1 for Data Plane."""
+    ftype = str((frame or {}).get("type") or "").strip().lower()
+    if ftype in CONTROL_LANE_FRAME_TYPES:
+        return QOS_PRIORITY_CONTROL
+    return QOS_PRIORITY_DATA
 
 
 def _version_tuple(value: Any) -> Tuple[int, ...]:
@@ -467,8 +501,18 @@ class EdgeRunner:
         # Rebound per connection in run_once(): asyncio primitives must not
         # cross event-loop boundaries when run_once is re-invoked.
         self._send_lock = asyncio.Lock()
+        self._outbox: Optional[asyncio.PriorityQueue] = None
+        self._sender_task: Optional[asyncio.Task] = None
+        self._outbox_seq = 0
         self.hello_ack: Optional[Dict[str, Any]] = None
         self._session_established = False
+        self.fenced_epochs: List[Dict[str, Any]] = []
+        self._checkpoint_managers: Dict[str, Any] = {}
+        self._checkpoint_min_turns = 5
+        self._checkpoint_max_turns = 8
+        self._loopback_server: Optional[asyncio.AbstractServer] = None
+        self._loopback_port: Optional[int] = None
+        self._loopback_token: str = ""
 
     # -- wire frames ---------------------------------------------------------
 
@@ -659,12 +703,200 @@ class EdgeRunner:
             masked["truncated"] = True
         return masked
 
-    # -- websocket session ---------------------------------------------------
+    # -- websocket session & QoS priority queue ------------------------------
 
-    async def _send_json(self, ws: Any, frame: Dict[str, Any]) -> None:
-        # Serialize sends: concurrent tool_call replies must never interleave.
+    async def _qos_sender_loop(self, ws: Any, outbox: asyncio.PriorityQueue) -> None:
+        """Drain outbound frames from ``outbox`` in priority order (0=Control, 1=Data)."""
+        while True:
+            _prio, _seq, frame, fut = await outbox.get()
+            try:
+                async with self._send_lock:
+                    await ws.send(json.dumps(frame, ensure_ascii=False))
+                if fut is not None and not fut.done():
+                    fut.set_result(True)
+            except Exception as exc:
+                if fut is not None and not fut.done():
+                    fut.set_exception(exc)
+            finally:
+                outbox.task_done()
+
+    def enqueue_frame(
+        self,
+        frame: Dict[str, Any],
+        *,
+        priority: Optional[int] = None,
+    ) -> asyncio.Future:
+        """Queue ``frame`` on the two-tier QoS PriorityQueue and return its send future."""
+        loop = asyncio.get_running_loop()
+        if self._outbox is None:
+            self._outbox = asyncio.PriorityQueue()
+        prio = int(priority) if priority is not None else frame_qos_priority(frame)
+        self._outbox_seq += 1
+        fut: asyncio.Future = loop.create_future()
+        self._outbox.put_nowait((prio, self._outbox_seq, frame, fut))
+        return fut
+
+    async def flush_outbox(self, ws: Any) -> List[Dict[str, Any]]:
+        """Drain all currently queued frames in strict QoS priority order."""
+        sent: List[Dict[str, Any]] = []
+        if self._outbox is None:
+            return sent
+        while not self._outbox.empty():
+            _prio, _seq, frame, fut = self._outbox.get_nowait()
+            try:
+                async with self._send_lock:
+                    await ws.send(json.dumps(frame, ensure_ascii=False))
+                sent.append(frame)
+                if fut is not None and not fut.done():
+                    fut.set_result(True)
+            except Exception as exc:
+                if fut is not None and not fut.done():
+                    fut.set_exception(exc)
+                raise
+            finally:
+                self._outbox.task_done()
+        return sent
+
+    def _drain_outbox(self, exc: BaseException) -> int:
+        """Fail all un-sent futures in ``_outbox`` on socket teardown so callers never hang."""
+        drained = 0
+        if self._outbox is None:
+            return drained
+        while not self._outbox.empty():
+            try:
+                _prio, _seq, _frame, fut = self._outbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if fut is not None and not fut.done():
+                fut.set_exception(exc)
+            self._outbox.task_done()
+            drained += 1
+        return drained
+
+    async def _send_json(
+        self,
+        ws: Any,
+        frame: Dict[str, Any],
+        *,
+        priority: Optional[int] = None,
+    ) -> None:
+        if (
+            self._outbox is not None
+            and self._sender_task is not None
+            and not self._sender_task.done()
+        ):
+            fut = self.enqueue_frame(frame, priority=priority)
+            await fut
+            return
         async with self._send_lock:
             await ws.send(json.dumps(frame, ensure_ascii=False))
+
+    def _get_checkpoint_manager(
+        self,
+        order_id: str,
+        *,
+        local_epoch: int = 0,
+        wt_path: Optional[Path] = None,
+        swarm_remote: str = "swarm",
+    ) -> Any:
+        from botex.edge.adapters import EpochCheckpointManager
+
+        clean_id = sanitize_identifier(str(order_id or "")) or str(order_id or "")
+        mgr = self._checkpoint_managers.get(clean_id)
+        if mgr is None:
+            mgr = EpochCheckpointManager(
+                order_id=clean_id,
+                epoch=int(local_epoch),
+                origin_repo=Path(wt_path) if wt_path is not None else self.workspace_root,
+                swarm_remote=swarm_remote,
+                interval=self._checkpoint_min_turns,
+            )
+            self._checkpoint_managers[clean_id] = mgr
+        return mgr
+
+    def record_order_turn(
+        self,
+        order_id: str,
+        *,
+        mutated_files: bool = False,
+        green_test: bool = False,
+    ) -> bool:
+        """Track file-mutating turns for ``order_id`` via ``EpochCheckpointManager``."""
+        mgr = self._get_checkpoint_manager(order_id)
+        snap = mgr.record_turn(mutated_files=mutated_files, green_test=green_test)
+        return bool(snap.get("should_checkpoint"))
+
+    def auto_checkpoint_epoch(
+        self,
+        order_id: str,
+        local_epoch: int,
+        *,
+        remote_epoch: Optional[int] = None,
+        fetch_remote_epoch_fn: Optional[Callable[..., Any]] = None,
+        wt_path: Optional[Path] = None,
+        swarm_remote: str = "swarm",
+        push_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+        commit: bool = True,
+        commit_message: str = "",
+    ) -> Dict[str, Any]:
+        """Delegate stage+commit+epoch-fenced push to ``EpochCheckpointManager``."""
+        clean_id = sanitize_identifier(str(order_id or ""))
+        if not clean_id:
+            return {"ok": False, "status": "invalid_order_id", "error": "INVALID_ORDER_ID"}
+        clean_remote = sanitize_identifier(swarm_remote)
+        if push_fn is None and (not clean_remote or clean_remote.lower() == "origin"):
+            return {
+                "ok": False,
+                "status": "forbidden_remote",
+                "error": "Auto-push to origin is forbidden; use explicit swarm remote.",
+            }
+        mgr = self._get_checkpoint_manager(
+            clean_id,
+            local_epoch=int(local_epoch),
+            wt_path=wt_path,
+            swarm_remote=swarm_remote,
+        )
+        epoch_cb: Callable[..., Any]
+        if remote_epoch is not None:
+            fixed_remote = int(remote_epoch)
+            epoch_cb = lambda **_kw: fixed_remote  # noqa: E731
+        elif fetch_remote_epoch_fn is not None:
+            user_cb = fetch_remote_epoch_fn
+
+            def epoch_cb(order_id: str = clean_id, **_kw: Any) -> Any:
+                try:
+                    return user_cb(order_id=order_id)
+                except TypeError:
+                    return user_cb(order_id)
+        else:
+            fixed_local = int(local_epoch)
+            epoch_cb = lambda **_kw: fixed_local  # noqa: E731
+
+        wrapped_push_fn: Optional[Callable[..., Any]] = None
+        if push_fn is not None:
+            user_push = push_fn
+
+            def wrapped_push_fn(**kw: Any) -> Dict[str, Any]:
+                try:
+                    return user_push(**kw)
+                except TypeError:
+                    return user_push(
+                        Path(kw.get("repo_dir") or self.workspace_root),
+                        str(kw.get("remote") or swarm_remote),
+                        str(kw.get("branch") or ""),
+                    )
+
+        target_wt = Path(wt_path) if wt_path is not None else self.workspace_root
+        return mgr.checkpoint_and_push(
+            repo_dir=target_wt,
+            remote=swarm_remote,
+            order_id=clean_id,
+            epoch=int(local_epoch),
+            commit=commit,
+            commit_message=commit_message,
+            fetch_remote_epoch_fn=epoch_cb,
+            push_fn=wrapped_push_fn,
+        )
 
     async def _tool_call_task(self, ws: Any, frame: Dict[str, Any]) -> None:
         call_id = str(frame.get("call_id") or "")
@@ -723,7 +955,42 @@ class EdgeRunner:
             if ftype == "hello_ack":
                 self._handle_hello_ack(frame)
             elif ftype == "ping":
-                await self._send_json(ws, {"type": "pong", "ts": frame.get("ts")})
+                await self._send_json(
+                    ws,
+                    {"type": "pong", "ts": frame.get("ts")},
+                    priority=QOS_PRIORITY_CONTROL,
+                )
+            elif ftype == "fence_epoch":
+                order_id = str(frame.get("order_id") or "").strip()
+                fenced_epoch = int(frame.get("fencing_epoch") or frame.get("epoch") or 0)
+                stale_epoch = int(frame.get("stale_epoch") or max(0, fenced_epoch - 1))
+                entry: Dict[str, Any] = {
+                    "order_id": order_id,
+                    "stale_epoch": stale_epoch,
+                    "fencing_epoch": fenced_epoch,
+                    "reason": str(frame.get("reason") or "remote_fence"),
+                }
+                if order_id and (self.workspace_root / ".git").exists():
+                    try:
+                        fence_res = await asyncio.to_thread(
+                            fence_local_epoch,
+                            self.workspace_root,
+                            order_id,
+                            stale_epoch,
+                        )
+                        entry["fence_result"] = fence_res
+                    except Exception as exc:
+                        entry["fence_error"] = type(exc).__name__
+                self.fenced_epochs.append(entry)
+                await self._send_json(
+                    ws,
+                    {
+                        "type": "fence_ack",
+                        "order_id": order_id,
+                        "fencing_epoch": fenced_epoch,
+                    },
+                    priority=QOS_PRIORITY_CONTROL,
+                )
             elif ftype == "tool_call":
                 task = asyncio.create_task(self._tool_call_task(ws, frame))
                 self._pending.add(task)
@@ -771,6 +1038,8 @@ class EdgeRunner:
 
         self._session_established = False
         self._send_lock = asyncio.Lock()
+        self._outbox = asyncio.PriorityQueue()
+        self._outbox_seq = 0
         auth_kwargs = _connect_headers_kwargs(
             websockets.connect, {"Authorization": f"Bearer {self._token}"}
         )
@@ -783,9 +1052,18 @@ class EdgeRunner:
                 **auth_kwargs,
             ) as ws:
                 self._ws = ws
+                self._sender_task = asyncio.create_task(self._qos_sender_loop(ws, self._outbox))
                 try:
                     await self._serve(ws)
                 finally:
+                    if self._sender_task is not None:
+                        self._sender_task.cancel()
+                        try:
+                            await self._sender_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                        self._sender_task = None
+                    self._drain_outbox(ConnectionError("edge websocket closed"))
                     for task in list(self._pending):
                         task.cancel()
                     self._ws = None
@@ -832,11 +1110,484 @@ class EdgeRunner:
                 pass
 
     def stop(self) -> None:
-        """Ask the reconnect loop to end; best-effort close of the socket."""
+        """Ask the reconnect loop to end; best-effort close of the socket and loopback IPC."""
         self._stop.set()
+        if self._loopback_server is not None:
+            try:
+                self._loopback_server.close()
+            except Exception:
+                pass
         ws = self._ws
         if ws is not None:
             try:
                 self._close_task = asyncio.ensure_future(ws.close())
             except RuntimeError:
                 pass
+
+    # -- 127.0.0.1 loopback IPC server (Phase 2b / Phase 3 botex-ears hook) ---
+
+    async def start_loopback_ipc(
+        self,
+        *,
+        port: int = 0,
+        loopback_token: str = "",
+        state_file: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        """Bind a local-only ``127.0.0.1`` IPC server with token + origin auth."""
+        if not self._loopback_token:
+            self._loopback_token = loopback_token or secrets.token_urlsafe(32)
+        elif loopback_token:
+            self._loopback_token = loopback_token
+
+        server = await asyncio.start_server(
+            self._handle_loopback_client,
+            host="127.0.0.1",
+            port=int(port),
+        )
+        self._loopback_server = server
+        bound_port = int(server.sockets[0].getsockname()[1]) if server.sockets else int(port)
+        self._loopback_port = bound_port
+
+        target_state = (
+            Path(state_file)
+            if state_file is not None
+            else (default_swarm_home() / "edge_daemon.json")
+        )
+        try:
+            target_state.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "pid": os.getpid(),
+                "host": "127.0.0.1",
+                "port": bound_port,
+                "loopback_token": self._loopback_token,
+                "device_id": self.device_id,
+                "workspace_id": self.workspace_id,
+                "started_at": time.time(),
+            }
+            raw_json = json.dumps(payload, indent=2)
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=target_state.parent,
+                prefix=".edge_daemon_",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_f:
+                tmp_f.write(raw_json)
+                tmp_path = Path(tmp_f.name)
+            if os.name != "nt":
+                try:
+                    os.chmod(tmp_path, 0o600)
+                except OSError:
+                    pass
+            os.replace(tmp_path, target_state)
+        except OSError:
+            pass
+
+        return {
+            "ok": True,
+            "host": "127.0.0.1",
+            "port": bound_port,
+            "loopback_token": self._loopback_token,
+            "state_file": str(target_state),
+        }
+
+    async def stop_loopback_ipc(self) -> None:
+        if self._loopback_server is not None:
+            self._loopback_server.close()
+            try:
+                await self._loopback_server.wait_closed()
+            except Exception:
+                pass
+            self._loopback_server = None
+            self._loopback_port = None
+
+    async def _handle_loopback_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            peer = writer.get_extra_info("peername")
+            peer_ip = str(peer[0]) if isinstance(peer, tuple) and peer else ""
+            if peer_ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                await self._write_loopback_http(
+                    writer,
+                    403,
+                    {"ok": False, "error": "forbidden_non_loopback"},
+                )
+                return
+
+            max_line_bytes = 8192
+            max_headers = 64
+            first_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+            if not first_line:
+                return
+            if len(first_line) > max_line_bytes:
+                await self._write_loopback_http(
+                    writer,
+                    413,
+                    {"ok": False, "error": "request_line_too_long"},
+                )
+                return
+            line_str = first_line.decode("utf-8", errors="replace").strip()
+
+            # Support raw JSON-line IPC as well as minimal HTTP/1.1 requests.
+            if line_str.startswith("{"):
+                await self._handle_loopback_json_line(line_str, writer)
+                return
+
+            parts = line_str.split()
+            method = parts[0].upper() if parts else "GET"
+            path = parts[1] if len(parts) > 1 else "/status"
+            headers: Dict[str, str] = {}
+            header_count = 0
+            while True:
+                hline = await asyncio.wait_for(reader.readline(), timeout=5.0)
+                if len(hline) > max_line_bytes:
+                    await self._write_loopback_http(
+                        writer,
+                        413,
+                        {"ok": False, "error": "header_line_too_long"},
+                    )
+                    return
+                if not hline or hline in (b"\r\n", b"\n"):
+                    break
+                header_count += 1
+                if header_count > max_headers:
+                    await self._write_loopback_http(
+                        writer,
+                        413,
+                        {"ok": False, "error": "too_many_headers"},
+                    )
+                    return
+                hstr = hline.decode("utf-8", errors="replace").strip()
+                if ":" in hstr:
+                    hk, hv = hstr.split(":", 1)
+                    headers[hk.strip().lower()] = hv.strip()
+
+            origin = headers.get("origin", "").strip()
+            if origin:
+                parsed_orig = urllib.parse.urlparse(origin)
+                if parsed_orig.hostname not in ("127.0.0.1", "localhost"):
+                    await self._write_loopback_http(
+                        writer,
+                        403,
+                        {"ok": False, "error": "forbidden_origin"},
+                    )
+                    return
+
+            provided_tok = headers.get("x-loopback-token", "").strip()
+            if not provided_tok:
+                auth_hdr = headers.get("authorization", "").strip()
+                if auth_hdr.lower().startswith("bearer "):
+                    provided_tok = auth_hdr[7:].strip()
+
+            if not self._loopback_token or not secrets.compare_digest(
+                provided_tok, self._loopback_token
+            ):
+                await self._write_loopback_http(
+                    writer,
+                    401,
+                    {"ok": False, "error": "unauthorized_loopback_token"},
+                )
+                return
+
+            content_len = int(headers.get("content-length") or 0)
+            if content_len > 65536:
+                await self._write_loopback_http(
+                    writer,
+                    413,
+                    {"ok": False, "error": "body_too_large"},
+                )
+                return
+            body_obj: Dict[str, Any] = {}
+            if content_len > 0:
+                raw_body = await asyncio.wait_for(
+                    reader.readexactly(content_len),
+                    timeout=5.0,
+                )
+                try:
+                    parsed_body = json.loads(raw_body.decode("utf-8", errors="replace"))
+                    if isinstance(parsed_body, dict):
+                        body_obj = parsed_body
+                except json.JSONDecodeError:
+                    pass
+
+            if path.startswith("/status") or (method == "GET" and path == "/"):
+                await self._write_loopback_http(
+                    writer,
+                    200,
+                    {
+                        "ok": True,
+                        "status": "running",
+                        "pid": os.getpid(),
+                        "device_id": self.device_id,
+                        "workspace_id": self.workspace_id,
+                        "session_established": self._session_established,
+                        "loopback_port": self._loopback_port,
+                    },
+                )
+                return
+
+            if method == "POST" and path.startswith("/control"):
+                frame = body_obj.get("frame")
+                allowed_control = frozenset({"lease_heartbeat", "fence_ack", "ping"})
+                ftype = (
+                    str(frame.get("type") or "").strip().lower() if isinstance(frame, dict) else ""
+                )
+                if not isinstance(frame, dict) or ftype not in allowed_control:
+                    await self._write_loopback_http(
+                        writer,
+                        400,
+                        {"ok": False, "error": "forbidden_control_frame_type"},
+                    )
+                    return
+                if self._ws is not None:
+                    await self._send_json(
+                        self._ws,
+                        frame,
+                        priority=QOS_PRIORITY_CONTROL,
+                    )
+                    await self._write_loopback_http(writer, 200, {"ok": True, "dispatched": True})
+                    return
+                await self._write_loopback_http(
+                    writer,
+                    200,
+                    {"ok": True, "dispatched": False, "reason": "no_active_ws"},
+                )
+                return
+
+            await self._write_loopback_http(writer, 404, {"ok": False, "error": "not_found"})
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _handle_loopback_json_line(
+        self,
+        line_str: str,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            msg = json.loads(line_str)
+        except json.JSONDecodeError:
+            writer.write(b'{"ok": false, "error": "invalid_json"}\n')
+            await writer.drain()
+            return
+        if not isinstance(msg, dict):
+            writer.write(b'{"ok": false, "error": "invalid_payload"}\n')
+            await writer.drain()
+            return
+        tok = str(msg.get("token") or msg.get("loopback_token") or "")
+        if not self._loopback_token or not secrets.compare_digest(tok, self._loopback_token):
+            writer.write(b'{"ok": false, "error": "unauthorized_loopback_token"}\n')
+            await writer.drain()
+            return
+        action = str(msg.get("action") or "status").lower()
+        if action == "status":
+            resp = {
+                "ok": True,
+                "status": "running",
+                "pid": os.getpid(),
+                "device_id": self.device_id,
+                "workspace_id": self.workspace_id,
+                "loopback_port": self._loopback_port,
+            }
+        else:
+            resp = {"ok": True, "action": action}
+        writer.write((json.dumps(resp) + "\n").encode("utf-8"))
+        await writer.drain()
+
+    async def _write_loopback_http(
+        self,
+        writer: asyncio.StreamWriter,
+        status_code: int,
+        payload: Dict[str, Any],
+    ) -> None:
+        reasons = {
+            200: "OK",
+            400: "Bad Request",
+            401: "Unauthorized",
+            403: "Forbidden",
+            404: "Not Found",
+            413: "Payload Too Large",
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        reason = reasons.get(status_code, "OK")
+        header = (
+            f"HTTP/1.1 {status_code} {reason}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode("ascii")
+        writer.write(header + body)
+        await writer.drain()
+
+
+async def async_probe_edge_daemon_loopback(
+    port: int,
+    loopback_token: str,
+    *,
+    origin: str = "",
+    timeout_s: float = 1.5,
+) -> Dict[str, Any]:
+    """Async probe of ``127.0.0.1:<port>/status`` using ``asyncio.open_connection``."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", int(port)),
+            timeout=timeout_s,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__}
+    try:
+        hdrs = [
+            "GET /status HTTP/1.1",
+            f"Host: 127.0.0.1:{int(port)}",
+            f"X-Loopback-Token: {loopback_token}",
+        ]
+        if origin:
+            hdrs.append(f"Origin: {origin}")
+        hdrs.append("Connection: close\r\n\r\n")
+        writer.write("\r\n".join(hdrs).encode("utf-8"))
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(65536), timeout=timeout_s)
+        text = raw.decode("utf-8", errors="replace")
+        head, _, body = text.partition("\r\n\r\n")
+        status_line = head.splitlines()[0] if head else ""
+        parts = status_line.split()
+        status_code = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 500
+        try:
+            parsed = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        if status_code != 200:
+            return {
+                "ok": False,
+                "status_code": status_code,
+                "error": f"HTTP {status_code}",
+                **(parsed if isinstance(parsed, dict) else {}),
+            }
+        if isinstance(parsed, dict):
+            parsed.setdefault("status_code", 200)
+            return parsed
+        return {"ok": False, "status_code": status_code, "error": "invalid_response"}
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__}
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+def probe_edge_daemon_loopback(
+    port: int,
+    loopback_token: str,
+    *,
+    origin: str = "",
+    timeout_s: float = 1.5,
+) -> Dict[str, Any]:
+    """Probe a running local ``127.0.0.1:<port>`` edge daemon via token-authenticated status."""
+    return asyncio.run(
+        async_probe_edge_daemon_loopback(
+            port,
+            loopback_token,
+            origin=origin,
+            timeout_s=timeout_s,
+        )
+    )
+
+
+def attach_or_spawn_edge_daemon(
+    *,
+    state_file: Optional[Path] = None,
+    lock_path: Optional[Path] = None,
+    loopback_port: int = 0,
+    spawn_fn: Optional[Callable[[], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Attach to an existing local ``--edge-daemon`` if healthy, or acquire lock to spawn."""
+    swarm_home = default_swarm_home()
+    st_path = Path(state_file) if state_file is not None else (swarm_home / "edge_daemon.json")
+    lk_path = Path(lock_path) if lock_path is not None else (swarm_home / "edge_daemon.lock")
+
+    if st_path.is_file():
+        try:
+            state = json.loads(st_path.read_text(encoding="utf-8"))
+            if isinstance(state, dict):
+                existing_port = int(state.get("port") or 0)
+                existing_tok = str(state.get("loopback_token") or "")
+                if existing_port > 0 and existing_tok:
+                    probe = probe_edge_daemon_loopback(existing_port, existing_tok)
+                    if probe.get("ok"):
+                        return {
+                            "ok": True,
+                            "mode": "attached",
+                            "pid": probe.get("pid") or state.get("pid"),
+                            "port": existing_port,
+                            "device_id": probe.get("device_id") or state.get("device_id"),
+                            "workspace_id": probe.get("workspace_id") or state.get("workspace_id"),
+                        }
+        except Exception:
+            pass
+
+    lock = SingleInstanceLock(lk_path)
+    try:
+        lock.acquire()
+    except SingleInstanceLockError:
+        for _attempt in range(3):
+            time.sleep(0.15)
+            if st_path.is_file():
+                try:
+                    state = json.loads(st_path.read_text(encoding="utf-8"))
+                    if isinstance(state, dict):
+                        existing_port = int(state.get("port") or 0)
+                        existing_tok = str(state.get("loopback_token") or "")
+                        if existing_port > 0 and existing_tok:
+                            probe = probe_edge_daemon_loopback(existing_port, existing_tok)
+                            if probe.get("ok"):
+                                return {
+                                    "ok": True,
+                                    "mode": "attached",
+                                    "pid": probe.get("pid") or state.get("pid"),
+                                    "port": existing_port,
+                                    "device_id": probe.get("device_id") or state.get("device_id"),
+                                    "workspace_id": probe.get("workspace_id")
+                                    or state.get("workspace_id"),
+                                }
+                except Exception:
+                    pass
+        return {
+            "ok": True,
+            "mode": "attached",
+            "reason": "lock_held_by_active_daemon",
+            "lock_path": str(lk_path),
+        }
+
+    if spawn_fn is not None:
+        try:
+            res = spawn_fn()
+            return {
+                "ok": True,
+                "mode": "spawned",
+                "lock": lock,
+                "loopback_port": int(loopback_port),
+                **(res if isinstance(res, dict) else {}),
+            }
+        except Exception:
+            lock.release()
+            raise
+
+    return {
+        "ok": True,
+        "mode": "spawned",
+        "lock": lock,
+        "state_file": str(st_path),
+        "lock_path": str(lk_path),
+        "loopback_port": int(loopback_port),
+    }

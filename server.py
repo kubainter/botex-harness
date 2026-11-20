@@ -3201,6 +3201,17 @@ def _cli_edge(argv: list[str]) -> None:
         action="store_true",
         help="Raise the local ceiling to permit delete_file/move_file",
     )
+    parser.add_argument(
+        "--edge-daemon",
+        action="store_true",
+        help="Attach to an existing local edge daemon or spawn one with 127.0.0.1 loopback IPC",
+    )
+    parser.add_argument(
+        "--loopback-port",
+        type=int,
+        default=None,
+        help="Optional 127.0.0.1 loopback IPC port (0 = dynamic ephemeral port; disabled unless set or --edge-daemon)",
+    )
     args = parser.parse_args(argv)
 
     server_url = str(args.server or "").strip()
@@ -3253,16 +3264,53 @@ def _cli_edge(argv: list[str]) -> None:
         workspace_root=workspace_root,
         caps=caps,
     )
+    daemon_lock = None
+    if getattr(args, "edge_daemon", False):
+        from botex.edge.runner import attach_or_spawn_edge_daemon
+
+        attach_res = attach_or_spawn_edge_daemon(
+            loopback_port=int(args.loopback_port) if args.loopback_port is not None else 0
+        )
+        if attach_res.get("mode") == "attached":
+            print(
+                ok(
+                    f"Attached to existing BoteX edge daemon "
+                    f"(pid={attach_res.get('pid')}, port={attach_res.get('port')})"
+                )
+            )
+            return
+        daemon_lock = attach_res.get("lock")
+
     print(
         title(
             f"BoteX edge → {args.server} | workspace={workspace_root} "
             f"(id={runner.workspace_id}) device={runner.device_id}"
         )
     )
+
+    async def _run_edge_main() -> None:
+        want_loopback = getattr(args, "edge_daemon", False) or (
+            getattr(args, "loopback_port", None) is not None
+        )
+        if want_loopback and hasattr(runner, "start_loopback_ipc"):
+            lb_port = int(args.loopback_port) if args.loopback_port is not None else 0
+            await runner.start_loopback_ipc(port=lb_port)
+        try:
+            await runner.run_forever()
+        finally:
+            if hasattr(runner, "stop_loopback_ipc"):
+                await runner.stop_loopback_ipc()
+
     try:
-        asyncio.run(runner.run_forever())
+        asyncio.run(_run_edge_main())
     except KeyboardInterrupt:
         runner.stop()
+    finally:
+        if daemon_lock is not None:
+            try:
+                daemon_lock.release()
+            except Exception:
+                pass
 
 
 class _UrllibSyncResponse:

@@ -28,7 +28,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -782,6 +782,9 @@ class _EdgeSession:
         self.connected_at = time.time()
         self.last_seen_at = self.connected_at
         self._send_lock = asyncio.Lock()
+        self._outbox: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        self._outbox_seq = 0
+        self._sender_task: Optional[asyncio.Task] = None
         self._pending: Dict[str, asyncio.Future] = {}
         self._approval_task_ids: set[str] = set()
         self.executor = RemoteWssToolExecutor(self)
@@ -790,7 +793,102 @@ class _EdgeSession:
     def session_key(self) -> str:
         return f"{self.device_id}:{self.workspace_id}"
 
-    async def send_frame(self, payload: Dict[str, Any]) -> None:
+    @staticmethod
+    def _frame_priority(payload: Dict[str, Any]) -> int:
+        ftype = str((payload or {}).get("type") or "").strip().lower()
+        if ftype in (
+            "fence_epoch",
+            "fence_ack",
+            "heartbeat",
+            "ping",
+            "pong",
+            "brief_sync",
+            "hello",
+            "hello_ack",
+        ):
+            return 0
+        return 1
+
+    def enqueue_frame(
+        self,
+        payload: Dict[str, Any],
+        *,
+        priority: Optional[int] = None,
+    ) -> asyncio.Future:
+        loop = asyncio.get_running_loop()
+        prio = int(priority) if priority is not None else self._frame_priority(payload)
+        self._outbox_seq += 1
+        fut: asyncio.Future = loop.create_future()
+        self._outbox.put_nowait((prio, self._outbox_seq, payload, fut))
+        return fut
+
+    async def flush_outbox(self) -> List[Dict[str, Any]]:
+        sent: List[Dict[str, Any]] = []
+        while not self._outbox.empty():
+            _prio, _seq, payload, fut = self._outbox.get_nowait()
+            try:
+                async with self._send_lock:
+                    await self.websocket.send_json(payload)
+                sent.append(payload)
+                if fut is not None and not fut.done():
+                    fut.set_result(True)
+            except Exception as exc:
+                if fut is not None and not fut.done():
+                    fut.set_exception(exc)
+                raise
+            finally:
+                self._outbox.task_done()
+        return sent
+
+    async def _qos_sender_loop(self) -> None:
+        while True:
+            _prio, _seq, payload, fut = await self._outbox.get()
+            try:
+                async with self._send_lock:
+                    await self.websocket.send_json(payload)
+                if fut is not None and not fut.done():
+                    fut.set_result(True)
+            except Exception as exc:
+                if fut is not None and not fut.done():
+                    fut.set_exception(exc)
+            finally:
+                self._outbox.task_done()
+
+    def start_qos_sender(self) -> None:
+        if self._sender_task is None or self._sender_task.done():
+            self._sender_task = asyncio.create_task(self._qos_sender_loop())
+
+    def _drain_outbox(self, exc: BaseException) -> int:
+        drained = 0
+        while not self._outbox.empty():
+            try:
+                _prio, _seq, _payload, fut = self._outbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if fut is not None and not fut.done():
+                fut.set_exception(exc)
+            self._outbox.task_done()
+            drained += 1
+        return drained
+
+    async def stop_qos_sender(self) -> None:
+        if self._sender_task is not None:
+            self._sender_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._sender_task
+            self._sender_task = None
+        self._drain_outbox(ConnectionError("edge session closed"))
+
+    async def send_frame(
+        self,
+        payload: Dict[str, Any],
+        *,
+        priority: Optional[int] = None,
+    ) -> None:
+        if self._sender_task is not None and not self._sender_task.done():
+            fut = self.enqueue_frame(payload, priority=priority)
+            await fut
+            return
         async with self._send_lock:
             await self.websocket.send_json(payload)
 
@@ -3219,6 +3317,238 @@ async def fence_swarm_order_endpoint(
     return botex_server.mask_secrets_recursive(res)
 
 
+_HOST_LEASE_TTL_S = 600.0
+_MAX_PENDING_FENCE_HOSTS = 256
+_MAX_PENDING_FENCES_PER_HOST = 64
+_PENDING_HOST_FENCES: "OrderedDict[str, deque[Dict[str, Any]]]" = OrderedDict()
+
+
+def queue_pending_host_fence(host_id: str, fence_frame: Dict[str, Any]) -> None:
+    clean_host = coerce_text(mask_secrets(str(host_id or ""))).strip()
+    if not clean_host:
+        return
+    bucket = _PENDING_HOST_FENCES.get(clean_host)
+    if bucket is None:
+        while len(_PENDING_HOST_FENCES) >= _MAX_PENDING_FENCE_HOSTS:
+            _PENDING_HOST_FENCES.popitem(last=False)
+        bucket = deque(maxlen=_MAX_PENDING_FENCES_PER_HOST)
+        _PENDING_HOST_FENCES[clean_host] = bucket
+    else:
+        _PENDING_HOST_FENCES.move_to_end(clean_host)
+    bucket.append(dict(fence_frame))
+
+
+async def deliver_pending_host_fences(session: _EdgeSession) -> List[Dict[str, Any]]:
+    """Flush any pending Control Lane ``fence_epoch`` frames queued for ``session.device_id``."""
+    pending = list(_PENDING_HOST_FENCES.pop(session.device_id, ()))
+    delivered: List[Dict[str, Any]] = []
+    for frame in pending:
+        try:
+            await session.send_frame(frame, priority=0)
+            delivered.append(frame)
+        except Exception:
+            queue_pending_host_fence(session.device_id, frame)
+            break
+    return delivered
+
+
+def _sweep_expired_host_leases_sync(
+    *,
+    now: Optional[float] = None,
+    candidate_hosts: Optional[List[str]] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    now_ts = float(now) if now is not None else time.time()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    healthy_pool = [
+        coerce_text(mask_secrets(str(h))).strip() for h in (candidate_hosts or []) if str(h).strip()
+    ]
+    conn = get_swarm_store_conn(db_path)
+    failovers: List[Dict[str, Any]] = []
+    with _SWARM_LOCK:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            expired_rows = conn.execute(
+                "SELECT lease_key, bot_slug, host_id, scope_path, fencing_token, expires_at, summary"
+                " FROM host_leases WHERE expires_at <= ? ORDER BY lease_key;",
+                (now_ts,),
+            ).fetchall()
+            for lrow in expired_rows:
+                stale_host = str(lrow["host_id"] or "")
+                bot_slug = str(lrow["bot_slug"] or "")
+                scope_path = str(lrow["scope_path"] or "")
+                old_token = int(lrow["fencing_token"] or 0)
+                lease_key = str(lrow["lease_key"] or "")
+
+                # Pick healthy replacement host Y != stale_host if available.
+                target_host = ""
+                for cand in healthy_pool:
+                    if cand != stale_host:
+                        target_host = cand
+                        break
+
+                order_rows = conn.execute(
+                    "SELECT order_id, bot_slug, epoch, status, payload_json"
+                    " FROM work_orders"
+                    " WHERE bot_slug = ?"
+                    " AND status NOT IN ('DONE', 'FAILED', 'BLOCKED', 'NEEDS_HUMAN', 'FENCED')"
+                    " ORDER BY order_id;",
+                    (bot_slug,),
+                ).fetchall()
+
+                matched_orders = []
+                for orow in order_rows:
+                    payload: Dict[str, Any] = {}
+                    if orow["payload_json"]:
+                        try:
+                            parsed = json.loads(str(orow["payload_json"]))
+                            if isinstance(parsed, dict):
+                                payload = parsed
+                        except json.JSONDecodeError:
+                            payload = {}
+                    assigned_host = str(
+                        payload.get("assigned_host") or payload.get("host_id") or ""
+                    ).strip()
+                    if assigned_host and assigned_host != stale_host:
+                        continue
+                    order_scope = str(payload.get("scope_path") or "").strip()
+                    if order_scope and scope_path and order_scope != scope_path:
+                        continue
+                    matched_orders.append((orow, payload))
+
+                if not matched_orders:
+                    lease_summary = str(lrow["summary"] or "")
+                    if not target_host and "[fenced]" in lease_summary:
+                        continue
+                    new_epoch = old_token + 1
+                    next_summary = (
+                        lease_summary
+                        if target_host or "[fenced]" in lease_summary
+                        else (f"{lease_summary} [fenced]".strip())
+                    )
+                    conn.execute(
+                        "UPDATE host_leases SET fencing_token = ?, host_id = ?, expires_at = ?, summary = ?"
+                        " WHERE lease_key = ?;",
+                        (
+                            new_epoch,
+                            target_host or stale_host,
+                            now_ts + _HOST_LEASE_TTL_S
+                            if target_host
+                            else float(lrow["expires_at"]),
+                            next_summary,
+                            lease_key,
+                        ),
+                    )
+                    fence_frame = {
+                        "type": "fence_epoch",
+                        "order_id": scope_path or lease_key,
+                        "bot_slug": bot_slug,
+                        "stale_host": stale_host,
+                        "target_host": target_host,
+                        "stale_epoch": old_token,
+                        "fencing_epoch": new_epoch,
+                        "reason": "lease_ttl_expired",
+                    }
+                    failovers.append(fence_frame)
+                    continue
+
+                for orow, payload in matched_orders:
+                    order_id = str(orow["order_id"] or "")
+                    prev_epoch = max(int(orow["epoch"] or 0), old_token)
+                    new_epoch = prev_epoch + 1
+                    last_checkpoint = str(
+                        payload.get("last_checkpoint_ref") or f"swarm/wip/{order_id}/e{prev_epoch}"
+                    )
+                    payload["fenced_by_lease_expiry"] = True
+                    payload["stale_host"] = stale_host
+                    payload["assigned_host"] = target_host
+                    payload["resume_from_checkpoint"] = last_checkpoint
+                    payload["fenced_at"] = now_iso
+                    next_status = "HANDOFF" if target_host else "FENCED"
+                    conn.execute(
+                        "UPDATE work_orders SET epoch = ?, status = ?, payload_json = ?, updated_at = ?"
+                        " WHERE order_id = ?;",
+                        (
+                            new_epoch,
+                            next_status,
+                            coerce_text(mask_secrets(json.dumps(payload, ensure_ascii=False))),
+                            now_iso,
+                            order_id,
+                        ),
+                    )
+                    lease_summary = str(lrow["summary"] or "")
+                    next_summary = (
+                        lease_summary
+                        if next_status != "FENCED" or "[fenced]" in lease_summary
+                        else (f"{lease_summary} [fenced]".strip())
+                    )
+                    conn.execute(
+                        "UPDATE host_leases SET fencing_token = ?, host_id = ?, expires_at = ?, summary = ?"
+                        " WHERE lease_key = ?;",
+                        (
+                            new_epoch,
+                            target_host or stale_host,
+                            now_ts + _HOST_LEASE_TTL_S
+                            if target_host
+                            else float(lrow["expires_at"]),
+                            next_summary,
+                            lease_key,
+                        ),
+                    )
+                    fence_frame = {
+                        "type": "fence_epoch",
+                        "order_id": order_id,
+                        "bot_slug": bot_slug,
+                        "stale_host": stale_host,
+                        "target_host": target_host,
+                        "stale_epoch": prev_epoch,
+                        "fencing_epoch": new_epoch,
+                        "checkpoint_ref": last_checkpoint,
+                        "status": next_status,
+                        "reason": "lease_ttl_expired",
+                    }
+                    failovers.append(fence_frame)
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+    return failovers
+
+
+async def sweep_expired_host_leases(
+    *,
+    now: Optional[float] = None,
+    candidate_hosts: Optional[List[str]] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Detect host leases expired past 10-min TTL, bump epoch ``e<N+1>``, failover to Host Y, and fence Host X."""
+    if candidate_hosts is None:
+        candidate_hosts = [s.device_id for s in _EDGE_SESSIONS.values() if s.is_live()]
+    failovers = await asyncio.to_thread(
+        _sweep_expired_host_leases_sync,
+        now=now,
+        candidate_hosts=candidate_hosts,
+        db_path=db_path,
+    )
+    for event in failovers:
+        stale_host = str(event.get("stale_host") or "")
+        if not stale_host:
+            continue
+        matching_sessions = [s for s in _EDGE_SESSIONS.values() if s.device_id == stale_host]
+        if matching_sessions:
+            for sess in matching_sessions:
+                try:
+                    await sess.send_frame(event, priority=0)
+                except Exception:
+                    queue_pending_host_fence(stale_host, event)
+        else:
+            queue_pending_host_fence(stale_host, event)
+    return failovers
+
+
 def _fetch_memory_graph_sync(ws: Path, scope: str) -> Dict[str, Any]:
     health = find_graph_health(workspace_dir=ws, scope=scope)
 
@@ -4301,6 +4631,7 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
         with suppress(Exception):
             await prev.websocket.close(code=1000, reason="Superseded")
     _EDGE_SESSIONS[session.session_key] = session
+    session.start_qos_sender()
 
     try:
         await session.send_frame(
@@ -4313,6 +4644,10 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                 "heartbeat_s": int(_EDGE_PING_INTERVAL_S),
             }
         )
+        try:
+            await deliver_pending_host_fences(session)
+        except Exception:
+            logger.debug("Failed delivering pending host fences after hello_ack", exc_info=True)
         try:
             initial_briefs = await asyncio.to_thread(list_active_brief_payloads)
             all_bots = await asyncio.to_thread(list_bots)
@@ -4380,6 +4715,7 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
     except Exception:
         logger.debug("Edge websocket disconnected unexpectedly", exc_info=True)
     finally:
+        await session.stop_qos_sender()
         session.fail_all_pending("Edge connection closed")
         if _EDGE_SESSIONS.get(session.session_key) is session:
             _EDGE_SESSIONS.pop(session.session_key, None)
