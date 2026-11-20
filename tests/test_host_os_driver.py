@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Tests for Plan 037: Multi-Host OS driver, process job guard, and epoch git worktrees."""
+"""Tests for Multi-Host OS driver, process job guard, and epoch git worktrees."""
 
 from __future__ import annotations
 

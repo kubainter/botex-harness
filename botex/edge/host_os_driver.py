@@ -648,7 +648,7 @@ def fence_local_epoch(
 
 
 # ============================================================================
-# Runtime blocklist & SHA-256 pre-flight (ADR-SWARM-02-A Task 4)
+# Runtime blocklist & SHA-256 pre-flight
 # ============================================================================
 
 

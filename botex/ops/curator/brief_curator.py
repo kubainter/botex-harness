@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Background Brief Curator (Plan 040 / ADR-SWARM-02-A).
+"""Background Brief Curator.
 
 Synthesizes concise ``bot_briefs`` from verified ``status == "active"``
 Memory Vault entries using free tiers + Optimistic CAS (``expected_etag``)

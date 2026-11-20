@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Chat provider-error observability tests (P1/P2 of the 403-incident remediation).
+"""Chat provider-error observability tests.
 
 Guards the server-side taint-safe error logging (CWE-532: only static
 allowlisted error codes reach the log sink — never the raw exception text)

@@ -157,6 +157,10 @@ _EXEC_POLICY = {
     [
         "git -C /tmp status",
         "git -C /tmp commit -m x",
+        "git -C/tmp status",
+        "git --no-pager -C/tmp status",
+        "git --no-pager -C /tmp status",
+        "git -C../x status",
         "git --git-dir /x status",
         "git --git-dir=/x/.git status",
         "git --work-tree /x status",
@@ -168,10 +172,16 @@ _EXEC_POLICY = {
         "git remote -v",
         "git remote add upstream https://example.org/x.git",
         "npm install express",
+        "npm i express",
+        "npm --silent i express",
         "npm ci",
         "pip wheel requests",
         "cd ..",
         "ls ..",
+        "ls ../etc",
+        "ls foo/../bar",
+        "ls ..\\etc",
+        "pytest ../../tests",
     ],
 )
 def test_exec_deny_args_block_path_redirects_and_installs(cmd):
@@ -191,6 +201,9 @@ def test_exec_deny_args_block_path_redirects_and_installs(cmd):
         "dir",
         "ls foo..bar",
         "pytest tests/",
+        "npm run test",
+        "npm init",
+        "npm info",
     ],
 )
 def test_exec_deny_args_allow_readonly_and_dotdot_lookalikes(cmd):

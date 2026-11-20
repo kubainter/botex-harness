@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""E2E tests for ADR-SWARM-02 Phase 1 tethered-bot visibility (Plan 036 Wave 2)."""
+"""E2E tests for tethered-bot visibility."""
 
 from __future__ import annotations
 

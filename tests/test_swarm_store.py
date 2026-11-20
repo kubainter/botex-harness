@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Contract tests for botex/core/swarm_store.py (Plan 035 Wave 1 Cloud Soul)."""
+"""Contract tests for botex/core/swarm_store.py (Cloud Soul)."""
 
 from __future__ import annotations
 

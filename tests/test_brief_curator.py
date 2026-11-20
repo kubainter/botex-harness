@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
-"""Tests for Plan 040 Background Brief Curator & Optimistic CAS (ADR-SWARM-02-A)."""
+"""Tests for the Background Brief Curator & Optimistic CAS."""
 
 from __future__ import annotations
 

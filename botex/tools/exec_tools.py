@@ -66,22 +66,33 @@ def _deny_hit(tokens: List[str], deny_args: List[str]) -> str:
     catches flag-insertion evasions like 'py -3 -c' vs pattern 'py -c'."""
     binary = _binary_name(tokens[0])
     arg_tokens = [t.lower() for t in tokens[1:]]
-    joined = binary + " " + " ".join(arg_tokens)
     for pattern in deny_args:
         p = pattern.lower().strip()
         if not p:
             continue
-        if " " not in p:
-            if p in arg_tokens:
+        if p == "..":
+            if any(".." in re.split(r"[\\/]", tok) for tok in arg_tokens):
                 return pattern
             continue
-        if p in joined:
-            return pattern
+        if " " not in p:
+            if p in arg_tokens or (
+                p.startswith("--") and any(tok.startswith(p + "=") for tok in arg_tokens)
+            ):
+                return pattern
+            continue
         parts = p.split()
         if parts[0] == binary:
+            if p == "git -c" and any(t.startswith("-C") for t in tokens[1:]):
+                return pattern
             # Ordered subsequence match over the argument tokens.
             it = iter(arg_tokens)
-            if all(any(tok == want for tok in it) for want in parts[1:]):
+            if all(
+                any(
+                    tok == want or (want.startswith("--") and tok.startswith(want + "="))
+                    for tok in it
+                )
+                for want in parts[1:]
+            ):
                 return pattern
     return ""
 

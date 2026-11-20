@@ -30,7 +30,7 @@ Define the normative caller-facing contract for AI orchestrators delegating boun
 
 ## 1. Delegation Rules & Verifier Firewall
 
-Delegate to BoteX (prefer `run_subagent` synchronous by default; `start_task` + `get_task_status` asynchronous only when the fan-out criteria of Global Rule 5.1 hold — and then it REQUIRES a dispatch-ledger entry (Rule 5.2; `list_tasks` is the sweep/recovery surface since Phase 2) plus collection via `get_task_status` before turn end (Rule 5.3)) for bounded file inspection, surgical patching, test-verified bug fixes, or Memory Vault operations. Do **not** delegate general knowledge questions, server/daemon administration, or vague unbounded requests.
+Delegate to BoteX (`run_subagent` synchronous by default; `start_task` + `get_task_status` asynchronous when fanning out, always collected via `get_task_status` before turn end) for bounded file inspection, surgical patching, test-verified bug fixes, or Memory Vault operations. Do **not** delegate general knowledge questions, server/daemon administration, or vague unbounded requests.
 
 - **Verifier Firewall:** When delegating a review or verification task (`reviewer`, `security-reviewer`), pass ONLY the target artifact/files, the governing contract, and the review checklist. NEVER pass the builder agent's reasoning, excuses, or self-reported "all tests pass" claims.
 - **Fail-Stop Protocol:** If BoteX terminates with `BLOCKED` or `UNSUPPORTED`, do NOT blindly retry the identical prompt; inspect `failure_kind` and fix permissions/constraints or escalate.
@@ -99,7 +99,7 @@ BoteX records every run in a local analytics ledger and feeds that evidence back
 - **Shadow routing:** the engine's per-`(recipe, taxonomy)` shadow model advice is advisory telemetry only and never overrides the `model`/`profile` you selected. `recommend_models` remains the caller-facing ranking surface.
 - **Swarm Memory & `envfact` Hygiene:** Cloud workstations share the Memory Vault (`scope="global"`, `project="swarm"`, server-derived `origin`). Always call `recall_memory(query="...", scope="all")` first before `search_memory`/`read_memory`, and never dump raw files or large JSON payloads into prompts (Zero Context Bloat). Before delegating on an unfamiliar/Edge workspace, check `recall_memory(query="envfact <workspace_or_module>", scope="all")`; persist verified shell fixes (`FormRepair`, e.g., `python -m pytest`) or missing binaries (`AbsentTool`) as `save_memory(..., kind="lesson", tags=["lesson", "envfact"])`. Ephemeral `temp-handoff` notes (`scope="local"`, `tags=["temp-handoff"]`) must include `expires: YYYY-MM-DD` and be deleted when done.
 
-### Tethered Bots & Local Fast-Cache (`ADR-SWARM-02`)
+### Tethered Bots & Local Fast-Cache
 
 - **Local Fast-Cache (`~/.ai/.swarm/bot_briefs/<slug>.md`):** Preloaded on `/api/edge/ws` connect or synced via `botex bots sync [--url URL] [--on-startup]`.
 - **MCP Discovery & Consultation:** `swarm_list_bots(namespace="")` lists active Cloud bots, `host_leases`, and cached briefs; `bot_consult(bot_id, query)` returns single-hop (`ttl_hops=1`) advice from verified `active` notes only; `bot_report_activity(bot_id, scope_path, summary, fencing_token=0)` updates fenced activity leases (`stale_epoch` if out-fenced).

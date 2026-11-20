@@ -2,7 +2,7 @@
 # Copyright 2026 Jakub Grzesiak (jg-webtech.pl)
 """Downward capability adapters, epoch checkpointing, and the verify terminal hook.
 
-Plan 038 (``ADR-SWARM-02`` Phase 2b): translates canonical ``WorkOrder`` objects
+Translates canonical ``WorkOrder`` objects
 into per-harness dispatch specs for ``botex`` / ``zcode`` / ``devin`` — never
 widening ``mode_request`` — while the ``antigravity_ls`` family stays excluded
 until a read-status API exists in L0. ``EpochCheckpointManager`` snapshots WIP
@@ -65,7 +65,7 @@ ANTIGRAVITY_EXCLUSION_REASON = "missing read-status API in L0"
 # Requested canonical mode -> granted canonical mode, per target harness.
 # Entries absent here fail closed (BLOCKED) rather than silently degrade.
 # ``fs_write`` is deliberately unmapped everywhere: no harness exposes a safe
-# file-system-write-only equivalent yet (Plan 038 test invariant).
+# file-system-write-only equivalent yet.
 HARNESS_MODE_MAP: Dict[str, Dict[str, str]] = {
     "botex": {
         "readonly": "readonly",
@@ -170,7 +170,7 @@ def _normalize_harness_name(name: Any) -> str:
 
 def _is_excluded_harness(norm: str) -> bool:
     # The whole antigravity* family is excluded from automated failover until
-    # the L0 read-status/cascade-health API exists (Plan 038 invariant).
+    # the L0 read-status/cascade-health API exists.
     return (
         norm == "antigravity"
         or norm.startswith("antigravity_")

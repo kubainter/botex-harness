@@ -343,7 +343,7 @@ DEFAULTS: Dict[str, Any] = {
             "destructive": 0,
             "full": 0,
         },
-        # Task-size routing (Stage 4.8): disabled by default. When enabled
+        # Task-size routing: disabled by default. When enabled
         # and the caller names neither model nor profile (and mode_profiles
         # resolved empty), estimate_task_tier classifies the prompt/files
         # into a tier and `tiers` maps it to a model profile — cheap tiers
@@ -356,7 +356,7 @@ DEFAULTS: Dict[str, Any] = {
                 "budget": "fast",
             },
         },
-        # Provider circuit breaker (Stage 4.8): consecutive server-side or
+        # Provider circuit breaker: consecutive server-side or
         # network failures trip a provider OPEN so dead endpoints fail fast
         # instead of burning request budget; after recovery_timeout_s a
         # single HALF_OPEN probe may retry. Per-provider override:
@@ -410,6 +410,7 @@ DEFAULTS: Dict[str, Any] = {
             "npm exec",
             "npx",
             "npm install",
+            "npm i",
             "npm ci",
             "pip install",
             "pip uninstall",
@@ -816,10 +817,10 @@ _PROVIDER_ALIASES: Dict[str, str] = {
 
 
 def normalize_provider_name(name: str = "", providers: Optional[Dict[str, Any]] = None) -> str:
-    """Normalize a provider identifier or common alias (e.g. 'nvmi' -> 'nvidia').
+    """Normalize a provider identifier or alias (e.g. 'nvmi' -> 'nvidia').
 
-    Returns a static canonical string literal for known provider aliases to
-    sever taint flow and prevent typos from falling back to paid endpoints.
+    Returns a static canonical literal to sever taint flow (CodeQL) —
+    never the mutated user string.
     """
     raw = (name or "").strip()
     if not raw:
@@ -858,13 +859,9 @@ def _normalize_model_for_provider(model: str, provider_name: str, explicit_provi
 
 
 def resolve_provider(name: str = "") -> tuple[str, Dict[str, Any]]:
-    """
-    Resolve the active provider. Explicit ``name`` (including common aliases
-    such as ``nvmi`` -> ``nvidia`` or ``or-free`` -> ``openrouter-free``) wins;
-    otherwise the ``BOTEX_PROVIDER`` env var; otherwise the first provider
-    flagged ``"default": true``; otherwise ``openrouter`` when present, else
-    the first configured provider. Returns ``(name, cfg)``; ``cfg`` is empty
-    when a named provider does not exist.
+    """Resolve the active provider: explicit ``name`` > ``BOTEX_PROVIDER`` env
+    > ``"default": true`` provider > ``openrouter`` > first configured.
+    Returns ``(name, cfg)``; ``cfg`` is empty when a named provider is missing.
     """
     providers = load_config().get("providers", {})
     if not name:
@@ -883,11 +880,8 @@ def resolve_provider(name: str = "") -> tuple[str, Dict[str, Any]]:
 
 
 def resolve_model(model: str = "", profile: str = "", provider: str = "") -> str:
-    """
-    Resolve which model to run. Priority (highest first):
-    explicit ``model`` > ``BOTEX_<PROFILE>_MODEL`` env >
-    ``providers[<provider>].models[<profile>]`` >
-    ``providers[<provider>].models.default`` > legacy top-level ``models``.
+    """Resolve the model: explicit ``model`` > ``BOTEX_<PROFILE>_MODEL`` env
+    > provider ``models[profile]`` > ``models.default`` > legacy ``models``.
     """
     _pname, pcfg = resolve_provider(provider)
     if model:
@@ -959,13 +953,9 @@ def resolve_model_candidates(
 
 
 def is_decisions_model(model: str, provider_cfg: Dict[str, Any]) -> bool:
-    """Whether the model is a decisions-only model for this provider.
-
-    Decision models (e.g. TypeSafe Jev on OpenRouter) answer typed
-    questions about a ``state`` via a dedicated endpoint instead of
-    chat/completions — routing them to the tool loop only produces a
-    provider 400. Declared per provider as ``decisions_models`` (exact
-    slugs or ``*``/``?`` globs).
+    """Whether the model is decisions-only for this provider (``decisions_models``,
+    exact slugs or ``*``/``?`` globs). Such models bypass chat/completions;
+    routing them into the tool loop only yields a provider 400.
     """
     patterns = (provider_cfg or {}).get("decisions_models") or []
     if isinstance(patterns, str):
@@ -998,10 +988,8 @@ def env_file() -> Optional[Path]:
 def swarm_memory_dir() -> str:
     """Configured swarm vault dir for the third READ-ONLY search root.
 
-    Relative paths (such as the committed default ``.botex/memory``) are
-    resolved against ``PROJECT_ROOT`` so both local workstations and remote
-    VPS deployments locate the harness swarm vault portably. Empty/blank
-    means OFF — memory scope "swarm"/"all" simply skips it."""
+    Relative paths resolve against ``PROJECT_ROOT`` (portability local
+    <-> VPS). Empty means OFF — scope "swarm"/"all" simply skips it."""
     value = load_config().get("paths", {}).get("swarm_memory_dir") or ""
     raw = str(value).strip()
     if not raw:
@@ -1011,11 +999,9 @@ def swarm_memory_dir() -> str:
 
 
 def get_swarm_store_db_path() -> Path:
-    """Resolved path to the Cloud Soul ``swarm_store.db`` (SQLite WAL).
-
-    ``paths.swarm_store_db`` / ``BOTEX_SWARM_STORE_DB`` wins when set
-    (absolute used as-is, relative resolved against PROJECT_ROOT); otherwise
-    ``~/.botex/swarm_store.db`` — a per-host store shared across workspaces."""
+    """Resolved path to ``swarm_store.db``: ``paths.swarm_store_db`` /
+    ``BOTEX_SWARM_STORE_DB`` (relative -> PROJECT_ROOT), else the per-host
+    ``~/.botex/swarm_store.db`` shared across workspaces."""
     raw = str(load_config().get("paths", {}).get("swarm_store_db") or "").strip()
     if raw:
         expanded = Path(raw).expanduser()
@@ -1033,10 +1019,8 @@ def get_bots_config() -> Dict[str, Any]:
 
 
 def get_recall_config() -> Dict[str, Any]:
-    """Merged ``memory.recall`` config for the recall LLM cascade.
-
-    Deep-merges botex.config.json over DEFAULTS so partial operator
-    overrides keep unspecified defaults (config.py _deep_merge pattern)."""
+    """Merged ``memory.recall`` config (partial operator overrides keep
+    unspecified DEFAULTS via deep-merge)."""
     defaults = DEFAULTS.get("memory", {}).get("recall", {})
     override = load_config().get("memory", {}).get("recall")
     if not isinstance(override, dict):
@@ -1090,11 +1074,9 @@ class WorkspaceOutOfBounds(ValueError):
 
 
 def allowed_workspaces() -> list[str]:
-    """Realpath-normalized entries of ``cloud.allowed_workspaces``.
-
-    Each entry is expanded (``~``) and realpath-resolved so later
-    comparisons close both ``..`` traversal and symlink escapes. Empty
-    does NOT disable containment — ``_enforce_workspace_containment``
+    """Realpath-normalized entries of ``cloud.allowed_workspaces`` (``~``-expanded,
+    realpath-resolved so comparisons close ``..`` traversal and symlink escapes).
+    Empty does NOT disable containment — ``_enforce_workspace_containment``
     substitutes the default-workspace root instead (fail-closed).
     """
     raw = (load_config().get("cloud", {}) or {}).get("allowed_workspaces")
@@ -1113,25 +1095,17 @@ def allowed_workspaces() -> list[str]:
 
 
 def _default_workspace_root() -> str:
-    """Realpath of the fallback workspace used for an empty ``workspace_dir``.
-
-    Shares ``resolve_workspace_source``'s chain so the empty-allowlist
-    root cannot drift from what ``resolve_workspace`` itself resolves.
-    """
+    """Realpath of the fallback workspace for an empty ``workspace_dir``;
+    shares ``resolve_workspace_source``'s chain so the empty-allowlist root
+    cannot drift from what ``resolve_workspace`` resolves."""
     return os.path.realpath(os.path.abspath(resolve_workspace_source("")[0]))
 
 
 def _enforce_workspace_containment(real_path: str) -> None:
-    """Fail-closed containment for ``cloud.allowed_workspaces``.
-
-    Empty allowlist = default-workspace-only: the resolved path must be
-    equal to or under ``engine.default_workspace`` (process cwd when that
-    is unset/not a directory — the same fallback ``resolve_workspace``
-    uses for an empty ``workspace_dir``). Non-empty allowlist: equal to
-    or under one of the allowed roots. Runs BEFORE any ``mkdir``
-    side-effect in ``get_tasks_dir``/``get_chat_sessions_dir``, so
-    out-of-bounds paths never materialize on disk (arena v2.1.0
-    merge-blocker B1).
+    """Fail-closed containment: empty allowlist = default-workspace-only
+    (same fallback ``resolve_workspace`` uses), else under one allowed root.
+    Runs BEFORE any ``mkdir`` in ``get_tasks_dir``/``get_chat_sessions_dir``
+    so out-of-bounds paths never materialize on disk.
     """
     roots = allowed_workspaces()
     if not roots:
@@ -1175,13 +1149,8 @@ def catalog_setting(key: str, override: Optional[Any] = None) -> Any:
 
 
 def catalog_cache_file() -> Path:
-    """Return resolved path to the catalog cache file.
-
-    ``catalog.cache_file`` is the canonical declaration (also reachable via
-    ``BOTEX_CATALOG_CACHE_FILE``). ``paths.catalog_file`` and
-    ``catalog.cache_path`` remain honoured as legacy aliases when a local
-    config still sets them explicitly.
-    """
+    """Resolved catalog cache path; ``catalog.cache_file`` (or env) is canonical,
+    ``paths.catalog_file``/``catalog.cache_path`` stay honoured as legacy aliases."""
     path_str = (
         load_config().get("paths", {}).get("catalog_file")
         or catalog_setting("cache_file")
