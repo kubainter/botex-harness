@@ -683,11 +683,11 @@ def test_observe_headers_case_insensitive_dicts():
 
 
 def test_observe_headers_httpx_headers_wire_shape():
-    """Ingestion contract: httpx.Headers from openai with_raw_response works."""
-    import httpx
+    """Ingestion contract: httpx2.Headers from openai with_raw_response works."""
+    import httpx2
 
     lim, _ = _limiter()
-    headers = httpx.Headers({k.lower(): v for k, v in _GROQ_HEADERS.items()})
+    headers = httpx2.Headers({k.lower(): v for k, v in _GROQ_HEADERS.items()})
     lim.observe_headers("prov", headers, model="m")
     rep = lim.stats()["prov"]["reported"]
     assert rep["limit_req"] == 30.0 and rep["reset_tok_s"] == pytest.approx(0.1)
