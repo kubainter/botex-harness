@@ -423,6 +423,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
                     [ruff_bin, "check", "--select=E9,F821,F822", "-"],
                     input=content,
                     text=True,
+                    encoding="utf-8",
                     capture_output=True,
                     timeout=5,
                 )
@@ -447,7 +448,12 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
         if php_bin:
             try:
                 proc = subprocess.run(
-                    [php_bin, "-l"], input=content, text=True, capture_output=True, timeout=5
+                    [php_bin, "-l"],
+                    input=content,
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    timeout=5,
                 )
                 if proc.returncode != 0:
                     first_err = proc.stdout.splitlines()[0] if proc.stdout else proc.stderr
@@ -462,7 +468,12 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
         if node_bin:
             try:
                 proc = subprocess.run(
-                    [node_bin, "--check"], input=content, text=True, capture_output=True, timeout=5
+                    [node_bin, "--check"],
+                    input=content,
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    timeout=5,
                 )
                 if proc.returncode != 0:
                     return False, f"JavaScript SyntaxError: {proc.stderr.strip()}"
@@ -476,7 +487,12 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
         if bash_bin:
             try:
                 proc = subprocess.run(
-                    [bash_bin, "-n"], input=content, text=True, capture_output=True, timeout=5
+                    [bash_bin, "-n"],
+                    input=content,
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    timeout=5,
                 )
                 if proc.returncode != 0:
                     return False, f"Bash SyntaxError: {proc.stderr.strip()}"
