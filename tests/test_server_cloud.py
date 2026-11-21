@@ -301,8 +301,8 @@ def test_wallet_endpoint(client, monkeypatch):
         assert data["quota_windows"] == []
 
 
-def test_wallet_endpoint_zai_quota_windows(client):
-    """Wallet endpoint returns quota windows and units='quota' for Z.ai."""
+def test_wallet_endpoint_quota_windows(client):
+    """Wallet endpoint returns quota windows and units='quota' for a quota-based provider."""
     sample_windows = (
         {
             "label": "5 Hours",
@@ -325,7 +325,7 @@ def test_wallet_endpoint_zai_quota_windows(client):
     )
     mock_credits = CreditsInfo(
         supported=True,
-        provider="zai",
+        provider="groq",
         units="quota",
         quota_windows=sample_windows,
     )
@@ -333,11 +333,11 @@ def test_wallet_endpoint_zai_quota_windows(client):
         "botex.server_cloud.default_wallet_service.get_credits_async",
         new=AsyncMock(return_value=mock_credits),
     ):
-        resp = client.get("/api/wallet?provider=zai&force_refresh=true")
+        resp = client.get("/api/wallet?provider=groq&force_refresh=true")
         assert resp.status_code == 200
         data = resp.json()
         assert data["supported"] is True
-        assert data["provider"] == "zai"
+        assert data["provider"] == "groq"
         assert data["units"] == "quota"
         assert len(data["quota_windows"]) == 2
         assert data["quota_windows"][0]["unit"] == "hours"
@@ -468,6 +468,90 @@ def test_task_collected_flag_persists(client):
             persisted_path.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _seed_evicted_terminal_task(task_id: str, collected: bool = False) -> Path:
+    """Persist a terminal task then evict its in-memory entry via the real TTL path."""
+    import time as _time
+
+    import server as botex_server
+    from botex.config import get_tasks_dir
+    from botex.server.task_store import save_task_persistent
+
+    entry = {
+        "task_id": task_id,
+        "task": "ttl fallback",
+        "request": {"workspace_dir": ""},
+        "status": "DONE",
+        "created_at": _time.time() - 7200,
+        "finished_at": _time.time() - 3700,
+        "result": "done",
+        "result_data": {"ok": True, "status": "DONE"},
+        "async_task": None,
+    }
+    if collected:
+        entry["collected"] = True
+    save_task_persistent(task_id, entry, "")
+    persisted_path = get_tasks_dir("") / f"{task_id}.json"
+    assert persisted_path.exists()
+    botex_server._TASKS[task_id] = dict(entry)
+    botex_server._cleanup_tasks()
+    assert task_id not in botex_server._TASKS
+    return persisted_path
+
+
+def test_get_task_route_restores_terminal_from_disk(client):
+    """TTL-evicted terminal entries are restored from .botex/tasks/ before 404."""
+    import server as botex_server
+
+    task_id = uuid.uuid4().hex[:12]
+    persisted_path = _seed_evicted_terminal_task(task_id)
+    try:
+        resp = client.get(f"/api/tasks/{task_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "DONE"
+        assert data["result_data"]["status"] == "DONE"
+    finally:
+        botex_server._TASKS.pop(task_id, None)
+        persisted_path.unlink(missing_ok=True)
+
+
+def test_get_task_status_restores_terminal_from_disk():
+    """MCP get_task_status falls back to the persistent store on memory miss."""
+    import asyncio
+
+    import server as botex_server
+
+    task_id = uuid.uuid4().hex[:12]
+    persisted_path = _seed_evicted_terminal_task(task_id)
+    try:
+        result = asyncio.run(botex_server.get_task_status(task_id))
+        assert result["ok"] is True
+        assert result["status"] == "DONE"
+        assert result["result_data"]["status"] == "DONE"
+        assert botex_server._TASKS[task_id]["collected"] is True
+    finally:
+        botex_server._TASKS.pop(task_id, None)
+        persisted_path.unlink(missing_ok=True)
+
+
+def test_restore_preserves_collected_and_not_found_for_unknown():
+    """Restore keeps the persisted `collected` flag; unknown ids stay NOT_FOUND."""
+    import asyncio
+
+    import server as botex_server
+
+    task_id = uuid.uuid4().hex[:12]
+    persisted_path = _seed_evicted_terminal_task(task_id, collected=True)
+    try:
+        server_cloud._load_tasks_persistent("")
+        assert botex_server._TASKS[task_id]["collected"] is True
+        result = asyncio.run(botex_server.get_task_status("zz-never-existed-zz"))
+        assert result == {"ok": False, "status": "NOT_FOUND", "task_id": "zz-never-existed-zz"}
+    finally:
+        botex_server._TASKS.pop(task_id, None)
+        persisted_path.unlink(missing_ok=True)
 
 
 def test_task_requires_provider_when_model_specified(client, monkeypatch):

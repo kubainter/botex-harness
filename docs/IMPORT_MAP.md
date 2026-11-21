@@ -31,12 +31,12 @@ Legacy alias spellings are **load-bearing** for BoteX itself (`server.py`, `depl
 | `botex.providers.retry` | `botex.retry` | — |
 | `botex.providers.wallet` | `botex.wallet` | credits service |
 | `botex.providers.http_pool` | — (new in v2.1.0) | pooled httpx2 clients |
-| `botex.providers.adapters.zai` | — (new in v2.1.0) | Z.ai GLM Coding Plan |
 | `botex.server.chat` | `botex.chat` | chat pipeline |
 | `botex.server.config` | `botex.config` | **containment lives here** (`WorkspaceOutOfBounds`, `allowed_workspaces`) |
 | `botex.server.i18n` | `botex.i18n` | — |
 | `botex.server.plugins` | `botex.plugins` | ZeroTrust subprocess runner |
 | `botex.server.server_cloud` | `botex.server_cloud` | FastAPI gateway (`botex-cloud.service`) |
+| `botex.server.task_store` | — (new in v2.1.0) | persistent task registry restore |
 | `botex.server.ui` | `botex.ui` | — |
 | `botex.skills.recipes` | `botex.recipes` | recipe prompts |
 | `botex.skills.skills` | `botex.skills` | skill vault |

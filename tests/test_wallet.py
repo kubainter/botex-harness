@@ -1017,7 +1017,7 @@ def test_format_key_status_dict_units_and_quota_windows():
     # 1. Quota provider: units="quota", low_budget_warning must be False even if remaining < threshold
     info_quota = CreditsInfo(
         supported=True,
-        provider="zai",
+        provider="groq",
         limit_remaining_usd=0.50,
         units="quota",
         quota_windows=sample_windows,

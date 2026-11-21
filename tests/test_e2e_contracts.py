@@ -7,7 +7,7 @@ Comprehensive requirements-driven verification covering:
 - PR-1: Core & Backend Performance (HTTP connection pool, SQLite pooling, DDL memoization,
   lifespan teardown, carry-buffer stream secret masking, uvloop packaging).
 - PR-2: Backend Catalog & Wallet Contracts (Z.ai catalog seeding & GLM isolation from
-  openrouter-free, CreditsInfo dataclass extensions, ZaiGLMProvider quota window normalizer,
+  openrouter-free, CreditsInfo dataclass extensions, quota-window normalization (removed with zai adapter),
   Cloud Server /api/wallet JSON contract).
 - PR-3: Cross-system contract invariants (wallet service serialization, model routing).
 
@@ -289,7 +289,7 @@ class TestTier1FeatureCoverage:
         )
         mock_credits = CreditsInfo(
             supported=True,
-            provider="zai",
+            provider="groq",
             units="quota",
             quota_windows=sample_quota_windows,
         )
@@ -299,11 +299,11 @@ class TestTier1FeatureCoverage:
             new=AsyncMock(return_value=mock_credits),
         ):
             with TestClient(app) as client:
-                resp = client.get("/api/wallet?provider=zai&force_refresh=true")
+                resp = client.get("/api/wallet?provider=groq&force_refresh=true")
                 assert resp.status_code == 200
                 data = resp.json()
                 assert data["supported"] is True
-                assert data["provider"] == "zai"
+                assert data["provider"] == "groq"
                 assert data["units"] == "quota"
                 assert "quota_windows" in data
                 assert len(data["quota_windows"]) == 1
@@ -362,54 +362,6 @@ class TestTier2BoundaryAndCornerCases:
         assert "Prefix text before secret " in combined_emitted
         assert " suffix text after secret." in combined_emitted
 
-    def test_zai_timestamp_parsing_formats(self):
-        """Verify _normalize_reset_time handles ms-epoch, sec-epoch, and ISO strings gracefully."""
-        from botex.providers.adapters.zai import _normalize_reset_time
-
-        # Milliseconds epoch (timestamp > 1e11)
-        ms_epoch = 1794074400000
-        res_ms = _normalize_reset_time(ms_epoch)
-        assert res_ms is not None
-        assert "Z" in res_ms or "+00:00" in res_ms
-        assert res_ms.startswith("2026-")
-
-        # Seconds epoch (timestamp < 1e11)
-        sec_epoch = 1794074400
-        res_sec = _normalize_reset_time(sec_epoch)
-        assert res_sec == res_ms
-
-        # String representation of ms epoch
-        res_str_ms = _normalize_reset_time("1794074400000")
-        assert res_str_ms == res_ms
-
-        # Pre-formatted ISO string
-        iso_str = "2026-11-06T18:00:00Z"
-        assert _normalize_reset_time(iso_str) == iso_str
-
-        # None and empty inputs
-        assert _normalize_reset_time(None) is None
-        assert _normalize_reset_time("") is None
-
-    def test_window_units_mapping_boundaries(self):
-        """Verify _WINDOW_UNITS_MAP correctly maps units 3 -> hours, 6 -> weeks, 5 -> months."""
-        from botex.providers.adapters.zai import _WINDOW_UNITS_MAP, _normalize_quota_window
-
-        assert _WINDOW_UNITS_MAP[3] == "hours"
-        assert _WINDOW_UNITS_MAP[5] == "months"
-        assert _WINDOW_UNITS_MAP[6] == "weeks"
-
-        # Test normalization handles unknown unit code gracefully
-        unknown_item = {
-            "unit": 99,
-            "number": 2,
-            "limit": 100,
-            "current_usage": 10,
-        }
-        norm = _normalize_quota_window(unknown_item)
-        assert norm["unit"] in ("99", "unknown")
-        assert norm["limit"] == 100.0
-        assert norm["current_usage"] == 10.0
-
     def test_credits_info_default_backward_compatibility(self):
         """Verify CreditsInfo defaults to units='usd' and quota_windows=() for legacy callers."""
         from botex.providers.providers import CreditsInfo
@@ -429,34 +381,6 @@ class TestTier2BoundaryAndCornerCases:
         # Frozen dataclass invariant
         with pytest.raises((TypeError, AttributeError)):
             info.units = "other"  # type: ignore
-
-    def test_zero_or_none_quota_windows_handling(self):
-        """Verify quota normalization handles zero limits, None values, and missing fields safely."""
-        from botex.providers.adapters.zai import _normalize_quota_window
-
-        # Zero limit: must not raise ZeroDivisionError
-        zero_lim_item = {
-            "unit": 3,
-            "number": 5,
-            "limit": 0,
-            "current_usage": 0,
-        }
-        norm_zero = _normalize_quota_window(zero_lim_item)
-        assert norm_zero["limit"] == 0.0
-        assert norm_zero["percentage"] in (0.0, None)
-        assert norm_zero["remaining"] == 0.0
-
-        # None limit with usage
-        none_lim_item = {
-            "unit": 6,
-            "number": 1,
-            "limit": None,
-            "currentUsage": 500,
-        }
-        norm_none = _normalize_quota_window(none_lim_item)
-        assert norm_none["limit"] is None
-        assert norm_none["current_usage"] == 500.0
-        assert norm_none["percentage"] is None
 
 
 # ===========================================================================
@@ -564,7 +488,7 @@ class TestTier3CrossFeatureInteractions:
 
         info = CreditsInfo(
             supported=True,
-            provider="zai",
+            provider="groq",
             units="quota",
             quota_windows=sample_windows,
             label=secret_label,

@@ -9,24 +9,15 @@ Covers:
 2. ProviderRegistry clean rejection: ProviderRegistry.get("zai") raises ValueError("Unknown provider: 'zai'")
 3. CreditsInfo stress harness: empty, partial, malformed, secret-bearing quota_windows and units
 4. Wallet service serialization and low budget warning USD guard
-5. ZaiGLMProvider deprecation and quota window normalization resilience
 """
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import FrozenInstanceError
 from typing import Any, Dict, List
 
 import pytest
 
-from botex.providers.adapters.zai import (
-    _WINDOW_TYPE_MAP,
-    _WINDOW_UNITS_MAP,
-    ZaiGLMProvider,
-    _normalize_quota_window,
-    _normalize_reset_time,
-)
 from botex.providers.catalog import (
     _CONSOLIDATED_MEM_CACHE,
     _VALID_PROVIDERS_MAP,
@@ -293,71 +284,3 @@ class TestEmpiricalWalletServiceSerialization:
             info_usd_high, low_budget_threshold_usd=5.0
         )
         assert formatted_usd_high["low_budget_warning"] is False
-
-
-class TestEmpiricalZaiAdapterResilience:
-    """Empirical stress-testing of offline Z.ai parsing utilities and deprecation notice."""
-
-    def test_zai_provider_emits_deprecation_warning_on_init(self):
-        """ZaiGLMProvider instantiation must trigger a DeprecationWarning."""
-        with warnings.catch_warnings(record=True) as recorded:
-            warnings.simplefilter("always")
-            prov = ZaiGLMProvider()
-            assert any(issubclass(w.category, DeprecationWarning) for w in recorded)
-            assert prov.name == "zai"
-
-    @pytest.mark.parametrize(
-        "raw_payload,expected_unit,expected_label",
-        [
-            ({"unit": 3, "number": 5, "limit": 100, "current_usage": 20}, "hours", "5 Hours"),
-            ({"unit": 6, "number": 1, "limit": 500, "current_usage": 50}, "weeks", "Weekly"),
-            ({"unit": 5, "number": 1, "limit": 1000, "current_usage": 100}, "months", "Monthly"),
-            (
-                {"unit": 3, "number": 2, "limit": 50, "currentUsage": 10},
-                "hours",
-                "2 Hours",
-            ),
-        ],
-    )
-    def test_normalize_quota_window_shapes_and_units_mapping(
-        self, raw_payload, expected_unit, expected_label
-    ):
-        """Verify normalization mappings for 3->hours, 5->months, 6->weeks and labels."""
-        norm = _normalize_quota_window(raw_payload)
-        assert norm["unit"] == expected_unit
-        assert norm["label"] == expected_label
-        assert norm["limit"] == float(raw_payload["limit"])
-
-    def test_normalize_quota_window_division_by_zero_and_none(self):
-        """Verify normalization handles limit=0, limit=None, and negative values safely."""
-        zero_payload = {"unit": 3, "number": 5, "limit": 0, "current_usage": 0}
-        norm_zero = _normalize_quota_window(zero_payload)
-        assert norm_zero["limit"] == 0.0
-        assert norm_zero["percentage"] in (0.0, None)
-        assert norm_zero["remaining"] == 0.0
-
-        none_payload = {"unit": 3, "number": 5, "limit": None, "current_usage": 10}
-        norm_none = _normalize_quota_window(none_payload)
-        assert norm_none["limit"] is None
-        assert norm_none["percentage"] is None
-        assert norm_none["remaining"] is None
-
-    def test_normalize_reset_time_epoch_and_iso(self):
-        """Verify _normalize_reset_time handles ms epoch, seconds epoch, and ISO strings."""
-        # Milliseconds epoch: 1772841600000 -> 2026-03-07T00:00:00Z
-        iso_from_ms = _normalize_reset_time(1772841600000)
-        assert iso_from_ms == "2026-03-07T00:00:00Z"
-
-        # Seconds epoch: 1772841600
-        iso_from_sec = _normalize_reset_time(1772841600)
-        assert iso_from_sec == "2026-03-07T00:00:00Z"
-
-        # Clean ISO string pass-through
-        iso_raw = "2026-11-06T12:00:00Z"
-        assert _normalize_reset_time(iso_raw) == iso_raw
-
-        # None / invalid
-        assert _normalize_reset_time(None) is None
-        assert _normalize_reset_time(0) is None
-        assert _normalize_reset_time(-100) is None
-        assert _normalize_reset_time("") is None

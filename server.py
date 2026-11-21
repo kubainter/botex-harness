@@ -142,6 +142,7 @@ from botex.memory import (
     search_memory as _search_memory,
 )
 from botex.providers import ProviderRegistry
+from botex.server.task_store import load_tasks_persistent
 
 try:
     from botex.core.tool_executor import resolve_edge_executor
@@ -706,7 +707,7 @@ async def start_task(
     provider: Annotated[
         str,
         Field(
-            description="openrouter-free|nvidia|google|ollama|openrouter. REQUIRED unless BOTEX_PROVIDER is set."
+            description="openrouter-free|nvidia|google|ollama|groq|cloudflare|openrouter. REQUIRED unless BOTEX_PROVIDER is set."
         ),
     ] = "",
     mode: Annotated[
@@ -839,6 +840,11 @@ async def get_task_status(
     _cleanup_tasks()
     entry = _TASKS.get(task_id)
     if not entry:
+        # Terminal results outlive their in-memory TTL on disk — restore
+        # from the persistent store before declaring NOT_FOUND.
+        await asyncio.to_thread(load_tasks_persistent, _TASKS)
+        entry = _TASKS.get(task_id)
+    if not entry:
         return {"ok": False, "status": "NOT_FOUND", "task_id": task_id}
     deadline = time.monotonic() + max(0, min(int(timeout_s), 600))
     while True:
@@ -961,7 +967,7 @@ async def run_subagent(
     provider: Annotated[
         str,
         Field(
-            description="openrouter-free|nvidia|google|ollama|openrouter. REQUIRED unless BOTEX_PROVIDER is set."
+            description="openrouter-free|nvidia|google|ollama|groq|cloudflare|openrouter. REQUIRED unless BOTEX_PROVIDER is set."
         ),
     ] = "",
     mode: Annotated[
@@ -2516,7 +2522,7 @@ def _cli_chat(argv: list[str]) -> None:
     parser.add_argument(
         "--provider",
         default="",
-        help="API provider (openrouter/openrouter-free/nvidia/google/ollama; empty = config default)",
+        help="API provider (openrouter/openrouter-free/nvidia/google/ollama/groq/cloudflare; empty = config default)",
     )
     parser.add_argument("--session-id", default="", help="Resume or label specific chat session")
     parser.add_argument(
@@ -3609,7 +3615,7 @@ def _repl(argv):
     parser.add_argument(
         "--provider",
         default="",
-        help="API provider (openrouter/openrouter-free/nvidia/google/ollama; empty = config default)",
+        help="API provider (openrouter/openrouter-free/nvidia/google/ollama/groq/cloudflare; empty = config default)",
     )
     parser.add_argument(
         "--mode",
@@ -3738,7 +3744,7 @@ def main():
         parser.add_argument(
             "--provider",
             default="",
-            help="API provider (openrouter/openrouter-free/nvidia/google/ollama; empty = config default)",
+            help="API provider (openrouter/openrouter-free/nvidia/google/ollama/groq/cloudflare; empty = config default)",
         )
         parser.add_argument(
             "--mode",

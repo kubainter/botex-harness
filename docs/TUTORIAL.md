@@ -36,7 +36,6 @@ Since v2.1.0 the package is organized into domain subpackages; legacy flat impor
 │   │   ├── wallet.py          credit balance, usage, and limit checker
 │   │   ├── http_pool.py       pooled httpx clients
 │   │   ├── prompt_cache.py    prompt-cache policy gating
-│   │   └── adapters/zai.py    Z.ai GLM Coding Plan adapter
 │   ├── tools/               worker tool implementations
 │   │   ├── patch_engine.py    fuzzy patching, in-memory syntax check, snapshots
 │   │   ├── file_tools.py      outline-first file I/O tools
@@ -244,7 +243,7 @@ BoteX can operate as a central HTTP/SSE daemon (`botex/server/server_cloud.py`):
 
 ## 9. Termination statuses
 
-`ok` is `true` **only** when `status == "DONE"`: it certifies that the task contract was verified (required output exists on disk or report delivered), not merely that the model claimed success. For background tasks (`start_task` / `get_task_status`), the outer `status` is lifecycle (`QUEUED`, `RUNNING`, `DONE`, `FAILED`, `CANCELLED`); lifecycle `DONE` means finished, not success. Success strictly requires `result_data.ok == true` and `result_data.status == "DONE"`. Workspace note: `files` are primary target hints (not a security allowlist); `workspace_dir` is the hard boundary (located on the BoteX host machine for remote SSE). Keep API keys empty in examples; do not pass secrets in tasks or memories.
+`ok` is `true` **only** when `status == "DONE"`: it certifies that the task contract was verified (required output exists on disk or report delivered), not merely that the model claimed success. For background tasks (`start_task` / `get_task_status`), the outer `status` is lifecycle (`QUEUED`, `RUNNING`, `DONE`, `FAILED`, `CANCELLED`); lifecycle `DONE` means finished, not success. Success strictly requires `result_data.ok == true` and `result_data.status == "DONE"`. Workspace note: `files` are primary target hints (not a security allowlist); `workspace_dir` is the hard boundary (located on the BoteX host machine for remote SSE). Keep API keys empty in examples; do not pass secrets in tasks or memories. Terminal results persist under `<workspace>/.botex/tasks/` and are restored on lookup past the in-memory TTL or after a restart, so late collection still returns the payload instead of `NOT_FOUND`.
 
 | Status | Meaning |
 |---|---|
