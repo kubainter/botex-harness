@@ -207,6 +207,7 @@ class McpBridgeClient:
         self._resources_cache: Optional[List[Dict[str, Any]]] = None
         self._resources_cached_at = 0.0
         self.on_client_notification = None  # callable(dict) set by the stdio loop
+        self._last_list_changed_relay: Dict[str, float] = {}
 
     def _on_server_notification(self, message: Any) -> None:
         try:
@@ -219,7 +220,16 @@ class McpBridgeClient:
             method = (data.get("root") or data).get("method") or data.get("method")
             if method == "notifications/tools/list_changed":
                 self._tools_cache = None
-            if method and str(method).startswith("notifications/") and self.on_client_notification:
+            if not method or not str(method).startswith("notifications/"):
+                return
+            # Server broadcasts reach every pooled SSE session — relay each
+            # */list_changed to the client once per window, not N times.
+            if str(method).endswith("/list_changed"):
+                now = time.monotonic()
+                if now - self._last_list_changed_relay.get(method, 0.0) < 0.5:
+                    return
+                self._last_list_changed_relay[method] = now
+            if self.on_client_notification:
                 self.on_client_notification(data.get("root") or data)
         except Exception:
             logger.debug("failed to relay server notification", exc_info=True)

@@ -272,6 +272,46 @@ def test_eof_drains_inflight_dispatch(monkeypatch):
         importlib.reload(m)
 
 
+def test_notifications_emit_no_stdout_response(monkeypatch):
+    """JSON-RPC notifications (no "id") must never get a response line."""
+    from botex.mcp_bridge import __main__ as m
+
+    written = []
+    monkeypatch.setattr(m, "_write", lambda msg: written.append(msg))
+    bridge = MagicMock()
+    for req in (
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 1},
+        },
+        {"jsonrpc": "2.0", "method": "bogus/notification"},
+    ):
+        asyncio.run(m._dispatch(bridge, req))
+    assert written == [], f"notification leaked a response: {written}"
+
+
+def test_list_changed_relay_dedupes_across_pool(monkeypatch):
+    """N SSE slots each deliver tools/list_changed — client sees ONE relay."""
+    c = _client(monkeypatch)
+    relayed = []
+    c.on_client_notification = relayed.append
+    c._tools_cache = [{"name": "old"}]
+    note = MagicMock()
+    note.model_dump_json = lambda: '{"root": {"method": "notifications/tools/list_changed"}}'
+    for _ in range(3):  # three slots deliver the same broadcast
+        c._on_server_notification(note)
+    assert c._tools_cache is None
+    assert len(relayed) == 1, f"broadcast relayed per-slot: {relayed}"
+    assert relayed[0]["method"] == "notifications/tools/list_changed"
+    # A distinct notification still passes through untouched.
+    note2 = MagicMock()
+    note2.model_dump_json = lambda: '{"method": "notifications/progress", "params": {}}'
+    c._on_server_notification(note2)
+    assert len(relayed) == 2
+
+
 def test_mutating_call_no_retry_after_send(monkeypatch):
     """A TimeoutError on a mutating call must NOT be retried (no double writes)."""
     c = _client(monkeypatch)

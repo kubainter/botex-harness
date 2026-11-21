@@ -194,6 +194,29 @@ def test_get_task_route_404_no_full_scan(client):
         path.unlink(missing_ok=True)
 
 
+def test_list_tasks_does_not_rehydrate_evicted_into_ram(client):
+    """GET /api/tasks serves persisted tasks but must NOT grow _TASKS.
+
+    Regression for the pre-fix behavior where every poll re-seeded all
+    historical disk entries into the in-memory registry (unbounded RAM).
+    """
+    ids = [uuid.uuid4().hex[:12] for _ in range(2)]
+    paths = [_seed_task_file(t) for t in ids]
+    try:
+        resp = client.get("/api/tasks")
+        assert resp.status_code == 200
+        listed = {t["task_id"] for t in resp.json()["tasks"]}
+        assert ids[0] in listed and ids[1] in listed
+        # Served from the merged local view — _TASKS stays un-hydrated.
+        assert ids[0] not in server_cloud._TASKS
+        assert ids[1] not in server_cloud._TASKS
+    finally:
+        for t in ids:
+            server_cloud._TASKS.pop(t, None)
+        for p in paths:
+            p.unlink(missing_ok=True)
+
+
 def test_concurrent_point_restores_no_dict_mutation_race():
     """Parallel TTL-miss restores + _cleanup_tasks iteration: no RuntimeError."""
     ids = [uuid.uuid4().hex[:12] for _ in range(8)]

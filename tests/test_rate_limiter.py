@@ -715,3 +715,113 @@ def test_reported_never_feeds_gating_buckets():
         assert after[key] == before[key], f"reported telemetry leaked into {key}"
     # remaining=0 must be advisory only — gating still allows calls
     assert asyncio.run(lim.acquire("prov")) == 0.0
+
+
+def test_parse_reset_openrouter_epoch_ms():
+    """OpenRouter x-ratelimit-reset is a Unix epoch in ms -> delta, not 1.7e12 s."""
+    from botex.providers.rate_limiter import _parse_reset_s
+
+    ms = _parse_reset_s(str(int((time.time() + 12) * 1000)))
+    assert 10.0 <= ms <= 13.0, f"epoch ms parsed as {ms}"
+    sec = _parse_reset_s(str(int(time.time() + 12)))
+    assert 10.0 <= sec <= 13.0, f"epoch s parsed as {sec}"
+    assert _parse_reset_s(str(int(time.time() - 60) * 1000)) == 0.0  # past -> 0
+    # Durations must still parse as before
+    assert _parse_reset_s("2.5s") == pytest.approx(2.5)
+    assert _parse_reset_s("250ms") == pytest.approx(0.25)
+    assert _parse_reset_s("5") == pytest.approx(5.0)
+
+
+def test_engine_stream_uses_with_streaming_response(tmp_path, monkeypatch):
+    """stream=True must go through with_streaming_response (headers early,
+    live SSE) — never with_raw_response, which buffers the whole body."""
+    from types import SimpleNamespace
+
+    import botex.engine as engine
+    from botex.providers.rate_limiter import get_rate_limiter
+
+    chunk = SimpleNamespace(
+        id="c1",
+        model="nvidia/test",
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content="STATUS: DONE\nok", reasoning_content=None, tool_calls=None
+                ),
+                finish_reason="stop",
+                index=0,
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+    class _AsyncChunks:
+        def __aiter__(self):
+            async def _gen():
+                yield chunk
+
+            return _gen()
+
+    class _RawResp:
+        headers = {"x-ratelimit-remaining-requests": "9"}
+
+        def parse(self):
+            return _AsyncChunks()
+
+    class _StreamingCM:
+        async def __aenter__(self):
+            return _RawResp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    wsr_calls, wr_calls, plain_calls = [], [], []
+    wsr = SimpleNamespace(create=lambda **kw: wsr_calls.append(kw) or _StreamingCM())
+    wr = SimpleNamespace(
+        create=AsyncMock(side_effect=AssertionError("with_raw_response used for stream"))
+    )
+    fake = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=lambda **kw: (
+                        plain_calls.append(kw) or AssertionError("plain create used for stream")
+                    )
+                ),
+                with_streaming_response=wsr,
+                with_raw_response=wr,
+            )
+        )
+    )
+
+    lim = get_rate_limiter()
+    seen = []
+    orig_observe = lim.observe_headers
+    lim.observe_headers = lambda *a, **k: seen.append(a) or orig_observe(*a, **k)
+
+    engine.AsyncOpenAI = lambda **_: fake
+    engine.resolve_model_candidates = lambda *a, **k: ["nvidia/test"]
+    engine.check_model_price = lambda *a, **k: (True, "")
+    engine.check_model_tools = lambda *a, **k: (True, "")
+    engine.check_budget_limit = lambda *a, **k: (False, 0.0)
+    engine.log_run = lambda **kw: {"cost_usd": 0.0}
+    engine.print_run_summary = lambda *a, **k: None
+    try:
+        result = asyncio.run(
+            engine.run_botex_task(
+                task="stream probe",
+                workspace_dir=str(tmp_path),
+                model="nvidia/test",
+                api_key="x",
+                provider="nvidia",
+                mode="readonly",
+            )
+        )
+    finally:
+        lim.observe_headers = orig_observe
+    assert result["status"] == "DONE", result
+    assert len(wsr_calls) == 1, f"with_streaming_response.create calls: {wsr_calls}"
+    assert wr_calls == [] and plain_calls == []
+    assert any(
+        p == "nvidia" and h.get("x-ratelimit-remaining-requests") == "9" for p, h, *_ in seen
+    ), f"headers never observed: {seen}"

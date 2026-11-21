@@ -69,7 +69,12 @@ def _pos(value: Any, default: float = 0.0) -> float:
 
 
 def _parse_reset_s(value: Any) -> Optional[float]:
-    """Parse a reset-duration header ("1.5s", "250ms", or a bare number) to seconds."""
+    """Parse a reset-duration header ("1.5s", "250ms", or a bare number) to seconds.
+
+    Bare numbers are durations in seconds — except OpenRouter-style Unix
+    epoch timestamps, which are converted to a delta from now (ms above
+    1e12, seconds above 1e9).
+    """
     if isinstance(value, str):
         s = value.strip().lower()
         if s.endswith("ms"):
@@ -77,7 +82,14 @@ def _parse_reset_s(value: Any) -> Optional[float]:
             return n / 1000.0 if n is not None else None
         if s.endswith("s"):
             return _num(s[:-1])
-    return _num(value)
+    n = _num(value)
+    if n is None:
+        return None
+    if n > 1e12:  # epoch ms
+        return max(0.0, n / 1000.0 - time.time())
+    if n > 1e9:  # epoch s
+        return max(0.0, n - time.time())
+    return n
 
 
 class TokenBucket:

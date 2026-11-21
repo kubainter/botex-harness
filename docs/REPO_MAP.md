@@ -67,7 +67,7 @@ targeted + integration tests.
 | `botex/core/context_inclusion.py` | `OutputNormalizer`, `DeterministicSignalGate`, `ContextKnapsack` | `test_context_inclusion.py` |
 | `botex/core/contracts.py` | `TaskContract`, `classify_api_error`, `should_fallback`, `resolve_task_contract`, `parse_structured_completion`, `format_handoff_response` | `test_approval.py`, `test_botex.py`, `test_circuit_breaker.py`, `test_retry.py`, +2 more |
 | `botex/core/device_tokens.py` | `DeviceTokenRecord`, `DeviceTokenStore`, `default_device_token_store` | `test_device_tokens.py`, `test_edge_delegation_api.py`, `test_edge_integration.py`, `test_edge_qos_daemon.py`, +2 more |
-| `botex/core/engine.py` | `TwoTierLifoStack`, `prune_tool_history`, `run_botex_task` | `test_analytics.py`, `test_approval.py`, `test_blackbox_penal.py`, `test_botex.py`, +13 more |
+| `botex/core/engine.py` | `TwoTierLifoStack`, `prune_tool_history`, `run_botex_task` | `test_analytics.py`, `test_approval.py`, `test_blackbox_penal.py`, `test_botex.py`, +14 more |
 | `botex/core/events.py` | `EventKind`, `TaskEventEmitter`, `get_emitter`, `emitter_or_none`, `drop_emitter` | `test_analytics.py`, `test_containment_recall_gate.py`, `test_events.py`, `test_security_hardening.py`, +2 more |
 | `botex/core/meta_harness.py` | `SpiralTracker`, `classify_task_taxonomy`, `is_infra_failure`, `get_relevant_meta_lessons`, `extract_meta_lesson`, `pack_lessons_within_budget`, `+4 more` | `test_meta_harness.py` |
 | `botex/core/state.py` | `CanonicalAgentTurn`, `InFlightTaskState`, `save_inflight_checkpoint`, `load_inflight_checkpoints`, `clear_inflight_checkpoint` | `test_context_inclusion.py`, `test_edge_ws_gateway.py`, `test_state_checkpoint.py` |

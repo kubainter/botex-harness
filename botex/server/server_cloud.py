@@ -2444,11 +2444,13 @@ async def list_tasks(
     never delivered (collected != true); `origin` filters by exact stored
     dispatch origin.
     """
+    # Merge persisted + in-memory entries into a LOCAL view only — restoring
+    # every historical file into _TASKS on each poll regrows RAM without bound.
     restored = await asyncio.to_thread(_load_tasks_persistent)
-    for tid, entry in restored.items():
-        _TASKS.setdefault(tid, entry)
+    merged: Dict[str, Dict[str, Any]] = dict(restored)
+    merged.update(_TASKS)  # live in-memory entries win over stale disk copies
     tasks = []
-    for tid, entry in list(_TASKS.items()):
+    for tid, entry in list(merged.items()):
         status = entry.get("status")
         terminal = status in {"DONE", "FAILED", "CANCELLED"}
         if uncollected_only and (not terminal or entry.get("collected") is True):
