@@ -84,7 +84,6 @@ from botex.config import (
     WorkspaceOutOfBounds,
     analytics_setting,
     get_bots_config,
-    get_tasks_dir,
     resolve_provider,
     resolve_workspace,
 )
@@ -137,6 +136,7 @@ from botex.security import (
     sanitize_identifier,
     sanitize_origin_claim,
 )
+from botex.server.task_store import load_tasks_persistent, save_task_persistent
 from botex.skills import delete_skill, get_skill, install_skill_async, list_skills
 from botex.state import load_inflight_checkpoints
 from botex.wallet import default_wallet_service
@@ -153,47 +153,12 @@ _TASKS: Dict[str, Dict[str, Any]] = botex_server._TASKS
 
 def _save_task_persistent(task_id: str, entry: Dict[str, Any], workspace_dir: str = "") -> None:
     """Persist task metadata and receipt to .botex/tasks/<task_id>.json across server restarts."""
-    try:
-        safe_tid = sanitize_identifier(task_id)
-        if not safe_tid:
-            return
-        tasks_dir = get_tasks_dir(workspace_dir)
-        existing = next(
-            (f for f in tasks_dir.iterdir() if f.is_file() and f.name == f"{safe_tid}.json"),
-            None,
-        )
-        p = existing if existing is not None else (tasks_dir / f"{safe_tid}.json")
-        clean = {k: v for k, v in entry.items() if k != "async_task"}
-        p.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception as exc:
-        logger.warning("Failed to persist task metadata: %s", type(exc).__name__)
+    save_task_persistent(task_id, entry, workspace_dir)
 
 
 def _load_tasks_persistent(workspace_dir: str = "") -> None:
     """Restore historical background tasks from disk into memory cache."""
-    try:
-        tasks_dir = get_tasks_dir(workspace_dir)
-        for f in tasks_dir.glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                tid = data.get("task_id") or f.stem
-                if tid not in _TASKS:
-                    data["async_task"] = None
-                    # Restart reaper: a persisted RUNNING/QUEUED entry has no
-                    # live worker after a server restart — mark it failed
-                    # instead of leaving an unkillable zombie in the PWA.
-                    if data.get("status") in {"RUNNING", "QUEUED"}:
-                        data["status"] = "FAILED"
-                        data["failure_kind"] = "server_restarted"
-                        data["result"] = data.get("result") or (
-                            "Task interrupted by server restart."
-                        )
-                        data["finished_at"] = data.get("finished_at") or time.time()
-                    _TASKS[tid] = data
-            except Exception:
-                pass
-    except Exception as exc:
-        logger.warning(f"Failed to load persistent tasks: {exc}")
+    load_tasks_persistent(_TASKS, workspace_dir)
 
 
 # WAN Reliability: Idempotency Cache & SSE Event Replay Buffer
@@ -2505,7 +2470,13 @@ async def get_task(task_id: str, request: Request) -> Dict[str, Any]:
     flag so it survives restarts.
     """
     clean_tid = sanitize_identifier(task_id)
-    if not clean_tid or clean_tid not in _TASKS:
+    if not clean_tid:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    if clean_tid not in _TASKS:
+        # TTL evicts terminal entries from memory while their persisted
+        # copy still exists — restore from disk before answering 404.
+        await asyncio.to_thread(_load_tasks_persistent)
+    if clean_tid not in _TASKS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     entry = _TASKS[clean_tid]
     if (

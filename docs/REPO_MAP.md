@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 70 Python modules (`server.py` + `botex/`), 87 test files (`tests/`).
+- **Codebase footprint:** 71 Python modules (`server.py` + `botex/`), 87 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -25,8 +25,8 @@ targeted + integration tests.
 
 | Module | File | Imported By (modules) | Direct Tests |
 |---|---|---:|---:|
-| `botex.tools.security` | `botex/tools/security.py` | 37 | 9 |
-| `botex.server.config` | `botex/server/config.py` | 24 | 21 |
+| `botex.tools.security` | `botex/tools/security.py` | 38 | 9 |
+| `botex.server.config` | `botex/server/config.py` | 25 | 21 |
 | `botex.memory.memory` | `botex/memory/memory.py` | 9 | 5 |
 | `botex.providers` | `botex/providers/__init__.py` | 8 | 12 |
 | `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 6 |
@@ -139,6 +139,7 @@ targeted + integration tests.
 | `botex/server/i18n.py` | `detect_language`, `init_language`, `set_language`, `get_language`, `t` | — |
 | `botex/server/plugins.py` | `PluginError`, `PluginValidationError`, `PluginExecutionError`, `PluginExecutionTimeout`, `PluginPermissionError`, `BoteXPluginDefinition`, `+5 more` | `test_approval.py`, `test_plugins_creator.py` |
 | `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+68 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +16 more |
+| `botex/server/task_store.py` | `save_task_persistent`, `load_tasks_persistent` | `test_server_cloud.py` |
 | `botex/server/ui.py` | `colors_enabled`, `paint`, `title`, `accent`, `ok`, `warn`, `+3 more` | `test_botex.py` |
 
 ### `botex.skills`

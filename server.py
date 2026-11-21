@@ -142,6 +142,7 @@ from botex.memory import (
     search_memory as _search_memory,
 )
 from botex.providers import ProviderRegistry
+from botex.server.task_store import load_tasks_persistent
 
 try:
     from botex.core.tool_executor import resolve_edge_executor
@@ -838,6 +839,11 @@ async def get_task_status(
     """Return status and `result_data` for a `start_task` run (check `result_data.ok` for verified outcome; delivery marks `collected`)."""
     _cleanup_tasks()
     entry = _TASKS.get(task_id)
+    if not entry:
+        # Terminal results outlive their in-memory TTL on disk — restore
+        # from the persistent store before declaring NOT_FOUND.
+        await asyncio.to_thread(load_tasks_persistent, _TASKS)
+        entry = _TASKS.get(task_id)
     if not entry:
         return {"ok": False, "status": "NOT_FOUND", "task_id": task_id}
     deadline = time.monotonic() + max(0, min(int(timeout_s), 600))
