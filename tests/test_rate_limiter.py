@@ -799,13 +799,13 @@ def test_engine_stream_uses_with_streaming_response(tmp_path, monkeypatch):
     orig_observe = lim.observe_headers
     lim.observe_headers = lambda *a, **k: seen.append(a) or orig_observe(*a, **k)
 
-    engine.AsyncOpenAI = lambda **_: fake
-    engine.resolve_model_candidates = lambda *a, **k: ["nvidia/test"]
-    engine.check_model_price = lambda *a, **k: (True, "")
-    engine.check_model_tools = lambda *a, **k: (True, "")
-    engine.check_budget_limit = lambda *a, **k: (False, 0.0)
-    engine.log_run = lambda **kw: {"cost_usd": 0.0}
-    engine.print_run_summary = lambda *a, **k: None
+    monkeypatch.setattr(engine, "AsyncOpenAI", lambda **_: fake)
+    monkeypatch.setattr(engine, "resolve_model_candidates", lambda *a, **k: ["nvidia/test"])
+    monkeypatch.setattr(engine, "check_model_price", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_model_tools", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_budget_limit", lambda *a, **k: (False, 0.0))
+    monkeypatch.setattr(engine, "log_run", lambda **kw: {"cost_usd": 0.0})
+    monkeypatch.setattr(engine, "print_run_summary", lambda *a, **k: None)
     try:
         result = asyncio.run(
             engine.run_botex_task(
