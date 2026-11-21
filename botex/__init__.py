@@ -68,7 +68,7 @@ LEGACY_MODULE_DOMAINS: Dict[str, str] = {
 }
 
 DOMAIN_PACKAGES = frozenset(
-    {"core", "providers", "tools", "memory", "skills", "server", "ops", "edge"}
+    {"core", "providers", "tools", "memory", "skills", "server", "ops", "edge", "mcp_bridge"}
 )
 COLLIDING_DOMAINS = frozenset({"providers", "memory", "skills"})
 
