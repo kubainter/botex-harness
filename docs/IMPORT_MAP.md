@@ -36,6 +36,7 @@ Legacy alias spellings are **load-bearing** for BoteX itself (`server.py`, `depl
 | `botex.server.i18n` | `botex.i18n` | — |
 | `botex.server.plugins` | `botex.plugins` | ZeroTrust subprocess runner |
 | `botex.server.server_cloud` | `botex.server_cloud` | FastAPI gateway (`botex-cloud.service`) |
+| `botex.server.task_store` | — (new in v2.1.0) | persistent task registry restore |
 | `botex.server.ui` | `botex.ui` | — |
 | `botex.skills.recipes` | `botex.recipes` | recipe prompts |
 | `botex.skills.skills` | `botex.skills` | skill vault |

@@ -17,6 +17,8 @@ Any other combination (`ok == false`, `BLOCKED`, `FAILED`, `VERIFICATION_FAILED`
 - `DONE`: Run terminated (inspect `result_data.ok` and `result_data.status`).
 - `FAILED` / `CANCELLED` / `NOT_FOUND` / `TOO_MANY_QUEUED`: Queue or system failure.
 
+Terminal results persist in `<workspace>/.botex/tasks/` and are restored on lookup even after the in-memory TTL (`engine.task_result_ttl_s`, default 3600s) evicts them — `NOT_FOUND` now means "never existed / never persisted", not merely "expired". A task restored as `FAILED` with `failure_kind == "server_restarted"` was persisted mid-flight and reaped after a server restart; treat it as dead, not retryable-in-place.
+
 ## Engine Status Taxonomy
 
 | Engine Status | Meaning / Condition | `ok` | Rollback Behavior |
