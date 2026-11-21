@@ -424,6 +424,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
                     input=content,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     capture_output=True,
                     timeout=5,
                 )
@@ -452,6 +453,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
                     input=content,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     capture_output=True,
                     timeout=5,
                 )
@@ -472,6 +474,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
                     input=content,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     capture_output=True,
                     timeout=5,
                 )
@@ -491,6 +494,7 @@ def validate_syntax(content: str, file_path: Path) -> Tuple[bool, Optional[str]]
                     input=content,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     capture_output=True,
                     timeout=5,
                 )
