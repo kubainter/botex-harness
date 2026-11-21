@@ -72,7 +72,7 @@ When spawned via `server.py mcp-bridge`, `botex.server.config` already loads
   "command": "botex",
   "args": ["mcp-bridge"],
   "env": {
-    "BOTEX_MCP_ENV": "C:\\Users\\<user>\\.ai\\botex_mcp\\.env",
+    "BOTEX_MCP_ENV": "C:\\Users\\<user>\\.botex\\mcp.env",
     "BOTEX_AGENT_ID": "<agent>",
     "BOTEX_MCP_POOL_SIZE": "3"
   }

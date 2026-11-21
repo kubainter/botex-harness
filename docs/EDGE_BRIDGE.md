@@ -27,7 +27,7 @@ Use this flow on any new machine that connects a local IDE/agent to an existing 
    - **Per-Call Provenance (Shared Bridges / Toolport):** When multiple local agents share one SSE bridge session, pass `origin="<agent>@<host>"` per tool call (`start_task`, `run_subagent`, `save_memory`, `patch_memory_section`, `botex_report_violation`). Reserved identity claims (`human`, `human-curated`, `operator`, `curator`) are rejected and fall back to the session headers.
 
 4. **Issue a one-time Edge device token & save `.env`:**
-   Call `POST https://<cloud-host>/api/edge/tokens` (see Section 2) and store the returned `btxd_...` token in `~/.ai/botex_mcp/.env` (or `./.env` inside the project):
+   Call `POST https://<cloud-host>/api/edge/tokens` (see Section 2) and store the returned `btxd_...` token in `./.env` inside the project (or point `BOTEX_ENV_FILE` at any env file):
    ```env
    BOTEX_EDGE_SERVER=wss://<cloud-host>/api/edge/ws
    BOTEX_EDGE_TOKEN=btxd_...
@@ -83,7 +83,7 @@ Device tokens are issued via `POST /api/edge/tokens` (authenticated with the Clo
 
 - **Default scopes** (when `scopes` is omitted): `["task_pull:<ws>", "result_push:<ws>"]`.
 - **Default TTL:** 30 days (`2592000` seconds).
-- **One-time secret:** The raw `btxd_...` token is returned once at creation. Store it in a protected `.env` file (`BOTEX_EDGE_TOKEN=...`, e.g., `~/.ai/botex_mcp/.env` or `BOTEX_ENV_FILE`) rather than a plain `.txt` file so agent DLP/file-access guards protect it.
+- **One-time secret:** The raw `btxd_...` token is returned once at creation. Store it in a protected `.env` file (`BOTEX_EDGE_TOKEN=...`, e.g., the repo `./.env` or `BOTEX_ENV_FILE`) rather than a plain `.txt` file so agent DLP/file-access guards protect it.
 - **Inspect / Revoke:**
   - `GET /api/edge/tokens` — list issued tokens (hashes are never returned).
   - `DELETE /api/edge/tokens/{jti}` — revoke by JTI and immediately disconnect matching active WSS sessions.
@@ -103,7 +103,7 @@ Or in PowerShell:
 .\bin\botex-edge.ps1
 ```
 
-`botex edge` automatically loads `.env` from `BOTEX_ENV_FILE`, `./.env`, the repo `.env`, or `~/.ai/botex_mcp/.env` (without overriding variables already set in the environment). You can also pass explicit flags:
+`botex edge` automatically loads `.env` from `BOTEX_ENV_FILE`, `./.env`, or the repo `.env` (without overriding variables already set in the environment). You can also pass explicit flags:
 
 ```powershell
 python server.py edge `

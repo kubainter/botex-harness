@@ -2812,7 +2812,6 @@ def _load_edge_env_files() -> None:
         [
             Path.cwd() / ".env",
             Path(__file__).resolve().parent / ".env",
-            Path.home() / ".ai" / "botex_mcp" / ".env",
         ]
     )
     seen: set[Path] = set()
@@ -2910,7 +2909,7 @@ def _cli_setup() -> None:
    Body:   {{"device_id": "<device-id>", "workspace_id": "<workspace-id>"}}
    -> Returns one-time token starting with: btxd_...
 
-3. {accent("Create ~/.ai/botex_mcp/.env (or ./.env in the target repo):")}
+3. {accent("Create ./.env in the target repo (or point BOTEX_ENV_FILE at one):")}
    BOTEX_EDGE_SERVER=wss://<cloud-host>/api/edge/ws
    BOTEX_EDGE_TOKEN=btxd_...
    BOTEX_EDGE_DEVICE_ID=<device-id>
