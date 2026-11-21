@@ -545,8 +545,8 @@ def test_restore_preserves_collected_and_not_found_for_unknown():
     task_id = uuid.uuid4().hex[:12]
     persisted_path = _seed_evicted_terminal_task(task_id, collected=True)
     try:
-        server_cloud._load_tasks_persistent("")
-        assert botex_server._TASKS[task_id]["collected"] is True
+        restored = server_cloud._load_tasks_persistent("")
+        assert restored[task_id]["collected"] is True
         result = asyncio.run(botex_server.get_task_status("zz-never-existed-zz"))
         assert result == {"ok": False, "status": "NOT_FOUND", "task_id": "zz-never-existed-zz"}
     finally:

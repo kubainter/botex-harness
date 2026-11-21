@@ -142,7 +142,7 @@ from botex.memory import (
     search_memory as _search_memory,
 )
 from botex.providers import ProviderRegistry
-from botex.server.task_store import load_tasks_persistent
+from botex.server.task_store import load_task_persistent
 
 try:
     from botex.core.tool_executor import resolve_edge_executor
@@ -526,7 +526,7 @@ def _cleanup_tasks() -> None:
     ttl = int(load_config().get("engine", {}).get("task_result_ttl_s", 3600))
     now = time.time()
     for task_id, entry in list(_TASKS.items()):
-        fin = entry.get("finished_at") or entry.get("created_at") or 0
+        fin = entry.get("restored_at") or entry.get("finished_at") or entry.get("created_at") or 0
         if entry.get("status") in {"DONE", "FAILED", "CANCELLED"} and (now - fin) > ttl:
             _TASKS.pop(task_id, None)
             # arena v2.1.0 F6: evict the event emitter alongside the task —
@@ -840,10 +840,13 @@ async def get_task_status(
     _cleanup_tasks()
     entry = _TASKS.get(task_id)
     if not entry:
-        # Terminal results outlive their in-memory TTL on disk — restore
-        # from the persistent store before declaring NOT_FOUND.
-        await asyncio.to_thread(load_tasks_persistent, _TASKS)
-        entry = _TASKS.get(task_id)
+        # Terminal results outlive their in-memory TTL on disk — O(1)
+        # restore of this task only, merged on the event loop so worker
+        # threads never mutate _TASKS.
+        restored = await asyncio.to_thread(load_task_persistent, task_id)
+        if restored is not None:
+            restored["restored_at"] = time.time()
+            entry = _TASKS.setdefault(restored["task_id"], restored)
     if not entry:
         return {"ok": False, "status": "NOT_FOUND", "task_id": task_id}
     deadline = time.monotonic() + max(0, min(int(timeout_s), 600))

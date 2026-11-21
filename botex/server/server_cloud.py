@@ -136,7 +136,11 @@ from botex.security import (
     sanitize_identifier,
     sanitize_origin_claim,
 )
-from botex.server.task_store import load_tasks_persistent, save_task_persistent
+from botex.server.task_store import (
+    load_task_persistent,
+    load_tasks_persistent,
+    save_task_persistent,
+)
 from botex.skills import delete_skill, get_skill, install_skill_async, list_skills
 from botex.state import load_inflight_checkpoints
 from botex.wallet import default_wallet_service
@@ -156,9 +160,10 @@ def _save_task_persistent(task_id: str, entry: Dict[str, Any], workspace_dir: st
     save_task_persistent(task_id, entry, workspace_dir)
 
 
-def _load_tasks_persistent(workspace_dir: str = "") -> None:
-    """Restore historical background tasks from disk into memory cache."""
-    load_tasks_persistent(_TASKS, workspace_dir)
+def _load_tasks_persistent(workspace_dir: str = "") -> Dict[str, Dict[str, Any]]:
+    """Disk scan only — returns a fresh dict; callers merge into _TASKS
+    on the event loop so worker threads never mutate shared state."""
+    return load_tasks_persistent(workspace_dir)
 
 
 # WAN Reliability: Idempotency Cache & SSE Event Replay Buffer
@@ -2439,9 +2444,11 @@ async def list_tasks(
     never delivered (collected != true); `origin` filters by exact stored
     dispatch origin.
     """
-    await asyncio.to_thread(_load_tasks_persistent)
+    restored = await asyncio.to_thread(_load_tasks_persistent)
+    for tid, entry in restored.items():
+        _TASKS.setdefault(tid, entry)
     tasks = []
-    for tid, entry in _TASKS.items():
+    for tid, entry in list(_TASKS.items()):
         status = entry.get("status")
         terminal = status in {"DONE", "FAILED", "CANCELLED"}
         if uncollected_only and (not terminal or entry.get("collected") is True):
@@ -2474,8 +2481,12 @@ async def get_task(task_id: str, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     if clean_tid not in _TASKS:
         # TTL evicts terminal entries from memory while their persisted
-        # copy still exists — restore from disk before answering 404.
-        await asyncio.to_thread(_load_tasks_persistent)
+        # copy still exists — O(1) restore of this task only, merged on
+        # the event loop so worker threads never mutate _TASKS.
+        restored = await asyncio.to_thread(load_task_persistent, clean_tid)
+        if restored is not None:
+            restored["restored_at"] = time.time()
+            _TASKS.setdefault(clean_tid, restored)
     if clean_tid not in _TASKS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     entry = _TASKS[clean_tid]
