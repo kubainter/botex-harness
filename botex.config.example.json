@@ -272,26 +272,37 @@
     "openrouter-free": [
       "nvidia",
       "google",
+      "cloudflare",
+      "groq",
       "openrouter"
     ],
     "nvidia": [
       "openrouter-free",
       "google",
+      "cloudflare",
+      "groq",
       "openrouter"
     ],
     "google": [
+      "openrouter-free",
       "nvidia",
+      "cloudflare",
+      "groq",
       "openrouter"
     ],
     "groq": [
       "openrouter-free",
       "nvidia",
-      "google"
+      "google",
+      "cloudflare",
+      "openrouter"
     ],
     "cloudflare": [
       "openrouter-free",
       "nvidia",
-      "google"
+      "google",
+      "groq",
+      "openrouter"
     ]
   },
   "paths": {

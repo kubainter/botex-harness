@@ -55,6 +55,7 @@ ignore = ["E501", "E402", "E741", "E711", "E712", "E701"]
 
 [project.scripts]
 botex = "server:main"
+botex-mcp-bridge = "botex.mcp_bridge.__main__:main"
 
 [tool.setuptools]
 py-modules = ["server"]
@@ -70,6 +71,7 @@ packages = [
     "botex.ops",
     "botex.ops.curator",
     "botex.edge",
+    "botex.mcp_bridge",
 ]
 
 [tool.setuptools.package-data]
@@ -78,4 +80,3 @@ packages = [
     "bundled/botex/*.md",
     "bundled/botex/references/*.md",
 ]
-

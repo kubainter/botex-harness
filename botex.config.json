@@ -273,25 +273,38 @@
   "provider_fallbacks": {
     "openrouter-free": [
       "nvidia",
-      "google"
+      "google",
+      "cloudflare",
+      "groq",
+      "openrouter"
     ],
     "nvidia": [
       "openrouter-free",
-      "google"
+      "google",
+      "cloudflare",
+      "groq",
+      "openrouter"
     ],
     "google": [
+      "openrouter-free",
       "nvidia",
-      "openrouter-free"
+      "cloudflare",
+      "groq",
+      "openrouter"
     ],
     "groq": [
       "openrouter-free",
       "nvidia",
-      "google"
+      "google",
+      "cloudflare",
+      "openrouter"
     ],
     "cloudflare": [
       "openrouter-free",
       "nvidia",
-      "google"
+      "google",
+      "groq",
+      "openrouter"
     ]
   },
   "paths": {

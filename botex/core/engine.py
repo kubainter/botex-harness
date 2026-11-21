@@ -2626,30 +2626,78 @@ async def _run_botex_task_once_impl(
             _use_stream: bool = use_stream,
             _create_kwargs: Dict[str, Any] = create_kwargs,
         ) -> Any:
+            from botex.providers.rate_limiter import get_rate_limiter
+
+            # Header telemetry (plan 049): real AsyncOpenAI clients expose
+            # with_raw_response; compatible fakes/servers without it keep the
+            # plain create() path — headers are then simply absent.
+            _wr = getattr(client.chat.completions, "with_raw_response", None)
+
+            def _observe_error_headers(exc: BaseException) -> None:
+                # Telemetry only: headers carried by a rejected call (HTTP 429)
+                # never feed gating buckets — observe_headers is additive.
+                err_headers = getattr(getattr(exc, "response", None), "headers", None)
+                if err_headers is not None:
+                    with contextlib.suppress(Exception):
+                        get_rate_limiter().observe_headers(provider_name, err_headers, model)
+
+            async def _create_with_headers() -> Any:
+                try:
+                    if _wr is None:
+                        return await client.chat.completions.create(**_create_kwargs)
+                    raw_resp = await _wr.create(**_create_kwargs)
+                except BaseException as e:
+                    _observe_error_headers(e)
+                    raise
+                get_rate_limiter().observe_headers(
+                    provider_name, getattr(raw_resp, "headers", None), model
+                )
+                return raw_resp.parse()
+
+            async def _collect_stream(stream_resp) -> Any:
+                chunks = []
+                try:
+                    async for chunk in stream_resp:
+                        chunks.append(chunk)
+                finally:
+                    # Deterministically release the HTTP stream (mirror of
+                    # chat.py): an unclosed httpx2 stream leaks an async
+                    # generator and holds the pooled connection until GC.
+                    _stream_close = getattr(stream_resp, "aclose", None) or getattr(
+                        stream_resp, "close", None
+                    )
+                    if callable(_stream_close):
+                        with contextlib.suppress(Exception):
+                            _close_res = _stream_close()
+                            if inspect.isawaitable(_close_res):
+                                await _close_res
+                return normalize_streaming_chunks(chunks, raw_model=model)
+
             if _use_stream:
-                stream_resp = await client.chat.completions.create(**_create_kwargs)
-                if hasattr(stream_resp, "__aiter__"):
-                    chunks = []
+                # with_raw_response buffers the whole SSE body before parse();
+                # with_streaming_response yields headers immediately and keeps
+                # the stream live (TTFT + ReadTimeout on slow models).
+                _wsr = getattr(client.chat.completions, "with_streaming_response", None)
+                if _wsr is not None:
                     try:
-                        async for chunk in stream_resp:
-                            chunks.append(chunk)
-                    finally:
-                        # Deterministically release the HTTP stream (mirror of
-                        # chat.py): an unclosed httpx2 stream leaks an async
-                        # generator and holds the pooled connection until GC.
-                        _stream_close = getattr(stream_resp, "aclose", None) or getattr(
-                            stream_resp, "close", None
-                        )
-                        if callable(_stream_close):
-                            with contextlib.suppress(Exception):
-                                _close_res = _stream_close()
-                                if inspect.isawaitable(_close_res):
-                                    await _close_res
-                    return normalize_streaming_chunks(chunks, raw_model=model)
+                        async with _wsr.create(**_create_kwargs) as raw_resp:
+                            get_rate_limiter().observe_headers(
+                                provider_name, getattr(raw_resp, "headers", None), model
+                            )
+                            parsed = raw_resp.parse()
+                            if hasattr(parsed, "__aiter__"):
+                                return await _collect_stream(parsed)
+                            return normalize_response(parsed)
+                    except BaseException as e:
+                        _observe_error_headers(e)
+                        raise
+                stream_resp = await _create_with_headers()
+                if hasattr(stream_resp, "__aiter__"):
+                    return await _collect_stream(stream_resp)
                 if hasattr(stream_resp, "__iter__") and not hasattr(stream_resp, "choices"):
                     return normalize_streaming_chunks(list(stream_resp), raw_model=model)
                 return normalize_response(stream_resp)
-            raw_api_resp = await client.chat.completions.create(**_create_kwargs)
+            raw_api_resp = await _create_with_headers()
             return normalize_response(raw_api_resp)
 
         def _on_retry_wait(delay, exc):

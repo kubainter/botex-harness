@@ -210,6 +210,15 @@ def test_pre_write_syntax():
         # Invalid JSON
         invalid, err = validate_syntax('{"key": 123,}', jp)
         assert not invalid, "Trailing comma in JSON should be rejected"
+
+        # Non-ASCII content must reach external linters as UTF-8, not the
+        # locale encoding — on Windows text=True alone pipes cp125x bytes to
+        # ruff/php/node/bash, which read stdin as UTF-8 and reject valid code.
+        py_unicode = Path(tmpdir) / "uni.py"
+        valid, err = validate_syntax(
+            '# komentarz — em-dash\nx = "żółć — test"\nprint(x)\n', py_unicode
+        )
+        assert valid, f"UTF-8 python with non-ASCII chars should pass: {err}"
     print("[PASS] Pre-write Syntax Validation Tests")
 
 
