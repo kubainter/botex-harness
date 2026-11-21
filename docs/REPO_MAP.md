@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 71 Python modules (`server.py` + `botex/`), 88 test files (`tests/`).
+- **Codebase footprint:** 74 Python modules (`server.py` + `botex/`), 89 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -44,13 +44,14 @@ targeted + integration tests.
 |---|---|
 | `botex.core` | `botex.edge`, `botex.memory`, `botex.providers`, `botex.server`, `botex.skills`, `botex.tools` |
 | `botex.edge` | `botex.core`, `botex.ops`, `botex.server`, `botex.tools`, `root` |
+| `botex.mcp_bridge` | *(none)* |
 | `botex.memory` | `botex.ops`, `botex.server`, `botex.tools` |
 | `botex.ops` | `botex.core`, `botex.memory`, `botex.providers`, `botex.server`, `botex.skills`, `botex.tools`, `root` |
 | `botex.providers` | `botex.core`, `botex.server`, `botex.skills`, `botex.tools` |
 | `botex.server` | `botex.core`, `botex.memory`, `botex.ops`, `botex.providers`, `botex.skills`, `botex.tools`, `root` |
 | `botex.skills` | `botex.memory`, `botex.server`, `botex.tools` |
 | `botex.tools` | `botex.core`, `botex.server` |
-| `root` | `botex.core`, `botex.edge`, `botex.memory`, `botex.ops`, `botex.providers`, `botex.server`, `botex.skills`, `botex.tools` |
+| `root` | `botex.core`, `botex.edge`, `botex.mcp_bridge`, `botex.memory`, `botex.ops`, `botex.providers`, `botex.server`, `botex.skills`, `botex.tools` |
 
 ## Modules & Test Mapping
 
@@ -85,6 +86,14 @@ targeted + integration tests.
 | `botex/edge/host_os_driver.py` | `SingleInstanceLockError`, `SingleInstanceLock`, `WindowsJobGuard`, `HostOSDriver`, `default_swarm_home`, `kill_posix_process_group`, `+3 more` | `test_host_os_driver.py` |
 | `botex/edge/runner.py` | `EdgeCapabilities`, `EdgeRunner`, `frame_qos_priority`, `get_local_bot_briefs_dir`, `write_local_bot_brief`, `read_local_bot_briefs`, `+3 more` | `test_edge_brief_sync.py`, `test_edge_qos_daemon.py`, `test_edge_runner.py`, `test_tethered_bot_visibility.py` |
 | `botex/edge/verify_gate.py` | `default_supervisor_ledger_path`, `build_clean_verify_env`, `scan_test_taint`, `append_supervisor_ledger`, `run_external_verify` | `test_verify_gate.py` |
+
+### `botex.mcp_bridge`
+
+| File | Key Public Symbols | Tests |
+|---|---|---|
+| `botex/mcp_bridge/__init__.py` | — | — |
+| `botex/mcp_bridge/__main__.py` | `main` | — |
+| `botex/mcp_bridge/client.py` | `McpBridgeClient` | `test_mcp_bridge.py` |
 
 ### `botex.memory`
 

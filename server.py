@@ -2929,6 +2929,17 @@ def _cli_setup() -> None:
 """)
 
 
+def _cli_mcp_bridge(argv: list[str]) -> None:
+    """CLI dispatcher for the MCP client bridge (stdio JSON-RPC <-> Cloud SSE/HTTP)."""
+    from botex.mcp_bridge import __main__ as mcp_bridge_main
+
+    try:
+        mcp_bridge_main.main(argv)
+    except KeyboardInterrupt:
+        print(err("MCP Bridge interrupted by user."), file=sys.stderr)
+        sys.exit(1)
+
+
 def _cli_edge(argv: list[str]) -> None:
     """CLI dispatcher for the thin edge runner (outbound WSS bridge)."""
     import argparse
@@ -3907,6 +3918,8 @@ def main():
         _cli_config(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "models":
         _cli_models(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "mcp-bridge":
+        _cli_mcp_bridge(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] in ("wallet", "credits"):
         _cli_wallet(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "chat":
