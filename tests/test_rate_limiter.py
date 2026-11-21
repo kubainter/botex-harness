@@ -636,3 +636,82 @@ def test_note_provider_result_hint_clamped_at_ceiling():
     with patch("botex.server_cloud.get_rate_limiter", return_value=limiter):
         _note_provider_result("prov", res)
     assert limiter.cooldown_remaining("prov") == pytest.approx(300.0)
+
+
+# --- plan 049: provider-reported rate-limit telemetry ------------------------
+
+_GROQ_HEADERS = {
+    "x-ratelimit-limit-requests": "30",
+    "x-ratelimit-remaining-requests": "29",
+    "x-ratelimit-limit-tokens": "8000",
+    "x-ratelimit-remaining-tokens": "7990",
+    "x-ratelimit-reset-requests": "2.5s",
+    "x-ratelimit-reset-tokens": "100ms",
+    "content-type": "application/json",
+}
+
+
+def test_observe_headers_groq_shapes_reported_block():
+    """Groq-shaped x-ratelimit-* headers land in stats()["reported"]."""
+    lim, _ = _limiter({"groq": {"rpm": 30, "tpm": 8000, "cooldown_s": 60.0}})
+    lim.observe_headers("groq", _GROQ_HEADERS, model="llama-3.3-70b")
+    rep = lim.stats()["groq"]["reported"]
+    assert rep["limit_req"] == 30.0
+    assert rep["remaining_req"] == 29.0
+    assert rep["limit_tok"] == 8000.0
+    assert rep["remaining_tok"] == 7990.0
+    assert rep["reset_req_s"] == pytest.approx(2.5)
+    assert rep["reset_tok_s"] == pytest.approx(0.1)
+    assert rep["model"] == "llama-3.3-70b"
+    assert rep["age_s"] >= 0.0
+
+
+def test_observe_headers_absent_means_no_reported_block():
+    """Missing headers are a no-op: no fabricated reported data."""
+    lim, _ = _limiter()
+    lim.observe_headers("prov", {"content-type": "application/json"})
+    lim.observe_headers("prov", None)
+    lim.observe_headers("prov", {"x-ratelimit-remaining-requests": "junk"})
+    assert "reported" not in lim.stats()["prov"]
+
+
+def test_observe_headers_case_insensitive_dicts():
+    """Plain dict headers with any casing normalize to lowercase keys."""
+    lim, _ = _limiter()
+    lim.observe_headers("prov", {"X-RateLimit-Remaining-Requests": "12"})
+    assert lim.stats()["prov"]["reported"]["remaining_req"] == 12.0
+
+
+def test_observe_headers_httpx_headers_wire_shape():
+    """Ingestion contract: httpx.Headers from openai with_raw_response works."""
+    import httpx
+
+    lim, _ = _limiter()
+    headers = httpx.Headers({k.lower(): v for k, v in _GROQ_HEADERS.items()})
+    lim.observe_headers("prov", headers, model="m")
+    rep = lim.stats()["prov"]["reported"]
+    assert rep["limit_req"] == 30.0 and rep["reset_tok_s"] == pytest.approx(0.1)
+
+
+def test_reported_never_feeds_gating_buckets():
+    """FIREWALL: observed headers must not change bucket/gating state."""
+    lim, _ = _limiter(
+        {"prov": {"rpm": 60, "tpm": 6000, "burst_multiplier": 1.0, "cooldown_s": 30.0}}
+    )
+    before = lim.stats()["prov"]
+    lim.observe_headers(
+        "prov", {"x-ratelimit-remaining-requests": "0", "x-ratelimit-remaining-tokens": "0"}
+    )
+    after = lim.stats()["prov"]
+    for key in (
+        "requests_available",
+        "tokens_available",
+        "cooldown_s",
+        "wait_s",
+        "requests_consumed",
+        "tokens_consumed",
+        "cooldown_hits",
+    ):
+        assert after[key] == before[key], f"reported telemetry leaked into {key}"
+    # remaining=0 must be advisory only — gating still allows calls
+    assert asyncio.run(lim.acquire("prov")) == 0.0

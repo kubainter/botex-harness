@@ -2626,8 +2626,24 @@ async def _run_botex_task_once_impl(
             _use_stream: bool = use_stream,
             _create_kwargs: Dict[str, Any] = create_kwargs,
         ) -> Any:
+            from botex.providers.rate_limiter import get_rate_limiter
+
+            # Header telemetry (plan 049): real AsyncOpenAI clients expose
+            # with_raw_response; compatible fakes/servers without it keep the
+            # plain create() path — headers are then simply absent.
+            _wr = getattr(client.chat.completions, "with_raw_response", None)
+
+            async def _create_with_headers() -> Any:
+                if _wr is None:
+                    return await client.chat.completions.create(**_create_kwargs)
+                raw_resp = await _wr.create(**_create_kwargs)
+                get_rate_limiter().observe_headers(
+                    provider_name, getattr(raw_resp, "headers", None), model
+                )
+                return raw_resp.parse()
+
             if _use_stream:
-                stream_resp = await client.chat.completions.create(**_create_kwargs)
+                stream_resp = await _create_with_headers()
                 if hasattr(stream_resp, "__aiter__"):
                     chunks = []
                     try:
@@ -2649,7 +2665,7 @@ async def _run_botex_task_once_impl(
                 if hasattr(stream_resp, "__iter__") and not hasattr(stream_resp, "choices"):
                     return normalize_streaming_chunks(list(stream_resp), raw_model=model)
                 return normalize_response(stream_resp)
-            raw_api_resp = await client.chat.completions.create(**_create_kwargs)
+            raw_api_resp = await _create_with_headers()
             return normalize_response(raw_api_resp)
 
         def _on_retry_wait(delay, exc):

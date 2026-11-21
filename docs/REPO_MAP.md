@@ -91,8 +91,8 @@ targeted + integration tests.
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/mcp_bridge/__init__.py` | — | — |
-| `botex/mcp_bridge/__main__.py` | `main` | — |
+| `botex/mcp_bridge/__init__.py` | — | `test_mcp_bridge.py` |
+| `botex/mcp_bridge/__main__.py` | `main` | `test_mcp_bridge.py` |
 | `botex/mcp_bridge/client.py` | `McpBridgeClient` | `test_mcp_bridge.py` |
 
 ### `botex.memory`

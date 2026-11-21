@@ -27,6 +27,9 @@ if sys.platform == "win32":
         pass
 
 _write_lock = threading.Lock()
+# Grace window for in-flight tool calls when stdin hits EOF — long calls get
+# a bounded drain before the process exits instead of a hard cancel.
+DRAIN_TIMEOUT_S = float(os.environ.get("BOTEX_MCP_DRAIN_S", "10"))
 
 
 def _write(msg: Dict[str, Any]) -> None:
@@ -107,10 +110,12 @@ async def _run(bridge: McpBridgeClient) -> None:
             t.add_done_callback(tasks.discard)
     finally:
         reader.cancel()
-        for t in tasks:
-            t.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            done, pending = await asyncio.wait(tasks, timeout=DRAIN_TIMEOUT_S)
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         await bridge.stop()
 
 

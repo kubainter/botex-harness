@@ -133,8 +133,7 @@ def test_concurrent_calls_use_least_loaded_slot(monkeypatch):
             return SimpleNamespace(content=[SimpleNamespace(text="done")], isError=False)
 
         sess.call_tool = _call
-        c._slots = c._slots + [slot] if False else [*c._slots, slot]
-    c._slots = c._slots[-2:]
+        c._slots.append(slot)
 
     async def _run():
         monkeypatch.setenv("BOTEX_MCP_HTTP_READS", "0")
@@ -198,6 +197,79 @@ def test_missing_token_fails_fast(capsys):
     finally:
         os.environ.clear()
         os.environ.update(old_env)
+
+
+def test_dispatch_writes_single_framed_line(monkeypatch):
+    """_dispatch must emit exactly one complete JSON line per request."""
+    import json as _json
+
+    from botex.mcp_bridge import __main__ as m
+
+    written = []
+    monkeypatch.setattr(m, "_write", lambda msg: written.append(msg))
+    bridge = MagicMock()
+
+    async def _call(name, args):
+        await asyncio.sleep(0)
+        return "pong", False
+
+    bridge.call_tool = _call
+    asyncio.run(
+        m._dispatch(
+            bridge,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "ping_tool", "arguments": {}},
+            },
+        )
+    )
+    assert len(written) == 1
+    resp = written[0]
+    assert resp["id"] == 7 and resp["result"]["content"][0]["text"] == "pong"
+    _json.dumps(resp)  # serializable -> one framed NDJSON line downstream
+
+
+def test_eof_drains_inflight_dispatch(monkeypatch):
+    """Real _run(): a request followed by stdin EOF must still get its
+    response — the drain grace lets the in-flight call finish."""
+    import io
+    import json as _json
+    import sys as _sys
+
+    from botex.mcp_bridge import __main__ as m
+
+    written = []
+    monkeypatch.setattr(m, "_write", lambda msg: written.append(msg))
+    req = {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {"name": "slow_tool", "arguments": {}},
+    }
+    monkeypatch.setattr(_sys, "stdin", io.StringIO(_json.dumps(req) + "\n"))
+    monkeypatch.setenv("BOTEX_MCP_DRAIN_S", "5")
+
+    import importlib
+
+    importlib.reload(m)  # pick up DRAIN_TIMEOUT_S env
+    monkeypatch.setattr(m, "_write", lambda msg: written.append(msg))
+    try:
+        bridge = MagicMock()
+        bridge.on_client_notification = None
+        bridge.stop = AsyncMock()
+
+        async def _slow_call(name, args):
+            await asyncio.sleep(0.15)
+            return "drained", False
+
+        bridge.call_tool = _slow_call
+        asyncio.run(m._run(bridge))
+        assert written and written[0]["result"]["content"][0]["text"] == "drained"
+    finally:
+        monkeypatch.delenv("BOTEX_MCP_DRAIN_S", raising=False)
+        importlib.reload(m)
 
 
 def test_mutating_call_no_retry_after_send(monkeypatch):

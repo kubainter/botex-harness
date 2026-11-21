@@ -68,6 +68,18 @@ def _pos(value: Any, default: float = 0.0) -> float:
     return parsed
 
 
+def _parse_reset_s(value: Any) -> Optional[float]:
+    """Parse a reset-duration header ("1.5s", "250ms", or a bare number) to seconds."""
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s.endswith("ms"):
+            n = _num(s[:-2])
+            return n / 1000.0 if n is not None else None
+        if s.endswith("s"):
+            return _num(s[:-1])
+    return _num(value)
+
+
 class TokenBucket:
     """One async token bucket with reserve-and-wait FIFO scheduling.
 
@@ -219,6 +231,11 @@ class ProviderRateLimiter:
         self._cooldown_hits: Dict[str, int] = {}
         self._last_429_at: Dict[str, float] = {}
         self._throttle_wait_ms: Dict[str, float] = {}
+        # Provider-reported quota headers (x-ratelimit-*), telemetry only:
+        # FIREWALL — these values never feed acquire()/charge()/
+        # record_tokens()/cooldown/report_limited(); local buckets keep
+        # gating. Missing or non-numeric headers are treated as absent.
+        self._reported: Dict[str, Dict[str, Any]] = {}
         self._state_path = state_path
         self._restore_cooldowns()
 
@@ -421,6 +438,54 @@ class ProviderRateLimiter:
         if bucket is not None:
             bucket.charge(amount)
 
+    _REPORTED_FIELDS = {
+        "limit_req": ("x-ratelimit-limit-requests", "ratelimit-limit-requests"),
+        "remaining_req": ("x-ratelimit-remaining-requests", "ratelimit-remaining-requests"),
+        "limit_tok": ("x-ratelimit-limit-tokens", "ratelimit-limit-tokens"),
+        "remaining_tok": ("x-ratelimit-remaining-tokens", "ratelimit-remaining-tokens"),
+    }
+    _REPORTED_RESET_FIELDS = {
+        "reset_req_s": ("x-ratelimit-reset-requests", "ratelimit-reset-requests"),
+        "reset_tok_s": ("x-ratelimit-reset-tokens", "ratelimit-reset-tokens"),
+    }
+
+    def observe_headers(self, provider: str, headers: Any, model: str = "") -> None:
+        """Ingest provider-reported rate-limit headers (telemetry only).
+
+        Accepts httpx ``Headers`` (case-insensitive) or any mapping;
+        non-numeric values are treated as absent — never inferred.
+        Reported values never feed gating decisions (see class invariant).
+        """
+        name = _norm_name(provider)
+        if not name or headers is None:
+            return
+        try:
+            lowered = {str(k).lower(): v for k, v in dict(headers).items()}
+        except Exception:
+            return
+        if not lowered:
+            return
+
+        block: Dict[str, Any] = {}
+        for out_key, aliases in self._REPORTED_FIELDS.items():
+            for alias in aliases:
+                v = _num(lowered.get(alias))
+                if v is not None:
+                    block[out_key] = v
+                    break
+        for out_key, aliases in self._REPORTED_RESET_FIELDS.items():
+            for alias in aliases:
+                v = _parse_reset_s(lowered.get(alias))
+                if v is not None:
+                    block[out_key] = v
+                    break
+        if not block:
+            return
+        block["observed_at"] = time.time()
+        if model:
+            block["model"] = str(model)
+        self._reported[name] = block
+
     def stats(self) -> Dict[str, Any]:
         """Snapshot of configured limits, live bucket levels, and cumulative usage."""
         out: Dict[str, Any] = {}
@@ -452,6 +517,13 @@ class ProviderRateLimiter:
                 "last_429_at": self._last_429_at.get(name),
                 "throttle_wait_ms": round(self._throttle_wait_ms.get(name, 0.0), 1),
             }
+            rep = self._reported.get(name)
+            if rep is not None:
+                # additive telemetry block; age_s lets consumers flag stale data
+                out[name]["reported"] = {
+                    **rep,
+                    "age_s": round(max(0.0, time.time() - float(rep.get("observed_at") or 0.0)), 3),
+                }
         return out
 
 
