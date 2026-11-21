@@ -272,6 +272,37 @@ def test_eof_drains_inflight_dispatch(monkeypatch):
         importlib.reload(m)
 
 
+def test_env_file_loading_via_botex_mcp_env(tmp_path, monkeypatch):
+    """BOTEX_MCP_ENV points at a local .env — secrets stay off the registry."""
+    from botex.mcp_bridge import __main__ as m
+
+    env_file = tmp_path / "bridge.env"
+    env_file.write_text("BOTEX_ACCESS_TOKEN=tok-123\nBOTEX_CLOUD_URL=https://c.test\n")
+    monkeypatch.setenv("BOTEX_MCP_ENV", str(env_file))
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("BOTEX_CLOUD_URL", raising=False)
+    monkeypatch.delenv("BOTEX_DISABLE_DOTENV", raising=False)
+    import os
+
+    m._load_env_file()
+    assert os.environ["BOTEX_ACCESS_TOKEN"] == "tok-123"
+    assert os.environ["BOTEX_CLOUD_URL"] == "https://c.test"
+
+
+def test_env_file_respects_disable_flag(tmp_path, monkeypatch):
+    from botex.mcp_bridge import __main__ as m
+
+    env_file = tmp_path / "bridge.env"
+    env_file.write_text("BOTEX_ACCESS_TOKEN=tok-123\n")
+    monkeypatch.setenv("BOTEX_MCP_ENV", str(env_file))
+    monkeypatch.setenv("BOTEX_DISABLE_DOTENV", "1")
+    monkeypatch.delenv("BOTEX_ACCESS_TOKEN", raising=False)
+    import os
+
+    m._load_env_file()
+    assert "BOTEX_ACCESS_TOKEN" not in os.environ
+
+
 def test_notifications_emit_no_stdout_response(monkeypatch):
     """JSON-RPC notifications (no "id") must never get a response line."""
     from botex.mcp_bridge import __main__ as m
