@@ -780,12 +780,6 @@ def get_consolidated_models(
     entries_by_key: Dict[str, Dict[str, Any]] = {}
 
     def _add_meta(meta: ModelMetadata, target_provider: str) -> None:
-        # The dedicated "zai"/"glm" provider is not admitted
-
-        t_prov_low = str(target_provider or "").lower().strip()
-
-        if t_prov_low in ("zai", "glm"):
-            return
         prov_literal = _VALID_PROVIDERS_MAP.get(target_provider, "openrouter")
         prov_cfg = providers_cfg.get(prov_literal) if isinstance(providers_cfg, dict) else None
         # Local endpoints (e.g. Ollama / Bielik) and quota/package-bound
@@ -1034,12 +1028,7 @@ def get_consolidated_models(
         is_free_rank = 0 if entry["is_free"] else 1
         return (is_curated, is_free_rank, entry["name"].lower())
 
-    clean_entries = [
-        item
-        for item in entries_by_key.values()
-        if str(item.get("provider", "")).lower() not in ("zai", "glm")
-    ]
-    sorted_models = sorted(clean_entries, key=_sort_key)
+    sorted_models = sorted(entries_by_key.values(), key=_sort_key)
 
     _CONSOLIDATED_MEM_CACHE["timestamp"] = now
     _CONSOLIDATED_MEM_CACHE["cache_mtime"] = mtime

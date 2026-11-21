@@ -504,7 +504,6 @@ botex/                 Domain subpackages (legacy flat imports like `botex.engin
     wallet.py            Credit balance & key budget status
     http_pool.py         Pooled httpx clients
     prompt_cache.py      Prompt-cache policy gating
-    adapters/zai.py      Z.ai GLM Coding Plan adapter
   tools/
     file_tools.py        Outline-first reads, create/move/delete
     patch_engine.py      Fuzzy patching, in-memory syntax checks & snapshots

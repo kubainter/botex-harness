@@ -36,7 +36,6 @@ Since v2.1.0 the package is organized into domain subpackages; legacy flat impor
 │   │   ├── wallet.py          credit balance, usage, and limit checker
 │   │   ├── http_pool.py       pooled httpx clients
 │   │   ├── prompt_cache.py    prompt-cache policy gating
-│   │   └── adapters/zai.py    Z.ai GLM Coding Plan adapter
 │   ├── tools/               worker tool implementations
 │   │   ├── patch_engine.py    fuzzy patching, in-memory syntax check, snapshots
 │   │   ├── file_tools.py      outline-first file I/O tools

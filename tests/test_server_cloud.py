@@ -301,8 +301,8 @@ def test_wallet_endpoint(client, monkeypatch):
         assert data["quota_windows"] == []
 
 
-def test_wallet_endpoint_zai_quota_windows(client):
-    """Wallet endpoint returns quota windows and units='quota' for Z.ai."""
+def test_wallet_endpoint_quota_windows(client):
+    """Wallet endpoint returns quota windows and units='quota' for a quota-based provider."""
     sample_windows = (
         {
             "label": "5 Hours",
@@ -325,7 +325,7 @@ def test_wallet_endpoint_zai_quota_windows(client):
     )
     mock_credits = CreditsInfo(
         supported=True,
-        provider="zai",
+        provider="groq",
         units="quota",
         quota_windows=sample_windows,
     )
@@ -333,11 +333,11 @@ def test_wallet_endpoint_zai_quota_windows(client):
         "botex.server_cloud.default_wallet_service.get_credits_async",
         new=AsyncMock(return_value=mock_credits),
     ):
-        resp = client.get("/api/wallet?provider=zai&force_refresh=true")
+        resp = client.get("/api/wallet?provider=groq&force_refresh=true")
         assert resp.status_code == 200
         data = resp.json()
         assert data["supported"] is True
-        assert data["provider"] == "zai"
+        assert data["provider"] == "groq"
         assert data["units"] == "quota"
         assert len(data["quota_windows"]) == 2
         assert data["quota_windows"][0]["unit"] == "hours"
