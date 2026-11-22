@@ -57,6 +57,13 @@ McpBridgeClient   (botex/mcp_bridge/client.py)
 | `BOTEX_TOOLS_TTL_S` | `300` | `tools/list`/`resources/list` cache TTL |
 | `BOTEX_CALL_TIMEOUT_S` | `600` | Per-call timeout |
 | `BOTEX_LIST_TIMEOUT_S` | `30` | Schema-list timeout |
+| `BOTEX_MCP_ENV` | — | Path to a local `.env` holding `BOTEX_CLOUD_URL`/`BOTEX_ACCESS_TOKEN` — keeps secrets out of the client registry |
+| `BOTEX_DISABLE_DOTENV` | `0` | Set `1` to skip `.env` loading entirely |
+
+Secrets resolution order: process env wins; then `BOTEX_MCP_ENV` (explicit
+file); otherwise standard upward `.env` discovery from the spawned cwd.
+When spawned via `server.py mcp-bridge`, `botex.server.config` already loads
+`<repo>/.env`, so a token placed there is picked up with no extra setup.
 
 ## Toolport / registry entry
 
@@ -65,13 +72,16 @@ McpBridgeClient   (botex/mcp_bridge/client.py)
   "command": "botex",
   "args": ["mcp-bridge"],
   "env": {
-    "BOTEX_CLOUD_URL": "https://<cloud-host>",
-    "BOTEX_ACCESS_TOKEN": "<token>",
+    "BOTEX_MCP_ENV": "C:\\Users\\<user>\\.botex\\mcp.env",
     "BOTEX_AGENT_ID": "<agent>",
     "BOTEX_MCP_POOL_SIZE": "3"
   }
 }
 ```
+
+`BOTEX_MCP_ENV` stores only a **path** — the registry never sees the token.
+Inline env (`BOTEX_CLOUD_URL`/`BOTEX_ACCESS_TOKEN` directly in `env`) still
+works when a secrets-capable client manages the entry.
 
 Each agent client spawns its own bridge process, so `X-Agent-Id`/`X-Host`
 provenance and session pools are per-agent — no shared serialized pipe.

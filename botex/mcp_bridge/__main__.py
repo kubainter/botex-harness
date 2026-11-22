@@ -19,6 +19,36 @@ from typing import Any, Dict, Optional
 
 from .client import DEFAULT_POOL_SIZE, McpBridgeClient
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+
+def _load_env_file() -> None:
+    """Load bridge secrets from a local .env instead of client/registry env.
+
+    BOTEX_MCP_ENV points at an explicit file (registry stores only the path,
+    never the token); otherwise standard upward .env discovery from cwd.
+    Already-set env vars win (override=False) and BOTEX_DISABLE_DOTENV opts
+    out entirely, matching botex.server.config.
+    """
+    if os.environ.get("BOTEX_DISABLE_DOTENV", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
+    if load_dotenv is None:
+        return
+    explicit = os.environ.get("BOTEX_MCP_ENV", "").strip()
+    if explicit:
+        load_dotenv(explicit, override=False)
+    else:
+        load_dotenv(override=False)
+
+
 if sys.platform == "win32":
     try:
         sys.stdin.reconfigure(encoding="utf-8")
@@ -129,6 +159,7 @@ def main(argv: Optional[list] = None) -> None:
     )
     args = parser.parse_args(argv)
 
+    _load_env_file()
     cloud_url = (os.environ.get("BOTEX_CLOUD_URL") or "").rstrip("/")
     access_token = (os.environ.get("BOTEX_ACCESS_TOKEN") or "").strip()
     if not cloud_url:
