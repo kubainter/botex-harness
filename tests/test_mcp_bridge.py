@@ -365,3 +365,52 @@ def test_mutating_call_no_retry_after_send(monkeypatch):
     text, is_err = asyncio.run(c.call_tool("start_task", {"task": "x"}))
     assert is_err is True
     assert len(calls) == 1, f"mutating call retried: {calls}"
+
+
+def test_run_startup_answers_initialize_before_bridge_start_finishes(monkeypatch):
+    """Slow Cloud SSE handshake must not block stdin `initialize` response."""
+    import io
+    import json as _json
+    import sys as _sys
+
+    from botex.mcp_bridge import __main__ as m
+
+    written = []
+    monkeypatch.setattr(m, "_write", lambda msg: written.append(msg))
+    init_req = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05"},
+    }
+    monkeypatch.setattr(_sys, "stdin", io.StringIO(_json.dumps(init_req) + "\n"))
+
+    started = asyncio.Event()
+    bridge = MagicMock()
+    bridge.on_client_notification = None
+    bridge.stop = AsyncMock()
+
+    async def _slow_start():
+        started.set()
+        await asyncio.sleep(10)
+
+    bridge.start = _slow_start
+
+    t0 = time.monotonic()
+    asyncio.run(m._run_startup(bridge))
+    elapsed = time.monotonic() - t0
+
+    assert started.is_set()
+    assert elapsed < 2.0, f"initialize blocked on bridge.start(): {elapsed:.2f}s"
+    assert len(written) == 1
+    assert written[0]["id"] == 1
+    assert written[0]["result"]["serverInfo"]["name"] == "botex-mcp-bridge"
+
+
+def test_pick_slot_initializes_slots_lazily(monkeypatch):
+    """_pick_slot must work even if called before start() has populated _slots."""
+    c = _client(monkeypatch, pool_size=2)
+    assert c._slots == []
+    slot = c._pick_slot()
+    assert slot.idx == 0
+    assert len(c._slots) == 2

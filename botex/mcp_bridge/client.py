@@ -234,13 +234,20 @@ class McpBridgeClient:
         except Exception:
             logger.debug("failed to relay server notification", exc_info=True)
 
+    def _ensure_slots(self) -> None:
+        if not self._slots:
+            self._slots = [
+                _SseSlot(
+                    i,
+                    f"{self.cloud_url}/mcp/sse",
+                    dict(self.headers),
+                    self._on_server_notification,
+                )
+                for i in range(self.pool_size)
+            ]
+
     async def start(self) -> None:
-        self._slots = [
-            _SseSlot(
-                i, f"{self.cloud_url}/mcp/sse", dict(self.headers), self._on_server_notification
-            )
-            for i in range(self.pool_size)
-        ]
+        self._ensure_slots()
         # Connect eagerly so a bad token fails at startup, not on first call.
         await self._slots[0].acquire()
         await self._prime_cache()
@@ -266,6 +273,7 @@ class McpBridgeClient:
             self._resources_cache = []
 
     def _pick_slot(self) -> _SseSlot:
+        self._ensure_slots()
         return min(self._slots, key=lambda s: s.in_flight)
 
     async def _with_slot(self, fn, timeout: float, retry_after_send: bool):
