@@ -96,16 +96,24 @@ from botex.core.device_tokens import (
 from botex.core.swarm_store import (
     _SWARM_LOCK,
     SWARM_SCHEMA_VERSION,
+    create_work_order,
     get_active_leases,
     get_bot,
     get_bot_brief,
     get_swarm_store_conn,
+    get_work_order,
     list_active_brief_payloads,
     list_bots,
     list_bots_due_for_brief_review,
+    list_host_harnesses,
+    list_work_orders,
+    pause_bot,
     record_bot_domain_turn,
     register_bot,
+    resume_bot,
+    update_work_order_status,
     upsert_bot_brief,
+    upsert_host_harnesses,
     upsert_host_lease,
 )
 from botex.core.tool_executor import (
@@ -775,6 +783,11 @@ class _EdgeSession:
             "brief_sync",
             "hello",
             "hello_ack",
+            "harness_pause",
+            "harness_resume",
+            "harness_cancel_task",
+            "control_ack",
+            "control_nack",
         ):
             return 0
         return 1
@@ -3356,6 +3369,278 @@ async def fence_swarm_order_endpoint(
     return botex_server.mask_secrets_recursive(res)
 
 
+_ALLOWED_EDGE_CONTROL_ACTIONS = frozenset(
+    {"harness_pause", "harness_resume", "harness_cancel_task"}
+)
+
+
+class SwarmOrderCreateRequest(BaseModel):
+    order_id: str = Field(..., min_length=1, max_length=128)
+    bot_slug: str = Field(default="", max_length=96)
+    status: str = Field(default="QUEUED", max_length=32)
+    host_id: str = Field(default="", max_length=128)
+    fencing_token: str = Field(default="", max_length=256)
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SwarmOrderActionRequest(BaseModel):
+    reason: str = Field(default="", max_length=512)
+    fencing_epoch: Optional[int] = Field(default=None, ge=0)
+    host_id: str = Field(default="", max_length=128)
+    fencing_token: str = Field(default="", max_length=256)
+
+
+async def dispatch_edge_control_frame(
+    host_id: str,
+    action: str,
+    *,
+    order_id: str,
+    fencing_token: str,
+    fencing_epoch: Optional[int] = None,
+    timeout_s: float = 5.0,
+) -> Dict[str, Any]:
+    """Dispatch an allowlisted typed control frame to an active Edge session."""
+    clean_action = str(action or "").strip().lower()
+    if clean_action not in _ALLOWED_EDGE_CONTROL_ACTIONS:
+        return {"dispatched": False, "reason": "forbidden_control_action"}
+    clean_host = coerce_text(mask_secrets(str(host_id or ""))).strip()
+    if not clean_host:
+        return {"dispatched": False, "reason": "no_host_assigned"}
+    session = next((s for s in _EDGE_SESSIONS.values() if s.device_id == clean_host), None)
+    if session is None:
+        return {"dispatched": False, "reason": "host_offline"}
+
+    req_id = f"ctrl_{uuid.uuid4().hex[:12]}"
+    frame: Dict[str, Any] = {
+        "type": clean_action,
+        "request_id": req_id,
+        "order_id": order_id,
+        "fencing_token": fencing_token,
+    }
+    if fencing_epoch is not None:
+        frame["fencing_epoch"] = int(fencing_epoch)
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    session._pending[req_id] = fut
+    try:
+        await session.send_frame(frame, priority=0)
+        reply = await asyncio.wait_for(fut, timeout=timeout_s)
+        return {
+            "dispatched": True,
+            "request_id": req_id,
+            "reply": botex_server.mask_secrets_recursive(reply),
+        }
+    except asyncio.TimeoutError:
+        return {"dispatched": True, "request_id": req_id, "reason": "ack_timeout"}
+    except Exception as exc:
+        return {"dispatched": False, "request_id": req_id, "reason": type(exc).__name__}
+    finally:
+        session._pending.pop(req_id, None)
+
+
+def _raise_for_order_mutation_error(res: Dict[str, Any]) -> None:
+    err_code = str(res.get("error") or res.get("reason") or "")
+    if err_code == "ORDER_NOT_FOUND":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=botex_server.mask_secrets_recursive(res),
+        )
+    if err_code in (
+        "EPOCH_MISMATCH",
+        "ORDER_EXISTS",
+        "illegal_transition",
+        "order_terminal",
+        "paused_lease_frozen",
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=botex_server.mask_secrets_recursive(res),
+        )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=botex_server.mask_secrets_recursive(res),
+    )
+
+
+async def _transition_order_and_dispatch(
+    order_id: str,
+    target_status: str,
+    control_action: str,
+    body: Optional[SwarmOrderActionRequest],
+) -> Dict[str, Any]:
+    clean_order = sanitize_identifier(order_id)
+    if not clean_order or clean_order != str(order_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid order_id format.",
+        )
+    req = body or SwarmOrderActionRequest()
+    res = await asyncio.to_thread(
+        update_work_order_status,
+        clean_order,
+        target_status,
+        reason=req.reason,
+        fencing_epoch=req.fencing_epoch,
+    )
+    if not res.get("ok"):
+        _raise_for_order_mutation_error(res)
+
+    order_obj = res.get("order") if isinstance(res.get("order"), dict) else res
+    target_host = str(req.host_id or order_obj.get("host_id") or "").strip()
+    fencing_token = str(
+        req.fencing_token or order_obj.get("fencing_token") or str(order_obj.get("epoch") or "")
+    ).strip()
+    if target_host and fencing_token:
+        res["control_dispatch"] = await dispatch_edge_control_frame(
+            target_host,
+            control_action,
+            order_id=clean_order,
+            fencing_token=fencing_token,
+            fencing_epoch=order_obj.get("epoch"),
+        )
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.get("/api/swarm/orders")
+async def list_swarm_orders_endpoint(
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    bot_slug: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> Dict[str, Any]:
+    orders = await asyncio.to_thread(
+        list_work_orders,
+        status=status_filter,
+        bot_slug=bot_slug,
+        limit=limit,
+    )
+    return botex_server.mask_secrets_recursive({"ok": True, "orders": orders, "count": len(orders)})
+
+
+@app.post("/api/swarm/orders", status_code=status.HTTP_201_CREATED)
+async def create_swarm_order_endpoint(body: SwarmOrderCreateRequest) -> Dict[str, Any]:
+    clean_order = sanitize_identifier(body.order_id)
+    if not clean_order or clean_order != str(body.order_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid order_id format.",
+        )
+    order_payload: Dict[str, Any] = dict(body.payload or {})
+    order_payload["order_id"] = clean_order
+    if body.bot_slug:
+        order_payload["bot_slug"] = body.bot_slug
+    if body.host_id:
+        order_payload["host_id"] = body.host_id
+    if body.fencing_token:
+        order_payload["fencing_token"] = body.fencing_token
+    order_payload["status"] = body.status
+
+    res = await asyncio.to_thread(create_work_order, order_payload)
+    if not res.get("ok"):
+        _raise_for_order_mutation_error(res)
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.get("/api/swarm/orders/{order_id}")
+async def get_swarm_order_endpoint(order_id: str) -> Dict[str, Any]:
+    clean_order = sanitize_identifier(order_id)
+    if not clean_order or clean_order != str(order_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid order_id format.",
+        )
+    order = await asyncio.to_thread(get_work_order, clean_order)
+    if order is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"WorkOrder '{clean_order}' not found.",
+        )
+    return botex_server.mask_secrets_recursive({"ok": True, "order": order})
+
+
+@app.post("/api/swarm/orders/{order_id}/pause")
+async def pause_swarm_order_endpoint(
+    order_id: str,
+    body: Optional[SwarmOrderActionRequest] = None,
+) -> Dict[str, Any]:
+    return await _transition_order_and_dispatch(order_id, "PAUSED", "harness_pause", body)
+
+
+@app.post("/api/swarm/orders/{order_id}/resume")
+async def resume_swarm_order_endpoint(
+    order_id: str,
+    body: Optional[SwarmOrderActionRequest] = None,
+) -> Dict[str, Any]:
+    return await _transition_order_and_dispatch(order_id, "RUNNING", "harness_resume", body)
+
+
+@app.post("/api/swarm/orders/{order_id}/cancel")
+async def cancel_swarm_order_endpoint(
+    order_id: str,
+    body: Optional[SwarmOrderActionRequest] = None,
+) -> Dict[str, Any]:
+    return await _transition_order_and_dispatch(order_id, "CANCELLED", "harness_cancel_task", body)
+
+
+@app.post("/api/bots/{slug}/pause")
+async def pause_bot_endpoint(slug: str) -> Dict[str, Any]:
+    clean_slug = sanitize_identifier(slug)
+    if not clean_slug or clean_slug != str(slug).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid bot slug.",
+        )
+    res = await asyncio.to_thread(pause_bot, clean_slug)
+    if not res.get("ok"):
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if res.get("error") == "BOT_NOT_FOUND"
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=code, detail=botex_server.mask_secrets_recursive(res))
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.post("/api/bots/{slug}/resume")
+async def resume_bot_endpoint(slug: str) -> Dict[str, Any]:
+    clean_slug = sanitize_identifier(slug)
+    if not clean_slug or clean_slug != str(slug).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid bot slug.",
+        )
+    res = await asyncio.to_thread(resume_bot, clean_slug)
+    if not res.get("ok"):
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if res.get("error") == "BOT_NOT_FOUND"
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=code, detail=botex_server.mask_secrets_recursive(res))
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.get("/api/edge/hosts/{host_id}/harnesses")
+async def list_edge_host_harnesses_endpoint(
+    host_id: str,
+    stale_after_s: int = Query(default=120, ge=1, le=86400),
+) -> Dict[str, Any]:
+    clean_host = coerce_text(mask_secrets(str(host_id or ""))).strip()[:96]
+    if not clean_host:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid host_id.",
+        )
+    harnesses = await asyncio.to_thread(
+        list_host_harnesses,
+        host_id=clean_host,
+        stale_after_s=stale_after_s,
+    )
+    return botex_server.mask_secrets_recursive(
+        {"ok": True, "host_id": clean_host, "harnesses": harnesses, "count": len(harnesses)}
+    )
+
+
 _HOST_LEASE_TTL_S = 600.0
 _MAX_PENDING_FENCE_HOSTS = 256
 _MAX_PENDING_FENCES_PER_HOST = 64
@@ -3432,7 +3717,9 @@ def _sweep_expired_host_leases_sync(
                     "SELECT order_id, bot_slug, epoch, status, payload_json"
                     " FROM work_orders"
                     " WHERE bot_slug = ?"
-                    " AND status NOT IN ('DONE', 'FAILED', 'BLOCKED', 'NEEDS_HUMAN', 'FENCED')"
+                    " AND status NOT IN ("
+                    "'DONE', 'FAILED', 'BLOCKED', 'NEEDS_HUMAN', 'FENCED', 'PAUSED', 'CANCELLED'"
+                    ")"
                     " ORDER BY order_id;",
                     (bot_slug,),
                 ).fetchall()
@@ -3458,6 +3745,29 @@ def _sweep_expired_host_leases_sync(
                     matched_orders.append((orow, payload))
 
                 if not matched_orders:
+                    paused_rows = conn.execute(
+                        "SELECT payload_json FROM work_orders"
+                        " WHERE bot_slug = ? AND status = 'PAUSED';",
+                        (bot_slug,),
+                    ).fetchall()
+                    has_paused_on_host = False
+                    for prow in paused_rows:
+                        p_payload: Dict[str, Any] = {}
+                        if prow["payload_json"]:
+                            try:
+                                parsed_p = json.loads(str(prow["payload_json"]))
+                                if isinstance(parsed_p, dict):
+                                    p_payload = parsed_p
+                            except json.JSONDecodeError:
+                                p_payload = {}
+                        p_host = str(
+                            p_payload.get("assigned_host") or p_payload.get("host_id") or ""
+                        ).strip()
+                        if not p_host or p_host == stale_host:
+                            has_paused_on_host = True
+                            break
+                    if has_paused_on_host:
+                        continue
                     lease_summary = str(lrow["summary"] or "")
                     if not target_host and "[fenced]" in lease_summary:
                         continue
@@ -4673,6 +4983,17 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
     session.start_qos_sender()
 
     try:
+        hello_harnesses = hello.get("harnesses")
+        if isinstance(hello_harnesses, list) and hello_harnesses:
+            try:
+                await asyncio.to_thread(
+                    upsert_host_harnesses,
+                    session.device_id,
+                    hello_harnesses,
+                    last_seen=hello.get("last_seen"),
+                )
+            except Exception:
+                logger.debug("Failed ingesting hello harness inventory", exc_info=True)
         await session.send_frame(
             {
                 "type": "hello_ack",
@@ -4734,6 +5055,22 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                 await session.send_frame({"type": "pong", "ts": frame.get("ts") or time.time()})
             elif ftype == "pong":
                 continue
+            elif ftype == "heartbeat":
+                hb_harnesses = frame.get("harnesses")
+                if isinstance(hb_harnesses, list):
+                    try:
+                        await asyncio.to_thread(
+                            upsert_host_harnesses,
+                            session.device_id,
+                            hb_harnesses,
+                            last_seen=frame.get("last_seen"),
+                        )
+                    except Exception:
+                        logger.debug("Failed ingesting heartbeat harness inventory", exc_info=True)
+            elif ftype in ("control_ack", "control_nack"):
+                req_id = str(frame.get("request_id") or "")
+                if req_id:
+                    session.resolve_pending(req_id, frame)
             elif ftype in ("tool_result", "delegate_result"):
                 cid = str(frame.get("call_id") or "")
                 res_obj = frame.get("result")
