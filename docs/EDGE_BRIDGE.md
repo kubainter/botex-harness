@@ -128,3 +128,37 @@ To dispatch an MCP task from BoteX Cloud onto the connected workstation, pass `w
 - Requires the `delegate_local:<workspace_id>` scope on the device token.
 - Requires explicit opt-in in `<workspace>/.botex/edge_caps.json` (or `~/.botex/edge_caps.json`) under `"delegation": {"enabled": true, "allowed_skills": {...}}` with each skill pinned by its 64-hex `sha256`.
 - Shell/execution parameter keys (`command`, `cmd`, `shell`, `script`, `code`, `eval`, `exec`, `argv`, `args`, `powershell`, `pwsh`, `bash`) are rejected recursively, and mutating skills require `ApprovalManager` confirmation.
+
+## 5. Harness Inventory Discovery & Typed Control Lane (Plan 042)
+
+### Harness Inventory (`hello` & `heartbeat`)
+
+`EdgeRunner` reports non-blocking local harness discovery results on `hello` and periodic `heartbeat` frames:
+
+```json
+{
+  "type": "heartbeat",
+  "device_id": "workstation-1",
+  "workspace_id": "harness",
+  "last_seen": "2026-11-23T14:40:00+00:00",
+  "harnesses": [
+    {
+      "harness_id": "devin",
+      "transport": "acp",
+      "status": "online",
+      "last_seen": "2026-11-23T14:40:00+00:00",
+      "capabilities": {"available": true}
+    }
+  ]
+}
+```
+
+- Discovery probes only allowlisted CLI binaries on `PATH` and configured local ACP endpoints with strict timeouts; no `.env` files or raw filesystem paths are emitted.
+- BoteX Cloud upserts each record into `host_harness_inventory` and evaluates TTL freshness on read (`stale_after_s`, default `120s`): records older than the TTL are surfaced with `status: "stale"` without losing the row.
+
+### Typed WSS & Loopback Control Lane
+
+Downward control frames on `/api/edge/ws` and `--edge-daemon` loopback `POST /control` are strictly allowlisted:
+- Loopback control allowlist: `lease_heartbeat`, `fence_ack`, `ping`, `harness_pause`, `harness_resume`, `harness_cancel_task`.
+- Downward typed harness frames (`harness_pause`, `harness_resume`, `harness_cancel_task`) MUST carry `order_id` and `fencing_token` (verified via constant-time comparison against the locally registered active order; optional `fencing_epoch` must not be stale).
+- `EdgeRunner` executes the corresponding OS process-tree helper (`pause_process_tree`, `resume_process_tree`, `cancel_process_tree`) and responds on the Control Lane with explicit `control_ack` or `control_nack` (`reason`, `ok`, `request_id`, `order_id`). Arbitrary or untyped commands are always rejected.

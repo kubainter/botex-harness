@@ -673,3 +673,213 @@ def test_loopback_control_allowlist_and_body_size_guard(tmp_path: Path) -> None:
             await runner.stop_loopback_ipc()
 
     asyncio.run(_exercise())
+
+
+def test_hello_and_heartbeat_include_harness_inventory_and_last_seen(tmp_path: Path) -> None:
+    """Plan 042: hello and heartbeat frames include discovered harnesses and last_seen."""
+    fake_inventory = [
+        {
+            "harness_id": "devin",
+            "transport": "acp",
+            "status": "online",
+            "last_seen": "2026-11-23T14:00:00+00:00",
+            "capabilities": {"available": True},
+        }
+    ]
+
+    async def _fake_discover() -> list[dict]:
+        return list(fake_inventory)
+
+    runner = EdgeRunner(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="dev-inv",
+        workspace_id="ws-inv",
+        workspace_root=tmp_path,
+        discover_harnesses_fn=_fake_discover,
+    )
+
+    async def _run() -> None:
+        hello = await runner.build_hello_frame()
+        assert hello["type"] == "hello"
+        assert hello["harnesses"] == fake_inventory
+        assert isinstance(hello["last_seen"], str) and hello["last_seen"]
+
+        hb = await runner.build_heartbeat_frame()
+        assert hb["type"] == "heartbeat"
+        assert hb["device_id"] == "dev-inv"
+        assert hb["workspace_id"] == "ws-inv"
+        assert hb["harnesses"] == fake_inventory
+        assert isinstance(hb["last_seen"], str) and hb["last_seen"]
+
+    asyncio.run(_run())
+
+
+def test_typed_control_frames_verify_fencing_token_and_return_ack_nack(tmp_path: Path) -> None:
+    """Plan 042: harness_pause/resume/cancel verify fencing_token and return ack/nack."""
+    calls: list[tuple[str, int]] = []
+
+    class _FakeDriver:
+        def pause_process_tree(self, pid: int, *, job_guard=None) -> dict:
+            calls.append(("pause", pid))
+            return {
+                "ok": True,
+                "action": "pause",
+                "pid": pid,
+                "affected_pids": [pid],
+                "detail": "ok",
+            }
+
+        def resume_process_tree(self, pid: int, *, job_guard=None) -> dict:
+            calls.append(("resume", pid))
+            return {
+                "ok": True,
+                "action": "resume",
+                "pid": pid,
+                "affected_pids": [pid],
+                "detail": "ok",
+            }
+
+        def cancel_process_tree(self, pid: int, *, job_guard=None) -> dict:
+            calls.append(("cancel", pid))
+            return {"ok": True, "action": "cancel", "pid": pid, "detail": "ok"}
+
+    runner = EdgeRunner(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="dev-ctrl",
+        workspace_id="ws-ctrl",
+        workspace_root=tmp_path,
+        os_driver=_FakeDriver(),
+    )
+    runner.register_active_order("ord-42", pid=4242, fencing_token="tok-epoch-2", fencing_epoch=2)
+
+    async def _run() -> None:
+        bad_type = await runner.handle_control_frame(
+            {"type": "shell_exec", "order_id": "ord-42", "fencing_token": "tok-epoch-2"}
+        )
+        assert bad_type["type"] == "control_nack"
+        assert bad_type["reason"] == "unsupported_control_frame"
+
+        bad_tok = await runner.handle_control_frame(
+            {"type": "harness_pause", "order_id": "ord-42", "fencing_token": "wrong"}
+        )
+        assert bad_tok["type"] == "control_nack"
+        assert bad_tok["reason"] == "fencing_token_mismatch"
+
+        stale_ep = await runner.handle_control_frame(
+            {
+                "type": "harness_pause",
+                "order_id": "ord-42",
+                "fencing_token": "tok-epoch-2",
+                "fencing_epoch": 1,
+            }
+        )
+        assert stale_ep["type"] == "control_nack"
+        assert stale_ep["reason"] == "stale_fencing_epoch"
+
+        ack_p = await runner.handle_control_frame(
+            {
+                "type": "harness_pause",
+                "request_id": "r1",
+                "order_id": "ord-42",
+                "fencing_token": "tok-epoch-2",
+                "fencing_epoch": 2,
+            }
+        )
+        assert ack_p["type"] == "control_ack"
+        assert ack_p["ok"] is True
+        assert ack_p["request_id"] == "r1"
+
+        ack_r = await runner.handle_control_frame(
+            {"type": "harness_resume", "order_id": "ord-42", "fencing_token": "tok-epoch-2"}
+        )
+        assert ack_r["type"] == "control_ack"
+
+        ack_c = await runner.handle_control_frame(
+            {"type": "harness_cancel_task", "order_id": "ord-42", "fencing_token": "tok-epoch-2"}
+        )
+        assert ack_c["type"] == "control_ack"
+        assert calls == [("pause", 4242), ("resume", 4242), ("cancel", 4242)]
+
+        # After cancel, order is unregistered -> nack
+        after_c = await runner.handle_control_frame(
+            {"type": "harness_pause", "order_id": "ord-42", "fencing_token": "tok-epoch-2"}
+        )
+        assert after_c["type"] == "control_nack"
+        assert after_c["reason"] == "order_not_active"
+
+    asyncio.run(_run())
+
+
+def test_loopback_control_accepts_typed_harness_frames_with_fencing_token(tmp_path: Path) -> None:
+    """Plan 042: loopback POST /control allows typed harness_* frames only with fencing_token."""
+
+    class _FakeDriver:
+        def pause_process_tree(self, pid: int, *, job_guard=None) -> dict:
+            return {
+                "ok": True,
+                "action": "pause",
+                "pid": pid,
+                "affected_pids": [pid],
+                "detail": "ok",
+            }
+
+    runner = EdgeRunner(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="dev-lb",
+        workspace_id="ws-lb",
+        workspace_root=tmp_path,
+        os_driver=_FakeDriver(),
+    )
+    runner.register_active_order("ord-lb", pid=5150, fencing_token="tok-lb", fencing_epoch=1)
+
+    async def _post(port: int, payload: dict) -> bytes:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            req = (
+                f"POST /control HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{port}\r\n"
+                f"X-Loopback-Token: tok-ctl\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n"
+            ).encode("ascii") + body
+            writer.write(req)
+            await writer.drain()
+            return await asyncio.wait_for(reader.read(4096), timeout=2.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def _exercise() -> None:
+        info = await runner.start_loopback_ipc(
+            port=0,
+            loopback_token="tok-ctl",
+            state_file=tmp_path / "edge_daemon.json",
+        )
+        try:
+            port = int(info["port"])
+            missing_tok = await _post(
+                port, {"frame": {"type": "harness_pause", "order_id": "ord-lb"}}
+            )
+            assert b"400 Bad Request" in missing_tok
+            assert b"missing_fencing_token_or_order_id" in missing_tok
+
+            ok_resp = await _post(
+                port,
+                {
+                    "frame": {
+                        "type": "harness_pause",
+                        "order_id": "ord-lb",
+                        "fencing_token": "tok-lb",
+                    },
+                    "local_exec": True,
+                },
+            )
+            assert b"200 OK" in ok_resp
+            assert b"control_ack" in ok_resp
+        finally:
+            await runner.stop_loopback_ipc()
+
+    asyncio.run(_exercise())
