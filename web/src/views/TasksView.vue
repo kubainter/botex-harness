@@ -13,15 +13,42 @@
       </div>
 
       <div class="flex items-center space-x-2">
+        <div class="flex rounded-lg border border-botex-700 bg-botex-900 overflow-hidden" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === 'tasks'"
+            :class="[
+              'min-h-[44px] lg:min-h-[36px] px-3 py-1.5 text-xs font-medium transition',
+              activeTab === 'tasks' ? 'bg-botex-800 text-sky-300' : 'text-slate-300 hover:text-white'
+            ]"
+            @click="activeTab = 'tasks'"
+          >
+            {{ t('tasksTitle') }}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === 'orders'"
+            :class="[
+              'min-h-[44px] lg:min-h-[36px] px-3 py-1.5 text-xs font-medium transition',
+              activeTab === 'orders' ? 'bg-botex-800 text-sky-300' : 'text-slate-300 hover:text-white'
+            ]"
+            @click="activeTab = 'orders'"
+          >
+            {{ t('orders.title') }}
+          </button>
+        </div>
         <button
           type="button"
           class="min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-botex-900 hover:bg-botex-800 border border-botex-700 text-xs font-medium text-slate-200 transition flex items-center space-x-1.5"
-          @click="tasksStore.fetchTasks"
+          @click="activeTab === 'orders' ? refreshOrders() : tasksStore.fetchTasks()"
         >
-          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': tasksStore.isLoading }" aria-hidden="true" />
+          <RefreshCwIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': activeTab === 'orders' ? loadingOrders : tasksStore.isLoading }" aria-hidden="true" />
           <span>{{ t('refresh') }}</span>
         </button>
         <button
+          v-if="activeTab === 'tasks'"
           type="button"
           class="min-h-[44px] lg:min-h-[36px] px-4 py-1.5 rounded-lg bg-brand-blue hover:bg-blue-600 text-xs font-semibold text-white transition flex items-center space-x-1.5"
           @click="showCreateModal = true"
@@ -31,6 +58,8 @@
         </button>
       </div>
     </div>
+
+    <template v-if="activeTab === 'tasks'">
 
     <!-- Error notice -->
     <div
@@ -223,6 +252,113 @@
         </div>
       </div>
     </div>
+    </template>
+
+    <!-- WorkOrder Queue -->
+    <template v-else>
+      <div
+        v-if="swarmError"
+        role="alert"
+        class="p-3 rounded-xl bg-rose-950/50 border border-rose-700/60 text-xs text-rose-200 flex items-center justify-between gap-3"
+      >
+        <span class="font-mono truncate">{{ swarmError }}</span>
+        <button type="button" class="shrink-0 underline hover:text-white min-h-[44px] px-2" @click="refreshOrders">{{ t('refresh') }}</button>
+      </div>
+
+      <div class="flex items-center justify-between text-xs text-slate-300 px-1">
+        <span class="font-semibold uppercase tracking-wider font-mono">{{ t('orders.title') }} ({{ orders.length }})</span>
+        <span class="text-slate-400">{{ t('orders.subtitle') }}</span>
+      </div>
+
+      <!-- Skeleton Loader -->
+      <div v-if="loadingOrders && orders.length === 0" class="space-y-3" aria-hidden="true">
+        <div
+          v-for="idx in 3"
+          :key="idx"
+          class="p-4 rounded-xl border border-botex-800 bg-botex-900/60 animate-pulse flex items-center justify-between"
+        >
+          <div class="space-y-2">
+            <div class="h-4 w-44 bg-botex-800 rounded"></div>
+            <div class="h-3 w-56 bg-botex-800/70 rounded"></div>
+          </div>
+          <div class="h-5 w-20 bg-botex-800 rounded"></div>
+        </div>
+      </div>
+
+      <div
+        v-else-if="orders.length === 0"
+        class="rounded-xl border border-botex-800 bg-botex-900/50 p-8 text-center text-slate-300 text-sm"
+      >
+        {{ t('orders.empty') }}
+      </div>
+
+      <template v-else>
+      <div
+        v-for="order in orders"
+        :key="order.order_id"
+        class="p-4 rounded-xl border border-botex-800 bg-botex-900 hover:border-slate-600 transition-all flex flex-wrap items-center justify-between gap-3"
+      >
+        <div class="min-w-0 space-y-1">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-sm font-semibold text-slate-100 font-mono truncate">{{ order.order_id }}</span>
+            <Badge :variant="orderBadgeVariant(order)">{{ order.status }}</Badge>
+          </div>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-slate-300 font-mono">
+            <span>{{ t('orders.bot') }}: <span class="text-cyan-300">{{ order.bot_slug }}</span></span>
+            <span>{{ t('orders.epoch') }}: <span class="text-slate-100">{{ order.epoch }}</span></span>
+            <span v-if="order.host_id" class="truncate">{{ t('orders.host') }}: <span class="text-slate-100">{{ order.host_id }}</span></span>
+          </div>
+          <p v-if="order.status_reason" class="text-xs text-amber-300/90 font-mono truncate">
+            {{ t('orders.reason') }}: {{ order.status_reason }}
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            v-if="order.status === 'RUNNING'"
+            type="button"
+            :disabled="mutatingOrderId === order.order_id"
+            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 text-xs border border-amber-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+            @click="pauseOrder(order)"
+          >
+            <PauseIcon class="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{{ t('orders.pause') }}</span>
+          </button>
+          <button
+            v-if="order.status === 'PAUSED'"
+            type="button"
+            :disabled="mutatingOrderId === order.order_id"
+            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-200 text-xs border border-emerald-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+            @click="resumeOrder(order)"
+          >
+            <PlayIcon class="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{{ t('orders.resume') }}</span>
+          </button>
+          <button
+            v-if="!isTerminalOrder(order)"
+            type="button"
+            :disabled="mutatingOrderId === order.order_id"
+            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-sky-950/60 hover:bg-sky-900/70 text-sky-200 text-xs border border-sky-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+            @click="fenceOrder(order)"
+          >
+            <FenceIcon class="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{{ t('orders.fence') }}</span>
+          </button>
+          <button
+            v-if="!isTerminalOrder(order)"
+            type="button"
+            :disabled="mutatingOrderId === order.order_id"
+            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 text-xs border border-rose-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+            @click="cancelOrder(order)"
+          >
+            <Loader2Icon v-if="mutatingOrderId === order.order_id" class="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+            <BanIcon v-else class="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{{ t('orders.cancel') }}</span>
+          </button>
+        </div>
+      </div>
+      </template>
+    </template>
 
     <!-- Task Detail as bottom-sheet modal on mobile (<lg): tapping a card
          opens the sheet immediately instead of pinning the panel under the
@@ -462,6 +598,7 @@ import { storeToRefs } from 'pinia'
 import { useTasksStore } from '../stores/tasks'
 import { useChatStore } from '../stores/chat'
 import { useApprovalsStore } from '../stores/approvals'
+import { useSwarmStore } from '../stores/swarm'
 import { useI18n } from '../i18n'
 import type {
   CatalogModel,
@@ -469,7 +606,8 @@ import type {
   ConnectedDeviceSkill,
   TaskCreateRequest,
   TaskDetail,
-  TaskSummary
+  TaskSummary,
+  WorkOrderInfo
 } from '../api/types'
 import { api } from '../api/client'
 import Modal from '../components/common/Modal.vue'
@@ -484,14 +622,61 @@ import {
   Plus as PlusIcon,
   RefreshCw as RefreshCwIcon,
   Loader2 as Loader2Icon,
-  ChevronRight as ChevronRightIcon
+  ChevronRight as ChevronRightIcon,
+  Pause as PauseIcon,
+  Play as PlayIcon,
+  Ban as BanIcon,
+  Fence as FenceIcon
 } from 'lucide-vue-next'
 
 const tasksStore = useTasksStore()
 const chatStore = useChatStore()
 const approvalsStore = useApprovalsStore()
+const swarmStore = useSwarmStore()
 const { tasks, currentTask } = storeToRefs(tasksStore)
+const { orders, loadingOrders, mutatingOrderId, error: swarmError } = storeToRefs(swarmStore)
 const { locale, t } = useI18n()
+
+const activeTab = ref<'tasks' | 'orders'>('tasks')
+
+const ORDER_TERMINAL_STATUSES = new Set(['DONE', 'FAILED', 'CANCELLED'])
+
+function isTerminalOrder(order: WorkOrderInfo): boolean {
+  return ORDER_TERMINAL_STATUSES.has(order.status)
+}
+
+function orderBadgeVariant(order: WorkOrderInfo): 'default' | 'success' | 'warning' | 'danger' | 'info' | 'purple' {
+  switch (order.status) {
+    case 'DONE': return 'success'
+    case 'RUNNING': return 'info'
+    case 'QUEUED': return 'warning'
+    case 'PAUSED': return 'warning'
+    case 'FENCED': return 'purple'
+    case 'FAILED': return 'danger'
+    case 'BLOCKED': return 'warning'
+    default: return 'default'
+  }
+}
+
+async function refreshOrders() {
+  await swarmStore.fetchOrders()
+}
+
+async function pauseOrder(order: WorkOrderInfo) {
+  await swarmStore.pauseOrder(order.order_id, { reason: 'paused from cockpit' })
+}
+
+async function resumeOrder(order: WorkOrderInfo) {
+  await swarmStore.resumeOrder(order.order_id, { reason: 'resumed from cockpit' })
+}
+
+async function cancelOrder(order: WorkOrderInfo) {
+  await swarmStore.cancelOrder(order.order_id, { reason: 'cancelled from cockpit' })
+}
+
+async function fenceOrder(order: WorkOrderInfo) {
+  await swarmStore.fenceOrder(order.order_id, { expected_epoch: order.epoch, reason: 'fenced from cockpit' })
+}
 
 const showCreateModal = ref(false)
 const showModelSelector = ref(false)
@@ -604,6 +789,7 @@ onMounted(() => {
   lgQuery?.addEventListener('change', onLgChange)
   tasksStore.fetchTasks()
   tasksStore.startPolling()
+  refreshOrders()
   if (chatStore.catalogModels.length === 0) {
     chatStore.fetchCatalogModels()
   }
