@@ -96,18 +96,23 @@ from botex.core.device_tokens import (
 from botex.core.swarm_store import (
     _SWARM_LOCK,
     SWARM_SCHEMA_VERSION,
+    create_channel,
     create_work_order,
     get_active_leases,
     get_bot,
     get_bot_brief,
+    get_channel,
     get_swarm_store_conn,
     get_work_order,
     list_active_brief_payloads,
     list_bots,
     list_bots_due_for_brief_review,
+    list_channel_messages,
+    list_channels,
     list_host_harnesses,
     list_work_orders,
     pause_bot,
+    post_channel_message,
     record_bot_domain_turn,
     register_bot,
     resume_bot,
@@ -314,6 +319,24 @@ def _broadcast_approval_request(action: PendingAction) -> None:
 
 
 default_approval_manager.add_listener(_broadcast_approval_request)
+
+
+def _broadcast_channel_message(channel_id: str, message: Dict[str, Any]) -> None:
+    """Best-effort fan-out of a posted channel message to connected PWA WebSockets."""
+    if not _ACTIVE_WEBSOCKETS:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug("No active event loop to broadcast channel message")
+        return
+    payload = {
+        "type": "channel_message",
+        "channel_id": channel_id,
+        "message": botex_server.mask_secrets_recursive(message),
+    }
+    for ws in list(_ACTIVE_WEBSOCKETS.keys()):
+        _spawn_bg_task(_send_ws_json_safe(ws, payload), loop=loop)
 
 
 # ---------------------------------------------------------------------------
@@ -3580,6 +3603,132 @@ async def cancel_swarm_order_endpoint(
     body: Optional[SwarmOrderActionRequest] = None,
 ) -> Dict[str, Any]:
     return await _transition_order_and_dispatch(order_id, "CANCELLED", "harness_cancel_task", body)
+
+
+# ---------------------------------------------------------------------------
+# Agent-to-agent channels (isolated data-only bus — Plan 043)
+#
+# Channel endpoints are strictly read/write against ``channels`` /
+# ``channel_messages``: message bodies are never parsed into WorkOrder state
+# transitions or Edge control frames.
+# ---------------------------------------------------------------------------
+
+
+class SwarmChannelCreateRequest(BaseModel):
+    channel_id: str = Field(..., min_length=1, max_length=128)
+    name: str = Field(..., min_length=1, max_length=128)
+    topic: str = Field(default="", max_length=512)
+    participants: List[str] = Field(default_factory=list, max_length=256)
+    acl_mode: str = Field(default="participants", max_length=32)
+    created_by: str = Field(default="", max_length=128)
+
+
+class SwarmChannelMessageRequest(BaseModel):
+    sender_slug: str = Field(..., min_length=1, max_length=128)
+    content: str = Field(..., min_length=1, max_length=8000)
+    sender_origin: str = Field(default="", max_length=128)
+    untrusted: bool = True
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _sanitize_channel_path_id(channel_id: str) -> str:
+    clean_chan = sanitize_identifier(channel_id)
+    if not clean_chan or clean_chan != str(channel_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid channel_id format.",
+        )
+    return clean_chan
+
+
+@app.get("/api/swarm/channels")
+async def list_swarm_channels_endpoint(
+    participant: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> Dict[str, Any]:
+    """List data-only coordination channels, optionally scoped to a participant."""
+    channels = await asyncio.to_thread(list_channels, participant=participant, limit=limit)
+    return botex_server.mask_secrets_recursive(
+        {"ok": True, "channels": channels, "count": len(channels)}
+    )
+
+
+@app.post("/api/swarm/channels", status_code=status.HTTP_201_CREATED)
+async def create_swarm_channel_endpoint(body: SwarmChannelCreateRequest) -> Dict[str, Any]:
+    """Create a channel; 409 on duplicate ``channel_id``, 400 on invalid fields."""
+    res = await asyncio.to_thread(
+        create_channel,
+        body.channel_id,
+        body.name,
+        topic=body.topic,
+        participants=body.participants,
+        acl_mode=body.acl_mode,
+        created_by=body.created_by,
+    )
+    if not res.get("ok"):
+        code = (
+            status.HTTP_409_CONFLICT
+            if res.get("error") == "CHANNEL_EXISTS"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=code, detail=botex_server.mask_secrets_recursive(res))
+    return botex_server.mask_secrets_recursive(res)
+
+
+@app.get("/api/swarm/channels/{channel_id}/messages")
+async def list_swarm_channel_messages_endpoint(
+    channel_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    before: Optional[str] = Query(default=None),
+    after: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """List a channel's messages in chronological order (created_at cursor paging)."""
+    clean_chan = _sanitize_channel_path_id(channel_id)
+    channel = await asyncio.to_thread(get_channel, clean_chan)
+    if channel is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Channel '{clean_chan}' not found.",
+        )
+    messages = await asyncio.to_thread(
+        list_channel_messages,
+        clean_chan,
+        limit=limit,
+        before=before,
+        after=after,
+    )
+    return botex_server.mask_secrets_recursive(
+        {"ok": True, "channel_id": clean_chan, "messages": messages, "count": len(messages)}
+    )
+
+
+@app.post("/api/swarm/channels/{channel_id}/messages", status_code=status.HTTP_201_CREATED)
+async def post_swarm_channel_message_endpoint(
+    channel_id: str,
+    body: SwarmChannelMessageRequest,
+) -> Dict[str, Any]:
+    """Append a data-only message; 404 unknown channel, 403 participant-ACL denied."""
+    clean_chan = _sanitize_channel_path_id(channel_id)
+    res = await asyncio.to_thread(
+        post_channel_message,
+        clean_chan,
+        body.sender_slug,
+        body.content,
+        sender_origin=body.sender_origin,
+        untrusted=body.untrusted,
+        metadata=body.metadata,
+    )
+    if not res.get("ok"):
+        err = res.get("error")
+        if err == "CHANNEL_NOT_FOUND":
+            code = status.HTTP_404_NOT_FOUND
+        elif err == "ACL_DENIED":
+            code = status.HTTP_403_FORBIDDEN
+        else:
+            code = status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=botex_server.mask_secrets_recursive(res))
+    _broadcast_channel_message(clean_chan, res)
+    return botex_server.mask_secrets_recursive(res)
 
 
 @app.post("/api/bots/{slug}/pause")

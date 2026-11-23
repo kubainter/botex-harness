@@ -3,9 +3,10 @@
 """BoteX Cloud Soul — versioned swarm identity store.
 
 Single SQLite WAL store holding the swarm's bot registry, per-bot briefs
-(souls) with etag/fencing metadata, host leases with fencing tokens, and
-durable work orders. Domain knowledge search stays in the Memory Vault's
-``index.db`` — this store intentionally ships ZERO FTS5 tables.
+(souls) with etag/fencing metadata, host leases with fencing tokens,
+durable work orders, and data-only agent-to-agent channels. Domain
+knowledge search stays in the Memory Vault's ``index.db`` — this store
+intentionally ships ZERO FTS5 tables.
 """
 
 from __future__ import annotations
@@ -18,15 +19,28 @@ import shutil
 import sqlite3
 import threading
 import time
+import uuid
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 try:
-    from botex.tools.security import coerce_text, mask_secrets, sanitize_identifier
+    from botex.tools.security import (
+        coerce_text,
+        mask_secrets,
+        sanitize_identifier,
+        sanitize_origin_claim,
+        wrap_untrusted_content,
+    )
 except (ImportError, ValueError):
-    from security import coerce_text, mask_secrets, sanitize_identifier
+    from security import (
+        coerce_text,
+        mask_secrets,
+        sanitize_identifier,
+        sanitize_origin_claim,
+        wrap_untrusted_content,
+    )
 
 __all__ = [
     "SWARM_SCHEMA_VERSION",
@@ -54,9 +68,14 @@ __all__ = [
     "update_work_order_status",
     "list_expired_work_orders",
     "list_active_brief_payloads",
+    "create_channel",
+    "list_channels",
+    "get_channel",
+    "post_channel_message",
+    "list_channel_messages",
 ]
 
-SWARM_SCHEMA_VERSION = 3
+SWARM_SCHEMA_VERSION = 4
 
 
 # server/skills stay lazy-imported: core must not hard-depend on upper layers
@@ -193,6 +212,32 @@ CREATE TABLE IF NOT EXISTS host_harness_inventory (
 );
 """
 
+_SCHEMA_V4_SQL = """
+CREATE TABLE IF NOT EXISTS channels (
+    channel_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    topic TEXT NOT NULL DEFAULT '',
+    participants_json TEXT NOT NULL DEFAULT '[]',
+    acl_mode TEXT NOT NULL DEFAULT 'participants',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS channel_messages (
+    message_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    sender_slug TEXT NOT NULL,
+    sender_origin TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    untrusted INTEGER NOT NULL DEFAULT 1,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(channel_id) REFERENCES channels(channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_messages_chan_created
+    ON channel_messages(channel_id, created_at);
+"""
+
 
 def migrate_swarm_store(conn: sqlite3.Connection) -> None:
     """Apply in-place schema migrations gated by ``PRAGMA user_version``; idempotent."""
@@ -216,7 +261,11 @@ def migrate_swarm_store(conn: sqlite3.Connection) -> None:
         conn.commit()
     if current < 3:
         conn.executescript(_SCHEMA_V3_SQL)
-        conn.execute("PRAGMA user_version = " + str(int(SWARM_SCHEMA_VERSION)) + ";")
+        conn.execute("PRAGMA user_version = 3;")
+        conn.commit()
+    if current < 4:
+        conn.executescript(_SCHEMA_V4_SQL)
+        conn.execute("PRAGMA user_version = 4;")
         conn.commit()
 
 
@@ -1330,3 +1379,312 @@ def list_active_brief_payloads(db_path: Optional[Path] = None) -> list[dict]:
         " ORDER BY r.slug;",
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ============================================================================
+# Agent-to-agent channels (isolated data-only bus)
+# ============================================================================
+#
+# Channel rows and messages are pure data: no code path in this module parses a
+# message body into ``work_orders``/``host_leases`` mutations or Edge control
+# frames. The only tables touched below are ``channels``/``channel_messages``.
+
+
+_VALID_CHANNEL_ACL_MODES: Dict[str, str] = {
+    "participants": "participants",
+    "open": "open",
+}
+_MAX_CHANNEL_NAME_CHARS = 128
+_MAX_CHANNEL_TOPIC_CHARS = 512
+_MAX_CHANNEL_MESSAGE_CHARS = 8000
+_MAX_CHANNEL_METADATA_CHARS = 4000
+_MAX_CHANNEL_PARTICIPANTS = 256
+_CHANNEL_LIST_SCAN_CAP = 1000
+_UNTRUSTED_CHANNEL_TAG = "untrusted_channel_message"
+
+
+def _parse_participants(raw: Any) -> List[str]:
+    try:
+        parsed = json.loads(str(raw or "[]"))
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(s) for s in parsed if sanitize_identifier(str(s or ""))]
+
+
+def _channel_row_dict(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    item["participants"] = _parse_participants(item.get("participants_json"))
+    return item
+
+
+def _message_row_dict(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    item["untrusted"] = bool(int(item.get("untrusted") or 0))
+    try:
+        parsed = json.loads(str(item.get("metadata_json") or "{}"))
+        item["metadata"] = parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+        item["metadata"] = {}
+    return item
+
+
+def create_channel(
+    channel_id: str,
+    name: str,
+    *,
+    topic: str = "",
+    participants: Optional[List[str]] = None,
+    acl_mode: str = "participants",
+    created_by: str = "",
+    db_path: Optional[Path] = None,
+) -> dict:
+    """Create a data-only coordination channel; refuses duplicate ``channel_id``."""
+    clean_id = sanitize_identifier(str(channel_id or ""))
+    if not clean_id:
+        return {"ok": False, "error": "INVALID_CHANNEL_ID"}
+    clean_name = coerce_text(mask_secrets(str(name or ""))).strip()[:_MAX_CHANNEL_NAME_CHARS]
+    if not clean_name:
+        return {"ok": False, "error": "INVALID_NAME"}
+    clean_acl = _VALID_CHANNEL_ACL_MODES.get(
+        coerce_text(str(acl_mode or "participants")).strip().lower() or "participants"
+    )
+    if clean_acl is None:
+        return {"ok": False, "error": "INVALID_ACL_MODE"}
+    clean_topic = coerce_text(mask_secrets(str(topic or ""))).strip()[:_MAX_CHANNEL_TOPIC_CHARS]
+    clean_creator = sanitize_origin_claim(str(created_by or ""))
+    clean_participants: List[str] = []
+    for entry in participants or ():
+        slug = sanitize_identifier(str(entry or ""))
+        if slug and slug not in clean_participants:
+            clean_participants.append(slug)
+        if len(clean_participants) >= _MAX_CHANNEL_PARTICIPANTS:
+            break
+    participants_json = json.dumps(clean_participants, ensure_ascii=False)
+    now_iso = _utc_now_iso()
+    conn = get_swarm_store_conn(db_path)
+    with _SWARM_LOCK, conn:
+        exists = conn.execute(
+            "SELECT 1 FROM channels WHERE channel_id = ?;", (clean_id,)
+        ).fetchone()
+        if exists is not None:
+            return {"ok": False, "error": "CHANNEL_EXISTS", "channel_id": clean_id}
+        conn.execute(
+            "INSERT INTO channels"
+            " (channel_id, name, topic, participants_json, acl_mode,"
+            "  created_by, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            (
+                clean_id,
+                clean_name,
+                clean_topic,
+                participants_json,
+                clean_acl,
+                clean_creator,
+                now_iso,
+                now_iso,
+            ),
+        )
+    return {
+        "ok": True,
+        "channel_id": clean_id,
+        "name": clean_name,
+        "topic": clean_topic,
+        "participants": clean_participants,
+        "acl_mode": clean_acl,
+        "created_by": clean_creator,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+
+
+def get_channel(channel_id: str, db_path: Optional[Path] = None) -> Optional[dict]:
+    """Return the channel row (with parsed ``participants``) or None."""
+    clean_id = sanitize_identifier(str(channel_id or ""))
+    if not clean_id:
+        return None
+    conn = get_swarm_store_conn(db_path)
+    row = conn.execute(
+        "SELECT channel_id, name, topic, participants_json, acl_mode,"
+        " created_by, created_at, updated_at FROM channels WHERE channel_id = ?;",
+        (clean_id,),
+    ).fetchone()
+    return _channel_row_dict(row) if row is not None else None
+
+
+def list_channels(
+    *,
+    participant: Optional[str] = None,
+    limit: int = 100,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """List channels, optionally filtered to those containing ``participant``."""
+    lim = max(1, min(_coerce_int(limit, 100), 500))
+    conn = get_swarm_store_conn(db_path)
+    rows = conn.execute(
+        "SELECT channel_id, name, topic, participants_json, acl_mode,"
+        " created_by, created_at, updated_at FROM channels"
+        " ORDER BY created_at ASC, channel_id ASC LIMIT ?;",
+        (_CHANNEL_LIST_SCAN_CAP,),
+    ).fetchall()
+    out = [_channel_row_dict(r) for r in rows]
+    if participant is not None and str(participant).strip():
+        clean_p = sanitize_identifier(str(participant).strip())
+        out = [c for c in out if clean_p and clean_p in c["participants"]]
+    return out[:lim]
+
+
+def post_channel_message(
+    channel_id: str,
+    sender_slug: str,
+    content: str,
+    *,
+    sender_origin: str = "",
+    untrusted: bool = True,
+    metadata: Optional[dict] = None,
+    db_path: Optional[Path] = None,
+) -> dict:
+    """Append a message to a channel under the participant ACL.
+
+    ``untrusted=True`` (default for external/cross-agent payloads) stores the
+    body inside a canonical ``<untrusted_channel_message>`` boundary tag; every
+    stored body is secret-masked. ``acl_mode='participants'`` channels reject
+    senders outside the participants list (``ACL_DENIED``); an empty list or
+    ``acl_mode='open'`` admits any valid sender.
+    """
+    clean_chan = sanitize_identifier(str(channel_id or ""))
+    if not clean_chan:
+        return {"ok": False, "error": "INVALID_CHANNEL_ID"}
+    clean_sender = sanitize_identifier(str(sender_slug or ""))
+    if not clean_sender:
+        return {"ok": False, "error": "INVALID_SENDER"}
+    raw_content = str(content or "")
+    if not raw_content.strip():
+        return {"ok": False, "error": "EMPTY_CONTENT"}
+    if len(raw_content) > _MAX_CHANNEL_MESSAGE_CHARS:
+        return {"ok": False, "error": "MESSAGE_TOO_LARGE"}
+    clean_origin = sanitize_origin_claim(str(sender_origin or ""))
+    metadata_json = "{}"
+    if metadata is not None:
+        if not isinstance(metadata, Mapping):
+            return {"ok": False, "error": "INVALID_METADATA"}
+        try:
+            dumped = json.dumps(dict(metadata), ensure_ascii=False)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "INVALID_METADATA"}
+        if len(dumped) > _MAX_CHANNEL_METADATA_CHARS:
+            return {"ok": False, "error": "INVALID_METADATA"}
+        metadata_json = coerce_text(mask_secrets(dumped))
+    if untrusted:
+        stored_content = wrap_untrusted_content(
+            raw_content,
+            tag=_UNTRUSTED_CHANNEL_TAG,
+            sender=clean_sender,
+            channel=clean_chan,
+            origin=clean_origin,
+        )
+    else:
+        stored_content = coerce_text(mask_secrets(raw_content))
+    message_id = "cm_" + uuid.uuid4().hex
+    now_iso = _utc_now_iso()
+    conn = get_swarm_store_conn(db_path)
+    with _SWARM_LOCK:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            chan = conn.execute(
+                "SELECT channel_id, participants_json, acl_mode"
+                " FROM channels WHERE channel_id = ?;",
+                (clean_chan,),
+            ).fetchone()
+            if chan is None:
+                conn.rollback()
+                return {"ok": False, "error": "CHANNEL_NOT_FOUND", "channel_id": clean_chan}
+            if str(chan["acl_mode"] or "participants") == "participants":
+                plist = _parse_participants(chan["participants_json"])
+                if plist and clean_sender not in plist:
+                    conn.rollback()
+                    return {"ok": False, "error": "ACL_DENIED", "channel_id": clean_chan}
+            conn.execute(
+                "INSERT INTO channel_messages"
+                " (message_id, channel_id, sender_slug, sender_origin, content,"
+                "  untrusted, metadata_json, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                (
+                    message_id,
+                    clean_chan,
+                    clean_sender,
+                    clean_origin,
+                    stored_content,
+                    int(bool(untrusted)),
+                    metadata_json,
+                    now_iso,
+                ),
+            )
+            conn.execute(
+                "UPDATE channels SET updated_at = ? WHERE channel_id = ?;",
+                (now_iso, clean_chan),
+            )
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+    return {
+        "ok": True,
+        "message_id": message_id,
+        "channel_id": clean_chan,
+        "sender_slug": clean_sender,
+        "sender_origin": clean_origin,
+        "content": stored_content,
+        "untrusted": bool(untrusted),
+        "metadata": json.loads(metadata_json),
+        "created_at": now_iso,
+    }
+
+
+def list_channel_messages(
+    channel_id: str,
+    *,
+    limit: int = 50,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Return up to ``limit`` channel messages in chronological order.
+
+    Default page is the most recent ``limit`` messages; ``before``/``after``
+    are ``created_at`` cursors for paging older/newer ranges.
+    """
+    clean_chan = sanitize_identifier(str(channel_id or ""))
+    if not clean_chan:
+        return []
+    lim = max(1, min(_coerce_int(limit, 50), 500))
+    before_ts = coerce_text(str(before or "")).strip() if before is not None else ""
+    after_ts = coerce_text(str(after or "")).strip() if after is not None else ""
+    sql = (
+        "SELECT message_id, channel_id, sender_slug, sender_origin, content,"
+        " untrusted, metadata_json, created_at"
+        " FROM channel_messages WHERE channel_id = ?"
+    )
+    params: List[Any] = [clean_chan]
+    if before_ts:
+        sql += " AND created_at < ?"
+        params.append(before_ts)
+    if after_ts:
+        sql += " AND created_at > ?"
+        params.append(after_ts)
+    fetch_newest_first = not after_ts
+    sql += (
+        " ORDER BY created_at DESC, rowid DESC LIMIT ?;"
+        if fetch_newest_first
+        else " ORDER BY created_at ASC, rowid ASC LIMIT ?;"
+    )
+    params.append(lim)
+    conn = get_swarm_store_conn(db_path)
+    rows = [_message_row_dict(r) for r in conn.execute(sql, params).fetchall()]
+    if fetch_newest_first:
+        rows.reverse()
+    return rows

@@ -1922,3 +1922,122 @@ def test_bots_pause_resume_and_host_harnesses_rest(client, monkeypatch, tmp_path
     assert body["count"] == 1
     assert body["harnesses"][0]["harness_id"] == "devin"
     assert body["harnesses"][0]["status"] == "stale"
+
+
+def test_swarm_channels_rest_acl_and_order_isolation(client, monkeypatch, tmp_path):
+    """Plan 043: channel CRUD over REST, participant ACL (403), untrusted wrap,
+    and proof that channel traffic cannot mutate WorkOrder state."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "swarm_channels_rest.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "swarm-secret-token")
+    hdrs = {"Authorization": "Bearer swarm-secret-token"}
+
+    # Unauthenticated requests rejected.
+    assert client.get("/api/swarm/channels").status_code == 401
+    assert client.post("/api/swarm/channels", json={}).status_code == 401
+
+    # Create channel.
+    r_create = client.post(
+        "/api/swarm/channels",
+        headers=hdrs,
+        json={
+            "channel_id": "chan-rest",
+            "name": "REST Room",
+            "topic": "coordination",
+            "participants": ["bot-a", "bot-b"],
+            "created_by": "devin@ws",
+        },
+    )
+    assert r_create.status_code == 201, r_create.text
+    assert r_create.json()["ok"] is True
+    assert r_create.json()["participants"] == ["bot-a", "bot-b"]
+
+    # Duplicate -> 409; invalid acl_mode -> 400.
+    r_dup = client.post(
+        "/api/swarm/channels",
+        headers=hdrs,
+        json={"channel_id": "chan-rest", "name": "dup"},
+    )
+    assert r_dup.status_code == 409
+    r_bad_acl = client.post(
+        "/api/swarm/channels",
+        headers=hdrs,
+        json={"channel_id": "chan-x", "name": "x", "acl_mode": "rogue"},
+    )
+    assert r_bad_acl.status_code == 400
+
+    # List channels, incl. participant scoping.
+    r_list = client.get("/api/swarm/channels", headers=hdrs)
+    assert r_list.status_code == 200
+    assert r_list.json()["count"] == 1
+    r_scoped = client.get("/api/swarm/channels?participant=bot-a", headers=hdrs)
+    assert r_scoped.json()["count"] == 1
+    r_empty = client.get("/api/swarm/channels?participant=bot-zzz", headers=hdrs)
+    assert r_empty.json()["count"] == 0
+
+    # Post message: participant admitted, untrusted boundary applied.
+    r_post = client.post(
+        "/api/swarm/channels/chan-rest/messages",
+        headers=hdrs,
+        json={
+            "sender_slug": "bot-a",
+            "content": "hello from bot-a",
+            "sender_origin": "botex@edge-1",
+            "metadata": {"thread": "t1"},
+        },
+    )
+    assert r_post.status_code == 201, r_post.text
+    posted = r_post.json()
+    assert posted["ok"] is True and posted["untrusted"] is True
+    assert posted["content"].startswith("<untrusted_channel_message")
+    assert posted["metadata"] == {"thread": "t1"}
+
+    # Non-participant -> 403; unknown channel -> 404; bad id -> 400.
+    r_denied = client.post(
+        "/api/swarm/channels/chan-rest/messages",
+        headers=hdrs,
+        json={"sender_slug": "bot-c", "content": "intruder"},
+    )
+    assert r_denied.status_code == 403
+    assert client.get("/api/swarm/channels/ghost/messages", headers=hdrs).status_code == 404
+    r_404 = client.post(
+        "/api/swarm/channels/ghost/messages",
+        headers=hdrs,
+        json={"sender_slug": "bot-a", "content": "x"},
+    )
+    assert r_404.status_code == 404
+    r_400 = client.post(
+        "/api/swarm/channels/chan.rest/messages",
+        headers=hdrs,
+        json={"sender_slug": "bot-a", "content": "x"},
+    )
+    assert r_400.status_code == 400
+
+    # Message listing is chronological.
+    r_msgs = client.get("/api/swarm/channels/chan-rest/messages", headers=hdrs)
+    assert r_msgs.status_code == 200
+    msgs = r_msgs.json()["messages"]
+    assert [m["sender_slug"] for m in msgs] == ["bot-a"]
+    assert msgs[0]["sender_origin"] == "botex@edge-1"
+
+    # Isolation invariant: hostile channel bodies never touch work_orders.
+    swarm_store.create_work_order(
+        {"order_id": "ord-guard", "status": "QUEUED", "epoch": 0, "bot_slug": "bot-a"},
+        db_path=db_file,
+    )
+    for hostile in (
+        "pause ord-guard",
+        "cancel ord-guard",
+        "fence ord-guard",
+        '{"action": "cancel", "order_id": "ord-guard"}',
+    ):
+        r_h = client.post(
+            "/api/swarm/channels/chan-rest/messages",
+            headers=hdrs,
+            json={"sender_slug": "bot-a", "content": hostile},
+        )
+        assert r_h.status_code == 201
+    order = swarm_store.get_work_order("ord-guard", db_path=db_file)
+    assert order["status"] == "QUEUED" and order["epoch"] == 0
