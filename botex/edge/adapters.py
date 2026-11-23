@@ -18,13 +18,18 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import ipaddress
 import logging
+import math
 import os
 import re
+import shutil
 import subprocess
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
+from urllib.parse import urlsplit
 
 try:
     from botex.tools.security import coerce_text, mask_secrets, sanitize_identifier
@@ -35,12 +40,14 @@ _LOG = logging.getLogger("botex.edge.adapters")
 
 __all__ = [
     "ANTIGRAVITY_EXCLUSION_REASON",
+    "DEFAULT_DISCOVERY_CLI_ALLOWLIST",
     "HARNESS_MODE_MAP",
     "RESTRICTIVENESS_RANK",
     "SUPPORTED_HARNESSES",
     "EpochCheckpointManager",
     "build_anti_spiral_reset",
     "check_harness_eligible",
+    "discover_local_harnesses",
     "finalize_verified_work_order",
     "translate_work_order",
 ]
@@ -176,6 +183,222 @@ def _is_excluded_harness(norm: str) -> bool:
         or norm.startswith("antigravity_")
         or norm.replace("_", "").startswith("antigravityls")
     )
+
+
+# ---------------------------------------------------------------------------
+# Bounded local harness discovery (Plan 042)
+# ---------------------------------------------------------------------------
+
+# CLI presence is resolved off-thread via shutil.which against bare,
+# allowlisted executable names only; ACP endpoints get loopback-restricted
+# TCP reachability probes. Records never carry filesystem paths or endpoint
+# hosts, keeping inventory frames safe to forward to BoteX Cloud.
+DEFAULT_DISCOVERY_CLI_ALLOWLIST: Dict[str, str] = {
+    "aider": "aider",
+    "botex": "botex",
+    "claude": "claude",
+    "codex": "codex",
+    "devin": "devin",
+    "zcode": "zcode",
+}
+
+_ACP_DEFAULT_PORTS: Dict[str, Optional[int]] = {"http": 80, "https": 443, "tcp": None}
+# Grace on top of the caller's per-probe budget so the outer bound only fires
+# on genuine overruns (thread scheduling, loop starvation), never racing the
+# individually wait_for-bounded probes.
+_DISCOVERY_OUTER_GRACE_S = 0.25
+
+
+def _is_bare_cli_name(name: str) -> bool:
+    # shutil.which() treats separator-containing names as literal paths, so
+    # only bare names may enter the probe set.
+    return (
+        bool(name)
+        and "/" not in name
+        and "\\" not in name
+        and ":" not in name
+        and name not in (".", "..")
+    )
+
+
+def _resolve_cli_availability(cli_names: List[str]) -> Dict[str, bool]:
+    # Executed inside asyncio.to_thread; only booleans come back so resolved
+    # executable paths never leave the probe thread.
+    return {name: (shutil.which(name) is not None) for name in cli_names}
+
+
+def _parse_loopback_endpoint(endpoint: str) -> tuple[Optional[str], Optional[str], Optional[int]]:
+    """Parse an ACP endpoint into ``(scheme, host, port)``; ``host`` is None
+    for non-loopback or otherwise non-probeable targets."""
+    raw = coerce_text(endpoint).strip()
+    if not raw:
+        return None, None, None
+    parsed = urlsplit(raw if "://" in raw else f"tcp://{raw}")
+    scheme = (parsed.scheme or "tcp").lower()
+    if scheme not in _ACP_DEFAULT_PORTS:
+        return scheme, None, None
+    try:
+        port = parsed.port
+    except ValueError:
+        return scheme, None, None
+    host = parsed.hostname or ""
+    if not host:
+        return scheme, None, None
+    loopback = host == "localhost"
+    if not loopback:
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            # Non-literal hosts are refused rather than resolved: a DNS lookup
+            # could block and would turn the edge bridge into a network scanner.
+            loopback = False
+    if not loopback:
+        return scheme, None, None
+    resolved_port = port if port is not None else _ACP_DEFAULT_PORTS[scheme]
+    return scheme, host, resolved_port
+
+
+async def _probe_acp_endpoint(endpoint: str, timeout_s: float) -> tuple[str, Dict[str, Any]]:
+    """Loopback-only TCP reachability probe; never reads endpoint responses."""
+    scheme, host, port = _parse_loopback_endpoint(endpoint)
+    capabilities: Dict[str, Any] = {"probe": "tcp"}
+    if scheme is not None:
+        capabilities["scheme"] = scheme
+    if scheme is None:
+        capabilities["reason"] = "empty-endpoint"
+        return "degraded", capabilities
+    if host is None:
+        capabilities["reason"] = "unsupported-or-non-loopback-endpoint"
+        return "degraded", capabilities
+    if not port or port <= 0:
+        capabilities["reason"] = "missing-or-invalid-port"
+        return "degraded", capabilities
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, int(port)), timeout=timeout_s
+        )
+    except TimeoutError:
+        capabilities["reason"] = "connect-timeout"
+        return "degraded", capabilities
+    except (ConnectionRefusedError, OSError):
+        return "offline", capabilities
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout=timeout_s)
+    except (TimeoutError, OSError):
+        pass
+    return "online", capabilities
+
+
+async def _gather_discovery_probes(
+    cli_names: List[str],
+    endpoint_map: Dict[str, str],
+    timeout_s: float,
+) -> tuple[Dict[str, bool], List[tuple[str, Dict[str, Any]]]]:
+    cli_available, *endpoint_results = await asyncio.gather(
+        asyncio.wait_for(
+            asyncio.to_thread(_resolve_cli_availability, cli_names), timeout=timeout_s
+        ),
+        *(_probe_acp_endpoint(endpoint, timeout_s) for endpoint in endpoint_map.values()),
+    )
+    return cli_available, endpoint_results
+
+
+async def discover_local_harnesses(
+    *,
+    acp_endpoints: Optional[Dict[str, str]] = None,
+    allowlisted_clis: Optional[Dict[str, str]] = None,
+    timeout_s: float = 1.5,
+) -> List[Dict[str, Any]]:
+    """Probe local harness availability without blocking the event loop.
+
+    Returns one record per probe target with the exact keys
+    ``harness_id``/``transport``/``status``/``last_seen``/``capabilities``;
+    the whole pass is bounded by ``timeout_s`` (plus a small scheduling
+    grace) and records never contain filesystem paths or endpoint hosts.
+    """
+    cli_map: Dict[str, str] = dict(
+        DEFAULT_DISCOVERY_CLI_ALLOWLIST if allowlisted_clis is None else allowlisted_clis
+    )
+    endpoint_map: Dict[str, str] = {}
+    for raw_id, endpoint in (acp_endpoints or {}).items():
+        endpoint_map[_normalize_harness_name(raw_id)] = coerce_text(endpoint)
+    try:
+        timeout = float(timeout_s)
+    except (TypeError, ValueError):
+        timeout = 1.5
+    if math.isnan(timeout) or timeout <= 0:
+        timeout = 1.5
+
+    cli_available: Dict[str, bool] = {}
+    endpoint_results: List[tuple[str, Dict[str, Any]]] = []
+    if cli_map or endpoint_map:
+        probe_names = sorted(
+            {
+                name
+                for name in (coerce_text(value) for value in cli_map.values())
+                if _is_bare_cli_name(name)
+            }
+        )
+        try:
+            cli_available, endpoint_results = await asyncio.wait_for(
+                _gather_discovery_probes(probe_names, endpoint_map, timeout),
+                timeout=timeout + _DISCOVERY_OUTER_GRACE_S,
+            )
+        except TimeoutError:
+            cli_available, endpoint_results = {}, []
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    records: List[Dict[str, Any]] = []
+
+    def _harness_id(raw: Any) -> str:
+        norm = _normalize_harness_name(raw)
+        return sanitize_identifier(norm) or norm
+
+    for raw_id, cli_name in cli_map.items():
+        harness_id = _harness_id(raw_id)
+        if not harness_id:
+            continue
+        cli_name_clean = coerce_text(cli_name)
+        found: Optional[bool] = cli_available.get(cli_name_clean)
+        if not _is_bare_cli_name(cli_name_clean):
+            found = None
+        records.append(
+            {
+                "harness_id": harness_id,
+                "transport": "cli",
+                "status": "online" if found else ("offline" if found is False else "degraded"),
+                "last_seen": observed_at,
+                "capabilities": {
+                    "available": found is True,
+                    "probe": "which",
+                    "cli": cli_name_clean,
+                },
+            }
+        )
+
+    for idx, (raw_id, _endpoint) in enumerate(endpoint_map.items()):
+        harness_id = _harness_id(raw_id)
+        if not harness_id:
+            continue
+        if idx < len(endpoint_results):
+            status, probe_capabilities = endpoint_results[idx]
+        else:
+            status, probe_capabilities = "degraded", {"probe": "tcp"}
+        capabilities = dict(probe_capabilities)
+        capabilities["available"] = status == "online"
+        records.append(
+            {
+                "harness_id": harness_id,
+                "transport": "acp",
+                "status": status,
+                "last_seen": observed_at,
+                "capabilities": capabilities,
+            }
+        )
+
+    records.sort(key=lambda record: (record["harness_id"], record["transport"]))
+    return records
 
 
 # ---------------------------------------------------------------------------

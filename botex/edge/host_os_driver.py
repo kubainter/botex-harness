@@ -28,6 +28,9 @@ __all__ = [
     "WindowsJobGuard",
     "HostOSDriver",
     "kill_posix_process_group",
+    "cancel_process_tree",
+    "pause_process_tree",
+    "resume_process_tree",
     "prepare_epoch_worktree",
     "fence_local_epoch",
     "check_runtime_blocklist",
@@ -38,6 +41,7 @@ _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
+_PROCESS_SUSPEND_RESUME = 0x0800
 
 
 def default_swarm_home() -> Path:
@@ -203,13 +207,25 @@ if sys.platform == "win32":
         k32.AssignProcessToJobObject.restype = wintypes.BOOL
         k32.TerminateJobObject.argtypes = [ctypes.c_void_p, wintypes.UINT]
         k32.TerminateJobObject.restype = wintypes.BOOL
+        k32.TerminateProcess.argtypes = [ctypes.c_void_p, wintypes.UINT]
+        k32.TerminateProcess.restype = wintypes.BOOL
         k32.CloseHandle.argtypes = [ctypes.c_void_p]
         k32.CloseHandle.restype = wintypes.BOOL
         return k32
 
+    def _build_ntdll() -> Any:
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtSuspendProcess.argtypes = [ctypes.c_void_p]
+        ntdll.NtSuspendProcess.restype = ctypes.c_long
+        ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+        ntdll.NtResumeProcess.restype = ctypes.c_long
+        return ntdll
+
     _KERNEL32: Any = _build_kernel32()
+    _NTDLL: Any = _build_ntdll()
 else:
     _KERNEL32 = None
+    _NTDLL = None
 
 
 def kill_posix_process_group(pgid: int, sig: Optional[int] = None) -> bool:
@@ -380,6 +396,296 @@ class WindowsJobGuard:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if not self._closed:
             self.kill_all()
+
+
+# ============================================================================
+# Typed process-tree control (pause / resume / cancel)
+# ============================================================================
+
+
+def _coerce_target_pid(pid: Any) -> tuple[Optional[int], str]:
+    """Normalize a control target pid; returns ``(pid, "")`` or ``(None, refusal reason)``."""
+    if isinstance(pid, bool):
+        return None, f"invalid pid: {pid!r}"
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return None, f"invalid pid: {pid!r}"
+    if pid_int <= 0:
+        return None, f"invalid pid: {pid_int}"
+    if pid_int == os.getpid():
+        return None, f"refusing supervisor self-pid {pid_int}"
+    return pid_int, ""
+
+
+def _process_control_refusal(action: str, pid: Any, reason: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"ok": False, "action": action, "pid": pid, "detail": reason}
+    if action != "cancel":
+        result["affected_pids"] = []
+    return result
+
+
+def _process_tree_targets(pid: int, job_guard: Optional[WindowsJobGuard]) -> list[int]:
+    if job_guard is not None and pid in job_guard.assigned_pids:
+        targets = list(job_guard.assigned_pids)
+        if pid not in targets:
+            targets.append(pid)
+        return targets
+    return [pid]
+
+
+def _win_suspend_resume_process(pid: int, *, suspend: bool) -> Optional[str]:
+    """Suspend/resume one process via ``NtSuspend``/``NtResume``Process; returns error detail or None."""
+    if _KERNEL32 is None or _NTDLL is None:
+        return "NtSuspendProcess/NtResumeProcess unavailable on this platform"
+    handle = _KERNEL32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
+    if not handle:
+        return f"OpenProcess({pid}) failed with Win32 error {ctypes.get_last_error()}"
+    try:
+        if suspend:
+            status = int(_NTDLL.NtSuspendProcess(handle))
+            name = "NtSuspendProcess"
+        else:
+            status = int(_NTDLL.NtResumeProcess(handle))
+            name = "NtResumeProcess"
+        if status < 0:
+            return f"{name}({pid}) failed with NTSTATUS {status & 0xFFFFFFFF:#010x}"
+        return None
+    finally:
+        _KERNEL32.CloseHandle(handle)
+
+
+def _win_terminate_process(pid: int, exit_code: int) -> Optional[str]:
+    """Terminate one process via TerminateProcess; returns error detail or None."""
+    if _KERNEL32 is None:
+        return "TerminateProcess unavailable on this platform"
+    handle = _KERNEL32.OpenProcess(_PROCESS_TERMINATE, False, pid)
+    if not handle:
+        return f"OpenProcess({pid}) failed with Win32 error {ctypes.get_last_error()}"
+    try:
+        if not _KERNEL32.TerminateProcess(handle, int(exit_code)):
+            return f"TerminateProcess({pid}) failed with Win32 error {ctypes.get_last_error()}"
+        return None
+    finally:
+        _KERNEL32.CloseHandle(handle)
+
+
+def _signal_posix_tree(pid: int, sig: int) -> tuple[bool, str, bool]:
+    """Send ``sig`` to the process group of ``pid``; never signals the supervisor's
+    own group (degrades to a single-pid signal instead).
+    Returns ``(ok, detail, single_pid_only)``."""
+    killpg_fn = getattr(os, "killpg", None)
+    getpgid_fn = getattr(os, "getpgid", None)
+    if not callable(killpg_fn) or not callable(getpgid_fn):
+        return False, "process groups unavailable on this platform", True
+    try:
+        pgid = int(getpgid_fn(pid))
+    except ProcessLookupError:
+        return False, f"process {pid} not found", True
+    except OSError as exc:
+        return False, coerce_text(mask_secrets(f"getpgid failed: {exc}")), True
+    getpgrp_fn = getattr(os, "getpgrp", None)
+    if callable(getpgrp_fn) and pgid == int(getpgrp_fn()):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return False, f"process {pid} not found", True
+        except OSError as exc:
+            return False, coerce_text(mask_secrets(f"os.kill failed: {exc}")), True
+        return (
+            True,
+            f"target shares the supervisor process group; sent signal {int(sig)} to pid {pid} only",
+            True,
+        )
+    try:
+        killpg_fn(pgid, sig)
+    except ProcessLookupError:
+        return False, f"process group {pgid} not found", True
+    except OSError as exc:
+        return False, coerce_text(mask_secrets(f"killpg failed: {exc}")), True
+    return True, f"sent signal {int(sig)} to process group {pgid}", False
+
+
+def pause_process_tree(pid: int, *, job_guard: Optional[WindowsJobGuard] = None) -> dict[str, Any]:
+    """Suspend a harness process tree: POSIX SIGSTOP on the process group,
+    Win32 ``NtSuspendProcess`` on guard-tracked PIDs."""
+    pid_int, refusal = _coerce_target_pid(pid)
+    if pid_int is None:
+        return _process_control_refusal("pause", pid, refusal)
+    targets = _process_tree_targets(pid_int, job_guard)
+    if callable(getattr(os, "killpg", None)) and callable(getattr(os, "getpgid", None)):
+        sig = getattr(signal, "SIGSTOP", None)
+        if sig is None:
+            return {
+                "ok": False,
+                "action": "pause",
+                "pid": pid_int,
+                "affected_pids": [],
+                "detail": "SIGSTOP unavailable on this platform",
+            }
+        ok, detail, single_pid = _signal_posix_tree(pid_int, int(sig))
+        return {
+            "ok": ok,
+            "action": "pause",
+            "pid": pid_int,
+            "affected_pids": [pid_int] if single_pid else targets,
+            "detail": detail,
+        }
+    if _KERNEL32 is not None and _NTDLL is not None:
+        affected: list[int] = []
+        errors: list[str] = []
+        for target in targets:
+            error = _win_suspend_resume_process(target, suspend=True)
+            if error is None:
+                affected.append(target)
+            else:
+                errors.append(error)
+        ok = pid_int in affected
+        if ok and not errors:
+            detail = f"suspended {len(affected)} process(es) via NtSuspendProcess"
+        else:
+            detail = "; ".join(errors) or "pause failed"
+        return {
+            "ok": ok,
+            "action": "pause",
+            "pid": pid_int,
+            "affected_pids": affected,
+            "detail": detail,
+        }
+    return {
+        "ok": False,
+        "action": "pause",
+        "pid": pid_int,
+        "affected_pids": [],
+        "detail": "no process-tree pause mechanism available on this platform",
+    }
+
+
+def resume_process_tree(pid: int, *, job_guard: Optional[WindowsJobGuard] = None) -> dict[str, Any]:
+    """Resume a suspended harness process tree: POSIX SIGCONT on the process
+    group, Win32 ``NtResumeProcess`` on guard-tracked PIDs."""
+    pid_int, refusal = _coerce_target_pid(pid)
+    if pid_int is None:
+        return _process_control_refusal("resume", pid, refusal)
+    targets = _process_tree_targets(pid_int, job_guard)
+    if callable(getattr(os, "killpg", None)) and callable(getattr(os, "getpgid", None)):
+        sig = getattr(signal, "SIGCONT", None)
+        if sig is None:
+            return {
+                "ok": False,
+                "action": "resume",
+                "pid": pid_int,
+                "affected_pids": [],
+                "detail": "SIGCONT unavailable on this platform",
+            }
+        ok, detail, single_pid = _signal_posix_tree(pid_int, int(sig))
+        return {
+            "ok": ok,
+            "action": "resume",
+            "pid": pid_int,
+            "affected_pids": [pid_int] if single_pid else targets,
+            "detail": detail,
+        }
+    if _KERNEL32 is not None and _NTDLL is not None:
+        affected: list[int] = []
+        errors: list[str] = []
+        for target in targets:
+            error = _win_suspend_resume_process(target, suspend=False)
+            if error is None:
+                affected.append(target)
+            else:
+                errors.append(error)
+        ok = pid_int in affected
+        if ok and not errors:
+            detail = f"resumed {len(affected)} process(es) via NtResumeProcess"
+        else:
+            detail = "; ".join(errors) or "resume failed"
+        return {
+            "ok": ok,
+            "action": "resume",
+            "pid": pid_int,
+            "affected_pids": affected,
+            "detail": detail,
+        }
+    return {
+        "ok": False,
+        "action": "resume",
+        "pid": pid_int,
+        "affected_pids": [],
+        "detail": "no process-tree resume mechanism available on this platform",
+    }
+
+
+def cancel_process_tree(
+    pid: int,
+    *,
+    job_guard: Optional[WindowsJobGuard] = None,
+    exit_code: int = 1,
+) -> dict[str, Any]:
+    """Cancel a harness process tree via ``WindowsJobGuard.kill_all``, POSIX
+    process-group termination, or a safe single-process TerminateProcess."""
+    pid_int, refusal = _coerce_target_pid(pid)
+    if pid_int is None:
+        return _process_control_refusal("cancel", pid, refusal)
+    try:
+        code = int(exit_code)
+    except (TypeError, ValueError):
+        code = 1
+    details: list[str] = []
+    ok = False
+    if job_guard is not None and (
+        pid_int in job_guard.assigned_pids or not job_guard.assigned_pids
+    ):
+        summary = job_guard.kill_all(exit_code=code)
+        ok = bool(summary.get("ok"))
+        if summary.get("terminated_win_job"):
+            details.append("terminated win job object")
+        pgids = summary.get("killed_pgids") or []
+        if pgids:
+            details.append(f"killed posix groups {pgids}")
+        kill_errors = summary.get("kill_errors") or []
+        if kill_errors:
+            details.append("guard kill errors: " + "; ".join(kill_errors))
+        callback_errors = summary.get("callback_errors") or []
+        if callback_errors:
+            details.append("guard callback errors: " + "; ".join(callback_errors))
+    elif job_guard is not None:
+        details.append(
+            f"pid {pid_int} not tracked by provided job_guard; falling back to direct termination"
+        )
+    if not ok:
+        killpg_fn = getattr(os, "killpg", None)
+        getpgid_fn = getattr(os, "getpgid", None)
+        if callable(killpg_fn) and callable(getpgid_fn):
+            try:
+                pgid = int(getpgid_fn(pid_int))
+                same_group = False
+                getpgrp_fn = getattr(os, "getpgrp", None)
+                if callable(getpgrp_fn):
+                    same_group = pgid == int(getpgrp_fn())
+                sig = int(getattr(signal, "SIGKILL", signal.SIGTERM))
+                if same_group:
+                    os.kill(pid_int, sig)
+                    details.append(f"sent signal {sig} to pid {pid_int}")
+                else:
+                    killpg_fn(pgid, sig)
+                    details.append(f"sent signal {sig} to process group {pgid}")
+                ok = True
+            except ProcessLookupError:
+                ok = True
+                details.append(f"process {pid_int} already gone")
+            except OSError as exc:
+                details.append(coerce_text(mask_secrets(f"posix termination failed: {exc}")))
+        elif _KERNEL32 is not None:
+            error = _win_terminate_process(pid_int, code)
+            if error is None:
+                ok = True
+                details.append(f"terminated pid {pid_int} via TerminateProcess")
+            else:
+                details.append(error)
+        else:
+            details.append("no process-tree termination mechanism available on this platform")
+    return {"ok": ok, "action": "cancel", "pid": pid_int, "detail": "; ".join(details)}
 
 
 # ============================================================================
@@ -873,3 +1179,28 @@ class HostOSDriver:
             wt_path,
             job_guard=job_guard,
         )
+
+    def pause_process_tree(
+        self,
+        pid: int,
+        *,
+        job_guard: Optional[WindowsJobGuard] = None,
+    ) -> dict[str, Any]:
+        return pause_process_tree(pid, job_guard=job_guard)
+
+    def resume_process_tree(
+        self,
+        pid: int,
+        *,
+        job_guard: Optional[WindowsJobGuard] = None,
+    ) -> dict[str, Any]:
+        return resume_process_tree(pid, job_guard=job_guard)
+
+    def cancel_process_tree(
+        self,
+        pid: int,
+        *,
+        job_guard: Optional[WindowsJobGuard] = None,
+        exit_code: int = 1,
+    ) -> dict[str, Any]:
+        return cancel_process_tree(pid, job_guard=job_guard, exit_code=exit_code)

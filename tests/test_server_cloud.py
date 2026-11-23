@@ -1784,3 +1784,141 @@ def test_streamable_http_mcp_initialize(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert "serverInfo" in resp.text
+
+
+def test_swarm_orders_rest_crud_pause_resume_cancel_and_lease_freeze(client, monkeypatch, tmp_path):
+    """Plan 041: WorkOrder REST lifecycle, auth, CAS/illegal transitions, and PAUSED lease-freeze."""
+    from botex.core import swarm_store
+    from botex.server import server_cloud
+
+    db_file = tmp_path / "swarm_orders_rest.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "swarm-secret-token")
+    hdrs = {"Authorization": "Bearer swarm-secret-token"}
+
+    # Unauthenticated request rejected
+    assert client.get("/api/swarm/orders").status_code == 401
+
+    # Register bot so lease sweep can be tested
+    swarm_store.register_bot("bot-alpha", "coding", "Alpha bot", db_path=db_file)
+
+    # Create order in RUNNING state
+    r_create = client.post(
+        "/api/swarm/orders",
+        headers=hdrs,
+        json={
+            "order_id": "ord-rest-1",
+            "bot_slug": "bot-alpha",
+            "status": "RUNNING",
+            "host_id": "host-1",
+        },
+    )
+    assert r_create.status_code == 201, r_create.text
+    assert r_create.json()["ok"] is True
+
+    # Duplicate rejected with 409
+    r_dup = client.post(
+        "/api/swarm/orders",
+        headers=hdrs,
+        json={"order_id": "ord-rest-1", "bot_slug": "bot-alpha", "status": "RUNNING"},
+    )
+    assert r_dup.status_code == 409
+
+    # List & Get
+    r_list = client.get("/api/swarm/orders?status=RUNNING", headers=hdrs)
+    assert r_list.status_code == 200
+    assert r_list.json()["count"] == 1
+    r_get = client.get("/api/swarm/orders/ord-rest-1", headers=hdrs)
+    assert r_get.status_code == 200
+    assert r_get.json()["order"]["status"] == "RUNNING"
+
+    # Pause -> PAUSED
+    r_pause = client.post(
+        "/api/swarm/orders/ord-rest-1/pause",
+        headers=hdrs,
+        json={"reason": "operator_break"},
+    )
+    assert r_pause.status_code == 200, r_pause.text
+    assert r_pause.json()["status"] == "PAUSED"
+    paused_epoch = r_pause.json()["epoch"]
+
+    # Expired host lease must NOT auto-fence PAUSED order
+    swarm_store.upsert_host_lease(
+        "bot-alpha", "host-1", "repo/a", "working", fencing_token=1, ttl_s=1, db_path=db_file
+    )
+    failovers = server_cloud._sweep_expired_host_leases_sync(
+        now=9_999_999_999.0, candidate_hosts=["host-2"], db_path=db_file
+    )
+    assert failovers == []
+    assert swarm_store.get_work_order("ord-rest-1", db_path=db_file)["status"] == "PAUSED"
+
+    # Stale fencing_epoch rejected with 409
+    r_stale = client.post(
+        "/api/swarm/orders/ord-rest-1/resume",
+        headers=hdrs,
+        json={"fencing_epoch": paused_epoch - 1},
+    )
+    assert r_stale.status_code == 409
+
+    # Resume -> RUNNING
+    r_resume = client.post(
+        "/api/swarm/orders/ord-rest-1/resume",
+        headers=hdrs,
+        json={"fencing_epoch": paused_epoch},
+    )
+    assert r_resume.status_code == 200
+    assert r_resume.json()["status"] == "RUNNING"
+
+    # Cancel -> CANCELLED (terminal)
+    r_cancel = client.post(
+        "/api/swarm/orders/ord-rest-1/cancel",
+        headers=hdrs,
+        json={"reason": "done_early"},
+    )
+    assert r_cancel.status_code == 200
+    assert r_cancel.json()["status"] == "CANCELLED"
+
+    # Further transitions from CANCELLED rejected with 409
+    r_after = client.post("/api/swarm/orders/ord-rest-1/resume", headers=hdrs, json={})
+    assert r_after.status_code == 409
+
+
+def test_bots_pause_resume_and_host_harnesses_rest(client, monkeypatch, tmp_path):
+    """Plan 041: /api/bots/{slug}/pause|resume and /api/edge/hosts/{host_id}/harnesses."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "swarm_bots_harnesses.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "swarm-secret-token")
+    hdrs = {"Authorization": "Bearer swarm-secret-token"}
+
+    swarm_store.register_bot("bot-beta", "ops", "Beta bot", db_path=db_file)
+    assert client.post("/api/bots/unknown-bot/pause", headers=hdrs).status_code == 404
+
+    r_p = client.post("/api/bots/bot-beta/pause", headers=hdrs)
+    assert r_p.status_code == 200
+    assert r_p.json()["status"] == "paused"
+
+    r_r = client.post("/api/bots/bot-beta/resume", headers=hdrs)
+    assert r_r.status_code == 200
+    assert r_r.json()["status"] == "active"
+
+    swarm_store.upsert_host_harnesses(
+        "edge-host-9",
+        [
+            {
+                "harness_id": "devin",
+                "transport": "acp",
+                "status": "online",
+                "capabilities": {"available": True},
+            }
+        ],
+        last_seen="2020-01-01T00:00:00+00:00",
+        db_path=db_file,
+    )
+    r_h = client.get("/api/edge/hosts/edge-host-9/harnesses?stale_after_s=60", headers=hdrs)
+    assert r_h.status_code == 200
+    body = r_h.json()
+    assert body["count"] == 1
+    assert body["harnesses"][0]["harness_id"] == "devin"
+    assert body["harnesses"][0]["status"] == "stale"

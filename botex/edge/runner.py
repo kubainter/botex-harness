@@ -39,6 +39,7 @@ import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -121,6 +122,23 @@ _IDEM_TTL_S = 600.0
 QOS_PRIORITY_CONTROL = 0
 QOS_PRIORITY_DATA = 1
 
+TYPED_CONTROL_FRAME_TYPES = frozenset(
+    {
+        "harness_pause",
+        "harness_resume",
+        "harness_cancel_task",
+    }
+)
+
+LOOPBACK_CONTROL_ALLOWLIST = frozenset(
+    {
+        "lease_heartbeat",
+        "fence_ack",
+        "ping",
+        *TYPED_CONTROL_FRAME_TYPES,
+    }
+)
+
 CONTROL_LANE_FRAME_TYPES = frozenset(
     {
         "fence_epoch",
@@ -131,6 +149,9 @@ CONTROL_LANE_FRAME_TYPES = frozenset(
         "brief_sync",
         "hello",
         "hello_ack",
+        "control_ack",
+        "control_nack",
+        *TYPED_CONTROL_FRAME_TYPES,
     }
 )
 
@@ -468,6 +489,9 @@ class EdgeRunner:
         logger: Optional[logging.Logger] = None,
         delegation_policy: Optional[EdgeDelegationPolicy] = None,
         delegation_handler: Optional[EdgeDelegationHandler] = None,
+        heartbeat_interval_s: float = 0.0,
+        discover_harnesses_fn: Optional[Callable[[], Any]] = None,
+        os_driver: Optional[Any] = None,
     ) -> None:
         self.server_url = str(server_url)
         self._token = token or os.environ.get("BOTEX_EDGE_TOKEN", "")
@@ -513,6 +537,166 @@ class EdgeRunner:
         self._loopback_server: Optional[asyncio.AbstractServer] = None
         self._loopback_port: Optional[int] = None
         self._loopback_token: str = ""
+        self.heartbeat_interval_s = max(0.0, float(heartbeat_interval_s))
+        self._discover_harnesses_fn = discover_harnesses_fn
+        self._os_driver = os_driver
+        self._active_order_controls: Dict[str, Dict[str, Any]] = {}
+        self._control_lock: Optional[asyncio.Lock] = None
+
+    # -- active order control registry & harness discovery -------------------
+
+    def register_active_order(
+        self,
+        order_id: str,
+        *,
+        pid: int = 0,
+        job_guard: Any = None,
+        fencing_token: str = "",
+        fencing_epoch: int = 0,
+    ) -> None:
+        key = str(order_id or "").strip()
+        if not key:
+            return
+        self._active_order_controls[key] = {
+            "pid": int(pid or 0),
+            "job_guard": job_guard,
+            "fencing_token": str(fencing_token or ""),
+            "fencing_epoch": int(fencing_epoch or 0),
+        }
+
+    def unregister_active_order(self, order_id: str) -> None:
+        key = str(order_id or "").strip()
+        if key:
+            self._active_order_controls.pop(key, None)
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    async def _collect_harness_inventory(self) -> List[Dict[str, Any]]:
+        fn = self._discover_harnesses_fn
+        if fn is None:
+            try:
+                from botex.edge.adapters import discover_local_harnesses
+
+                fn = discover_local_harnesses
+            except Exception:
+                return []
+        try:
+            res = fn()
+            if inspect.isawaitable(res):
+                res = await asyncio.wait_for(res, timeout=3.0)
+            if isinstance(res, list):
+                return [item for item in res if isinstance(item, dict)]
+        except Exception as exc:
+            self._log.debug("harness discovery skipped (%s)", type(exc).__name__)
+        return []
+
+    async def build_hello_frame(self) -> Dict[str, Any]:
+        frame = self._hello_frame()
+        frame["last_seen"] = self._utc_now_iso()
+        frame["harnesses"] = await self._collect_harness_inventory()
+        return frame
+
+    async def build_heartbeat_frame(self) -> Dict[str, Any]:
+        return {
+            "type": "heartbeat",
+            "device_id": self.device_id,
+            "workspace_id": self.workspace_id,
+            "last_seen": self._utc_now_iso(),
+            "harnesses": await self._collect_harness_inventory(),
+        }
+
+    async def handle_control_frame(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate fencing token and execute an allowlisted typed control frame."""
+        if self._control_lock is None:
+            self._control_lock = asyncio.Lock()
+        async with self._control_lock:
+            return await self._handle_control_frame_locked(frame)
+
+    async def _handle_control_frame_locked(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        ftype = str((frame or {}).get("type") or "").strip().lower()
+        req_id = str((frame or {}).get("request_id") or "").strip()
+        order_id = str((frame or {}).get("order_id") or "").strip()
+
+        def _nack(reason: str, **extra: Any) -> Dict[str, Any]:
+            out: Dict[str, Any] = {
+                "type": "control_nack",
+                "request_id": req_id,
+                "order_id": order_id,
+                "action": ftype,
+                "ok": False,
+                "reason": reason,
+            }
+            out.update(extra)
+            return out
+
+        if ftype not in TYPED_CONTROL_FRAME_TYPES:
+            return _nack("unsupported_control_frame")
+        if not order_id:
+            return _nack("missing_order_id")
+
+        provided_token = str(frame.get("fencing_token") or "").strip()
+        if not provided_token:
+            return _nack("missing_fencing_token")
+
+        entry = self._active_order_controls.get(order_id)
+        if entry is None:
+            return _nack("order_not_active")
+
+        expected_token = str(entry.get("fencing_token") or "")
+        if not expected_token or not secrets.compare_digest(provided_token, expected_token):
+            return _nack("fencing_token_mismatch")
+
+        if "fencing_epoch" in frame and frame.get("fencing_epoch") is not None:
+            try:
+                provided_epoch = int(frame["fencing_epoch"])
+            except (TypeError, ValueError):
+                return _nack("invalid_fencing_epoch")
+            if provided_epoch < int(entry.get("fencing_epoch") or 0):
+                return _nack("stale_fencing_epoch")
+
+        pid = int(entry.get("pid") or 0)
+        job_guard = entry.get("job_guard")
+
+        driver = self._os_driver
+        if driver is None:
+            from botex.edge import host_os_driver as driver
+
+        method_map = {
+            "harness_pause": "pause_process_tree",
+            "harness_resume": "resume_process_tree",
+            "harness_cancel_task": "cancel_process_tree",
+        }
+        helper = getattr(driver, method_map[ftype], None)
+        if helper is None:
+            return _nack("os_driver_method_unavailable")
+
+        try:
+            res = await asyncio.to_thread(helper, pid, job_guard=job_guard)
+        except Exception as exc:
+            return _nack("os_driver_error", error=type(exc).__name__)
+
+        if not isinstance(res, dict) or not res.get("ok"):
+            return _nack(
+                str((res or {}).get("detail") or "control_action_failed")
+                if isinstance(res, dict)
+                else "control_action_failed",
+                result=res if isinstance(res, dict) else {},
+            )
+
+        if ftype == "harness_cancel_task":
+            self.unregister_active_order(order_id)
+
+        return {
+            "type": "control_ack",
+            "request_id": req_id,
+            "order_id": order_id,
+            "action": ftype,
+            "fencing_token_verified": True,
+            "ok": True,
+            "result": res,
+        }
 
     # -- wire frames ---------------------------------------------------------
 
@@ -942,90 +1126,114 @@ class EdgeRunner:
         except Exception:
             self._log.debug("delegate reply for call_id=%s lost on a dead socket", call_id)
 
+    async def _heartbeat_loop(self, ws: Any) -> None:
+        while not self._stop.is_set() and self.heartbeat_interval_s > 0:
+            await asyncio.sleep(self.heartbeat_interval_s)
+            if self._stop.is_set():
+                break
+            hb = await self.build_heartbeat_frame()
+            await self._send_json(ws, hb, priority=QOS_PRIORITY_CONTROL)
+
     async def _serve(self, ws: Any) -> None:
-        await self._send_json(ws, self._hello_frame())
-        async for raw in ws:
-            try:
-                frame = json.loads(raw)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(frame, dict):
-                continue
-            ftype = frame.get("type")
-            if ftype == "hello_ack":
-                self._handle_hello_ack(frame)
-            elif ftype == "ping":
-                await self._send_json(
-                    ws,
-                    {"type": "pong", "ts": frame.get("ts")},
-                    priority=QOS_PRIORITY_CONTROL,
-                )
-            elif ftype == "fence_epoch":
-                order_id = str(frame.get("order_id") or "").strip()
-                fenced_epoch = int(frame.get("fencing_epoch") or frame.get("epoch") or 0)
-                stale_epoch = int(frame.get("stale_epoch") or max(0, fenced_epoch - 1))
-                entry: Dict[str, Any] = {
-                    "order_id": order_id,
-                    "stale_epoch": stale_epoch,
-                    "fencing_epoch": fenced_epoch,
-                    "reason": str(frame.get("reason") or "remote_fence"),
-                }
-                if order_id and (self.workspace_root / ".git").exists():
-                    try:
-                        fence_res = await asyncio.to_thread(
-                            fence_local_epoch,
-                            self.workspace_root,
-                            order_id,
-                            stale_epoch,
-                        )
-                        entry["fence_result"] = fence_res
-                    except Exception as exc:
-                        entry["fence_error"] = type(exc).__name__
-                self.fenced_epochs.append(entry)
-                await self._send_json(
-                    ws,
-                    {
-                        "type": "fence_ack",
+        await self._send_json(ws, await self.build_hello_frame(), priority=QOS_PRIORITY_CONTROL)
+        hb_task: Optional[asyncio.Task] = None
+        if self.heartbeat_interval_s > 0:
+            hb_task = asyncio.create_task(self._heartbeat_loop(ws))
+        try:
+            async for raw in ws:
+                try:
+                    frame = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(frame, dict):
+                    continue
+                ftype = frame.get("type")
+                if ftype == "hello_ack":
+                    self._handle_hello_ack(frame)
+                elif ftype == "ping":
+                    await self._send_json(
+                        ws,
+                        {"type": "pong", "ts": frame.get("ts")},
+                        priority=QOS_PRIORITY_CONTROL,
+                    )
+                elif ftype in TYPED_CONTROL_FRAME_TYPES:
+                    reply = await self.handle_control_frame(frame)
+                    await self._send_json(ws, reply, priority=QOS_PRIORITY_CONTROL)
+                elif ftype == "fence_epoch":
+                    order_id = str(frame.get("order_id") or "").strip()
+                    fenced_epoch = int(frame.get("fencing_epoch") or frame.get("epoch") or 0)
+                    stale_epoch = int(frame.get("stale_epoch") or max(0, fenced_epoch - 1))
+                    entry: Dict[str, Any] = {
                         "order_id": order_id,
+                        "stale_epoch": stale_epoch,
                         "fencing_epoch": fenced_epoch,
-                    },
-                    priority=QOS_PRIORITY_CONTROL,
-                )
-            elif ftype == "tool_call":
-                task = asyncio.create_task(self._tool_call_task(ws, frame))
-                self._pending.add(task)
-                task.add_done_callback(self._pending.discard)
-            elif ftype == "delegate_skill":
-                task = asyncio.create_task(self._delegate_skill_task(ws, frame))
-                self._pending.add(task)
-                task.add_done_callback(self._pending.discard)
-            elif ftype == "brief_sync":
-                bots = frame.get("bots")
-                if isinstance(bots, list):
-                    for bot in bots:
-                        if not isinstance(bot, dict):
-                            continue
+                        "reason": str(frame.get("reason") or "remote_fence"),
+                    }
+                    if order_id and (self.workspace_root / ".git").exists():
                         try:
-                            raw_slug = str(bot.get("slug") or "").strip()
-                            bot_status = str(bot.get("status") or "active").strip().lower()
-                            if bot_status != "active":
-                                safe_slug = sanitize_identifier(raw_slug)
-                                if safe_slug and safe_slug == raw_slug:
-                                    (get_local_bot_briefs_dir() / f"{safe_slug}.md").unlink(
-                                        missing_ok=True
-                                    )
-                                continue
-                            write_local_bot_brief(
-                                raw_slug,
-                                namespace=str(bot.get("namespace") or ""),
-                                role_desc=str(bot.get("role_desc") or ""),
-                                etag=str(bot.get("etag") or ""),
-                                fencing_epoch=bot.get("fencing_epoch", 0),
-                                content=str(bot.get("content") or ""),
-                                updated_at=str(bot.get("updated_at") or ""),
+                            fence_res = await asyncio.to_thread(
+                                fence_local_epoch,
+                                self.workspace_root,
+                                order_id,
+                                stale_epoch,
                             )
+                            entry["fence_result"] = fence_res
                         except Exception as exc:
-                            self._log.warning("brief_sync entry rejected (%s)", type(exc).__name__)
+                            entry["fence_error"] = type(exc).__name__
+                    self.fenced_epochs.append(entry)
+                    await self._send_json(
+                        ws,
+                        {
+                            "type": "fence_ack",
+                            "order_id": order_id,
+                            "fencing_epoch": fenced_epoch,
+                        },
+                        priority=QOS_PRIORITY_CONTROL,
+                    )
+                elif ftype == "tool_call":
+                    task = asyncio.create_task(self._tool_call_task(ws, frame))
+                    self._pending.add(task)
+                    task.add_done_callback(self._pending.discard)
+                elif ftype == "delegate_skill":
+                    task = asyncio.create_task(self._delegate_skill_task(ws, frame))
+                    self._pending.add(task)
+                    task.add_done_callback(self._pending.discard)
+                elif ftype == "brief_sync":
+                    bots = frame.get("bots")
+                    if isinstance(bots, list):
+                        for bot in bots:
+                            if not isinstance(bot, dict):
+                                continue
+                            try:
+                                raw_slug = str(bot.get("slug") or "").strip()
+                                bot_status = str(bot.get("status") or "active").strip().lower()
+                                if bot_status != "active":
+                                    safe_slug = sanitize_identifier(raw_slug)
+                                    if safe_slug and safe_slug == raw_slug:
+                                        (get_local_bot_briefs_dir() / f"{safe_slug}.md").unlink(
+                                            missing_ok=True
+                                        )
+                                    continue
+                                write_local_bot_brief(
+                                    raw_slug,
+                                    namespace=str(bot.get("namespace") or ""),
+                                    role_desc=str(bot.get("role_desc") or ""),
+                                    etag=str(bot.get("etag") or ""),
+                                    fencing_epoch=bot.get("fencing_epoch", 0),
+                                    content=str(bot.get("content") or ""),
+                                    updated_at=str(bot.get("updated_at") or ""),
+                                )
+                            except Exception as exc:
+                                self._log.warning(
+                                    "brief_sync entry rejected (%s)", type(exc).__name__
+                                )
+        finally:
+            if hb_task is not None:
+                hb_task.cancel()
+                try:
+                    await hb_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     async def run_once(self) -> str:
         """Run a single connect→serve session.
@@ -1332,17 +1540,32 @@ class EdgeRunner:
 
             if method == "POST" and path.startswith("/control"):
                 frame = body_obj.get("frame")
-                allowed_control = frozenset({"lease_heartbeat", "fence_ack", "ping"})
                 ftype = (
                     str(frame.get("type") or "").strip().lower() if isinstance(frame, dict) else ""
                 )
-                if not isinstance(frame, dict) or ftype not in allowed_control:
+                if not isinstance(frame, dict) or ftype not in LOOPBACK_CONTROL_ALLOWLIST:
                     await self._write_loopback_http(
                         writer,
                         400,
                         {"ok": False, "error": "forbidden_control_frame_type"},
                     )
                     return
+                if ftype in TYPED_CONTROL_FRAME_TYPES:
+                    if (
+                        not str(frame.get("fencing_token") or "").strip()
+                        or not str(frame.get("order_id") or "").strip()
+                    ):
+                        await self._write_loopback_http(
+                            writer,
+                            400,
+                            {"ok": False, "error": "missing_fencing_token_or_order_id"},
+                        )
+                        return
+                    if body_obj.get("local_exec"):
+                        ctrl_reply = await self.handle_control_frame(frame)
+                        status_code = 200 if ctrl_reply.get("ok") else 409
+                        await self._write_loopback_http(writer, status_code, ctrl_reply)
+                        return
                 if self._ws is not None:
                     await self._send_json(
                         self._ws,

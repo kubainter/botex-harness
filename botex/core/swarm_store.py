@@ -11,6 +11,7 @@ durable work orders. Domain knowledge search stays in the Memory Vault's
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import shutil
@@ -20,7 +21,7 @@ import time
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 try:
     from botex.tools.security import coerce_text, mask_secrets, sanitize_identifier
@@ -35,6 +36,9 @@ __all__ = [
     "register_bot",
     "get_bot",
     "list_bots",
+    "set_bot_status",
+    "pause_bot",
+    "resume_bot",
     "get_bot_brief",
     "upsert_bot_brief",
     "record_bot_domain_turn",
@@ -42,10 +46,17 @@ __all__ = [
     "list_bots_due_for_brief_review",
     "upsert_host_lease",
     "get_active_leases",
+    "upsert_host_harnesses",
+    "list_host_harnesses",
+    "create_work_order",
+    "get_work_order",
+    "list_work_orders",
+    "update_work_order_status",
+    "list_expired_work_orders",
     "list_active_brief_payloads",
 ]
 
-SWARM_SCHEMA_VERSION = 2
+SWARM_SCHEMA_VERSION = 3
 
 
 # server/skills stay lazy-imported: core must not hard-depend on upper layers
@@ -72,6 +83,14 @@ def _has_injection_pattern(text: str) -> bool:
     except (ImportError, ValueError):
         from skills import has_injection_pattern
     return has_injection_pattern(text)
+
+
+def _work_order_fsm() -> Any:
+    try:
+        from botex.core import work_orders as fsm
+    except (ImportError, ValueError):
+        import work_orders as fsm
+    return fsm
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -162,6 +181,18 @@ CREATE TABLE IF NOT EXISTS bot_turn_counters (
 );
 """
 
+_SCHEMA_V3_SQL = """
+CREATE TABLE IF NOT EXISTS host_harness_inventory (
+    host_id TEXT NOT NULL,
+    harness_id TEXT NOT NULL,
+    transport TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'online',
+    last_seen TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (host_id, harness_id)
+);
+"""
+
 
 def migrate_swarm_store(conn: sqlite3.Connection) -> None:
     """Apply in-place schema migrations gated by ``PRAGMA user_version``; idempotent."""
@@ -181,6 +212,10 @@ def migrate_swarm_store(conn: sqlite3.Connection) -> None:
         if "author" not in cols:
             conn.execute("ALTER TABLE bot_briefs ADD COLUMN author TEXT DEFAULT 'human';")
         conn.executescript(_SCHEMA_V2_COUNTERS_SQL)
+        conn.execute("PRAGMA user_version = 2;")
+        conn.commit()
+    if current < 3:
+        conn.executescript(_SCHEMA_V3_SQL)
         conn.execute("PRAGMA user_version = " + str(int(SWARM_SCHEMA_VERSION)) + ";")
         conn.commit()
 
@@ -280,6 +315,7 @@ if not getattr(shutil.rmtree, "_botex_swarm_safe", False):
 
 _VALID_BOT_STATUSES: Dict[str, str] = {
     "active": "active",
+    "paused": "paused",
     "dormant": "dormant",
     "disabled": "disabled",
 }
@@ -394,6 +430,41 @@ def list_bots(
     sql += " ORDER BY slug;"
     conn = get_swarm_store_conn(db_path)
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def set_bot_status(slug: str, status: str, db_path: Optional[Path] = None) -> dict:
+    """Set a registered bot's status (``active``/``paused``/``dormant``/``disabled``)."""
+    clean_slug = sanitize_identifier(str(slug or ""))
+    if not clean_slug:
+        return {"ok": False, "error": "INVALID_SLUG"}
+    clean_status = _VALID_BOT_STATUSES.get(coerce_text(str(status or "")).strip().lower())
+    if clean_status is None:
+        return {"ok": False, "error": "INVALID_STATUS"}
+    conn = get_swarm_store_conn(db_path)
+    with _SWARM_LOCK, conn:
+        cur = conn.execute(
+            "UPDATE bots_registry SET status = ?, updated_at = ? WHERE slug = ?;",
+            (clean_status, _utc_now_iso(), clean_slug),
+        )
+        if cur.rowcount <= 0:
+            return {"ok": False, "error": "BOT_NOT_FOUND"}
+        row = conn.execute(
+            "SELECT slug, namespace, role_desc, instructions_path, status,"
+            " brief_budget_tokens, created_at, updated_at"
+            " FROM bots_registry WHERE slug = ?;",
+            (clean_slug,),
+        ).fetchone()
+    return {"ok": True, **dict(row)}
+
+
+def pause_bot(slug: str, db_path: Optional[Path] = None) -> dict:
+    """Freeze a bot: status -> ``paused`` (drops out of every ``active``-only query)."""
+    return set_bot_status(slug, "paused", db_path=db_path)
+
+
+def resume_bot(slug: str, db_path: Optional[Path] = None) -> dict:
+    """Release a paused/dormant bot back to ``active``."""
+    return set_bot_status(slug, "active", db_path=db_path)
 
 
 # ============================================================================
@@ -847,6 +918,398 @@ def get_active_leases(
     sql += " ORDER BY lease_key;"
     conn = get_swarm_store_conn(db_path)
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+# ============================================================================
+# Host harness inventory (Edge-reported live harnesses)
+# ============================================================================
+
+
+_VALID_HARNESS_STATUSES: Dict[str, str] = {
+    "online": "online",
+    "degraded": "degraded",
+    "offline": "offline",
+    "stale": "stale",
+}
+_MAX_TRANSPORT_CHARS = 64
+
+
+def _coerce_capabilities_json(value: Any) -> str:
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                return coerce_text(mask_secrets(json.dumps(parsed, ensure_ascii=False)))
+        return "{}"
+    if isinstance(value, (dict, list)):
+        try:
+            return coerce_text(mask_secrets(json.dumps(value, ensure_ascii=False)))
+        except (ValueError, TypeError):
+            pass
+    return "{}"
+
+
+def _parse_capabilities(raw: Any) -> Any:
+    try:
+        return json.loads(str(raw or "{}"))
+    except (ValueError, TypeError):
+        return {}
+
+
+def upsert_host_harnesses(
+    host_id: str,
+    harnesses: List[dict],
+    *,
+    last_seen: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Upsert the live-harness inventory reported by an Edge host; returns stored rows."""
+    clean_host = coerce_text(str(host_id or "")).strip()
+    if not clean_host:
+        return []
+    seen_default = coerce_text(str(last_seen or "")).strip() or _utc_now_iso()
+    conn = get_swarm_store_conn(db_path)
+    stored: list[dict] = []
+    with _SWARM_LOCK, conn:
+        for entry in harnesses or ():
+            if not isinstance(entry, Mapping):
+                continue
+            harness_id = sanitize_identifier(str(entry.get("harness_id") or ""))
+            transport = coerce_text(str(entry.get("transport") or "")).strip()
+            if not harness_id or not transport:
+                continue
+            transport = transport[:_MAX_TRANSPORT_CHARS]
+            status_key = coerce_text(str(entry.get("status") or "online")).strip().lower()
+            clean_status = _VALID_HARNESS_STATUSES.get(status_key, "online")
+            seen = coerce_text(str(entry.get("last_seen") or seen_default)).strip() or seen_default
+            caps_json = _coerce_capabilities_json(
+                entry.get("capabilities", entry.get("capabilities_json"))
+            )
+            conn.execute(
+                "INSERT INTO host_harness_inventory"
+                " (host_id, harness_id, transport, status, last_seen, capabilities_json)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(host_id, harness_id) DO UPDATE SET"
+                "   transport=excluded.transport,"
+                "   status=excluded.status,"
+                "   last_seen=excluded.last_seen,"
+                "   capabilities_json=excluded.capabilities_json;",
+                (clean_host, harness_id, transport, clean_status, seen, caps_json),
+            )
+            stored.append(
+                {
+                    "host_id": clean_host,
+                    "harness_id": harness_id,
+                    "transport": transport,
+                    "status": clean_status,
+                    "last_seen": seen,
+                    "capabilities": _parse_capabilities(caps_json),
+                    "capabilities_json": caps_json,
+                }
+            )
+    return stored
+
+
+def list_host_harnesses(
+    host_id: Optional[str] = None,
+    *,
+    stale_after_s: int = 120,
+    now: Optional[datetime] = None,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """List reported harnesses; rows idle beyond ``stale_after_s`` surface as ``stale``."""
+    conn = get_swarm_store_conn(db_path)
+    sql = (
+        "SELECT host_id, harness_id, transport, status, last_seen, capabilities_json"
+        " FROM host_harness_inventory"
+    )
+    params: List[Any] = []
+    if host_id and str(host_id).strip():
+        sql += " WHERE host_id = ?"
+        params.append(coerce_text(str(host_id).strip()))
+    sql += " ORDER BY host_id, harness_id;"
+    now_dt = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    stale_after = max(0, _coerce_int(stale_after_s, 120))
+    out: list[dict] = []
+    for row in conn.execute(sql, params).fetchall():
+        item = dict(row)
+        item["capabilities"] = _parse_capabilities(item.get("capabilities_json"))
+        age_s: Optional[float] = None
+        try:
+            seen_dt = datetime.fromisoformat(str(item.get("last_seen") or ""))
+            if seen_dt.tzinfo is None:
+                seen_dt = seen_dt.replace(tzinfo=timezone.utc)
+            age_s = max(0.0, (now_dt - seen_dt).total_seconds())
+        except ValueError:
+            age_s = None
+        item["age_s"] = age_s
+        if age_s is not None and age_s > stale_after:
+            item["status"] = "stale"
+        out.append(item)
+    return out
+
+
+# ============================================================================
+# Work orders persistence (Wave 2 REST backing store)
+# ============================================================================
+
+
+_MAX_ORDER_REASON_CHARS = 400
+
+
+def _order_row_dict(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    raw = item.pop("payload_json", None)
+    payload: Dict[str, Any] = {}
+    try:
+        parsed = json.loads(str(raw or "{}"))
+        if isinstance(parsed, dict):
+            payload = parsed
+    except (ValueError, TypeError):
+        payload = {}
+    out = dict(payload)
+    out.update(item)
+    return out
+
+
+def _norm_order_status(fsm: Any, value: Any) -> str:
+    norm = str(value or "").strip().upper()
+    return {s: s for s in fsm.ALL_STATUSES}.get(norm, "")
+
+
+def create_work_order(order_dict: dict, db_path: Optional[Path] = None) -> dict:
+    """Persist a new work order; refuses to overwrite an existing ``order_id``."""
+    d = order_dict if isinstance(order_dict, Mapping) else {}
+    clean_id = sanitize_identifier(str(d.get("order_id") or ""))
+    if not clean_id:
+        return {"ok": False, "error": "INVALID_ORDER_ID"}
+    fsm = _work_order_fsm()
+    clean_status = _norm_order_status(fsm, d.get("status") or "QUEUED")
+    if not clean_status:
+        return {"ok": False, "error": "INVALID_STATUS"}
+    bot_slug = sanitize_identifier(str(d.get("bot_slug") or ""))
+    try:
+        epoch = int(d.get("epoch") or 0)
+    except (TypeError, ValueError):
+        epoch = 0
+    try:
+        payload_str = coerce_text(mask_secrets(json.dumps(dict(d), ensure_ascii=False)))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "INVALID_PAYLOAD"}
+    now_iso = _utc_now_iso()
+    conn = get_swarm_store_conn(db_path)
+    with _SWARM_LOCK, conn:
+        exists = conn.execute(
+            "SELECT 1 FROM work_orders WHERE order_id = ?;", (clean_id,)
+        ).fetchone()
+        if exists is not None:
+            return {"ok": False, "error": "ORDER_EXISTS", "order_id": clean_id}
+        conn.execute(
+            "INSERT INTO work_orders"
+            " (order_id, bot_slug, epoch, status, payload_json, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+            (clean_id, bot_slug, epoch, clean_status, payload_str, now_iso, now_iso),
+        )
+    return {"ok": True, "order_id": clean_id, "status": clean_status, "epoch": epoch}
+
+
+def get_work_order(order_id: str, db_path: Optional[Path] = None) -> Optional[dict]:
+    """Return the stored order (columns + parsed payload) or None."""
+    clean_id = sanitize_identifier(str(order_id or ""))
+    if not clean_id:
+        return None
+    conn = get_swarm_store_conn(db_path)
+    row = conn.execute(
+        "SELECT order_id, bot_slug, epoch, status, payload_json, created_at, updated_at"
+        " FROM work_orders WHERE order_id = ?;",
+        (clean_id,),
+    ).fetchone()
+    return _order_row_dict(row) if row is not None else None
+
+
+def list_work_orders(
+    *,
+    status: Optional[str] = None,
+    bot_slug: Optional[str] = None,
+    limit: int = 100,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """List stored orders, optionally filtered by status (normalized) and/or bot."""
+    sql = (
+        "SELECT order_id, bot_slug, epoch, status, payload_json, created_at, updated_at"
+        " FROM work_orders"
+    )
+    clauses: List[str] = []
+    params: List[Any] = []
+    if status and str(status).strip():
+        clean_status = _norm_order_status(_work_order_fsm(), status)
+        if not clean_status:
+            return []
+        clauses.append("status = ?")
+        params.append(clean_status)
+    if bot_slug and str(bot_slug).strip():
+        clauses.append("bot_slug = ?")
+        params.append(sanitize_identifier(str(bot_slug).strip()))
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY updated_at DESC, order_id ASC LIMIT ?;"
+    params.append(max(1, min(_coerce_int(limit, 100), 1000)))
+    conn = get_swarm_store_conn(db_path)
+    return [_order_row_dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def update_work_order_status(
+    order_id: str,
+    target_status: str,
+    *,
+    reason: str = "",
+    fencing_epoch: Optional[int] = None,
+    force: bool = False,
+    db_path: Optional[Path] = None,
+) -> dict:
+    """CAS-guarded status transition enforcing the WorkOrder state machine.
+
+    When ``fencing_epoch`` is supplied it must equal the stored epoch — a
+    mismatch means a stale writer. ``PAUSED`` orders refuse ``FENCED``
+    transitions unless ``force=True`` (operator lease-freeze).
+    """
+    clean_id = sanitize_identifier(str(order_id or ""))
+    if not clean_id:
+        return {"ok": False, "error": "INVALID_ORDER_ID"}
+    fsm = _work_order_fsm()
+    target = _norm_order_status(fsm, target_status)
+    if not target:
+        return {"ok": False, "error": "INVALID_STATUS"}
+    clean_reason = coerce_text(mask_secrets(str(reason or ""))).strip()[:_MAX_ORDER_REASON_CHARS]
+    now_iso = _utc_now_iso()
+    conn = get_swarm_store_conn(db_path)
+    with _SWARM_LOCK:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            row = conn.execute(
+                "SELECT order_id, epoch, status, payload_json FROM work_orders WHERE order_id = ?;",
+                (clean_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return {"ok": False, "error": "ORDER_NOT_FOUND", "order_id": clean_id}
+            current = str(row["status"] or "")
+            cur_epoch = _coerce_int(row["epoch"], 0)
+            if fencing_epoch is not None and _coerce_int(fencing_epoch, -1) != cur_epoch:
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "error": "EPOCH_MISMATCH",
+                    "order_id": clean_id,
+                    "current_epoch": cur_epoch,
+                }
+            if (
+                current == fsm.WorkOrderStatus.PAUSED
+                and target == fsm.WorkOrderStatus.FENCED
+                and not force
+            ):
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "status": current,
+                    "reason": "paused_lease_frozen",
+                    "order_id": clean_id,
+                }
+            if current in fsm.TERMINAL_STATUSES:
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "status": current,
+                    "reason": "order_terminal",
+                    "order_id": clean_id,
+                }
+            if not fsm.can_transition(current, target):
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "status": current,
+                    "reason": "illegal_transition",
+                    "from": current,
+                    "to": target,
+                    "order_id": clean_id,
+                }
+            payload: Dict[str, Any] = {}
+            if row["payload_json"]:
+                try:
+                    parsed = json.loads(str(row["payload_json"]))
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                except json.JSONDecodeError:
+                    payload = {}
+            if clean_reason:
+                payload["status_reason"] = clean_reason
+            new_epoch = cur_epoch + 1
+            conn.execute(
+                "UPDATE work_orders SET status = ?, epoch = ?, payload_json = ?, updated_at = ?"
+                " WHERE order_id = ?;",
+                (
+                    target,
+                    new_epoch,
+                    coerce_text(mask_secrets(json.dumps(payload, ensure_ascii=False))),
+                    now_iso,
+                    clean_id,
+                ),
+            )
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+    return {
+        "ok": True,
+        "order_id": clean_id,
+        "status": target,
+        "previous_status": current,
+        "epoch": new_epoch,
+        "fencing_epoch": new_epoch,
+        "reason": clean_reason,
+        "updated_at": now_iso,
+    }
+
+
+def list_expired_work_orders(
+    now: Optional[datetime] = None,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Non-terminal, non-PAUSED orders whose bot holds an expired host lease.
+
+    These are the rows a lease-expiry sweep may fence; ``PAUSED`` orders are
+    lease-frozen and deliberately excluded alongside terminal statuses.
+    """
+    fsm = _work_order_fsm()
+    if isinstance(now, datetime):
+        now_dt = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        now_ts = now_dt.timestamp()
+    else:
+        now_ts = time.time()
+    skipped = sorted({fsm.WorkOrderStatus.PAUSED} | fsm.TERMINAL_STATUSES)
+    placeholders = ", ".join("?" for _ in skipped)
+    conn = get_swarm_store_conn(db_path)
+    rows = conn.execute(
+        "SELECT w.order_id, w.bot_slug, w.epoch, w.status, w.payload_json,"
+        " w.created_at, w.updated_at,"
+        " l.lease_key, l.host_id, l.scope_path, l.fencing_token, l.expires_at"
+        " FROM work_orders w"
+        " JOIN host_leases l ON l.bot_slug = w.bot_slug"
+        f" WHERE w.status NOT IN ({placeholders})"
+        " AND l.expires_at <= ?"
+        " ORDER BY w.order_id, l.lease_key;",
+        (*skipped, now_ts),
+    ).fetchall()
+    return [_order_row_dict(r) for r in rows]
 
 
 # ============================================================================

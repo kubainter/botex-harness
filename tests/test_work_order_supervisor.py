@@ -22,6 +22,7 @@ from botex.core.work_orders import (
     WorkOrderSupervisor,
     can_transition,
     compute_failure_signature,
+    is_lease_frozen,
 )
 
 
@@ -409,12 +410,22 @@ def test_transition_table_and_terminal_lock():
     assert can_transition("TRIAGED", "HANDOFF")
     assert can_transition("HANDOFF", "RUNNING")
     assert can_transition("VERIFYING", "DONE")
+    assert can_transition("RUNNING", "PAUSED")
+    assert can_transition("PAUSED", "RUNNING")
+    assert can_transition("PAUSED", "FENCED")
+    assert not can_transition("PAUSED", "STUCK")
+    assert not can_transition("PAUSED", "VERIFYING")
+    assert not can_transition("QUEUED", "PAUSED")
     assert not can_transition("RUNNING", "DONE")
     assert not can_transition("QUEUED", "DONE")
     assert not can_transition("DONE", "RUNNING")
     assert not can_transition("BLOCKED", "RUNNING")
-    for state in ("QUEUED", "RUNNING", "STUCK", "TRIAGED", "HANDOFF", "VERIFYING"):
+    nonterminal = ("QUEUED", "RUNNING", "PAUSED", "STUCK", "TRIAGED", "HANDOFF", "VERIFYING")
+    for state in nonterminal:
         assert can_transition(state, "FENCED")
+        assert can_transition(state, "CANCELLED")
+    for state in ("DONE", "FAILED", "BLOCKED", "NEEDS_HUMAN", "FENCED", "CANCELLED"):
+        assert not can_transition(state, "CANCELLED")
 
     sup = _sup()
     order = _order(status="RUNNING")
@@ -423,6 +434,65 @@ def test_transition_table_and_terminal_lock():
     assert out["ok"] is True
     assert order.status == WorkOrderStatus.FENCED
     assert sup.transition(order, "RUNNING")["reason"] == "order_terminal"
+
+
+def test_pause_resume_cancel_and_lease_freeze():
+    sup = _sup()
+    order = _order(status="RUNNING")
+    assert not is_lease_frozen(order)
+
+    out = sup.pause_order(order)
+    assert out["ok"] is True
+    assert order.status == WorkOrderStatus.PAUSED
+    assert is_lease_frozen(order)
+    assert is_lease_frozen({"status": "PAUSED"})
+    assert not is_lease_frozen({"status": "RUNNING"})
+
+    # Lease-expiry auto-fencing is refused while PAUSED; force still wins.
+    refused = sup.fence_order(order, reason="lease_expired")
+    assert refused == {
+        "ok": False,
+        "status": WorkOrderStatus.PAUSED,
+        "reason": "paused_lease_frozen",
+    }
+    assert order.status == WorkOrderStatus.PAUSED
+
+    # Failure triage and verify never advance a paused order.
+    before_attempts = len(order.attempt_ledger)
+    fail = sup.handle_failure(order, "botex", failure_kind="rate_limit", error_text="HTTP 429")
+    assert fail["ok"] is False
+    assert fail["reason"] == "paused_lease_frozen"
+    assert len(order.attempt_ledger) == before_attempts
+    verify = sup.begin_verify(order)
+    assert verify["ok"] is False and verify["reason"] == "paused_lease_frozen"
+    assert order.status == WorkOrderStatus.PAUSED
+
+    # PAUSED only resumes to RUNNING or exits via CANCELLED/forced FENCED.
+    assert sup.transition(order, "STUCK")["reason"] == "illegal_transition"
+    forced = sup.fence_order(order, reason="lease_expired", force=True)
+    assert forced["ok"] is True
+    assert order.status == WorkOrderStatus.FENCED
+
+    order2 = _order(status="RUNNING")
+    assert sup.pause_order(order2, reason="operator_pause")["ok"] is True
+    resumed = sup.resume_order(order2)
+    assert resumed["ok"] is True
+    assert order2.status == WorkOrderStatus.RUNNING
+    assert not is_lease_frozen(order2)
+
+    # cancel_order works from any non-terminal state and is terminal.
+    for st in ("QUEUED", "RUNNING", "PAUSED", "STUCK", "TRIAGED", "HANDOFF", "VERIFYING"):
+        victim = _order(status=st)
+        res = sup.cancel_order(victim, reason="operator_cancel")
+        assert res["ok"] is True, (st, res)
+        assert victim.status == WorkOrderStatus.CANCELLED
+        assert sup.transition(victim, "RUNNING")["reason"] == "order_terminal"
+        assert sup.cancel_order(victim)["reason"] == "order_terminal"
+
+    # QUEUED cannot pause directly (must be RUNNING first).
+    queued = _order(status="QUEUED")
+    assert sup.pause_order(queued)["reason"] == "illegal_transition"
+    assert queued.status == WorkOrderStatus.QUEUED
 
 
 def test_work_order_serialization_roundtrip(tmp_path: Path):

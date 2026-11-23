@@ -413,3 +413,78 @@ def test_run_command_success_invalidates_read_cache(tmp_path):
     r4 = asyncio.run(ex.execute("read_file", {"path": "f.py"}, tmp_path, task_id="t"))
     assert r4["ok"] is True
     assert calls[3] == ("read_file", None)  # cache dropped: fresh digest sent
+
+
+def test_edge_ws_ingests_harness_inventory_and_dispatches_typed_control(monkeypatch, tmp_path):
+    """Plan 042: /api/edge/ws ingests hello/heartbeat harnesses and dispatches allowlisted control frames."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "edge_ws_inv.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+
+    tok_store = DeviceTokenStore(tmp_path / "device_tokens.json")
+    raw_token, _ = tok_store.issue_token("edge-host-42", "ws-42")
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "cloud-admin-tok")
+
+    client = TestClient(server_cloud.app)
+    with client.websocket_connect(
+        "/api/edge/ws", headers={"Authorization": f"Bearer {raw_token}"}
+    ) as ws:
+        ws.send_json(
+            {
+                "type": "hello",
+                "device_id": "edge-host-42",
+                "workspace_id": "ws-42",
+                "last_seen": "2026-11-23T16:00:00+00:00",
+                "harnesses": [
+                    {
+                        "harness_id": "devin",
+                        "transport": "acp",
+                        "status": "online",
+                        "capabilities": {"available": True},
+                    }
+                ],
+                "capabilities": {},
+            }
+        )
+        ack = ws.receive_json()
+        assert ack["type"] == "hello_ack"
+
+        ws.send_json(
+            {
+                "type": "heartbeat",
+                "device_id": "edge-host-42",
+                "workspace_id": "ws-42",
+                "last_seen": "2026-11-23T16:01:00+00:00",
+                "harnesses": [
+                    {
+                        "harness_id": "zcode",
+                        "transport": "cli",
+                        "status": "online",
+                        "capabilities": {"available": True},
+                    }
+                ],
+            }
+        )
+        ws.send_json({"type": "ping", "ts": 1.0})
+        pong = ws.receive_json()
+        assert pong["type"] == "pong"
+
+    harnesses = swarm_store.list_host_harnesses(
+        host_id="edge-host-42", stale_after_s=999999999, db_path=db_file
+    )
+    ids = {h["harness_id"] for h in harnesses}
+    assert {"devin", "zcode"} <= ids
+
+    # Non-allowlisted control action is always rejected
+    bad = asyncio.run(
+        server_cloud.dispatch_edge_control_frame(
+            "edge-host-42",
+            "arbitrary_shell",
+            order_id="ord-1",
+            fencing_token="tok-1",
+        )
+    )
+    assert bad["dispatched"] is False
+    assert bad["reason"] == "forbidden_control_action"

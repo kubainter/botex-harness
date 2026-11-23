@@ -58,6 +58,7 @@ __all__ = [
     "WorkOrderSupervisor",
     "can_transition",
     "compute_failure_signature",
+    "is_lease_frozen",
 ]
 
 
@@ -68,11 +69,13 @@ class WorkOrderStatus:
     TRIAGED = "TRIAGED"
     HANDOFF = "HANDOFF"
     VERIFYING = "VERIFYING"
+    PAUSED = "PAUSED"
     DONE = "DONE"
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
     NEEDS_HUMAN = "NEEDS_HUMAN"
     FENCED = "FENCED"
+    CANCELLED = "CANCELLED"
 
 
 ALL_STATUSES = frozenset(
@@ -90,6 +93,7 @@ TERMINAL_STATUSES = frozenset(
         WorkOrderStatus.BLOCKED,
         WorkOrderStatus.NEEDS_HUMAN,
         WorkOrderStatus.FENCED,
+        WorkOrderStatus.CANCELLED,
     }
 )
 
@@ -102,6 +106,8 @@ _MACHINE_EDGES = frozenset(
         ("QUEUED", "BLOCKED"),
         ("QUEUED", "NEEDS_HUMAN"),
         ("RUNNING", "STUCK"),
+        ("RUNNING", "PAUSED"),
+        ("PAUSED", "RUNNING"),
         ("RUNNING", "VERIFYING"),
         ("RUNNING", "FAILED"),
         ("RUNNING", "BLOCKED"),
@@ -125,6 +131,7 @@ _MACHINE_EDGES = frozenset(
         ("VERIFYING", "NEEDS_HUMAN"),
     }
     | {(s, "FENCED") for s in _NONTERMINAL_STATUSES}
+    | {(s, "CANCELLED") for s in _NONTERMINAL_STATUSES}
 )
 
 
@@ -139,6 +146,15 @@ def can_transition(current: str, target: str) -> bool:
     if not cur or not tgt or cur in TERMINAL_STATUSES:
         return False
     return (cur, tgt) in _MACHINE_EDGES
+
+
+def is_lease_frozen(order: Any) -> bool:
+    """True while the order is ``PAUSED`` — operator holds it safe from
+    lease-expiry auto-fencing and failover until explicitly resumed."""
+    status = getattr(order, "status", None)
+    if status is None and isinstance(order, Mapping):
+        status = order.get("status")
+    return _norm_status(status) == WorkOrderStatus.PAUSED
 
 
 _VERIFY_KINDS: Dict[str, str] = {
@@ -674,7 +690,33 @@ class WorkOrderSupervisor:
             order, WorkOrderStatus.RUNNING, reason=f"harness:{str(harness or '')}"
         )
 
-    def fence_order(self, order: WorkOrder, *, reason: str = "lease_expired") -> Dict[str, Any]:
+    def pause_order(self, order: WorkOrder, *, reason: str = "operator_pause") -> Dict[str, Any]:
+        out = self.transition(order, WorkOrderStatus.PAUSED, reason=reason)
+        if out["ok"]:
+            self._audit(order, "paused", reason=reason)
+        return out
+
+    def resume_order(self, order: WorkOrder, *, reason: str = "operator_resume") -> Dict[str, Any]:
+        out = self.transition(order, WorkOrderStatus.RUNNING, reason=reason)
+        if out["ok"]:
+            self._audit(order, "resumed", reason=reason)
+        return out
+
+    def cancel_order(self, order: WorkOrder, *, reason: str = "operator_cancel") -> Dict[str, Any]:
+        out = self.transition(order, WorkOrderStatus.CANCELLED, reason=reason)
+        if out["ok"]:
+            self._audit(order, "cancelled", reason=reason)
+        return out
+
+    def fence_order(
+        self, order: WorkOrder, *, reason: str = "lease_expired", force: bool = False
+    ) -> Dict[str, Any]:
+        if not force and is_lease_frozen(order):
+            return {
+                "ok": False,
+                "status": order.status,
+                "reason": "paused_lease_frozen",
+            }
         out = self.transition(order, WorkOrderStatus.FENCED, reason=reason)
         if out["ok"]:
             self._audit(order, "fenced", reason=reason)
@@ -729,6 +771,8 @@ class WorkOrderSupervisor:
     ) -> Dict[str, Any]:
         if order.status in TERMINAL_STATUSES:
             return {"ok": False, "status": order.status, "reason": "order_terminal"}
+        if order.status == WorkOrderStatus.PAUSED:
+            return {"ok": False, "status": order.status, "reason": "paused_lease_frozen"}
 
         record = self.record_attempt(
             order,
@@ -874,6 +918,8 @@ class WorkOrderSupervisor:
     def begin_verify(self, order: WorkOrder) -> Dict[str, Any]:
         if order.status in TERMINAL_STATUSES:
             return {"ok": False, "status": order.status, "reason": "order_terminal"}
+        if order.status == WorkOrderStatus.PAUSED:
+            return {"ok": False, "status": order.status, "reason": "paused_lease_frozen"}
         if self._verify_kind(order) == "none":
             out = self.transition(
                 order, WorkOrderStatus.NEEDS_HUMAN, reason="verify_none_requires_human"
