@@ -8,6 +8,7 @@ import importlib
 import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -36,8 +37,8 @@ def db_path(tmp_path):
 
 def test_schema_version_and_tables(db_path):
     conn = swarm_store.get_swarm_store_conn(db_path)
-    assert swarm_store.SWARM_SCHEMA_VERSION == 2
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+    assert swarm_store.SWARM_SCHEMA_VERSION == 3
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     assert conn.execute("PRAGMA journal_mode;").fetchone()[0].lower() == "wal"
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
     assert {
@@ -45,6 +46,7 @@ def test_schema_version_and_tables(db_path):
         "bot_briefs",
         "bot_turn_counters",
         "host_leases",
+        "host_harness_inventory",
         "work_orders",
     } <= tables
 
@@ -53,13 +55,14 @@ def test_migrate_swarm_store_idempotent(db_path):
     conn = swarm_store.get_swarm_store_conn(db_path)
     swarm_store.migrate_swarm_store(conn)
     swarm_store.migrate_swarm_store(conn)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
     assert {
         "bots_registry",
         "bot_briefs",
         "bot_turn_counters",
         "host_leases",
+        "host_harness_inventory",
         "work_orders",
     } <= tables
 
@@ -69,9 +72,45 @@ def test_migrate_swarm_store_standalone_conn(tmp_path):
     try:
         assert conn.execute("PRAGMA user_version;").fetchone()[0] == 0
         swarm_store.migrate_swarm_store(conn)
-        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     finally:
         conn.close()
+
+
+def test_migrate_swarm_store_v2_to_v3_preserves_rows(tmp_path):
+    db = tmp_path / "v2_upgrade.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(swarm_store._SCHEMA_V1_SQL)
+        conn.executescript(swarm_store._SCHEMA_V2_COUNTERS_SQL)
+        conn.execute("ALTER TABLE bot_briefs ADD COLUMN pinned INTEGER DEFAULT 0;")
+        conn.execute("ALTER TABLE bot_briefs ADD COLUMN author TEXT DEFAULT 'human';")
+        conn.execute(
+            "INSERT INTO bots_registry (slug, namespace, role_desc, status)"
+            " VALUES ('legacy-bot', 'swarm', 'v2 role', 'active');"
+        )
+        conn.execute(
+            "INSERT INTO work_orders"
+            " (order_id, bot_slug, epoch, status, payload_json, created_at, updated_at)"
+            " VALUES ('ord-v2', 'legacy-bot', 4, 'RUNNING', '{}', 't0', 't0');"
+        )
+        conn.execute("PRAGMA user_version = 2;")
+        conn.commit()
+
+        swarm_store.migrate_swarm_store(conn)
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 3
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
+        assert "host_harness_inventory" in tables
+    finally:
+        conn.close()
+
+    bot = swarm_store.get_bot("legacy-bot", db_path=db)
+    assert bot is not None and bot["status"] == "active"
+    order = swarm_store.get_work_order("ord-v2", db_path=db)
+    assert order is not None
+    assert order["status"] == "RUNNING" and order["epoch"] == 4
+    swarm_store.close_swarm_store_dbs()
 
 
 def test_migrate_swarm_store_v1_to_v2_preserves_rows(tmp_path):
@@ -92,7 +131,7 @@ def test_migrate_swarm_store_v1_to_v2_preserves_rows(tmp_path):
         conn.commit()
 
         swarm_store.migrate_swarm_store(conn)
-        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     finally:
         conn.close()
 
@@ -566,3 +605,272 @@ def test_turn_counters_and_due_for_review_thresholds(db_path):
     assert ctr_human["pending_turns"] == 0 and ctr_human["last_review_at"] == 1370.0
     due_post_human = swarm_store.list_bots_due_for_brief_review(now=1380.0, db_path=db_path)
     assert "t20" not in [b["slug"] for b in due_post_human]
+
+
+# ---------------------------------------------------------------------------
+# Bot status control (paused)
+# ---------------------------------------------------------------------------
+
+
+def test_set_bot_status_pause_resume(db_path):
+    swarm_store.register_bot("pb", "ns", db_path=db_path)
+    paused = swarm_store.pause_bot("pb", db_path=db_path)
+    assert paused["ok"] is True and paused["status"] == "paused"
+    assert swarm_store.get_bot("pb", db_path=db_path)["status"] == "paused"
+    assert [b["slug"] for b in swarm_store.list_bots(status="paused", db_path=db_path)] == ["pb"]
+
+    resumed = swarm_store.resume_bot("pb", db_path=db_path)
+    assert resumed["ok"] is True and resumed["status"] == "active"
+
+    via_set = swarm_store.set_bot_status("pb", "dormant", db_path=db_path)
+    assert via_set["ok"] is True and via_set["status"] == "dormant"
+
+    assert swarm_store.set_bot_status("pb", "rogue", db_path=db_path) == {
+        "ok": False,
+        "error": "INVALID_STATUS",
+    }
+    assert swarm_store.pause_bot("ghost", db_path=db_path) == {
+        "ok": False,
+        "error": "BOT_NOT_FOUND",
+    }
+    assert swarm_store.set_bot_status("bad/slug", "paused", db_path=db_path) == {
+        "ok": False,
+        "error": "INVALID_SLUG",
+    }
+
+
+def test_paused_bot_drops_out_of_active_queries(db_path):
+    swarm_store.register_bot("pb2", "ns-pb", db_path=db_path)
+    swarm_store.upsert_bot_brief("pb2", "soul", db_path=db_path)
+    assert swarm_store.pause_bot("pb2", db_path=db_path)["ok"] is True
+
+    assert swarm_store.record_bot_domain_turn("ns-pb", inc=5, db_path=db_path) == 0
+    assert [p["slug"] for p in swarm_store.list_active_brief_payloads(db_path=db_path)] == []
+    lease = swarm_store.upsert_host_lease("pb2", "h1", "/x", "s", db_path=db_path)
+    assert lease["ok"] is False and lease["status"] == "bot_inactive"
+    inactive = swarm_store.upsert_bot_brief("pb2", "curator v", author="curator", db_path=db_path)
+    assert inactive == {"ok": False, "error": "BOT_INACTIVE"}
+
+
+# ---------------------------------------------------------------------------
+# Host harness inventory
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_and_list_host_harnesses(db_path):
+    stored = swarm_store.upsert_host_harnesses(
+        "host-a",
+        [
+            {
+                "harness_id": "botex",
+                "transport": "wss",
+                "capabilities": {"models": ["m1"], "modes": ["edit"]},
+            },
+            {"harness_id": "zcode", "transport": "local", "status": "degraded"},
+        ],
+        last_seen="2026-11-23T10:00:00+00:00",
+        db_path=db_path,
+    )
+    assert [h["harness_id"] for h in stored] == ["botex", "zcode"]
+    assert stored[0]["capabilities"] == {"models": ["m1"], "modes": ["edit"]}
+
+    # Idempotent upsert on (host_id, harness_id) conflict.
+    swarm_store.upsert_host_harnesses(
+        "host-a",
+        [{"harness_id": "botex", "transport": "wss", "status": "offline"}],
+        last_seen="2026-11-23T10:00:30+00:00",
+        db_path=db_path,
+    )
+    now_dt = datetime(2026, 11, 23, 10, 0, 45, tzinfo=timezone.utc)
+    rows = swarm_store.list_host_harnesses("host-a", now=now_dt, db_path=db_path)
+    assert [r["harness_id"] for r in rows] == ["botex", "zcode"]
+    botex_row = rows[0]
+    assert botex_row["status"] == "offline"
+    assert botex_row["last_seen"] == "2026-11-23T10:00:30+00:00"
+    assert botex_row["capabilities"] == {}
+
+    # Rows idle beyond stale_after_s surface as stale without being deleted.
+    stale = swarm_store.list_host_harnesses(
+        "host-a",
+        stale_after_s=20,
+        now=datetime(2026, 11, 23, 10, 1, 0, tzinfo=timezone.utc),
+        db_path=db_path,
+    )
+    assert stale[0]["status"] == "stale"
+    assert stale[0]["age_s"] == 30.0
+    fresh = swarm_store.list_host_harnesses(
+        "host-a",
+        stale_after_s=120,
+        now=datetime(2026, 11, 23, 10, 1, 0, tzinfo=timezone.utc),
+        db_path=db_path,
+    )
+    assert fresh[0]["status"] == "offline"
+    assert fresh[1]["status"] == "degraded"
+
+    # host_id=None lists every host's inventory.
+    swarm_store.upsert_host_harnesses(
+        "host-b", [{"harness_id": "devin", "transport": "api"}], db_path=db_path
+    )
+    all_rows = swarm_store.list_host_harnesses(db_path=db_path)
+    assert {r["host_id"] for r in all_rows} == {"host-a", "host-b"}
+
+    # Entries lacking harness_id or transport are skipped; invalid host -> [].
+    skipped = swarm_store.upsert_host_harnesses(
+        "host-c",
+        [{"harness_id": "", "transport": "wss"}, {"harness_id": "x"}],
+        db_path=db_path,
+    )
+    assert skipped == []
+    assert (
+        swarm_store.upsert_host_harnesses(
+            "  ", [{"harness_id": "x", "transport": "y"}], db_path=db_path
+        )
+        == []
+    )
+
+
+# ---------------------------------------------------------------------------
+# Work orders persistence
+# ---------------------------------------------------------------------------
+
+
+def _mk_order(order_id="ord-1", **kw):
+    d = {
+        "order_id": order_id,
+        "goal": "do the thing",
+        "bot_slug": "night-coder",
+        "status": "QUEUED",
+        "epoch": 0,
+        "scope": ["src/"],
+    }
+    d.update(kw)
+    return d
+
+
+def test_create_get_list_work_orders(db_path):
+    res = swarm_store.create_work_order(_mk_order(), db_path=db_path)
+    assert res["ok"] is True and res["order_id"] == "ord-1" and res["status"] == "QUEUED"
+
+    got = swarm_store.get_work_order("ord-1", db_path=db_path)
+    assert got["goal"] == "do the thing"
+    assert got["scope"] == ["src/"]
+    assert got["status"] == "QUEUED" and got["epoch"] == 0
+    assert got["created_at"] and got["updated_at"]
+    assert swarm_store.get_work_order("ghost", db_path=db_path) is None
+
+    assert swarm_store.create_work_order(_mk_order(), db_path=db_path) == {
+        "ok": False,
+        "error": "ORDER_EXISTS",
+        "order_id": "ord-1",
+    }
+    assert swarm_store.create_work_order({"order_id": "bad/id"}, db_path=db_path) == {
+        "ok": False,
+        "error": "INVALID_ORDER_ID",
+    }
+    assert swarm_store.create_work_order(
+        _mk_order("ord-bad", status="hacked"), db_path=db_path
+    ) == {
+        "ok": False,
+        "error": "INVALID_STATUS",
+    }
+
+    swarm_store.create_work_order(_mk_order("ord-2", status="RUNNING"), db_path=db_path)
+    swarm_store.create_work_order(_mk_order("ord-3", bot_slug="other-bot"), db_path=db_path)
+    listed = swarm_store.list_work_orders(status="RUNNING", db_path=db_path)
+    assert [o["order_id"] for o in listed] == ["ord-2"]
+    by_bot = swarm_store.list_work_orders(bot_slug="other-bot", db_path=db_path)
+    assert [o["order_id"] for o in by_bot] == ["ord-3"]
+    # Status filter is case-normalized; unknown statuses match nothing.
+    queued = swarm_store.list_work_orders(status="queued", db_path=db_path)
+    assert {o["order_id"] for o in queued} == {"ord-1", "ord-3"}
+    assert swarm_store.list_work_orders(status="bogus", db_path=db_path) == []
+    assert len(swarm_store.list_work_orders(limit=1, db_path=db_path)) == 1
+
+
+def test_update_work_order_status_machine_and_cas(db_path):
+    swarm_store.create_work_order(_mk_order(), db_path=db_path)
+
+    ok = swarm_store.update_work_order_status("ord-1", "RUNNING", fencing_epoch=0, db_path=db_path)
+    assert ok["ok"] is True
+    assert ok["status"] == "RUNNING" and ok["previous_status"] == "QUEUED"
+    assert ok["epoch"] == 1 and ok["fencing_epoch"] == 1
+
+    # CAS rejects a stale epoch.
+    stale = swarm_store.update_work_order_status("ord-1", "STUCK", fencing_epoch=0, db_path=db_path)
+    assert stale["ok"] is False and stale["error"] == "EPOCH_MISMATCH"
+    assert stale["current_epoch"] == 1
+
+    # Illegal edge is refused (RUNNING -> DONE needs the verify gate).
+    illegal = swarm_store.update_work_order_status("ord-1", "DONE", db_path=db_path)
+    assert illegal["ok"] is False
+    assert illegal["reason"] == "illegal_transition"
+    assert illegal["from"] == "RUNNING" and illegal["to"] == "DONE"
+
+    # Terminal orders refuse every transition.
+    swarm_store.update_work_order_status("ord-1", "CANCELLED", db_path=db_path)
+    term = swarm_store.update_work_order_status("ord-1", "RUNNING", db_path=db_path)
+    assert term["ok"] is False and term["reason"] == "order_terminal"
+
+    assert swarm_store.update_work_order_status("ghost", "RUNNING", db_path=db_path) == {
+        "ok": False,
+        "error": "ORDER_NOT_FOUND",
+        "order_id": "ghost",
+    }
+    assert swarm_store.update_work_order_status("ord-1", "bogus", db_path=db_path) == {
+        "ok": False,
+        "error": "INVALID_STATUS",
+    }
+
+
+def test_update_work_order_status_paused_lease_freeze(db_path):
+    swarm_store.create_work_order(_mk_order(status="RUNNING", epoch=3), db_path=db_path)
+    paused = swarm_store.update_work_order_status(
+        "ord-1", "PAUSED", reason="operator_pause", db_path=db_path
+    )
+    assert paused["ok"] is True and paused["status"] == "PAUSED"
+    assert swarm_store.get_work_order("ord-1", db_path=db_path)["status_reason"] == "operator_pause"
+
+    # Lease-expiry fencing is refused while PAUSED unless forced.
+    refused = swarm_store.update_work_order_status("ord-1", "FENCED", db_path=db_path)
+    assert refused["ok"] is False
+    assert refused["reason"] == "paused_lease_frozen"
+    assert refused["status"] == "PAUSED"
+    assert swarm_store.get_work_order("ord-1", db_path=db_path)["status"] == "PAUSED"
+
+    forced = swarm_store.update_work_order_status("ord-1", "FENCED", force=True, db_path=db_path)
+    assert forced["ok"] is True and forced["status"] == "FENCED"
+
+    # PAUSED -> RUNNING (resume) is a legal edge.
+    swarm_store.create_work_order(_mk_order("ord-p2", status="PAUSED"), db_path=db_path)
+    resumed = swarm_store.update_work_order_status("ord-p2", "RUNNING", db_path=db_path)
+    assert resumed["ok"] is True and resumed["previous_status"] == "PAUSED"
+
+
+def test_list_expired_work_orders_excludes_paused_and_terminal(db_path):
+    swarm_store.register_bot("ebot", "ns", db_path=db_path)
+    swarm_store.register_bot("lbot", "ns", db_path=db_path)
+    swarm_store.upsert_host_lease(
+        "ebot", "h1", "/x", "s", fencing_token=1, ttl_s=-5, db_path=db_path
+    )
+    swarm_store.upsert_host_lease(
+        "lbot", "h2", "/x", "s", fencing_token=1, ttl_s=3600, db_path=db_path
+    )
+    for oid, st in (
+        ("ord-run", "RUNNING"),
+        ("ord-paused", "PAUSED"),
+        ("ord-done", "DONE"),
+        ("ord-cancel", "CANCELLED"),
+    ):
+        swarm_store.create_work_order(_mk_order(oid, bot_slug="ebot", status=st), db_path=db_path)
+    swarm_store.create_work_order(
+        _mk_order("ord-live", bot_slug="lbot", status="RUNNING"), db_path=db_path
+    )
+
+    expired = swarm_store.list_expired_work_orders(now=datetime.now(timezone.utc), db_path=db_path)
+    assert [o["order_id"] for o in expired] == ["ord-run"]
+    assert expired[0]["host_id"] == "h1"
+    assert expired[0]["fencing_token"] == 1
+    # Without `now`, wall-clock expiry is used the same way.
+    assert [o["order_id"] for o in swarm_store.list_expired_work_orders(db_path=db_path)] == [
+        "ord-run"
+    ]
