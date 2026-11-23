@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 74 Python modules (`server.py` + `botex/`), 89 test files (`tests/`).
+- **Codebase footprint:** 75 Python modules (`server.py` + `botex/`), 90 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -82,6 +82,7 @@ targeted + integration tests.
 |---|---|---|
 | `botex/edge/__init__.py` | — | `test_edge_brief_sync.py`, `test_edge_delegation.py`, `test_edge_integration.py`, `test_edge_runner.py`, +1 more |
 | `botex/edge/adapters.py` | `EpochCheckpointManager`, `discover_local_harnesses`, `check_harness_eligible`, `translate_work_order`, `build_anti_spiral_reset`, `finalize_verified_work_order` | `test_groq_cloudflare_providers.py`, `test_host_os_driver.py`, `test_work_order_supervisor.py` |
+| `botex/edge/credentials.py` | `get_edge_credentials_dir`, `validate_credential_id`, `edge_token_path`, `extract_token_jti`, `save_edge_token`, `load_edge_token`, `+3 more` | `test_edge_credentials.py` |
 | `botex/edge/delegation.py` | `DelegationError`, `EdgeSkillSpec`, `EdgeDelegationPolicy`, `EdgeDelegationHandler`, `validate_params`, `verify_skill_digest` | `test_edge_delegation.py` |
 | `botex/edge/host_os_driver.py` | `SingleInstanceLockError`, `SingleInstanceLock`, `WindowsJobGuard`, `HostOSDriver`, `default_swarm_home`, `kill_posix_process_group`, `+6 more` | `test_host_os_driver.py` |
 | `botex/edge/runner.py` | `EdgeCapabilities`, `EdgeRunner`, `frame_qos_priority`, `get_local_bot_briefs_dir`, `write_local_bot_brief`, `read_local_bot_briefs`, `+3 more` | `test_edge_brief_sync.py`, `test_edge_qos_daemon.py`, `test_edge_runner.py`, `test_tethered_bot_visibility.py` |
@@ -177,4 +178,4 @@ targeted + integration tests.
 | File | Key Public Symbols | Tests |
 |---|---|---|
 | `botex/__init__.py` | — | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m7_concurrency.py`, `test_curator_and_migration_f4.py`, +23 more |
-| `server.py` | `SubagentAttemptResult`, `SubagentTaskResult`, `mask_secrets_recursive`, `mask_stream_chunk`, `start_task`, `get_task_status`, `+29 more` | `test_analytics.py`, `test_approval.py`, `test_blackbox_penal.py`, `test_botex.py`, +26 more |
+| `server.py` | `SubagentAttemptResult`, `SubagentTaskResult`, `mask_secrets_recursive`, `mask_stream_chunk`, `start_task`, `get_task_status`, `+29 more` | `test_analytics.py`, `test_approval.py`, `test_blackbox_penal.py`, `test_botex.py`, +27 more |

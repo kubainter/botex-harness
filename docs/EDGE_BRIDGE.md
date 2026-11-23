@@ -26,14 +26,12 @@ Use this flow on any new machine that connects a local IDE/agent to an existing 
      - `X-Host: <device-name>` *(optional, used for Cloud Memory Vault & BlackBox provenance)*
    - **Per-Call Provenance (Shared Bridges / Toolport):** When multiple local agents share one SSE bridge session, pass `origin="<agent>@<host>"` per tool call (`start_task`, `run_subagent`, `save_memory`, `patch_memory_section`, `botex_report_violation`). Reserved identity claims (`human`, `human-curated`, `operator`, `curator`) are rejected and fall back to the session headers.
 
-4. **Issue a one-time Edge device token & save `.env`:**
-   Call `POST https://<cloud-host>/api/edge/tokens` (see Section 2) and store the returned `btxd_...` token in `./.env` inside the project (or point `BOTEX_ENV_FILE` at any env file):
-   ```env
-   BOTEX_EDGE_SERVER=wss://<cloud-host>/api/edge/ws
-   BOTEX_EDGE_TOKEN=btxd_...
-   BOTEX_EDGE_DEVICE_ID=<device-id>
-   BOTEX_EDGE_WORKSPACE_ID=<workspace-id>
+4. **Issue a one-time Edge device token & enroll it locally (recommended):**
+   Call `POST https://<cloud-host>/api/edge/tokens` (see Section 2) and store the returned `btxd_...` token with `botex edge enroll`:
+   ```bash
+   botex edge enroll --device-id <device-id> --workspace-id <workspace-id>
    ```
+   Paste (or pipe) the token when prompted. Credentials live in the isolated cross-platform store `~/.botex/credentials/edge/` (override with `BOTEX_CREDENTIALS_DIR` for multi-instance setups or containers); raw tokens never touch the project `.env`. Pass the server per-run with `--server wss://<cloud-host>/api/edge/ws` or `BOTEX_EDGE_SERVER`.
 
 5. **Start the Edge bridge in the project directory:**
    ```bash
@@ -83,7 +81,7 @@ Device tokens are issued via `POST /api/edge/tokens` (authenticated with the Clo
 
 - **Default scopes** (when `scopes` is omitted): `["task_pull:<ws>", "result_push:<ws>"]`.
 - **Default TTL:** 30 days (`2592000` seconds).
-- **One-time secret:** The raw `btxd_...` token is returned once at creation. Store it in a protected `.env` file (`BOTEX_EDGE_TOKEN=...`, e.g., the repo `./.env` or `BOTEX_ENV_FILE`) rather than a plain `.txt` file so agent DLP/file-access guards protect it.
+- **One-time secret:** The raw `btxd_...` token is returned once at creation. Enroll it in the isolated local credential store via `botex edge enroll` (stored under `~/.botex/credentials/edge/`, `BOTEX_CREDENTIALS_DIR` override) — see Section 3. CI/service accounts can instead pass `--token-file` or set `BOTEX_EDGE_TOKEN` per-process.
 - **Inspect / Revoke:**
   - `GET /api/edge/tokens` — list issued tokens (hashes are never returned).
   - `DELETE /api/edge/tokens/{jti}` — revoke by JTI and immediately disconnect matching active WSS sessions.
@@ -91,7 +89,18 @@ Device tokens are issued via `POST /api/edge/tokens` (authenticated with the Clo
 
 ## 3. Running the Local Edge Runner
 
-From the target workspace directory, after setting `BOTEX_EDGE_TOKEN` (and optional `BOTEX_EDGE_SERVER`, `BOTEX_EDGE_DEVICE_ID`, `BOTEX_EDGE_WORKSPACE_ID`) in your `.env`:
+From the target workspace directory, after enrolling a token (Section 2) with:
+
+```bash
+botex edge enroll --device-id <device-id> --workspace-id <workspace-id>
+```
+
+The runner resolves credentials in order: `--token`, `--token-file`, explicit process `BOTEX_EDGE_TOKEN`, the isolated store (`~/.botex/credentials/edge/`, `BOTEX_CREDENTIALS_DIR` override), then any legacy `.env` `BOTEX_EDGE_TOKEN` fallback. Manage stored credentials with:
+
+- `botex edge tokens list` — show stored credentials (`device_id`, `workspace_id`, `jti`, `updated_at`; raw tokens are never displayed).
+- `botex edge tokens remove --device-id <id> --workspace-id <id>` — delete a stored credential.
+
+CI/service overrides: `BOTEX_EDGE_TOKEN` (env or `.env`) or `--token-file` still work unchanged. Optionally set `BOTEX_EDGE_SERVER`, `BOTEX_EDGE_DEVICE_ID`, `BOTEX_EDGE_WORKSPACE_ID` in your environment:
 
 ```sh
 ./bin/botex-edge.sh

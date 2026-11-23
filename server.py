@@ -2916,11 +2916,12 @@ def _cli_setup() -> None:
    Body:   {{"device_id": "<device-id>", "workspace_id": "<workspace-id>"}}
    -> Returns one-time token starting with: btxd_...
 
-3. {accent("Create ./.env in the target repo (or point BOTEX_ENV_FILE at one):")}
-   BOTEX_EDGE_SERVER=wss://<cloud-host>/api/edge/ws
-   BOTEX_EDGE_TOKEN=btxd_...
-   BOTEX_EDGE_DEVICE_ID=<device-id>
-   BOTEX_EDGE_WORKSPACE_ID=<workspace-id>
+3. {accent("Store the edge token in the isolated local credential store (recommended):")}
+   botex edge enroll --device-id <device-id> --workspace-id <workspace-id>
+   (paste the one-time btxd_... token when prompted, or pipe it / use --token-file)
+   Credentials live in ~/.botex/credentials/edge/ (override dir with BOTEX_CREDENTIALS_DIR).
+   Pass the server separately via --server wss://<cloud-host>/api/edge/ws or BOTEX_EDGE_SERVER.
+   CI/services: skip the store and set BOTEX_EDGE_TOKEN (or --token-file) instead.
 
 4. {accent("Start the Edge bridge in your project directory:")}
    botex edge -w .
@@ -2949,11 +2950,106 @@ def _cli_mcp_bridge(argv: list[str]) -> None:
 def _cli_edge(argv: list[str]) -> None:
     """CLI dispatcher for the thin edge runner (outbound WSS bridge)."""
     import argparse
+    import getpass
     import socket
 
     from botex.edge import EdgeCapabilities, EdgeRunner
 
+    # Capture explicit process-env token before .env loading so stale .env entries
+    # cannot shadow per-(device_id, workspace_id) credentials in the isolated store.
+    process_env_token = os.environ.get("BOTEX_EDGE_TOKEN", "")
     _load_edge_env_files()
+
+    if argv and argv[0] in ("enroll", "tokens"):
+        from botex.edge.credentials import (
+            delete_edge_token,
+            list_edge_credentials,
+            save_edge_token,
+        )
+
+        sub = argparse.ArgumentParser(prog="botex edge")
+        cmd = sub.add_subparsers(dest="command", required=True)
+        p_enroll = cmd.add_parser(
+            "enroll", help="Store an edge device token in the local credential store"
+        )
+        p_enroll.add_argument("--device-id", default=os.environ.get("BOTEX_EDGE_DEVICE_ID", ""))
+        p_enroll.add_argument(
+            "--workspace-id", default=os.environ.get("BOTEX_EDGE_WORKSPACE_ID", "")
+        )
+        p_enroll.add_argument("--workspace", "-w", default=".")
+        p_enroll.add_argument("--token-file", default="")
+        p_tokens = cmd.add_parser("tokens", help="Manage stored edge device tokens")
+        p_tokens_sub = p_tokens.add_subparsers(dest="tokens_command", required=True)
+        p_tokens_sub.add_parser("list", help="List stored edge credentials (no token material)")
+        p_remove = p_tokens_sub.add_parser("remove", help="Remove a stored edge credential")
+        p_remove.add_argument("--device-id", required=True)
+        p_remove.add_argument("--workspace-id", required=True)
+        ns = sub.parse_args(argv)
+
+        if ns.command == "enroll":
+            device_id = (ns.device_id or "").strip() or socket.gethostname()
+            workspace_root = str(Path(ns.workspace).expanduser().resolve())
+            workspace_id = (ns.workspace_id or "").strip() or Path(workspace_root).name
+            raw_token = ""
+            if ns.token_file:
+                try:
+                    raw_token = Path(ns.token_file).expanduser().read_text(encoding="utf-8").strip()
+                except OSError as exc:
+                    print(err(f"Cannot read --token-file: {exc.strerror or exc}"), file=sys.stderr)
+                    sys.exit(2)
+            elif not sys.stdin.isatty():
+                raw_token = sys.stdin.read().strip()
+            else:
+                raw_token = getpass.getpass("Edge device token (btxd_...): ").strip()
+            if not raw_token:
+                print(
+                    err("Empty token: pipe a btxd_ token, pass --token-file, or type one."),
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            try:
+                res = save_edge_token(device_id, workspace_id, raw_token)
+            except (OSError, ValueError) as exc:
+                print(err(f"Failed to store edge token: {exc}"), file=sys.stderr)
+                sys.exit(2)
+            print(
+                ok(
+                    f"Stored edge credential for device={res['device_id']} "
+                    f"workspace={res['workspace_id']} (jti={res.get('jti', '?')})"
+                )
+            )
+            return
+
+        if ns.tokens_command == "list":
+            items = list_edge_credentials()
+            if not items:
+                print(dim("No stored edge credentials. Use 'botex edge enroll' to add one."))
+                return
+            header = f"{'DEVICE':<28} {'WORKSPACE':<28} {'JTI':<20} UPDATED"
+            print(title(header))
+            for it in items:
+                print(
+                    f"{it.get('device_id', '?'):<28} {it.get('workspace_id', '?'):<28} "
+                    f"{it.get('jti', '?'):<20} {it.get('updated_at', '?')}"
+                )
+            return
+
+        try:
+            removed = delete_edge_token(ns.device_id, ns.workspace_id)
+        except ValueError as exc:
+            print(err(f"Invalid credential identifier: {exc}"), file=sys.stderr)
+            sys.exit(2)
+        if removed:
+            print(
+                ok(f"Removed edge credential for device={ns.device_id} workspace={ns.workspace_id}")
+            )
+        else:
+            print(
+                dim(
+                    f"No stored edge credential for device={ns.device_id} workspace={ns.workspace_id}"
+                )
+            )
+        return
 
     parser = argparse.ArgumentParser(
         prog="botex edge",
@@ -2961,7 +3057,10 @@ def _cli_edge(argv: list[str]) -> None:
             "Run the thin edge runner: an outbound WSS bridge that lets BoteX "
             "Cloud execute workspace tools on this device (no inbound port)."
         ),
-        epilog="Run 'botex setup' for full Cloud MCP + Edge .env instructions.",
+        epilog=(
+            "Use 'botex edge enroll' to store device tokens in the isolated credential store; "
+            "run 'botex setup' for full Cloud MCP + Edge instructions."
+        ),
     )
     parser.add_argument(
         "--server",
@@ -3028,29 +3127,44 @@ def _cli_edge(argv: list[str]) -> None:
         )
         sys.exit(2)
 
-    token = args.token
-    if not token and args.token_file:
-        try:
-            token = Path(args.token_file).expanduser().read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            print(
-                err(f"Cannot read --token-file: {exc.strerror or exc}"),
-                file=sys.stderr,
-            )
-            sys.exit(2)
-    if not token:
-        token = os.environ.get("BOTEX_EDGE_TOKEN", "")
+    workspace_root = str(Path(args.workspace).expanduser().resolve())
+    device_id = args.device_id or socket.gethostname()
+    workspace_id = args.workspace_id or Path(workspace_root).name
+
+    from botex.edge.credentials import resolve_edge_token
+
+    if args.token:
+        print(
+            dim(
+                "Warning: --token exposes credentials in process lists; "
+                "prefer 'botex edge enroll' or --token-file."
+            ),
+            file=sys.stderr,
+        )
+
+    try:
+        token, _token_source = resolve_edge_token(
+            device_id,
+            workspace_id,
+            cli_token=args.token,
+            token_file=args.token_file,
+            env_token=process_env_token,
+        )
+    except (OSError, ValueError) as exc:
+        print(err(f"Cannot resolve edge token: {exc}"), file=sys.stderr)
+        sys.exit(2)
+    if not token and not str(args.token_file or "").strip():
+        token = os.environ.get("BOTEX_EDGE_TOKEN", "").strip()
     if not token:
         print(
             err(
-                "Edge token required: pass --token/--token-file or set BOTEX_EDGE_TOKEN "
-                "(run 'botex setup' for details)."
+                "Edge token required: run 'botex edge enroll --device-id <id> "
+                "--workspace-id <id>' to store one interactively, or pass "
+                "--token-file / set BOTEX_EDGE_TOKEN for CI (run 'botex setup' for details)."
             ),
             file=sys.stderr,
         )
         sys.exit(2)
-
-    workspace_root = str(Path(args.workspace).expanduser().resolve())
     caps = EdgeCapabilities.load(workspace_root)
     if args.allow_exec:
         caps.allow_exec = True
@@ -3062,8 +3176,8 @@ def _cli_edge(argv: list[str]) -> None:
     runner = EdgeRunner(
         args.server,
         token=token,
-        device_id=args.device_id or socket.gethostname(),
-        workspace_id=args.workspace_id or Path(workspace_root).name,
+        device_id=device_id,
+        workspace_id=workspace_id,
         workspace_root=workspace_root,
         caps=caps,
     )
