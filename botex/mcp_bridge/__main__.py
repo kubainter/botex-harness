@@ -11,13 +11,17 @@ channel.
 import argparse
 import asyncio
 import json
+import logging
 import os
 import socket
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .client import DEFAULT_POOL_SIZE, McpBridgeClient
+
+logger = logging.getLogger(__name__)
 
 try:
     from dotenv import load_dotenv
@@ -29,7 +33,7 @@ def _load_env_file() -> None:
     """Load bridge secrets from a local .env instead of client/registry env.
 
     BOTEX_MCP_ENV points at an explicit file (registry stores only the path,
-    never the token); otherwise standard upward .env discovery from cwd.
+    never the token); otherwise checks cwd upward and the repo root .env.
     Already-set env vars win (override=False) and BOTEX_DISABLE_DOTENV opts
     out entirely, matching botex.server.config.
     """
@@ -47,6 +51,9 @@ def _load_env_file() -> None:
         load_dotenv(explicit, override=False)
     else:
         load_dotenv(override=False)
+        repo_env = Path(__file__).resolve().parents[2] / ".env"
+        if repo_env.exists():
+            load_dotenv(dotenv_path=repo_env, override=False)
 
 
 if sys.platform == "win32":
@@ -186,8 +193,26 @@ def main(argv: Optional[list] = None) -> None:
 
 
 async def _run_startup(bridge: McpBridgeClient) -> None:
-    await bridge.start()
-    await _run(bridge)
+    async def _start_bg() -> None:
+        try:
+            await bridge.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("background bridge startup failed: %s", e)
+
+    # Start SSE pool & cache priming in the background so stdin `initialize`
+    # is answered immediately (<50ms) even if the Cloud handshake is slow.
+    start_task = asyncio.create_task(_start_bg())
+    try:
+        await _run(bridge)
+    finally:
+        if not start_task.done():
+            start_task.cancel()
+            try:
+                await start_task
+            except BaseException:
+                pass
 
 
 if __name__ == "__main__":

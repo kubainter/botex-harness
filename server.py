@@ -23,9 +23,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Optional, Tuple
 
-from pydantic import Field
-from typing_extensions import TypedDict
-
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -36,6 +33,14 @@ if hasattr(sys.stdout, "reconfigure"):
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
+
+# Fast-path for `server.py mcp-bridge`: avoid importing the full local harness
+# (~2-4s on Windows) so stdio `initialize` completes well within client timeouts.
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "mcp-bridge":
+    from botex.mcp_bridge import __main__ as _mcp_bridge_main
+
+    _mcp_bridge_main.main(sys.argv[2:])
+    sys.exit(0)
 
 from botex.analytics import cli_history, cli_stats, load_analytics
 from botex.benchmarks import get_recommended_models
@@ -79,6 +84,8 @@ from botex.security import (
 from botex.ui import accent, dim, err, mark_status, ok, title, warn
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
+from pydantic import Field
+from typing_extensions import TypedDict
 
 from botex.core.blackbox import (
     get_rap_sheet as _get_rap_sheet,
