@@ -17,6 +17,7 @@ Define the normative caller-facing contract for AI orchestrators delegating boun
 ## Prerequisites
 
 - BoteX MCP server running and reachable (`check_health()` returns ready).
+  - **Multiplexing Cloud Bridge (`botex mcp-bridge` / `server.py mcp-bridge`):** Connects to BoteX Cloud via a pool of concurrent SSE sessions (`BOTEX_MCP_POOL_SIZE`, default `3`, least-loaded dispatch) plus a stateless `/mcp/http` fast path (`BOTEX_MCP_HTTP_READS=1`) for read-class tools (`check_health`, `recall_memory`, `get_task_status`, `list_tasks`). Multiple delegations (`run_subagent`, `start_task`) and status checks can be dispatched in parallel without head-of-line blocking (see `docs/MCP_BRIDGE.md`).
 - Target `workspace_dir` is reachable by the **BoteX server host**:
   - For **remote BoteX Cloud** (`https://.../mcp/sse`), NEVER pass a local workstation path (`C:\Users\...` or unpushed local repo path) — the server falls back to its own VPS checkout (`/opt/botex`, deployed `main`).
   - To inspect or edit local/unpushed workstation files from BoteX Cloud, an outbound `botex edge` runner must be connected (`docs/EDGE_BRIDGE.md`) and `workspace_dir` MUST be set to `"edge://<device_id>/<workspace_id>"` (or `"<workspace_id>"`). If no edge runner is online, do not delegate local-file work to Cloud.
