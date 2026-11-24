@@ -117,7 +117,7 @@ def test_edge_runner_serve_brief_sync_writes_valid_and_skips_malformed(tmp_path)
                     "type": "hello_ack",
                     "device_id": hello["device_id"],
                     "workspace_id": hello["workspace_id"],
-                    "server_version": "2.1.0",
+                    "server_version": "2.2.0",
                 }
             )
         )

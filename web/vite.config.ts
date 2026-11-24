@@ -24,7 +24,7 @@ export default defineConfig({
         start_url: '/',
         scope: '/',
         // @ts-ignore
-        version: '2.1.0',
+        version: '2.2.0',
         icons: [
           {
             src: '/icon-192.png',

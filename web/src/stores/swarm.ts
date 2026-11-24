@@ -8,8 +8,10 @@ import type {
   BotBrief,
   BotLease,
   ConnectedDeviceInfo,
+  HostWorkspace,
   HostHarnessInfo,
   WorkOrderInfo,
+  WorkOrderDispatchPayload,
   SwarmChannelInfo,
   ChannelCreatePayload,
   ChannelMessagePayload,
@@ -47,10 +49,13 @@ export const useSwarmStore = defineStore('swarm', () => {
 
   // --- Edge hosts -----------------------------------------------------------
   const devices = ref<ConnectedDeviceInfo[]>([])
+  const workspacesByHost = ref<Record<string, HostWorkspace[]>>({})
   const harnessesByHost = ref<Record<string, HostHarnessInfo[]>>({})
   const leasesByHost = ref<Record<string, BotLease[]>>({})
   const loadingHosts = ref<boolean>(false)
   const loadingLeases = ref<boolean>(false)
+  const loadingWorkspacesHost = ref<Set<string>>(new Set())
+  const workspaceErrors = ref<Record<string, string>>({})
   const loadingHarnessHost = ref<Set<string>>(new Set())
   const harnessErrors = ref<Record<string, string>>({})
 
@@ -236,6 +241,71 @@ export const useSwarmStore = defineStore('swarm', () => {
     }
   }
 
+  const WORKSPACE_STATES: Record<string, 'enrolled' | 'candidate' | 'disabled'> = {
+    enrolled: 'enrolled',
+    candidate: 'candidate',
+    disabled: 'disabled'
+  }
+
+  function sanitizeWorkspaceRows(
+    hostId: string,
+    rows: Array<Partial<HostWorkspace> | Record<string, unknown>>,
+    prev: HostWorkspace[],
+    fallbackLastSeen?: string
+  ): HostWorkspace[] {
+    const out: HostWorkspace[] = []
+    const seen = new Set<string>()
+    for (const item of rows) {
+      const raw = (item ?? {}) as Partial<HostWorkspace>
+      const wsId = typeof raw.workspace_id === 'string' ? raw.workspace_id.trim() : ''
+      if (!wsId || seen.has(wsId)) continue
+      seen.add(wsId)
+      const old = prev.find((p) => p.workspace_id === wsId)
+      const rawState = typeof raw.state === 'string' ? raw.state.trim().toLowerCase() : ''
+      const state = WORKSPACE_STATES[rawState] ?? old?.state ?? 'enrolled'
+      const connected =
+        typeof raw.connected === 'boolean'
+          ? raw.connected
+          : old !== undefined
+            ? old.connected
+            : devices.value.some((d) => d.device_id === hostId && d.workspace_id === wsId && d.healthy !== false)
+      const label = typeof raw.label === 'string' ? raw.label.trim() : old?.label ?? ''
+      const lastSeen =
+        typeof raw.last_seen === 'string' && raw.last_seen.trim()
+          ? raw.last_seen.trim()
+          : typeof fallbackLastSeen === 'string' && fallbackLastSeen.trim()
+            ? fallbackLastSeen.trim()
+            : old?.last_seen ?? ''
+      out.push({
+        workspace_id: wsId,
+        label,
+        state,
+        connected,
+        last_seen: lastSeen
+      })
+    }
+    return out
+  }
+
+  async function fetchHostWorkspaces(hostId: string): Promise<void> {
+    loadingWorkspacesHost.value.add(hostId)
+    const { [hostId]: _prev, ...restErrors } = workspaceErrors.value
+    workspaceErrors.value = restErrors
+    try {
+      const res = await api.listHostWorkspaces(hostId)
+      const prev = workspacesByHost.value[hostId] ?? []
+      workspacesByHost.value = {
+        ...workspacesByHost.value,
+        [hostId]: sanitizeWorkspaceRows(hostId, res.workspaces ?? [], prev)
+      }
+    } catch (e) {
+      workspacesByHost.value = { ...workspacesByHost.value, [hostId]: [] }
+      workspaceErrors.value = { ...workspaceErrors.value, [hostId]: errorMessage(e) }
+    } finally {
+      loadingWorkspacesHost.value.delete(hostId)
+    }
+  }
+
   async function fetchHostHarnesses(hostId: string, staleAfterS: number = 120): Promise<void> {
     loadingHarnessHost.value.add(hostId)
     const { [hostId]: _prev, ...restErrors } = harnessErrors.value
@@ -336,6 +406,39 @@ export const useSwarmStore = defineStore('swarm', () => {
 
   async function fenceOrder(orderId: string, body: { expected_epoch: number; reason?: string; status?: string }): Promise<ActionResult> {
     return mutateOrder(orderId, () => api.fenceWorkOrder(orderId, body))
+  }
+
+  async function dispatchOrder(orderId: string, payload: WorkOrderDispatchPayload): Promise<ActionResult> {
+    mutatingOrderId.value = orderId
+    error.value = null
+    try {
+      const res = await api.dispatchWorkOrder(orderId, payload)
+      if (res.order) {
+        applyOrderPatch(orderId, {
+          ...res.order,
+          host_id: res.order.host_id ?? payload.host_id,
+          workspace_id: res.order.workspace_id ?? payload.workspace_id,
+          harness_id: res.order.harness_id ?? payload.harness_id,
+          verification_pending: false
+        })
+      }
+      await fetchOrders(lastOrdersParams)
+      const refreshed = orders.value.find((o) => o.order_id === orderId)
+      if (refreshed) {
+        applyOrderPatch(orderId, {
+          ...(res.order ?? {}),
+          host_id: refreshed.host_id ?? res.order?.host_id ?? payload.host_id,
+          workspace_id: refreshed.workspace_id ?? res.order?.workspace_id ?? payload.workspace_id,
+          harness_id: refreshed.harness_id ?? res.order?.harness_id ?? payload.harness_id
+        })
+      }
+      void fetchLeases()
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, message: errorMessage(e) }
+    } finally {
+      mutatingOrderId.value = null
+    }
   }
 
   // --- Channels (data-only coordination bus) --------------------------------
@@ -463,7 +566,10 @@ export const useSwarmStore = defineStore('swarm', () => {
 
   // --- Realtime push reconciliation -----------------------------------------
 
-  function handleSwarmEvent(event: SwarmRealtimeEvent): void {
+  const TERMINAL_OR_FENCED_ORDER_STATUSES = new Set(['DONE', 'FAILED', 'CANCELLED', 'FENCED'])
+  const COMPLETION_EVENT_KINDS = new Set(['exited', 'completed', 'done'])
+
+  function applyRealtimeEvent(event: SwarmRealtimeEvent): void {
     switch (event.type) {
       case 'bot_status': {
         if (event.bot) {
@@ -487,15 +593,61 @@ export const useSwarmStore = defineStore('swarm', () => {
       }
       case 'work_order_update': {
         if (!event.order_id) break
+        const nextStatus = event.order?.status ?? event.status
+        const clearPending =
+          typeof nextStatus === 'string' && TERMINAL_OR_FENCED_ORDER_STATUSES.has(nextStatus)
+            ? { verification_pending: false }
+            : {}
         if (event.order) {
           const idx = orders.value.findIndex((o) => o.order_id === event.order_id)
-          if (idx >= 0) orders.value[idx] = { ...orders.value[idx], ...event.order }
-          else orders.value.push(event.order)
+          const merged: WorkOrderInfo = {
+            ...(idx >= 0 ? orders.value[idx] : ({} as WorkOrderInfo)),
+            ...event.order,
+            ...(event.host_id !== undefined ? { host_id: event.host_id } : {}),
+            ...(event.workspace_id !== undefined ? { workspace_id: event.workspace_id } : {}),
+            ...(event.harness_id !== undefined ? { harness_id: event.harness_id } : {}),
+            ...(event.pid !== undefined ? { pid: event.pid } : {}),
+            ...clearPending
+          }
+          if (idx >= 0) orders.value[idx] = merged
+          else orders.value.push(merged)
         } else {
           applyOrderPatch(event.order_id, {
             ...(event.status !== undefined ? { status: event.status } : {}),
-            ...(event.epoch !== undefined ? { epoch: event.epoch } : {})
+            ...(event.epoch !== undefined ? { epoch: event.epoch } : {}),
+            ...(event.host_id !== undefined ? { host_id: event.host_id } : {}),
+            ...(event.workspace_id !== undefined ? { workspace_id: event.workspace_id } : {}),
+            ...(event.harness_id !== undefined ? { harness_id: event.harness_id } : {}),
+            ...(event.pid !== undefined ? { pid: event.pid } : {}),
+            ...clearPending
           })
+        }
+        break
+      }
+      case 'work_order_event': {
+        if (!event.order_id) break
+        const idx = orders.value.findIndex((o) => o.order_id === event.order_id)
+        if (idx < 0) break
+        const current = orders.value[idx]
+        // Invariant: edge events never transition an order to DONE; only verified updates do.
+        const isTerminal =
+          current.status === 'DONE' || current.status === 'FAILED' || current.status === 'CANCELLED'
+        const kindNorm = typeof event.kind === 'string' ? event.kind.trim().toLowerCase() : ''
+        const markPending =
+          !isTerminal && (event.verification_pending === true || COMPLETION_EVENT_KINDS.has(kindNorm))
+        orders.value[idx] = {
+          ...current,
+          status: current.status,
+          ...(typeof event.host_id === 'string' && event.host_id && !current.host_id
+            ? { host_id: event.host_id }
+            : {}),
+          ...(typeof event.workspace_id === 'string' && event.workspace_id
+            ? { workspace_id: event.workspace_id }
+            : {}),
+          ...(typeof event.kind === 'string' && event.kind ? { last_event_kind: event.kind } : {}),
+          ...(typeof event.ts === 'string' && event.ts ? { last_event_ts: event.ts } : {}),
+          ...(typeof event.seq === 'number' ? { last_event_seq: event.seq } : {}),
+          ...(markPending ? { verification_pending: true } : {})
         }
         break
       }
@@ -506,15 +658,32 @@ export const useSwarmStore = defineStore('swarm', () => {
         }
         break
       }
-      case 'host_workspace_update':
-        // Reserved for the workspace pane (later phase); nothing to reconcile yet.
+      case 'host_workspaces_update':
+      case 'host_workspace_update': {
+        if (!event.host_id) break
+        const prev = workspacesByHost.value[event.host_id] ?? []
+        workspacesByHost.value = {
+          ...workspacesByHost.value,
+          [event.host_id]: sanitizeWorkspaceRows(
+            event.host_id,
+            event.workspaces ?? [],
+            prev,
+            event.last_seen
+          )
+        }
         break
+      }
     }
   }
+
+  const handleSwarmEvent = applyRealtimeEvent
 
   function reconcileAfterReconnect(): void {
     // The socket may have missed pushes while down; refresh only loaded collections.
     if (bots.value.length) void fetchBots()
+    for (const hostId of Object.keys(workspacesByHost.value)) {
+      void fetchHostWorkspaces(hostId)
+    }
     for (const hostId of Object.keys(harnessesByHost.value)) {
       void fetchHostHarnesses(hostId)
     }
@@ -527,7 +696,13 @@ export const useSwarmStore = defineStore('swarm', () => {
     if (realtimeCleanup) return realtimeCleanup
 
     let wasConnected = false
-    const offEvents = wsManager.onSwarmEvent(handleSwarmEvent)
+    const offEvents = wsManager.onSwarmEvent(applyRealtimeEvent)
+    const offFallback = wsManager.onChunk((chunk) => {
+      const rawType = (chunk as { type?: string } | null)?.type
+      if (rawType === 'host_workspaces_update' || rawType === 'work_order_event') {
+        applyRealtimeEvent(chunk as unknown as SwarmRealtimeEvent)
+      }
+    })
     const offStatus = wsManager.onStatusChange((status) => {
       realtimeStatus.value = status
       if (status === 'CONNECTED') {
@@ -540,6 +715,7 @@ export const useSwarmStore = defineStore('swarm', () => {
 
     realtimeCleanup = () => {
       offEvents()
+      offFallback()
       offStatus()
       realtimeCleanup = null
     }
@@ -563,10 +739,13 @@ export const useSwarmStore = defineStore('swarm', () => {
     briefError,
     // hosts
     devices,
+    workspacesByHost,
     harnessesByHost,
     leasesByHost,
     loadingHosts,
     loadingLeases,
+    loadingWorkspacesHost,
+    workspaceErrors,
     loadingHarnessHost,
     harnessErrors,
     // orders
@@ -590,6 +769,7 @@ export const useSwarmStore = defineStore('swarm', () => {
     selectChannel,
     fetchChannelMessages,
     postChannelMessage,
+    applyRealtimeEvent,
     handleSwarmEvent,
     initRealtime,
     // shared
@@ -600,9 +780,11 @@ export const useSwarmStore = defineStore('swarm', () => {
     refreshBrief,
     toggleBotPause,
     fetchHosts,
+    fetchHostWorkspaces,
     fetchHostHarnesses,
     fetchLeases,
     fetchOrders,
+    dispatchOrder,
     pauseOrder,
     resumeOrder,
     cancelOrder,

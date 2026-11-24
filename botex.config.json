@@ -143,9 +143,9 @@
         "enabled": false
       },
       "models": {
-        "default": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
-        "coding": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
-        "fast": "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M"
+        "default": "SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M",
+        "coding": "SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M",
+        "fast": "SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M"
       }
     }
   },

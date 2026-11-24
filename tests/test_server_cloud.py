@@ -27,7 +27,6 @@ from fastapi.testclient import TestClient
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-from botex import __version__
 from botex.approval import ActionStatus, PendingAction, default_approval_manager
 from botex.providers import CreditsInfo
 from botex.server import server_cloud
@@ -63,7 +62,8 @@ def test_health_endpoint_public(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "healthy"
-    assert data["version"] == __version__
+    assert data["version"] == "2.2.0"
+    assert app.version == "2.2.0"
     assert "uptime_s" in data
     assert "timestamp" in data
 
@@ -2208,3 +2208,408 @@ def test_swarm_rest_mutations_emit_ws_events(client, monkeypatch, tmp_path):
     assert r_msg.status_code == 201
     assert events[-1][0] == "channel_message"
     assert events[-1][1]["channel_id"] == "chan-ws"
+
+
+# ---------------------------------------------------------------------------
+# Plan 051: Host Workspaces, Atomic Token Upgrade & WorkOrder Dispatch REST
+# ---------------------------------------------------------------------------
+
+
+def test_edge_host_workspaces_rest_zero_paths_and_connected(client, monkeypatch, tmp_path):
+    """GET /api/edge/hosts/{host_id}/workspaces returns opaque metadata + live status without paths."""
+    from botex.core import swarm_store
+    from botex.core.device_tokens import DeviceTokenRecord
+
+    db_file = tmp_path / "host_workspaces_rest.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "swarm-secret-token")
+    hdrs = {"Authorization": "Bearer swarm-secret-token"}
+
+    assert client.get("/api/edge/hosts/host_a1b2c3/workspaces").status_code == 401
+    assert client.get("/api/edge/hosts/host..bad/workspaces", headers=hdrs).status_code == 400
+
+    swarm_store.upsert_host_workspaces(
+        "host_a1b2c3",
+        [
+            {
+                "workspace_id": "ws_enrolled01",
+                "label": "Primary Repo",
+                "state": "enrolled",
+                "root": "C:\\Users\\secret\\primary",
+                "path": "/home/secret/primary",
+            },
+            {
+                "workspace_id": "ws_cand0002",
+                "label": "Candidate Repo",
+                "state": "candidate",
+                "root": "/Users/secret/cand",
+            },
+        ],
+        last_seen="2026-11-24T12:00:00+00:00",
+        db_path=db_file,
+    )
+
+    dummy_rec = DeviceTokenRecord(
+        jti="jti_live_01",
+        device_id="host_a1b2c3",
+        workspace_id="ws_enrolled01",
+        scopes=["task_pull:ws_enrolled01", "result_push:ws_enrolled01"],
+    )
+    dummy_sess = server_cloud._EdgeSession(
+        websocket=SimpleNamespace(),
+        token_record=dummy_rec,
+        device_id="host_a1b2c3",
+        workspace_id="ws_enrolled01",
+        capabilities={},
+    )
+    server_cloud._EDGE_SESSIONS[dummy_sess.session_key] = dummy_sess
+    try:
+        res = client.get("/api/edge/hosts/host_a1b2c3/workspaces", headers=hdrs)
+        assert res.status_code == 200, res.text
+        raw_text = res.text
+        assert "C:\\Users\\secret" not in raw_text
+        assert "/home/secret" not in raw_text
+        assert "/Users/secret" not in raw_text
+        assert '"root"' not in raw_text
+
+        body = res.json()
+        assert body["ok"] is True
+        assert body["host_id"] == "host_a1b2c3"
+        assert body["count"] == 2
+        by_ws = {w["workspace_id"]: w for w in body["workspaces"]}
+        for item in body["workspaces"]:
+            assert set(item.keys()) == {
+                "workspace_id",
+                "label",
+                "state",
+                "connected",
+                "last_seen",
+            }
+        assert by_ws["ws_enrolled01"]["connected"] is True
+        assert by_ws["ws_enrolled01"]["state"] == "enrolled"
+        assert by_ws["ws_cand0002"]["connected"] is False
+        assert by_ws["ws_cand0002"]["state"] == "candidate"
+
+        dummy_sess.last_seen_at = 0.0
+        res_stale = client.get("/api/edge/hosts/host_a1b2c3/workspaces", headers=hdrs).json()
+        by_ws_stale = {w["workspace_id"]: w for w in res_stale["workspaces"]}
+        assert by_ws_stale["ws_enrolled01"]["connected"] is False
+    finally:
+        server_cloud._EDGE_SESSIONS.pop(dummy_sess.session_key, None)
+
+
+def test_edge_tokens_upgrade_atomicity_and_ownership(client, monkeypatch, tmp_path):
+    """POST /api/edge/tokens/upgrade atomically issues delegate_local:<ws>, revokes prior JTI, and disconnects WS."""
+    from botex.core.device_tokens import DeviceTokenStore
+
+    tok_store = DeviceTokenStore(tmp_path / "upgrade_tokens.json")
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "swarm-secret-token")
+    hdrs = {"Authorization": "Bearer swarm-secret-token"}
+
+    old_raw, old_rec = tok_store.issue_token("host_u1", "ws_u1")
+    other_raw, other_rec = tok_store.issue_token("host_other", "ws_other")
+
+    # Ownership mismatch on replace_jti -> 403 without mutating either token
+    r_mismatch = client.post(
+        "/api/edge/tokens/upgrade",
+        headers=hdrs,
+        json={
+            "device_id": "host_u1",
+            "workspace_id": "ws_u1",
+            "replace_jti": other_rec.jti,
+        },
+    )
+    assert r_mismatch.status_code == 403
+    assert tok_store.verify_token(old_raw) is not None
+    assert tok_store.verify_token(other_raw) is not None
+
+    # Bad replace_jti or cross-workspace scope -> 400
+    assert (
+        client.post(
+            "/api/edge/tokens/upgrade",
+            headers=hdrs,
+            json={"device_id": "host_u1", "workspace_id": "ws_u1", "replace_jti": "bad..jti"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/edge/tokens/upgrade",
+            headers=hdrs,
+            json={
+                "device_id": "host_u1",
+                "workspace_id": "ws_u1",
+                "scopes": ["delegate_local:ws_other"],
+            },
+        ).status_code
+        == 400
+    )
+
+    # Active session using old_rec is disconnected atomically on upgrade
+    closed_codes = []
+
+    class _FakeEdgeWS:
+        async def close(self, code=1000, reason=""):
+            closed_codes.append((code, reason))
+
+    live_sess = server_cloud._EdgeSession(
+        websocket=_FakeEdgeWS(),
+        token_record=old_rec,
+        device_id="host_u1",
+        workspace_id="ws_u1",
+        capabilities={},
+    )
+    server_cloud._EDGE_SESSIONS[live_sess.session_key] = live_sess
+    try:
+        r_up = client.post(
+            "/api/edge/tokens/upgrade",
+            headers=hdrs,
+            json={
+                "device_id": "host_u1",
+                "workspace_id": "ws_u1",
+                "replace_jti": old_rec.jti,
+                "label": "Upgraded Daemon",
+            },
+        )
+        assert r_up.status_code == 200, r_up.text
+        up = r_up.json()
+        assert up["ok"] is True
+        assert up["token"].startswith("btxd_")
+        new_jti = up["record"]["jti"]
+        assert new_jti != old_rec.jti
+        assert set(up["record"]["scopes"]) == {
+            "task_pull:ws_u1",
+            "result_push:ws_u1",
+            "delegate_local:ws_u1",
+        }
+        assert old_rec.jti in up["revoked_jtis"]
+        assert up["disconnected_sessions"] == 1
+        assert closed_codes and closed_codes[0][0] == 1008
+        assert tok_store.is_revoked(old_rec.jti) is True
+        assert tok_store.verify_token(old_raw) is None
+        assert tok_store.verify_token(up["token"]) is not None
+        assert tok_store.verify_token(other_raw) is not None
+    finally:
+        server_cloud._EDGE_SESSIONS.pop("host_u1:ws_u1", None)
+
+
+def test_swarm_order_dispatch_rest_gates_ack_and_nack(client, monkeypatch, tmp_path):
+    """POST /api/swarm/orders/{order_id}/dispatch enforces scope, harness_spawn, ack->RUNNING, nack->QUEUED."""
+    from botex.core import swarm_store
+    from botex.core.device_tokens import DeviceTokenStore
+
+    db_file = tmp_path / "swarm_dispatch_rest.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+    tok_store = DeviceTokenStore(tmp_path / "dispatch_tokens.json")
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "swarm-secret-token")
+    hdrs = {"Authorization": "Bearer swarm-secret-token"}
+
+    assert server_cloud._EdgeSession._frame_priority({"type": "dispatch_work_order"}) == 0
+    assert "dispatch_work_order" in server_cloud._ALLOWED_EDGE_CONTROL_ACTIONS
+
+    swarm_store.register_bot("bot-disp", "coding", "Dispatch bot", db_path=db_file)
+    swarm_store.create_work_order(
+        {"order_id": "ord_disp_1", "bot_slug": "bot-disp", "status": "QUEUED", "goal": "Fix bug"},
+        db_path=db_file,
+    )
+    swarm_store.create_work_order(
+        {"order_id": "ord_cancelled", "bot_slug": "bot-disp", "status": "CANCELLED"},
+        db_path=db_file,
+    )
+
+    # 404 missing order & 409 illegal transition from terminal
+    assert (
+        client.post(
+            "/api/swarm/orders/ord_missing/dispatch",
+            headers=hdrs,
+            json={"host_id": "host_d1", "workspace_id": "ws_d1", "harness_id": "devin"},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/swarm/orders/ord_cancelled/dispatch",
+            headers=hdrs,
+            json={"host_id": "host_d1", "workspace_id": "ws_d1", "harness_id": "devin"},
+        ).status_code
+        == 409
+    )
+
+    _, rec_other_ws = tok_store.issue_token(
+        "host_d1",
+        "ws_other",
+        scopes=["task_pull:ws_other", "result_push:ws_other", "delegate_local:ws_other"],
+    )
+    _, rec_no_del = tok_store.issue_token(
+        "host_d1",
+        "ws_d1",
+        scopes=["task_pull:ws_d1", "result_push:ws_d1"],
+    )
+    _, rec_full = tok_store.issue_token(
+        "host_d1",
+        "ws_d1",
+        scopes=["task_pull:ws_d1", "result_push:ws_d1", "delegate_local:ws_d1"],
+    )
+
+    sent_frames: list[tuple[str, dict]] = []
+    reply_mode = {"kind": "ack"}
+
+    def _make_ws(ws_name: str, session_ref: list):
+        class _ResponderWS:
+            async def send_json(self, payload):
+                sent_frames.append((ws_name, payload))
+                req_id = payload.get("request_id")
+                if req_id and session_ref:
+                    sess = session_ref[0]
+                    if reply_mode["kind"] == "nack":
+                        sess.resolve_pending(
+                            req_id,
+                            {
+                                "type": "control_nack",
+                                "request_id": req_id,
+                                "order_id": payload.get("order_id"),
+                                "ok": False,
+                                "reason": "workspace_disabled",
+                            },
+                        )
+                    else:
+                        sess.resolve_pending(
+                            req_id,
+                            {
+                                "type": "control_ack",
+                                "request_id": req_id,
+                                "order_id": payload.get("order_id"),
+                                "ok": True,
+                                "pid": 43210,
+                                "spec_echo": {"harness": payload.get("harness_id")},
+                            },
+                        )
+
+        return _ResponderWS()
+
+    other_ref: list = []
+    sess_other = server_cloud._EdgeSession(
+        websocket=_make_ws("ws_other", other_ref),
+        token_record=rec_other_ws,
+        device_id="host_d1",
+        workspace_id="ws_other",
+        capabilities={"harness_spawn": True},
+    )
+    other_ref.append(sess_other)
+    server_cloud._EDGE_SESSIONS[sess_other.session_key] = sess_other
+
+    try:
+        # Exact (host_id, workspace_id) required on REST /dispatch -> 404 when ws_d1 offline
+        r_offline = client.post(
+            "/api/swarm/orders/ord_disp_1/dispatch",
+            headers=hdrs,
+            json={"host_id": "host_d1", "workspace_id": "ws_d1", "harness_id": "devin"},
+        )
+        assert r_offline.status_code == 404
+
+        # Missing delegate_local:<ws> scope -> 403
+        no_del_ref: list = []
+        sess_no_del = server_cloud._EdgeSession(
+            websocket=_make_ws("ws_d1", no_del_ref),
+            token_record=rec_no_del,
+            device_id="host_d1",
+            workspace_id="ws_d1",
+            capabilities={"harness_spawn": True},
+        )
+        no_del_ref.append(sess_no_del)
+        server_cloud._EDGE_SESSIONS[sess_no_del.session_key] = sess_no_del
+        r_noscope = client.post(
+            "/api/swarm/orders/ord_disp_1/dispatch",
+            headers=hdrs,
+            json={"host_id": "host_d1", "workspace_id": "ws_d1", "harness_id": "devin"},
+        )
+        assert r_noscope.status_code == 403
+        assert swarm_store.get_work_order("ord_disp_1", db_path=db_file)["status"] == "QUEUED"
+
+        # Missing harness_spawn: True capability -> 403
+        no_spawn_ref: list = []
+        sess_no_spawn = server_cloud._EdgeSession(
+            websocket=_make_ws("ws_d1", no_spawn_ref),
+            token_record=rec_full,
+            device_id="host_d1",
+            workspace_id="ws_d1",
+            capabilities={"harness_spawn": False},
+        )
+        no_spawn_ref.append(sess_no_spawn)
+        server_cloud._EDGE_SESSIONS[sess_no_spawn.session_key] = sess_no_spawn
+        r_nospawn = client.post(
+            "/api/swarm/orders/ord_disp_1/dispatch",
+            headers=hdrs,
+            json={"host_id": "host_d1", "workspace_id": "ws_d1", "harness_id": "devin"},
+        )
+        assert r_nospawn.status_code == 403
+        assert swarm_store.get_work_order("ord_disp_1", db_path=db_file)["status"] == "QUEUED"
+
+        # Full session: control_nack -> 409, order stays QUEUED at epoch 0
+        full_ref: list = []
+        sess_full = server_cloud._EdgeSession(
+            websocket=_make_ws("ws_d1", full_ref),
+            token_record=rec_full,
+            device_id="host_d1",
+            workspace_id="ws_d1",
+            capabilities={"harness_spawn": True},
+        )
+        full_ref.append(sess_full)
+        server_cloud._EDGE_SESSIONS[sess_full.session_key] = sess_full
+
+        reply_mode["kind"] = "nack"
+        r_nack = client.post(
+            "/api/swarm/orders/ord_disp_1/dispatch",
+            headers=hdrs,
+            json={"host_id": "host_d1", "workspace_id": "ws_d1", "harness_id": "devin"},
+        )
+        assert r_nack.status_code == 409
+        after_nack = swarm_store.get_work_order("ord_disp_1", db_path=db_file)
+        assert after_nack["status"] == "QUEUED"
+        assert after_nack["epoch"] == 0
+
+        # control_ack ok -> 200, transitions to RUNNING, records pid + host lease, broadcasts update
+        events = []
+        monkeypatch.setattr(
+            server_cloud, "_broadcast_swarm_event", lambda et, pl: events.append((et, pl))
+        )
+        reply_mode["kind"] = "ack"
+        r_ack = client.post(
+            "/api/swarm/orders/ord_disp_1/dispatch",
+            headers=hdrs,
+            json={"host_id": "host_d1", "workspace_id": "ws_d1", "harness_id": "devin"},
+        )
+        assert r_ack.status_code == 200, r_ack.text
+        ack_body = r_ack.json()
+        assert ack_body["ok"] is True
+        assert ack_body["status"] == "RUNNING"
+        assert ack_body["epoch"] == 1
+        assert ack_body["host_id"] == "host_d1"
+        assert ack_body["workspace_id"] == "ws_d1"
+        assert ack_body["harness_id"] == "devin"
+        assert ack_body["pid"] == 43210
+
+        stored = swarm_store.get_work_order("ord_disp_1", db_path=db_file)
+        assert stored["status"] == "RUNNING"
+        assert stored["pid"] == 43210
+        assert stored["workspace_id"] == "ws_d1"
+        assert stored["harness_id"] == "devin"
+
+        leases = swarm_store.get_active_leases("bot-disp", db_path=db_file)
+        assert len(leases) == 1
+        assert leases[0]["host_id"] == "host_d1"
+        assert leases[0]["scope_path"] == "ws_d1"
+        assert events[-1][0] == "work_order_update"
+        assert events[-1][1]["status"] == "RUNNING"
+
+        # Subsequent pause routes control frame to exact (host_d1, ws_d1) session first
+        sent_frames.clear()
+        r_pause = client.post("/api/swarm/orders/ord_disp_1/pause", headers=hdrs, json={})
+        assert r_pause.status_code == 200
+        assert sent_frames[-1][0] == "ws_d1"
+        assert sent_frames[-1][1]["type"] == "harness_pause"
+    finally:
+        server_cloud._EDGE_SESSIONS.pop("host_d1:ws_other", None)
+        server_cloud._EDGE_SESSIONS.pop("host_d1:ws_d1", None)

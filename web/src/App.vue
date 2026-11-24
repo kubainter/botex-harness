@@ -434,7 +434,7 @@ const backendHost = computed(() => {
 })
 
 const appVersion = computed(() => {
-  return authStore.healthData?.version ? `v${authStore.healthData.version}` : 'v2.1.0'
+  return authStore.healthData?.version ? `v${authStore.healthData.version}` : 'v2.2.0'
 })
 
 const isCheckingUpdate = ref(false)

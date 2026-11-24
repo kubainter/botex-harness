@@ -95,7 +95,7 @@ async def _dispatch(bridge: McpBridgeClient, req: Dict[str, Any]) -> None:
             {
                 "protocolVersion": params.get("protocolVersion", "2024-11-05"),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "botex-mcp-bridge", "version": "2.1.0"},
+                "serverInfo": {"name": "botex-mcp-bridge", "version": "2.2.0"},
             },
         )
     elif method.startswith("notifications/"):

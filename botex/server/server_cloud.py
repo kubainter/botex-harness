@@ -87,6 +87,7 @@ from botex.config import (
     resolve_provider,
     resolve_workspace,
 )
+from botex.core import work_orders
 from botex.core.context_guard import read_scratchpad
 from botex.core.device_tokens import (
     DeviceTokenRecord,
@@ -110,16 +111,19 @@ from botex.core.swarm_store import (
     list_channel_messages,
     list_channels,
     list_host_harnesses,
+    list_host_workspaces,
     list_work_orders,
     pause_bot,
     post_channel_message,
     record_bot_domain_turn,
+    record_work_order_event,
     register_bot,
     resume_bot,
     update_work_order_status,
     upsert_bot_brief,
     upsert_host_harnesses,
     upsert_host_lease,
+    upsert_host_workspaces,
 )
 from botex.core.tool_executor import (
     ToolExecutor,
@@ -452,6 +456,15 @@ class EdgeTokenIssueRequest(BaseModel):
     scopes: Optional[List[str]] = None
     ttl_s: Optional[int] = None
     label: str = ""
+
+
+class EdgeTokenUpgradeRequest(BaseModel):
+    device_id: str
+    workspace_id: str
+    replace_jti: Optional[str] = None
+    scopes: Optional[List[str]] = None
+    ttl_s: Optional[int] = None
+    label: str = "Workstation"
 
 
 class EdgeDelegateRequest(BaseModel):
@@ -814,6 +827,7 @@ class _EdgeSession:
             "harness_pause",
             "harness_resume",
             "harness_cancel_task",
+            "dispatch_work_order",
             "control_ack",
             "control_nack",
         ):
@@ -1527,7 +1541,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="BoteX Cloud Gateway & Remote MCP",
     description="FastAPI service for autonomous code harness, Remote MCP SSE, and interactive chat.",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -2005,7 +2019,7 @@ async def get_health() -> Dict[str, Any]:
     now = time.time()
     return {
         "status": "healthy",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "uptime_s": round(now - START_TIME, 2),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -3410,8 +3424,31 @@ async def fence_swarm_order_endpoint(
 
 
 _ALLOWED_EDGE_CONTROL_ACTIONS = frozenset(
-    {"harness_pause", "harness_resume", "harness_cancel_task"}
+    {"harness_pause", "harness_resume", "harness_cancel_task", "dispatch_work_order"}
 )
+_EDGE_CONTROL_ACTION_MAP: Dict[str, str] = {a: a for a in _ALLOWED_EDGE_CONTROL_ACTIONS}
+
+
+def _sanitize_harness_spec(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        head, sep, tail = text.partition(":")
+        if not sep or ":" in tail:
+            return ""
+        clean_head = sanitize_identifier(head)
+        clean_tail = sanitize_identifier(tail)
+        if (
+            not clean_head
+            or clean_head != head.strip()
+            or not clean_tail
+            or clean_tail != tail.strip()
+        ):
+            return ""
+        return f"{clean_head}:{clean_tail}"
+    clean = sanitize_identifier(text)
+    return clean if clean == text else ""
 
 
 class SwarmOrderCreateRequest(BaseModel):
@@ -3430,6 +3467,13 @@ class SwarmOrderActionRequest(BaseModel):
     fencing_token: str = Field(default="", max_length=256)
 
 
+class SwarmOrderDispatchRequest(BaseModel):
+    host_id: str = Field(..., min_length=1, max_length=128)
+    workspace_id: str = Field(..., min_length=1, max_length=160)
+    harness_id: str = Field(..., min_length=1, max_length=96)
+    fencing_token: str = Field(default="", max_length=256)
+
+
 async def dispatch_edge_control_frame(
     host_id: str,
     action: str,
@@ -3437,16 +3481,20 @@ async def dispatch_edge_control_frame(
     order_id: str,
     fencing_token: str,
     fencing_epoch: Optional[int] = None,
+    workspace_id: Optional[str] = None,
     timeout_s: float = 5.0,
 ) -> Dict[str, Any]:
     """Dispatch an allowlisted typed control frame to an active Edge session."""
-    clean_action = str(action or "").strip().lower()
-    if clean_action not in _ALLOWED_EDGE_CONTROL_ACTIONS:
+    clean_action = _EDGE_CONTROL_ACTION_MAP.get(str(action or "").strip().lower(), "")
+    if not clean_action:
         return {"dispatched": False, "reason": "forbidden_control_action"}
     clean_host = coerce_text(mask_secrets(str(host_id or ""))).strip()
     if not clean_host:
         return {"dispatched": False, "reason": "no_host_assigned"}
-    session = next((s for s in _EDGE_SESSIONS.values() if s.device_id == clean_host), None)
+    clean_ws = sanitize_identifier(str(workspace_id or "")) if workspace_id else ""
+    session = _resolve_target_edge_session(clean_host, clean_ws) if clean_ws else None
+    if session is None:
+        session = _resolve_target_edge_session(clean_host, "")
     if session is None:
         return {"dispatched": False, "reason": "host_offline"}
 
@@ -3457,6 +3505,8 @@ async def dispatch_edge_control_frame(
         "order_id": order_id,
         "fencing_token": fencing_token,
     }
+    if clean_ws:
+        frame["workspace_id"] = clean_ws
     if fencing_epoch is not None:
         frame["fencing_epoch"] = int(fencing_epoch)
 
@@ -3475,6 +3525,89 @@ async def dispatch_edge_control_frame(
         return {"dispatched": True, "request_id": req_id, "reason": "ack_timeout"}
     except Exception as exc:
         return {"dispatched": False, "request_id": req_id, "reason": type(exc).__name__}
+    finally:
+        session._pending.pop(req_id, None)
+
+
+async def dispatch_work_order_frame(
+    host_id: str,
+    *,
+    workspace_id: str,
+    order_id: str,
+    fencing_token: str,
+    fencing_epoch: Optional[int] = None,
+    order_payload: Dict[str, Any],
+    timeout_s: float = 5.0,
+) -> Dict[str, Any]:
+    """Send a downward ``dispatch_work_order`` control frame and await ``control_ack``/``control_nack``."""
+    clean_host = coerce_text(mask_secrets(str(host_id or ""))).strip()
+    if not clean_host:
+        return {"dispatched": False, "ok": False, "reason": "no_host_assigned"}
+    clean_ws = sanitize_identifier(str(workspace_id or ""))
+    clean_order = sanitize_identifier(str(order_id or ""))
+    if not clean_order:
+        return {"dispatched": False, "ok": False, "reason": "invalid_order_id"}
+
+    if not clean_ws:
+        return {"dispatched": False, "ok": False, "reason": "workspace_id_required"}
+    session = _resolve_target_edge_session(clean_host, clean_ws)
+    if (
+        session is None
+        or not session.is_live()
+        or _edge_token_store().is_revoked(session.token_record.jti)
+    ):
+        return {"dispatched": False, "ok": False, "reason": "host_offline"}
+
+    masked_order = botex_server.mask_secrets_recursive(dict(order_payload or {}))
+    if isinstance(masked_order, dict):
+        masked_order.pop("root", None)
+    clean_token = coerce_text(mask_secrets(str(fencing_token or ""))).strip()
+    req_id = f"ctrl_{uuid.uuid4().hex[:12]}"
+    frame: Dict[str, Any] = {
+        "type": "dispatch_work_order",
+        "request_id": req_id,
+        "order_id": clean_order,
+        "workspace_id": clean_ws or session.workspace_id,
+        "fencing_token": clean_token,
+        "order": masked_order,
+    }
+    if fencing_epoch is not None:
+        frame["fencing_epoch"] = int(fencing_epoch)
+    if isinstance(masked_order, dict) and masked_order.get("harness_id"):
+        frame["harness_id"] = masked_order["harness_id"]
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    session._pending[req_id] = fut
+    try:
+        await session.send_frame(frame, priority=0)
+        reply = await asyncio.wait_for(fut, timeout=timeout_s)
+        masked_reply = botex_server.mask_secrets_recursive(reply) if isinstance(reply, dict) else {}
+        ack_ok = bool(
+            isinstance(masked_reply, dict)
+            and masked_reply.get("type") == "control_ack"
+            and masked_reply.get("ok") is not False
+        )
+        return {
+            "dispatched": True,
+            "ok": ack_ok,
+            "request_id": req_id,
+            "reply": masked_reply,
+        }
+    except asyncio.TimeoutError:
+        return {
+            "dispatched": True,
+            "ok": False,
+            "request_id": req_id,
+            "reason": "ack_timeout",
+        }
+    except Exception as exc:
+        return {
+            "dispatched": False,
+            "ok": False,
+            "request_id": req_id,
+            "reason": type(exc).__name__,
+        }
     finally:
         session._pending.pop(req_id, None)
 
@@ -3526,10 +3659,20 @@ async def _transition_order_and_dispatch(
     if not res.get("ok"):
         _raise_for_order_mutation_error(res)
 
+    stored_order = await asyncio.to_thread(get_work_order, clean_order)
+    order_meta = stored_order if isinstance(stored_order, dict) else {}
     order_obj = res.get("order") if isinstance(res.get("order"), dict) else res
-    target_host = str(req.host_id or order_obj.get("host_id") or "").strip()
+    target_host = str(
+        req.host_id or order_obj.get("host_id") or order_meta.get("host_id") or ""
+    ).strip()
+    target_ws = str(order_obj.get("workspace_id") or order_meta.get("workspace_id") or "").strip()
     fencing_token = str(
-        req.fencing_token or order_obj.get("fencing_token") or str(order_obj.get("epoch") or "")
+        req.fencing_token
+        or order_obj.get("fencing_token")
+        or order_obj.get("fence_id")
+        or order_meta.get("fence_id")
+        or order_meta.get("fencing_token")
+        or str(order_obj.get("epoch") or "")
     ).strip()
     if target_host and fencing_token:
         res["control_dispatch"] = await dispatch_edge_control_frame(
@@ -3538,6 +3681,7 @@ async def _transition_order_and_dispatch(
             order_id=clean_order,
             fencing_token=fencing_token,
             fencing_epoch=order_obj.get("epoch"),
+            workspace_id=target_ws or None,
         )
     _broadcast_swarm_event(
         "work_order_update",
@@ -3549,6 +3693,96 @@ async def _transition_order_and_dispatch(
         },
     )
     return botex_server.mask_secrets_recursive(res)
+
+
+def _finalize_dispatched_work_order_sync(
+    order_id: str,
+    *,
+    expected_epoch: int,
+    host_id: str,
+    workspace_id: str,
+    harness_id: str,
+    fencing_token: str,
+    pid: Optional[int],
+    bot_slug: str,
+) -> Dict[str, Any]:
+    res = update_work_order_status(
+        order_id,
+        "RUNNING",
+        reason=f"dispatched:{harness_id}",
+        fencing_epoch=expected_epoch,
+    )
+    if not res.get("ok"):
+        return res
+    new_epoch = int(res["epoch"])
+    conn = get_swarm_store_conn()
+    with _SWARM_LOCK:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            row = conn.execute(
+                "SELECT payload_json FROM work_orders WHERE order_id = ?;",
+                (order_id,),
+            ).fetchone()
+            payload: Dict[str, Any] = {}
+            if row is not None and row["payload_json"]:
+                try:
+                    parsed = json.loads(str(row["payload_json"]))
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                except json.JSONDecodeError:
+                    payload = {}
+            payload.pop("root", None)
+            payload.pop("fencing_token", None)
+            payload["host_id"] = host_id
+            payload["assigned_host"] = host_id
+            payload["workspace_id"] = workspace_id
+            payload["harness_id"] = harness_id
+            payload["fence_id"] = fencing_token
+            payload["pid"] = pid
+            masked_payload = botex_server.mask_secrets_recursive(payload)
+            conn.execute(
+                "UPDATE work_orders SET payload_json = ? WHERE order_id = ?;",
+                (
+                    coerce_text(json.dumps(masked_payload, ensure_ascii=False)),
+                    order_id,
+                ),
+            )
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+    lease_slug = (
+        sanitize_identifier(bot_slug)
+        or sanitize_identifier(harness_id.partition(":")[0])
+        or "dispatcher"
+    )
+    lease_res = upsert_host_lease(
+        lease_slug,
+        host_id,
+        workspace_id,
+        f"WorkOrder {order_id} ({harness_id})",
+        fencing_token=new_epoch,
+    )
+    updated_order = get_work_order(order_id) or {}
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "status": res["status"],
+        "previous_status": res.get("previous_status"),
+        "epoch": new_epoch,
+        "fencing_epoch": new_epoch,
+        "fencing_token": fencing_token,
+        "host_id": host_id,
+        "workspace_id": workspace_id,
+        "harness_id": harness_id,
+        "pid": pid,
+        "order": updated_order,
+        "lease": lease_res,
+    }
 
 
 @app.get("/api/swarm/orders")
@@ -3638,6 +3872,173 @@ async def cancel_swarm_order_endpoint(
     body: Optional[SwarmOrderActionRequest] = None,
 ) -> Dict[str, Any]:
     return await _transition_order_and_dispatch(order_id, "CANCELLED", "harness_cancel_task", body)
+
+
+@app.post("/api/swarm/orders/{order_id}/dispatch")
+async def dispatch_swarm_order_endpoint(
+    order_id: str,
+    body: SwarmOrderDispatchRequest,
+) -> Dict[str, Any]:
+    """Dispatch a queued/handoff WorkOrder to an exact ``(host_id, workspace_id)`` Edge session."""
+    clean_order = sanitize_identifier(order_id)
+    if not clean_order or clean_order != str(order_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid order_id format.",
+        )
+    clean_host = sanitize_identifier(body.host_id)
+    if not clean_host or clean_host != str(body.host_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid host_id format.",
+        )
+    clean_ws = sanitize_identifier(body.workspace_id)
+    if not clean_ws or clean_ws != str(body.workspace_id).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid workspace_id format.",
+        )
+    clean_harness = _sanitize_harness_spec(body.harness_id)
+    if not clean_harness:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid harness_id format.",
+        )
+
+    order = await asyncio.to_thread(get_work_order, clean_order)
+    if order is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"WorkOrder '{clean_order}' not found.",
+        )
+    cur_status = str(order.get("status") or "")
+    if not work_orders.can_transition(cur_status, "RUNNING"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=botex_server.mask_secrets_recursive(
+                {
+                    "ok": False,
+                    "reason": "illegal_transition",
+                    "order_id": clean_order,
+                    "from": cur_status,
+                    "to": "RUNNING",
+                }
+            ),
+        )
+
+    sess = _EDGE_SESSIONS.get(f"{clean_host}:{clean_ws}")
+    if sess is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target edge host/workspace session not connected.",
+        )
+    store = _edge_token_store()
+    if store.is_revoked(sess.token_record.jti):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Target edge session token is revoked.",
+        )
+    if not sess.is_live():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Target edge session liveness lease expired.",
+        )
+    if not sess.token_record.has_scope(f"delegate_local:{clean_ws}"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Device token lacks 'delegate_local:{clean_ws}' scope.",
+        )
+    if not bool(sess.capabilities.get("harness_spawn") is True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Target edge session does not advertise 'harness_spawn: true' capability.",
+        )
+
+    cur_epoch = int(order.get("epoch") or 0)
+    next_epoch = cur_epoch + 1
+    wire_fencing_token = coerce_text(
+        mask_secrets(
+            str(
+                body.fencing_token
+                or order.get("fencing_token")
+                or f"ft_{clean_order}_{next_epoch}_{uuid.uuid4().hex[:8]}"
+            )
+        )
+    ).strip()
+    dispatch_payload: Dict[str, Any] = dict(order)
+    dispatch_payload.pop("root", None)
+    dispatch_payload["order_id"] = clean_order
+    dispatch_payload["host_id"] = clean_host
+    dispatch_payload["workspace_id"] = clean_ws
+    dispatch_payload["harness_id"] = clean_harness
+    dispatch_payload["target_harness"] = clean_harness
+
+    dispatch_res = await dispatch_work_order_frame(
+        clean_host,
+        workspace_id=clean_ws,
+        order_id=clean_order,
+        fencing_token=wire_fencing_token,
+        fencing_epoch=next_epoch,
+        order_payload=dispatch_payload,
+    )
+    if not dispatch_res.get("ok"):
+        reply = dispatch_res.get("reply")
+        is_nack = isinstance(reply, dict) and (
+            reply.get("type") == "control_nack" or reply.get("ok") is False
+        )
+        err_status = status.HTTP_409_CONFLICT if is_nack else status.HTTP_502_BAD_GATEWAY
+        raise HTTPException(
+            status_code=err_status,
+            detail=botex_server.mask_secrets_recursive(
+                {
+                    "ok": False,
+                    "error": "DISPATCH_REJECTED" if is_nack else "DISPATCH_GATEWAY_FAILURE",
+                    "order_id": clean_order,
+                    "control_dispatch": dispatch_res,
+                }
+            ),
+        )
+
+    reply_dict = dispatch_res.get("reply") if isinstance(dispatch_res.get("reply"), dict) else {}
+    raw_pid = reply_dict.get("pid")
+    if raw_pid is None and isinstance(reply_dict.get("result"), dict):
+        raw_pid = reply_dict["result"].get("pid")
+    pid_val: Optional[int] = None
+    if raw_pid is not None and not isinstance(raw_pid, bool):
+        try:
+            pid_val = int(raw_pid)
+        except (TypeError, ValueError):
+            pid_val = None
+
+    final_res = await asyncio.to_thread(
+        _finalize_dispatched_work_order_sync,
+        clean_order,
+        expected_epoch=cur_epoch,
+        host_id=clean_host,
+        workspace_id=clean_ws,
+        harness_id=clean_harness,
+        fencing_token=wire_fencing_token,
+        pid=pid_val,
+        bot_slug=str(order.get("bot_slug") or ""),
+    )
+    if not final_res.get("ok"):
+        _raise_for_order_mutation_error(final_res)
+
+    final_res["control_dispatch"] = dispatch_res
+    _broadcast_swarm_event(
+        "work_order_update",
+        {
+            "order_id": clean_order,
+            "status": final_res["status"],
+            "epoch": final_res["epoch"],
+            "host_id": clean_host,
+            "workspace_id": clean_ws,
+            "harness_id": clean_harness,
+            "pid": pid_val,
+            "order": final_res.get("order"),
+        },
+    )
+    return botex_server.mask_secrets_recursive(final_res)
 
 
 # ---------------------------------------------------------------------------
@@ -3810,6 +4211,39 @@ async def resume_bot_endpoint(slug: str) -> Dict[str, Any]:
     return botex_server.mask_secrets_recursive(res)
 
 
+_VALID_EDGE_WORKSPACE_STATES: Dict[str, str] = {
+    "enrolled": "enrolled",
+    "candidate": "candidate",
+    "disabled": "disabled",
+}
+
+
+def _sanitize_workspaces_manifest(raw_manifest: Any) -> List[Dict[str, str]]:
+    """Strip paths/unexpected keys from an untrusted edge workspace manifest."""
+    if not isinstance(raw_manifest, list):
+        return []
+    cleaned: List[Dict[str, str]] = []
+    for entry in raw_manifest:
+        if not isinstance(entry, dict):
+            continue
+        ws_id = sanitize_identifier(str(entry.get("workspace_id") or ""))
+        if not ws_id:
+            continue
+        state_val = _VALID_EDGE_WORKSPACE_STATES.get(
+            str(entry.get("state") or "").strip().lower(),
+            "enrolled",
+        )
+        label_val = coerce_text(mask_secrets(str(entry.get("label") or ""))).strip()[:128]
+        cleaned.append(
+            {
+                "workspace_id": ws_id,
+                "label": label_val,
+                "state": state_val,
+            }
+        )
+    return cleaned
+
+
 @app.get("/api/edge/hosts/{host_id}/harnesses")
 async def list_edge_host_harnesses_endpoint(
     host_id: str,
@@ -3828,6 +4262,39 @@ async def list_edge_host_harnesses_endpoint(
     )
     return botex_server.mask_secrets_recursive(
         {"ok": True, "host_id": clean_host, "harnesses": harnesses, "count": len(harnesses)}
+    )
+
+
+@app.get("/api/edge/hosts/{host_id}/workspaces")
+async def list_edge_host_workspaces_endpoint(host_id: str) -> Dict[str, Any]:
+    clean_host = sanitize_identifier(host_id)
+    if not clean_host or clean_host != str(host_id or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid host_id.",
+        )
+    rows = await asyncio.to_thread(list_host_workspaces, host_id=clean_host)
+    workspaces: List[Dict[str, Any]] = []
+    for row in rows:
+        ws_id = sanitize_identifier(str(row.get("workspace_id") or ""))
+        if not ws_id:
+            continue
+        state_val = _VALID_EDGE_WORKSPACE_STATES.get(
+            str(row.get("state") or "").strip().lower(),
+            "enrolled",
+        )
+        connected = bool((sess := _EDGE_SESSIONS.get(f"{clean_host}:{ws_id}")) and sess.is_live())
+        workspaces.append(
+            {
+                "workspace_id": ws_id,
+                "label": coerce_text(mask_secrets(str(row.get("label") or ""))).strip()[:128],
+                "state": state_val,
+                "connected": connected,
+                "last_seen": coerce_text(mask_secrets(str(row.get("last_seen") or ""))).strip(),
+            }
+        )
+    return botex_server.mask_secrets_recursive(
+        {"ok": True, "host_id": clean_host, "workspaces": workspaces, "count": len(workspaces)}
     )
 
 
@@ -4796,6 +5263,124 @@ async def issue_edge_token(body: EdgeTokenIssueRequest) -> Dict[str, Any]:
     }
 
 
+@app.post("/api/edge/tokens/upgrade")
+async def upgrade_edge_token(body: EdgeTokenUpgradeRequest) -> Dict[str, Any]:
+    """Atomically issue an upgraded token (incl. ``delegate_local:<ws>``) and revoke prior JTIs."""
+    clean_dev = sanitize_identifier(body.device_id)
+    clean_ws = sanitize_identifier(body.workspace_id)
+    if (
+        not clean_dev
+        or clean_dev != str(body.device_id or "").strip()
+        or not clean_ws
+        or clean_ws != str(body.workspace_id or "").strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid device_id or workspace_id format.",
+        )
+
+    clean_replace_jti: Optional[str] = None
+    if body.replace_jti is not None and str(body.replace_jti) != "":
+        cand_jti = sanitize_identifier(body.replace_jti)
+        if not cand_jti or cand_jti != str(body.replace_jti).strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid replace_jti format.",
+            )
+        clean_replace_jti = cand_jti
+
+    default_scopes = [
+        f"task_pull:{clean_ws}",
+        f"result_push:{clean_ws}",
+        f"delegate_local:{clean_ws}",
+    ]
+    effective_scopes = default_scopes if body.scopes is None else list(body.scopes)
+    for scope_entry in effective_scopes:
+        scope_text = str(scope_entry or "").strip()
+        if ":" not in scope_text or scope_text.split(":", 1)[1].strip() != clean_ws:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Token scopes must bind strictly to the requested workspace_id.",
+            )
+
+    store = _edge_token_store()
+    ttl_val = body.ttl_s if body.ttl_s is not None else 30 * 24 * 3600
+
+    def _upgrade_token_sync() -> tuple[
+        Optional[str], Optional[Any], List[str], Optional[tuple[int, str]]
+    ]:
+        with store._lock:
+            all_tokens = store.list_tokens(include_revoked=True)
+            by_jti = {str(t.get("jti") or ""): t for t in all_tokens if isinstance(t, dict)}
+            if clean_replace_jti is not None:
+                existing = by_jti.get(clean_replace_jti)
+                if existing is not None and (
+                    existing.get("device_id") != clean_dev
+                    or existing.get("workspace_id") != clean_ws
+                ):
+                    return (
+                        None,
+                        None,
+                        [],
+                        (
+                            status.HTTP_403_FORBIDDEN,
+                            "replace_jti belongs to a different device_id or workspace_id.",
+                        ),
+                    )
+            jtis_to_revoke: List[str] = []
+            if clean_replace_jti is not None:
+                jtis_to_revoke.append(clean_replace_jti)
+            for tok in all_tokens:
+                if not isinstance(tok, dict) or tok.get("revoked"):
+                    continue
+                t_jti = sanitize_identifier(str(tok.get("jti") or ""))
+                if (
+                    t_jti
+                    and tok.get("device_id") == clean_dev
+                    and tok.get("workspace_id") == clean_ws
+                    and t_jti not in jtis_to_revoke
+                ):
+                    jtis_to_revoke.append(t_jti)
+            try:
+                raw_cred, token_rec = store.issue_token(
+                    clean_dev,
+                    clean_ws,
+                    scopes=effective_scopes,
+                    ttl_s=ttl_val,
+                    label=body.label,
+                )
+            except ValueError as exc:
+                return (
+                    None,
+                    None,
+                    [],
+                    (status.HTTP_400_BAD_REQUEST, coerce_text(mask_secrets(str(exc)))),
+                )
+
+            revoked: List[str] = []
+            for old_jti in jtis_to_revoke:
+                if old_jti != token_rec.jti:
+                    store.revoke_token(old_jti)
+                    revoked.append(old_jti)
+            return raw_cred, token_rec, revoked, None
+
+    raw_credential, rec, revoked_jtis, err_info = await asyncio.to_thread(_upgrade_token_sync)
+    if err_info is not None:
+        raise HTTPException(status_code=err_info[0], detail=err_info[1])
+
+    disconnected = 0
+    for old_jti in revoked_jtis:
+        disconnected += await _close_sessions_for_jti(old_jti)
+
+    return {
+        "ok": True,
+        "token": raw_credential,
+        "record": rec.to_public_dict(),
+        "revoked_jtis": revoked_jtis,
+        "disconnected_sessions": disconnected,
+    }
+
+
 @app.get("/api/edge/tokens")
 async def list_edge_tokens(include_revoked: bool = Query(default=True)) -> Dict[str, Any]:
     """List per-device tokens without exposing hashes or secrets."""
@@ -5193,12 +5778,33 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                         "last_seen": hello.get("last_seen"),
                     },
                 )
+        hello_workspaces = hello.get("workspaces_manifest")
+        if isinstance(hello_workspaces, list):
+            cleaned_hello_ws = _sanitize_workspaces_manifest(hello_workspaces)
+            try:
+                stored_hello_ws = await asyncio.to_thread(
+                    upsert_host_workspaces,
+                    session.device_id,
+                    cleaned_hello_ws,
+                    last_seen=hello.get("last_seen"),
+                )
+            except Exception:
+                logger.debug("Failed ingesting hello workspaces manifest", exc_info=True)
+            else:
+                _broadcast_swarm_event(
+                    "host_workspaces_update",
+                    {
+                        "host_id": session.device_id,
+                        "workspaces": stored_hello_ws,
+                        "last_seen": hello.get("last_seen"),
+                    },
+                )
         await session.send_frame(
             {
                 "type": "hello_ack",
                 "device_id": session.device_id,
                 "workspace_id": session.workspace_id,
-                "server_version": "2.1.0",
+                "server_version": "2.2.0",
                 "min_client_version": "2.1.0",
                 "heartbeat_s": int(_EDGE_PING_INTERVAL_S),
             }
@@ -5275,6 +5881,96 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                                 "last_seen": frame.get("last_seen"),
                             },
                         )
+                hb_workspaces = frame.get("workspaces_manifest")
+                if isinstance(hb_workspaces, list):
+                    cleaned_hb_ws = _sanitize_workspaces_manifest(hb_workspaces)
+                    try:
+                        stored_hb_ws = await asyncio.to_thread(
+                            upsert_host_workspaces,
+                            session.device_id,
+                            cleaned_hb_ws,
+                            last_seen=frame.get("last_seen"),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed ingesting heartbeat workspaces manifest", exc_info=True
+                        )
+                    else:
+                        _broadcast_swarm_event(
+                            "host_workspaces_update",
+                            {
+                                "host_id": session.device_id,
+                                "workspaces": stored_hb_ws,
+                                "last_seen": frame.get("last_seen"),
+                            },
+                        )
+            elif ftype == "work_order_event":
+                # Edge events record telemetry only and NEVER self-transition an order
+                # to DONE (STOP #5 / no_self_report_done: only verify_gate sets DONE).
+                ev_order_id = sanitize_identifier(str(frame.get("order_id") or ""))
+                raw_seq = frame.get("seq")
+                seq_val: Optional[int] = None
+                if raw_seq is not None and not isinstance(raw_seq, bool):
+                    try:
+                        parsed_seq = int(raw_seq)
+                        if parsed_seq >= 0:
+                            seq_val = parsed_seq
+                    except (TypeError, ValueError):
+                        seq_val = None
+                ev_kind = coerce_text(mask_secrets(str(frame.get("kind") or ""))).strip()[:64]
+                ev_ts = coerce_text(mask_secrets(str(frame.get("ts") or ""))).strip()[:64] or None
+                raw_data = frame.get("data")
+                masked_data = (
+                    botex_server.mask_secrets_recursive(raw_data)
+                    if isinstance(raw_data, dict)
+                    else {}
+                )
+                if isinstance(masked_data, dict):
+                    masked_data.pop("root", None)
+                if ev_order_id and ev_kind and seq_val is not None:
+                    try:
+                        existing_order = await asyncio.to_thread(get_work_order, ev_order_id)
+                    except Exception:
+                        existing_order = None
+                    if isinstance(existing_order, dict):
+                        exp_host = str(existing_order.get("host_id") or "").strip()
+                        exp_ws = str(existing_order.get("workspace_id") or "").strip()
+                        if (exp_host and exp_host != session.device_id) or (
+                            exp_ws and exp_ws != session.workspace_id
+                        ):
+                            logger.warning(
+                                "Ignoring cross-owner work_order_event order=%s host=%s ws=%s",
+                                ev_order_id,
+                                session.device_id,
+                                session.workspace_id,
+                            )
+                            continue
+                    try:
+                        ev_res = await asyncio.to_thread(
+                            record_work_order_event,
+                            ev_order_id,
+                            workspace_id=session.workspace_id,
+                            seq=seq_val,
+                            kind=ev_kind,
+                            ts=ev_ts,
+                            data=masked_data,
+                        )
+                    except Exception:
+                        logger.debug("Failed recording work_order_event", exc_info=True)
+                        ev_res = {"ok": False}
+                    if ev_res.get("ok") and ev_res.get("inserted"):
+                        masked_event: Dict[str, Any] = {
+                            "host_id": session.device_id,
+                            "order_id": ev_res["order_id"],
+                            "workspace_id": ev_res["workspace_id"],
+                            "seq": ev_res["seq"],
+                            "kind": ev_res["kind"],
+                            "ts": ev_res["ts"],
+                            "data": botex_server.mask_secrets_recursive(ev_res.get("data") or {}),
+                        }
+                        if str(ev_res["kind"]).lower() in ("exited", "completed", "done"):
+                            masked_event["verification_pending"] = True
+                        _broadcast_swarm_event("work_order_event", masked_event)
             elif ftype in ("control_ack", "control_nack"):
                 req_id = str(frame.get("request_id") or "")
                 if req_id:

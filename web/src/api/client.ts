@@ -35,8 +35,10 @@ import type {
   BotBrief,
   BotBriefUpdateRequest,
   BotLease,
+  HostWorkspace,
   HostHarnessInfo,
   WorkOrderInfo,
+  WorkOrderDispatchPayload,
   WorkOrderCreateRequest,
   WorkOrderActionRequest,
   WorkOrderFenceRequest,
@@ -636,6 +638,16 @@ export const api = {
     return request<BotInfo & { ok: boolean }>(`/api/bots/${encodeURIComponent(slug)}/resume`, { method: 'POST' })
   },
 
+  async listHostWorkspaces(hostId: string): Promise<{
+    ok: boolean
+    host_id: string
+    workspaces: HostWorkspace[]
+  }> {
+    return request<{ ok: boolean; host_id: string; workspaces: HostWorkspace[] }>(
+      `/api/edge/hosts/${encodeURIComponent(hostId)}/workspaces`
+    )
+  },
+
   async listHostHarnesses(hostId: string, staleAfterS: number = 120): Promise<{
     ok: boolean
     host_id: string
@@ -666,6 +678,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body)
     })
+  },
+
+  async dispatchWorkOrder(
+    orderId: string,
+    payload: WorkOrderDispatchPayload
+  ): Promise<{ ok: boolean; order?: WorkOrderInfo; dispatch?: unknown; lease?: unknown; control_dispatch?: unknown }> {
+    return request<{ ok: boolean; order?: WorkOrderInfo; dispatch?: unknown; lease?: unknown; control_dispatch?: unknown }>(
+      `/api/swarm/orders/${encodeURIComponent(orderId)}/dispatch`,
+      { method: 'POST', body: JSON.stringify(payload) }
+    )
   },
 
   async pauseWorkOrder(orderId: string, body?: WorkOrderActionRequest): Promise<{ ok: boolean; order?: WorkOrderInfo; control_dispatch?: unknown }> {

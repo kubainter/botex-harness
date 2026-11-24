@@ -2947,6 +2947,74 @@ def _cli_mcp_bridge(argv: list[str]) -> None:
         sys.exit(1)
 
 
+def _edge_https_base_url(raw_url: str) -> str:
+    """Derive an http(s) base URL from a ws(s)/http(s) server URL (path + userinfo dropped)."""
+    from urllib.parse import urlsplit
+
+    text = str(raw_url or "").strip()
+    if not text:
+        return ""
+    scheme_map = {"wss": "https", "ws": "http"}
+    try:
+        parts = urlsplit(text)
+        scheme = scheme_map.get(parts.scheme.lower(), parts.scheme.lower())
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return ""
+    if scheme not in ("https", "http") or not host:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    if port:
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def _run_edge_host_daemon(
+    server_url: str,
+    loopback_port: int,
+    *,
+    allow_exec: bool = False,
+    allow_destructive: bool = False,
+) -> None:
+    """Run the multi-workspace EdgeHostDaemon until interrupted.
+
+    Serves every ``state='enrolled'`` workspace from the host registry
+    (``host_workspaces.json``); the single-workspace flow stays available when
+    the registry holds no enrolled entries.
+    """
+    from botex.edge.runner import EdgeHostDaemon
+
+    daemon = EdgeHostDaemon(
+        server_url,
+        loopback_port=int(loopback_port),
+        allow_exec=bool(allow_exec),
+        allow_destructive=bool(allow_destructive),
+    )
+
+    async def _run_daemon_main() -> None:
+        start_res = await daemon.start()
+        if isinstance(start_res, dict) and start_res.get("mode") == "attached":
+            print(
+                ok(
+                    f"Attached to existing BoteX edge daemon "
+                    f"(pid={start_res.get('pid')}, port={start_res.get('port')})"
+                )
+            )
+            return
+        print(title("BoteX edge host daemon: serving enrolled workspaces from the host registry"))
+        await daemon.run_forever()
+
+    try:
+        asyncio.run(_run_daemon_main())
+    except KeyboardInterrupt:
+        try:
+            asyncio.run(daemon.stop())
+        except Exception:
+            pass
+
+
 def _cli_edge(argv: list[str]) -> None:
     """CLI dispatcher for the thin edge runner (outbound WSS bridge)."""
     import argparse
@@ -2960,11 +3028,19 @@ def _cli_edge(argv: list[str]) -> None:
     process_env_token = os.environ.get("BOTEX_EDGE_TOKEN", "")
     _load_edge_env_files()
 
-    if argv and argv[0] in ("enroll", "tokens"):
+    if argv and argv[0] in ("enroll", "tokens", "workspaces"):
         from botex.edge.credentials import (
             delete_edge_token,
+            extract_token_jti,
             list_edge_credentials,
+            load_edge_token,
             save_edge_token,
+        )
+        from botex.edge.workspaces import (
+            add_workspace,
+            discover_candidate_workspaces,
+            list_workspaces,
+            remove_workspace,
         )
 
         sub = argparse.ArgumentParser(prog="botex edge")
@@ -2984,6 +3060,61 @@ def _cli_edge(argv: list[str]) -> None:
         p_remove = p_tokens_sub.add_parser("remove", help="Remove a stored edge credential")
         p_remove.add_argument("--device-id", required=True)
         p_remove.add_argument("--workspace-id", required=True)
+        p_upgrade = p_tokens_sub.add_parser(
+            "upgrade",
+            help="Rotate an edge device token via the Cloud upgrade endpoint (adds delegate_local scope)",
+        )
+        p_upgrade.add_argument("--device-id", default=os.environ.get("BOTEX_EDGE_DEVICE_ID", ""))
+        p_upgrade.add_argument(
+            "--workspace-id", default=os.environ.get("BOTEX_EDGE_WORKSPACE_ID", "")
+        )
+        p_upgrade.add_argument(
+            "--cloud-url",
+            default="",
+            help=(
+                "Cloud HTTPS base URL (a wss:// edge URL is converted); "
+                "default: derived from BOTEX_EDGE_SERVER"
+            ),
+        )
+        p_upgrade.add_argument("--label", default="", help="Optional token label stored on Cloud")
+
+        p_ws = cmd.add_parser(
+            "workspaces",
+            help="Manage the multi-workspace host registry used by 'botex edge --edge-daemon'",
+        )
+        p_ws_sub = p_ws.add_subparsers(dest="workspaces_command", required=True)
+        p_ws_add = p_ws_sub.add_parser(
+            "add", help="Register a workspace directory (enrolled unless --candidate)"
+        )
+        p_ws_add.add_argument("path", help="Workspace directory to register")
+        p_ws_add.add_argument("--label", default="", help="Human-readable workspace label")
+        p_ws_add.add_argument(
+            "--workspace-id",
+            default="",
+            help="Explicit opaque workspace id (ws_...); generated when omitted",
+        )
+        p_ws_add.add_argument(
+            "--candidate",
+            action="store_true",
+            help="Register as candidate instead of enrolled (stays inert until enrolled)",
+        )
+        p_ws_add.add_argument(
+            "--local-admin",
+            action="store_true",
+            help="Allow locally-administered skills for this workspace",
+        )
+        p_ws_list = p_ws_sub.add_parser("list", help="List registered workspaces")
+        p_ws_list.add_argument(
+            "--include-disabled", action="store_true", help="Include disabled entries"
+        )
+        p_ws_remove = p_ws_sub.add_parser("remove", help="Remove a registered workspace")
+        p_ws_remove.add_argument("--workspace-id", required=True)
+        p_ws_discover = p_ws_sub.add_parser(
+            "discover", help="Scan roots for project markers and register candidate workspaces"
+        )
+        p_ws_discover.add_argument(
+            "roots", nargs="*", help="Directories to scan (default: current directory)"
+        )
         ns = sub.parse_args(argv)
 
         if ns.command == "enroll":
@@ -3020,7 +3151,160 @@ def _cli_edge(argv: list[str]) -> None:
             )
             return
 
-        if ns.tokens_command == "list":
+        if ns.command == "tokens" and ns.tokens_command == "upgrade":
+            import urllib.error
+            import urllib.request
+
+            base_url = _edge_https_base_url(
+                str(ns.cloud_url or "").strip() or os.environ.get("BOTEX_EDGE_SERVER", "")
+            )
+            if not base_url:
+                print(
+                    err(
+                        "Cannot derive the Cloud base URL: pass --cloud-url https://<host> "
+                        "or set BOTEX_EDGE_SERVER=wss://<host>/api/edge/ws."
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            device_id = (ns.device_id or "").strip() or socket.gethostname()
+            workspace_id = (ns.workspace_id or "").strip()
+            if not workspace_id:
+                print(
+                    err("--workspace-id is required for 'botex edge tokens upgrade'."),
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            bearer = os.environ.get("BOTEX_ACCESS_TOKEN", "").strip()
+            if not bearer:
+                print(
+                    err(
+                        "Cloud auth token missing: export BOTEX_ACCESS_TOKEN "
+                        "(this command reads the environment only, never .env)."
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            cur_token = load_edge_token(device_id, workspace_id)
+            replace_jti = extract_token_jti(cur_token) or None
+            payload = json.dumps(
+                {
+                    "device_id": device_id,
+                    "workspace_id": workspace_id,
+                    "replace_jti": replace_jti,
+                    "label": str(ns.label or "").strip(),
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                f"{base_url}/api/edge/tokens/upgrade",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {bearer}",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                print(
+                    err(
+                        f"Token upgrade rejected by Cloud (HTTP {exc.code}); local token unchanged."
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            except urllib.error.URLError as exc:
+                print(err(f"Cannot reach the Cloud gateway: {exc.reason}"), file=sys.stderr)
+                sys.exit(1)
+            new_token = str(body.get("token", "") or "").strip() if isinstance(body, dict) else ""
+            if not new_token.startswith("btxd_"):
+                print(
+                    err("Cloud response contained no valid edge token; local token unchanged."),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            try:
+                res = save_edge_token(device_id, workspace_id, new_token)
+            except (OSError, ValueError) as exc:
+                print(
+                    err(f"Token upgraded on Cloud but storing it locally failed: {exc}"),
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            print(
+                ok(
+                    f"Edge token upgraded for device={device_id} workspace={workspace_id}: "
+                    f"jti {replace_jti or '-'} -> {res.get('jti', '?')}"
+                )
+            )
+            return
+
+        if ns.command == "workspaces":
+            if ns.workspaces_command == "add":
+                root = str(Path(ns.path).expanduser().resolve())
+                try:
+                    entry = add_workspace(
+                        root,
+                        label=str(ns.label or "").strip(),
+                        workspace_id=str(ns.workspace_id or "").strip(),
+                        state="candidate" if ns.candidate else "enrolled",
+                        daemon_mode=True,
+                        local_admin=bool(ns.local_admin),
+                    )
+                except (OSError, ValueError) as exc:
+                    print(err(f"Cannot add workspace: {exc}"), file=sys.stderr)
+                    sys.exit(2)
+                print(
+                    ok(
+                        f"Workspace added: id={entry['workspace_id']} "
+                        f"label={entry['label'] or '-'} state={entry['state']}"
+                    )
+                )
+                return
+
+            if ns.workspaces_command == "list":
+                items = list_workspaces(include_disabled=bool(ns.include_disabled))
+                if not items:
+                    print(
+                        dim(
+                            "No workspaces registered. Use 'botex edge workspaces add <path>' "
+                            "or 'botex edge workspaces discover'."
+                        )
+                    )
+                    return
+                header = f"{'WORKSPACE_ID':<18} {'LABEL':<24} {'STATE':<10} SOURCE"
+                print(title(header))
+                for ws in items:
+                    print(
+                        f"{ws.get('workspace_id', '?'):<18} {(ws.get('label') or '-'):<24} "
+                        f"{ws.get('state', '?'):<10} {ws.get('source', '?')}"
+                    )
+                return
+
+            if ns.workspaces_command == "remove":
+                if remove_workspace(str(ns.workspace_id).strip()):
+                    print(ok(f"Removed workspace {ns.workspace_id}"))
+                else:
+                    print(dim(f"No workspace registered with id {ns.workspace_id}"))
+                return
+
+            roots = [str(Path(r).expanduser().resolve()) for r in (ns.roots or [])]
+            found = discover_candidate_workspaces(roots or [str(Path.cwd())])
+            if not found:
+                print(dim("No new candidate workspaces discovered."))
+                return
+            for ws in found:
+                print(
+                    ok(
+                        f"Discovered candidate workspace: id={ws['workspace_id']} "
+                        f"label={ws['label']} state={ws['state']}"
+                    )
+                )
+            return
+
+        if ns.command == "tokens" and ns.tokens_command == "list":
             items = list_edge_credentials()
             if not items:
                 print(dim("No stored edge credentials. Use 'botex edge enroll' to add one."))
@@ -3126,6 +3410,21 @@ def _cli_edge(argv: list[str]) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+
+    if getattr(args, "edge_daemon", False):
+        from botex.edge.workspaces import list_workspaces
+
+        enrolled = [ws for ws in list_workspaces() if ws.get("state") == "enrolled"]
+        if enrolled:
+            _run_edge_host_daemon(
+                server_url,
+                int(args.loopback_port) if args.loopback_port is not None else 0,
+                allow_exec=bool(args.allow_exec),
+                allow_destructive=bool(args.allow_destructive),
+            )
+            return
+        # No enrolled entries in the host registry: fall through to the legacy
+        # single-workspace --edge-daemon flow (attach_or_spawn_edge_daemon + EdgeRunner).
 
     workspace_root = str(Path(args.workspace).expanduser().resolve())
     device_id = args.device_id or socket.gethostname()
