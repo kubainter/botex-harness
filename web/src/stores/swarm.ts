@@ -1,14 +1,23 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { api, ApiError } from '../api/client'
+import { wsManager } from '../api/ws'
+import type { ConnectionStatus } from '../api/ws'
 import type {
   BotInfo,
   BotBrief,
   BotLease,
   ConnectedDeviceInfo,
   HostHarnessInfo,
-  WorkOrderInfo
+  WorkOrderInfo,
+  SwarmChannelInfo,
+  ChannelCreatePayload,
+  ChannelMessagePayload,
+  ChannelMessageInfo,
+  SwarmRealtimeEvent
 } from '../api/types'
+
+const CHANNEL_MESSAGE_PAGE_SIZE = 50
 
 export type BriefSaveResult =
   | { ok: true; brief: BotBrief }
@@ -51,11 +60,29 @@ export const useSwarmStore = defineStore('swarm', () => {
   const mutatingOrderId = ref<string | null>(null)
   let lastOrdersParams: { status?: string; bot_slug?: string; limit?: number } | undefined
 
+  // --- Channels (data-only coordination bus) --------------------------------
+  const channels = ref<SwarmChannelInfo[]>([])
+  const selectedChannelId = ref<string | null>(null)
+  const messagesByChannel = ref<Record<string, ChannelMessageInfo[]>>({})
+  const hasMoreOlderByChannel = ref<Record<string, boolean>>({})
+  const loadingChannels = ref<boolean>(false)
+  const loadingMessages = ref<boolean>(false)
+  const postingMessage = ref<boolean>(false)
+  const channelError = ref<string | null>(null)
+  const realtimeStatus = ref<ConnectionStatus>('DISCONNECTED')
+  let realtimeCleanup: (() => void) | null = null
+
   const error = ref<string | null>(null)
   const briefError = ref<string | null>(null)
 
   const selectedBot = computed<BotInfo | null>(
     () => bots.value.find((b) => b.slug === selectedBotSlug.value) ?? null
+  )
+  const selectedChannel = computed<SwarmChannelInfo | null>(
+    () => channels.value.find((c) => c.channel_id === selectedChannelId.value) ?? null
+  )
+  const selectedChannelMessages = computed<ChannelMessageInfo[]>(
+    () => messagesByChannel.value[selectedChannelId.value ?? ''] ?? []
   )
 
   function upsertBotRow(row: BotInfo): void {
@@ -311,6 +338,214 @@ export const useSwarmStore = defineStore('swarm', () => {
     return mutateOrder(orderId, () => api.fenceWorkOrder(orderId, body))
   }
 
+  // --- Channels (data-only coordination bus) --------------------------------
+
+  function upsertChannelRow(row: SwarmChannelInfo): void {
+    const idx = channels.value.findIndex((c) => c.channel_id === row.channel_id)
+    if (idx >= 0) channels.value[idx] = { ...channels.value[idx], ...row }
+    else channels.value.push(row)
+    channels.value.sort(
+      (a, b) => a.created_at.localeCompare(b.created_at) || a.channel_id.localeCompare(b.channel_id)
+    )
+  }
+
+  function dedupeMessagesSorted(list: ChannelMessageInfo[]): ChannelMessageInfo[] {
+    const seen = new Set<string>()
+    const out: ChannelMessageInfo[] = []
+    for (const m of list) {
+      if (seen.has(m.message_id)) continue
+      seen.add(m.message_id)
+      out.push(m)
+    }
+    return out.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id))
+  }
+
+  function appendChannelMessage(channelId: string, message: ChannelMessageInfo): void {
+    const existing = messagesByChannel.value[channelId]
+    if (!existing) return // channel never opened: history loads on select
+    if (existing.some((m) => m.message_id === message.message_id)) return
+    messagesByChannel.value = {
+      ...messagesByChannel.value,
+      [channelId]: dedupeMessagesSorted([...existing, message])
+    }
+  }
+
+  function bumpChannelUpdated(channelId: string, ts?: string): void {
+    const idx = channels.value.findIndex((c) => c.channel_id === channelId)
+    if (idx < 0) return
+    const next = ts ?? new Date().toISOString()
+    if (channels.value[idx].updated_at >= next) return
+    channels.value[idx] = { ...channels.value[idx], updated_at: next }
+  }
+
+  async function fetchChannels(params?: { participant?: string; limit?: number }): Promise<void> {
+    loadingChannels.value = true
+    channelError.value = null
+    try {
+      const res = await api.listChannels(params)
+      channels.value = res.channels ?? []
+      if (selectedChannelId.value && !channels.value.some((c) => c.channel_id === selectedChannelId.value)) {
+        selectedChannelId.value = null
+      }
+    } catch (e) {
+      channelError.value = errorMessage(e)
+    } finally {
+      loadingChannels.value = false
+    }
+  }
+
+  async function createChannel(body: ChannelCreatePayload): Promise<ActionResult> {
+    channelError.value = null
+    try {
+      const res = await api.createChannel(body)
+      upsertChannelRow(res.channel)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, message: errorMessage(e) }
+    }
+  }
+
+  async function selectChannel(channelId: string | null): Promise<void> {
+    selectedChannelId.value = channelId
+    if (!channelId) return
+    if (!messagesByChannel.value[channelId]) {
+      await fetchChannelMessages(channelId)
+    }
+  }
+
+  async function fetchChannelMessages(
+    channelId: string,
+    opts?: { before?: string; appendOlder?: boolean }
+  ): Promise<void> {
+    loadingMessages.value = true
+    channelError.value = null
+    try {
+      const res = await api.listChannelMessages(channelId, {
+        limit: CHANNEL_MESSAGE_PAGE_SIZE,
+        before: opts?.before
+      })
+      const incoming = res.messages ?? []
+      if (opts?.appendOlder) {
+        const existing = messagesByChannel.value[channelId] ?? []
+        messagesByChannel.value = {
+          ...messagesByChannel.value,
+          [channelId]: dedupeMessagesSorted([...incoming, ...existing])
+        }
+      } else {
+        messagesByChannel.value = { ...messagesByChannel.value, [channelId]: incoming }
+      }
+      // A short page means the channel history is fully loaded.
+      hasMoreOlderByChannel.value = {
+        ...hasMoreOlderByChannel.value,
+        [channelId]: incoming.length >= CHANNEL_MESSAGE_PAGE_SIZE
+      }
+    } catch (e) {
+      channelError.value = errorMessage(e)
+    } finally {
+      loadingMessages.value = false
+    }
+  }
+
+  async function postChannelMessage(channelId: string, body: ChannelMessagePayload): Promise<ActionResult> {
+    postingMessage.value = true
+    channelError.value = null
+    try {
+      const res = await api.postChannelMessage(channelId, body)
+      appendChannelMessage(channelId, res.message)
+      bumpChannelUpdated(channelId, res.message.created_at)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, message: errorMessage(e) }
+    } finally {
+      postingMessage.value = false
+    }
+  }
+
+  // --- Realtime push reconciliation -----------------------------------------
+
+  function handleSwarmEvent(event: SwarmRealtimeEvent): void {
+    switch (event.type) {
+      case 'bot_status': {
+        if (event.bot) {
+          upsertBotRow(event.bot) // also refreshes selectedBot via computed
+        } else if (event.slug && event.status !== undefined) {
+          const idx = bots.value.findIndex((b) => b.slug === event.slug)
+          if (idx >= 0) bots.value[idx] = { ...bots.value[idx], status: event.status }
+        }
+        break
+      }
+      case 'host_harness_update': {
+        if (!event.host_id) break
+        const prev = harnessesByHost.value[event.host_id] ?? []
+        const next = (event.harnesses ?? []).map((h) => {
+          const old = prev.find((p) => p.harness_id === h.harness_id)
+          // Pushes may omit limits; keep the last snapshot instead of dropping it.
+          return h.limits === undefined && old?.limits ? { ...h, limits: old.limits } : h
+        })
+        harnessesByHost.value = { ...harnessesByHost.value, [event.host_id]: next }
+        break
+      }
+      case 'work_order_update': {
+        if (!event.order_id) break
+        if (event.order) {
+          const idx = orders.value.findIndex((o) => o.order_id === event.order_id)
+          if (idx >= 0) orders.value[idx] = { ...orders.value[idx], ...event.order }
+          else orders.value.push(event.order)
+        } else {
+          applyOrderPatch(event.order_id, {
+            ...(event.status !== undefined ? { status: event.status } : {}),
+            ...(event.epoch !== undefined ? { epoch: event.epoch } : {})
+          })
+        }
+        break
+      }
+      case 'channel_message': {
+        if (event.channel_id && event.message) {
+          appendChannelMessage(event.channel_id, event.message)
+          bumpChannelUpdated(event.channel_id, event.message.created_at)
+        }
+        break
+      }
+      case 'host_workspace_update':
+        // Reserved for the workspace pane (later phase); nothing to reconcile yet.
+        break
+    }
+  }
+
+  function reconcileAfterReconnect(): void {
+    // The socket may have missed pushes while down; refresh only loaded collections.
+    if (bots.value.length) void fetchBots()
+    for (const hostId of Object.keys(harnessesByHost.value)) {
+      void fetchHostHarnesses(hostId)
+    }
+    if (orders.value.length) void fetchOrders(lastOrdersParams)
+    if (channels.value.length) void fetchChannels()
+    if (selectedChannelId.value) void fetchChannelMessages(selectedChannelId.value)
+  }
+
+  function initRealtime(): () => void {
+    if (realtimeCleanup) return realtimeCleanup
+
+    let wasConnected = false
+    const offEvents = wsManager.onSwarmEvent(handleSwarmEvent)
+    const offStatus = wsManager.onStatusChange((status) => {
+      realtimeStatus.value = status
+      if (status === 'CONNECTED') {
+        if (wasConnected) reconcileAfterReconnect()
+        wasConnected = true
+      }
+    })
+    realtimeStatus.value = wsManager.getStatus()
+    if (wsManager.getStatus() === 'DISCONNECTED') wsManager.connect()
+
+    realtimeCleanup = () => {
+      offEvents()
+      offStatus()
+      realtimeCleanup = null
+    }
+    return realtimeCleanup
+  }
+
   return {
     // teammates
     bots,
@@ -338,6 +573,25 @@ export const useSwarmStore = defineStore('swarm', () => {
     orders,
     loadingOrders,
     mutatingOrderId,
+    // channels & realtime
+    channels,
+    selectedChannelId,
+    selectedChannel,
+    selectedChannelMessages,
+    messagesByChannel,
+    hasMoreOlderByChannel,
+    loadingChannels,
+    loadingMessages,
+    postingMessage,
+    channelError,
+    realtimeStatus,
+    fetchChannels,
+    createChannel,
+    selectChannel,
+    fetchChannelMessages,
+    postChannelMessage,
+    handleSwarmEvent,
+    initRealtime,
     // shared
     error,
     fetchBots,

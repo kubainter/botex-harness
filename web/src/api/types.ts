@@ -755,6 +755,20 @@ export interface BotLease {
   summary: string
 }
 
+// Forward-compatible usage window for a harness row: every field is optional
+// so partial provider snapshots stay representable until fully populated.
+export interface HarnessLimits {
+  unit?: string
+  used?: number | null
+  remaining?: number | null
+  limit?: number | null
+  reset_at?: string | null
+  window_s?: number | null
+  source?: string
+  confidence?: string
+  collected_at?: string
+}
+
 export interface HostHarnessInfo {
   host_id: string
   harness_id: string
@@ -763,6 +777,7 @@ export interface HostHarnessInfo {
   last_seen: string
   age_s?: number | null
   capabilities: Record<string, unknown>
+  limits?: HarnessLimits
 }
 
 export interface WorkOrderInfo {
@@ -799,3 +814,52 @@ export interface WorkOrderFenceRequest {
   reason?: string
   status?: string
 }
+
+// ---------------------------------------------------------------------------
+// Swarm Channels (data-only coordination bus) & realtime push events
+// ---------------------------------------------------------------------------
+
+export interface SwarmChannelInfo {
+  channel_id: string
+  name: string
+  topic: string
+  participants: string[]
+  acl_mode: 'participants' | 'open' | string
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ChannelMessageInfo {
+  message_id: string
+  channel_id: string
+  sender_slug: string
+  sender_origin: string
+  content: string
+  untrusted: boolean
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface ChannelCreatePayload {
+  channel_id: string
+  name: string
+  topic?: string
+  participants?: string[]
+  acl_mode?: 'participants' | 'open' | string
+  created_by?: string
+}
+
+export interface ChannelMessagePayload {
+  sender_slug: string
+  content: string
+  sender_origin?: string
+  metadata?: Record<string, unknown>
+}
+
+export type SwarmRealtimeEvent =
+  | { type: 'bot_status'; slug?: string; status?: string; bot?: BotInfo }
+  | { type: 'host_harness_update'; host_id?: string; harnesses?: HostHarnessInfo[]; last_seen?: string }
+  | { type: 'work_order_update'; order_id?: string; status?: string; epoch?: number; order?: WorkOrderInfo }
+  | { type: 'channel_message'; channel_id?: string; message?: ChannelMessageInfo }
+  | { type: 'host_workspace_update'; host_id?: string; workspaces?: Array<Record<string, unknown>> }
