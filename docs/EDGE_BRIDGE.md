@@ -171,3 +171,14 @@ Downward control frames on `/api/edge/ws` and `--edge-daemon` loopback `POST /co
 - Loopback control allowlist: `lease_heartbeat`, `fence_ack`, `ping`, `harness_pause`, `harness_resume`, `harness_cancel_task`.
 - Downward typed harness frames (`harness_pause`, `harness_resume`, `harness_cancel_task`) MUST carry `order_id` and `fencing_token` (verified via constant-time comparison against the locally registered active order; optional `fencing_epoch` must not be stale).
 - `EdgeRunner` executes the corresponding OS process-tree helper (`pause_process_tree`, `resume_process_tree`, `cancel_process_tree`) and responds on the Control Lane with explicit `control_ack` or `control_nack` (`reason`, `ok`, `request_id`, `order_id`). Arbitrary or untyped commands are always rejected.
+
+## 6. Work-Order Fencing & Lifecycle Control
+
+The Cloud REST API and the local supervisor pulse control the work-order lifecycle (no `swarm fence` CLI subcommand exists).
+
+- `botex night-pulse [--once]` — local supervisor cycle: syncs bot briefs and host leases, fences stale local epoch worktrees for `FENCED` orders, and runs the verify gate.
+- `POST /api/swarm/orders/{order_id}/fence` — atomically increments the work-order epoch after a `local_epoch`/`expected_epoch` CAS check against the remote epoch; optional `status` (`FENCED`, `HANDOFF`, `STUCK`, `BLOCKED`), `bot_slug`, `host_id`, `scope_path`, `reason`. Conflicting epochs return `409` (`stale_epoch`).
+- `POST /api/swarm/orders/{order_id}/pause` | `.../resume` | `.../cancel` — CAS-guarded FSM transitions (`PAUSED` / `RUNNING` / `CANCELLED`) that also dispatch the matching typed control frame (`harness_pause`, `harness_resume`, `harness_cancel_task`) to the assigned Edge host when `host_id` + `fencing_token` resolve.
+- `POST /api/bots/{slug}/pause` | `.../resume` — freeze/release a Tethered Bot (`paused` / `active`).
+
+Successful bot and order mutations broadcast `bot_status` and `work_order_update` events to connected `/api/chat/ws` clients, `hello` and `heartbeat` inventory updates emit `host_harness_update`, and new channel posts emit `channel_message`. Every payload passes secret masking before fan-out.

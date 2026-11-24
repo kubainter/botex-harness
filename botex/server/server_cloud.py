@@ -321,22 +321,27 @@ def _broadcast_approval_request(action: PendingAction) -> None:
 default_approval_manager.add_listener(_broadcast_approval_request)
 
 
-def _broadcast_channel_message(channel_id: str, message: Dict[str, Any]) -> None:
-    """Best-effort fan-out of a posted channel message to connected PWA WebSockets."""
+def _broadcast_swarm_event(event_type: str, payload: Dict[str, Any]) -> None:
+    """Best-effort fan-out of a realtime swarm event to connected PWA WebSockets."""
     if not _ACTIVE_WEBSOCKETS:
         return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        logger.debug("No active event loop to broadcast channel message")
+        logger.debug("No active event loop to broadcast swarm event")
         return
-    payload = {
-        "type": "channel_message",
-        "channel_id": channel_id,
-        "message": botex_server.mask_secrets_recursive(message),
-    }
+    masked = botex_server.mask_secrets_recursive(payload)
+    # ``type`` is the envelope discriminator; payload keys may never shadow it.
+    envelope: Dict[str, Any] = {"type": event_type}
+    if isinstance(masked, dict):
+        envelope.update({k: v for k, v in masked.items() if k != "type"})
     for ws in list(_ACTIVE_WEBSOCKETS.keys()):
-        _spawn_bg_task(_send_ws_json_safe(ws, payload), loop=loop)
+        _spawn_bg_task(_send_ws_json_safe(ws, envelope), loop=loop)
+
+
+def _broadcast_channel_message(channel_id: str, message: Dict[str, Any]) -> None:
+    """Best-effort fan-out of a posted channel message to connected PWA WebSockets."""
+    _broadcast_swarm_event("channel_message", {"channel_id": channel_id, "message": message})
 
 
 # ---------------------------------------------------------------------------
@@ -3000,6 +3005,9 @@ async def create_or_update_bot(body: BotCreateRequest) -> Dict[str, Any]:
         )
     if res.get("status") != "active":
         _fanout_edge_brief_sync([{"slug": res["slug"], "status": res["status"]}])
+    _broadcast_swarm_event(
+        "bot_status", {"slug": res.get("slug"), "status": res.get("status"), "bot": res}
+    )
     return botex_server.mask_secrets_recursive(res)
 
 
@@ -3389,6 +3397,15 @@ async def fence_swarm_order_endpoint(
             status_code=status.HTTP_409_CONFLICT,
             detail=botex_server.mask_secrets_recursive(res),
         )
+    _broadcast_swarm_event(
+        "work_order_update",
+        {
+            "order_id": res.get("order_id"),
+            "status": res.get("status"),
+            "epoch": res.get("epoch"),
+            "order": res,
+        },
+    )
     return botex_server.mask_secrets_recursive(res)
 
 
@@ -3522,6 +3539,15 @@ async def _transition_order_and_dispatch(
             fencing_token=fencing_token,
             fencing_epoch=order_obj.get("epoch"),
         )
+    _broadcast_swarm_event(
+        "work_order_update",
+        {
+            "order_id": res.get("order_id"),
+            "status": res.get("status"),
+            "epoch": res.get("epoch"),
+            "order": order_obj,
+        },
+    )
     return botex_server.mask_secrets_recursive(res)
 
 
@@ -3561,6 +3587,15 @@ async def create_swarm_order_endpoint(body: SwarmOrderCreateRequest) -> Dict[str
     res = await asyncio.to_thread(create_work_order, order_payload)
     if not res.get("ok"):
         _raise_for_order_mutation_error(res)
+    _broadcast_swarm_event(
+        "work_order_update",
+        {
+            "order_id": res.get("order_id"),
+            "status": res.get("status"),
+            "epoch": res.get("epoch"),
+            "order": res,
+        },
+    )
     return botex_server.mask_secrets_recursive(res)
 
 
@@ -3747,6 +3782,9 @@ async def pause_bot_endpoint(slug: str) -> Dict[str, Any]:
             else status.HTTP_409_CONFLICT
         )
         raise HTTPException(status_code=code, detail=botex_server.mask_secrets_recursive(res))
+    _broadcast_swarm_event(
+        "bot_status", {"slug": res.get("slug"), "status": res.get("status"), "bot": res}
+    )
     return botex_server.mask_secrets_recursive(res)
 
 
@@ -3766,6 +3804,9 @@ async def resume_bot_endpoint(slug: str) -> Dict[str, Any]:
             else status.HTTP_409_CONFLICT
         )
         raise HTTPException(status_code=code, detail=botex_server.mask_secrets_recursive(res))
+    _broadcast_swarm_event(
+        "bot_status", {"slug": res.get("slug"), "status": res.get("status"), "bot": res}
+    )
     return botex_server.mask_secrets_recursive(res)
 
 
@@ -5135,7 +5176,7 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
         hello_harnesses = hello.get("harnesses")
         if isinstance(hello_harnesses, list) and hello_harnesses:
             try:
-                await asyncio.to_thread(
+                stored_hello_harnesses = await asyncio.to_thread(
                     upsert_host_harnesses,
                     session.device_id,
                     hello_harnesses,
@@ -5143,6 +5184,15 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                 )
             except Exception:
                 logger.debug("Failed ingesting hello harness inventory", exc_info=True)
+            else:
+                _broadcast_swarm_event(
+                    "host_harness_update",
+                    {
+                        "host_id": session.device_id,
+                        "harnesses": stored_hello_harnesses,
+                        "last_seen": hello.get("last_seen"),
+                    },
+                )
         await session.send_frame(
             {
                 "type": "hello_ack",
@@ -5208,7 +5258,7 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                 hb_harnesses = frame.get("harnesses")
                 if isinstance(hb_harnesses, list):
                     try:
-                        await asyncio.to_thread(
+                        stored_hb_harnesses = await asyncio.to_thread(
                             upsert_host_harnesses,
                             session.device_id,
                             hb_harnesses,
@@ -5216,6 +5266,15 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                         )
                     except Exception:
                         logger.debug("Failed ingesting heartbeat harness inventory", exc_info=True)
+                    else:
+                        _broadcast_swarm_event(
+                            "host_harness_update",
+                            {
+                                "host_id": session.device_id,
+                                "harnesses": stored_hb_harnesses,
+                                "last_seen": frame.get("last_seen"),
+                            },
+                        )
             elif ftype in ("control_ack", "control_nack"):
                 req_id = str(frame.get("request_id") or "")
                 if req_id:

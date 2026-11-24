@@ -287,6 +287,9 @@
             <HostsView
               v-else-if="currentView === 'hosts'"
             />
+            <ChannelsView
+              v-else-if="currentView === 'channels'"
+            />
             <ApprovalsView
               v-else-if="currentView === 'approvals'"
             />
@@ -303,8 +306,8 @@
         </Transition>
       </div>
 
-      <!-- Mobile Bottom Navigation Bar (Safe Bounds & Equal Columns) -->
-      <nav class="md:hidden bg-botex-900 border-t border-botex-800 grid grid-cols-8 w-full max-w-full overflow-hidden py-1 px-0.5 pb-safe shrink-0 z-30 select-none" aria-label="Primary">
+      <!-- Mobile Bottom Navigation Bar (Safe Bounds; horizontally scrollable for 9 tabs) -->
+      <nav class="md:hidden bg-botex-900 border-t border-botex-800 flex items-center overflow-x-auto gap-0.5 px-1 py-1 pb-safe w-full max-w-full shrink-0 z-30 select-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label="Primary">
         <button
           v-for="item in navItems"
           :key="item.id"
@@ -312,7 +315,7 @@
           :aria-label="navAriaLabel(item)"
           :aria-current="currentView === item.id ? 'page' : undefined"
           :class="[
-            'min-h-[48px] w-full min-w-0 overflow-hidden flex flex-col items-center justify-center py-1 px-0 rounded-lg text-xs font-medium transition relative',
+            'min-h-[48px] shrink-0 min-w-[3.75rem] overflow-hidden flex flex-col items-center justify-center py-1 px-0.5 rounded-lg text-xs font-medium transition relative',
             currentView === item.id ? 'text-sky-300 bg-botex-800/80 shadow-sm' : 'text-slate-300 hover:text-white'
           ]"
           @click="currentView = item.id"
@@ -351,11 +354,13 @@ import { useApprovalsStore } from './stores/approvals'
 import { useChatStore } from './stores/chat'
 import { useWalletStore } from './stores/wallet'
 import { useThemeStore } from './stores/theme'
+import { useSwarmStore } from './stores/swarm'
 import { useI18n } from './i18n'
 import ChatView from './views/ChatView.vue'
 import TasksView from './views/TasksView.vue'
 import BotsView from './views/BotsView.vue'
 import HostsView from './views/HostsView.vue'
+import ChannelsView from './views/ChannelsView.vue'
 import ApprovalsView from './views/ApprovalsView.vue'
 import MemoryView from './views/MemoryView.vue'
 import WalletView from './views/WalletView.vue'
@@ -366,6 +371,7 @@ import {
   Cpu as CpuIcon,
   Bot as BotIcon,
   Server as ServerIcon,
+  Hash as HashIcon,
   ShieldAlert as ShieldAlertIcon,
   Database as DatabaseIcon,
   Wallet as WalletIcon,
@@ -380,6 +386,7 @@ const approvalsStore = useApprovalsStore()
 const chatStore = useChatStore()
 const walletStore = useWalletStore()
 const themeStore = useThemeStore()
+const swarm = useSwarmStore()
 const { lang, setUiLang, t } = useI18n()
 
 const { count: approvalsCount, activeModalAction } = storeToRefs(approvalsStore)
@@ -388,12 +395,14 @@ const { isBudgetLow } = storeToRefs(walletStore)
 
 const currentView = ref<string>('chat')
 const sidebarCollapsed = ref<boolean>(false)
+let stopSwarmRealtime: (() => void) | null = null
 
 const navItems = [
   { id: 'chat', labelKey: 'nav.chat', shortKey: 'nav.chat.short', icon: MessageSquareIcon },
   { id: 'tasks', labelKey: 'nav.tasks', shortKey: 'nav.tasks.short', icon: CpuIcon },
   { id: 'bots', labelKey: 'nav.bots', shortKey: 'nav.bots.short', icon: BotIcon },
   { id: 'hosts', labelKey: 'nav.hosts', shortKey: 'nav.hosts.short', icon: ServerIcon },
+  { id: 'channels', labelKey: 'nav.channels', shortKey: 'nav.channels.short', icon: HashIcon },
   { id: 'approvals', labelKey: 'nav.approvals', shortKey: 'nav.approvals.short', icon: ShieldAlertIcon },
   { id: 'memory', labelKey: 'nav.memory', shortKey: 'nav.memory.short', icon: DatabaseIcon },
   { id: 'wallet', labelKey: 'nav.wallet', shortKey: 'nav.wallet.short', icon: WalletIcon },
@@ -485,10 +494,13 @@ onMounted(() => {
   approvalsStore.init()
   chatStore.init()
   walletStore.fetchWallet()
+  stopSwarmRealtime = swarm.initRealtime()
 })
 
 onUnmounted(() => {
   window.removeEventListener('hashchange', onHashChange)
+  stopSwarmRealtime?.()
+  stopSwarmRealtime = null
 })
 
 function onNavigate(viewName: string) {

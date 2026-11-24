@@ -39,7 +39,11 @@ import type {
   WorkOrderInfo,
   WorkOrderCreateRequest,
   WorkOrderActionRequest,
-  WorkOrderFenceRequest
+  WorkOrderFenceRequest,
+  SwarmChannelInfo,
+  ChannelMessageInfo,
+  ChannelCreatePayload,
+  ChannelMessagePayload
 } from './types'
 
 
@@ -690,6 +694,57 @@ export const api = {
       `/api/swarm/orders/${encodeURIComponent(orderId)}/fence`,
       { method: 'POST', body: JSON.stringify(body) }
     )
+  },
+
+  // 14. Swarm Channels (data-only coordination bus)
+  async listChannels(params?: { participant?: string; limit?: number }): Promise<{
+    ok: boolean
+    channels: SwarmChannelInfo[]
+    count: number
+  }> {
+    const q = new URLSearchParams()
+    if (params?.participant) q.set('participant', params.participant)
+    if (params?.limit !== undefined) q.set('limit', String(params.limit))
+    const qs = q.toString()
+    return request<{ ok: boolean; channels: SwarmChannelInfo[]; count: number }>(
+      `/api/swarm/channels${qs ? '?' + qs : ''}`
+    )
+  },
+
+  async createChannel(body: ChannelCreatePayload): Promise<{ ok: boolean; channel: SwarmChannelInfo }> {
+    // The server returns the created row flat (channel fields at the top level);
+    // normalize so callers always receive it wrapped.
+    const data = await request<SwarmChannelInfo & { ok: boolean; channel?: SwarmChannelInfo }>(
+      '/api/swarm/channels',
+      { method: 'POST', body: JSON.stringify(body) }
+    )
+    return { ok: data.ok, channel: data.channel ?? data }
+  },
+
+  async listChannelMessages(
+    channelId: string,
+    params?: { limit?: number; before?: string; after?: string }
+  ): Promise<{ ok: boolean; channel_id: string; messages: ChannelMessageInfo[]; count: number }> {
+    const q = new URLSearchParams()
+    if (params?.limit !== undefined) q.set('limit', String(params.limit))
+    if (params?.before) q.set('before', params.before)
+    if (params?.after) q.set('after', params.after)
+    const qs = q.toString()
+    return request<{ ok: boolean; channel_id: string; messages: ChannelMessageInfo[]; count: number }>(
+      `/api/swarm/channels/${encodeURIComponent(channelId)}/messages${qs ? '?' + qs : ''}`
+    )
+  },
+
+  async postChannelMessage(
+    channelId: string,
+    body: ChannelMessagePayload
+  ): Promise<{ ok: boolean; message: ChannelMessageInfo }> {
+    // Same flat-row normalization as createChannel.
+    const data = await request<ChannelMessageInfo & { ok: boolean; message?: ChannelMessageInfo }>(
+      `/api/swarm/channels/${encodeURIComponent(channelId)}/messages`,
+      { method: 'POST', body: JSON.stringify(body) }
+    )
+    return { ok: data.ok, message: data.message ?? data }
   }
 }
 

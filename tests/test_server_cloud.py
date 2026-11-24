@@ -17,6 +17,7 @@ Comprehensive unit and integration test suite covering:
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -2041,3 +2042,169 @@ def test_swarm_channels_rest_acl_and_order_isolation(client, monkeypatch, tmp_pa
         assert r_h.status_code == 201
     order = swarm_store.get_work_order("ord-guard", db_path=db_file)
     assert order["status"] == "QUEUED" and order["epoch"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Realtime swarm WS event broadcasts (Plan 045)
+# ---------------------------------------------------------------------------
+
+
+def test_broadcast_swarm_event_fanout_masks_and_types(monkeypatch):
+    """_broadcast_swarm_event fans out typed, secret-masked envelopes to each socket."""
+    sent = []
+    spawned = []
+    monkeypatch.setattr(
+        server_cloud, "_spawn_bg_task", lambda coro, loop=None: spawned.append(coro)
+    )
+
+    class _FakeWS:
+        async def send_json(self, payload):
+            sent.append(payload)
+
+    async def _run():
+        ws = _FakeWS()
+        server_cloud._ACTIVE_WEBSOCKETS[ws] = asyncio.Lock()
+        try:
+            server_cloud._broadcast_swarm_event(
+                "bot_status",
+                {
+                    "slug": "bot-x",
+                    "status": "paused",
+                    "bot": {"slug": "bot-x"},
+                    "type": "forged",
+                },
+            )
+            server_cloud._broadcast_swarm_event(
+                "work_order_update",
+                {
+                    "order_id": "ord-1",
+                    "status": "FENCED",
+                    "epoch": 2,
+                    "order": {"order_id": "ord-1"},
+                },
+            )
+            server_cloud._broadcast_swarm_event(
+                "host_harness_update",
+                {
+                    "host_id": "edge-1",
+                    "harnesses": [{"harness_id": "devin"}],
+                    "last_seen": "t0",
+                },
+            )
+            server_cloud._broadcast_channel_message(
+                "chan-1", {"content": "key sk-abc123def456ghi789"}
+            )
+            for coro in spawned:
+                await coro
+        finally:
+            server_cloud._ACTIVE_WEBSOCKETS.pop(ws, None)
+
+    asyncio.run(_run())
+
+    assert [m["type"] for m in sent] == [
+        "bot_status",
+        "work_order_update",
+        "host_harness_update",
+        "channel_message",
+    ]
+    assert sent[0]["slug"] == "bot-x"
+    assert sent[2]["harnesses"] == [{"harness_id": "devin"}]
+    assert sent[3]["channel_id"] == "chan-1"
+    assert "sk-abc123def456ghi789" not in json.dumps(sent[3])
+
+
+def test_broadcast_swarm_event_noop_without_loop_or_sockets(monkeypatch):
+    """Broadcast safely no-ops with no connected sockets or no running event loop."""
+    spawned = []
+    monkeypatch.setattr(
+        server_cloud, "_spawn_bg_task", lambda coro, loop=None: spawned.append(coro)
+    )
+
+    server_cloud._broadcast_swarm_event("bot_status", {"slug": "bot-x"})
+    assert spawned == []
+
+    class _FakeWS:
+        async def send_json(self, payload):  # pragma: no cover - must never run
+            raise AssertionError("send must not be attempted")
+
+    ws = _FakeWS()
+    server_cloud._ACTIVE_WEBSOCKETS[ws] = asyncio.Lock()
+    try:
+        server_cloud._broadcast_swarm_event("bot_status", {"slug": "bot-x"})
+    finally:
+        server_cloud._ACTIVE_WEBSOCKETS.pop(ws, None)
+    assert spawned == []
+
+
+def test_swarm_rest_mutations_emit_ws_events(client, monkeypatch, tmp_path):
+    """Bot/order/channel REST mutations fan out typed events via _broadcast_swarm_event."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "swarm_ws_events.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+    monkeypatch.setenv("BOTEX_ACCESS_TOKEN", "swarm-secret-token")
+    hdrs = {"Authorization": "Bearer swarm-secret-token"}
+
+    events = []
+    monkeypatch.setattr(
+        server_cloud, "_broadcast_swarm_event", lambda et, pl: events.append((et, pl))
+    )
+
+    r_bot = client.post(
+        "/api/bots",
+        headers=hdrs,
+        json={"slug": "bot-ws1", "namespace": "ops", "role_desc": "WS bot"},
+    )
+    assert r_bot.status_code == 201
+    assert events[-1][0] == "bot_status"
+    assert events[-1][1]["slug"] == "bot-ws1" and events[-1][1]["status"] == "active"
+
+    r_pause = client.post("/api/bots/bot-ws1/pause", headers=hdrs)
+    assert r_pause.status_code == 200
+    assert events[-1][0] == "bot_status" and events[-1][1]["status"] == "paused"
+
+    r_resume = client.post("/api/bots/bot-ws1/resume", headers=hdrs)
+    assert r_resume.status_code == 200
+    assert events[-1][0] == "bot_status" and events[-1][1]["status"] == "active"
+
+    r_order = client.post(
+        "/api/swarm/orders",
+        headers=hdrs,
+        json={"order_id": "ord-ws1", "bot_slug": "bot-ws1", "status": "RUNNING"},
+    )
+    assert r_order.status_code == 201
+    assert events[-1][0] == "work_order_update"
+    assert events[-1][1]["order_id"] == "ord-ws1"
+    assert events[-1][1]["status"] == "RUNNING"
+
+    r_op = client.post("/api/swarm/orders/ord-ws1/pause", headers=hdrs, json={})
+    assert r_op.status_code == 200
+    assert events[-1][0] == "work_order_update" and events[-1][1]["status"] == "PAUSED"
+
+    r_or = client.post("/api/swarm/orders/ord-ws1/resume", headers=hdrs, json={})
+    assert r_or.status_code == 200
+    assert events[-1][0] == "work_order_update" and events[-1][1]["status"] == "RUNNING"
+
+    epoch = r_or.json()["epoch"]
+    r_fence = client.post(
+        "/api/swarm/orders/ord-ws1/fence",
+        headers=hdrs,
+        json={"expected_epoch": epoch, "reason": "operator_fence"},
+    )
+    assert r_fence.status_code == 200
+    assert events[-1][0] == "work_order_update"
+    assert events[-1][1]["status"] == "FENCED" and events[-1][1]["epoch"] == epoch + 1
+
+    client.post(
+        "/api/swarm/channels",
+        headers=hdrs,
+        json={"channel_id": "chan-ws", "name": "WS", "participants": ["bot-ws1"]},
+    )
+    r_msg = client.post(
+        "/api/swarm/channels/chan-ws/messages",
+        headers=hdrs,
+        json={"sender_slug": "bot-ws1", "content": "ping"},
+    )
+    assert r_msg.status_code == 201
+    assert events[-1][0] == "channel_message"
+    assert events[-1][1]["channel_id"] == "chan-ws"

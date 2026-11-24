@@ -14,8 +14,8 @@ BoteX is an execution harness for autonomous code-editing agents, functioning as
 
 The main directories and modules are:
 
-*   **Root files:** `server.py` (MCP server & CLI dispatcher, incl. `swarm fence` / `night-pulse`), `botex.config.json`, `bin/botex.*` / `bin/botex-edge.*`, `pyproject.toml` / `requirements.txt` / `requirements.lock`, `ROADMAP.md`.
-*   **`botex/core/`** - Engine internals: `engine.py` (execution loop, 5-gate failovers, receipts, rollback, `SHADOW_ROUTING`), `state.py` (`InFlightTaskState`, contrastive ring buffers), `contracts.py` (`TASK_COMPLETION_JSON_SCHEMA`), `events.py` (`EventKind`), `capabilities.py` (`readonly`/`edit`/`destructive`/`full`), `approval.py` (HITL policies), `context_guard.py`, `context_inclusion.py` (`ContextKnapsack`), `meta_harness.py` (episodic lessons, 800 B cap), `swarm_store.py` (`SWARM_SCHEMA_VERSION=1`, SQLite WAL), `work_order.py` (`WorkOrder` supervisor, policy, `CostLedger`), `blackbox.py`, `tracing.py`.
+*   **Root files:** `server.py` (MCP server & CLI dispatcher, incl. `night-pulse`; work-order fencing via REST `/api/swarm/orders/{order_id}/fence`), `botex.config.json`, `bin/botex.*` / `bin/botex-edge.*`, `pyproject.toml` / `requirements.txt` / `requirements.lock`, `ROADMAP.md`.
+*   **`botex/core/`** - Engine internals: `engine.py` (execution loop, 5-gate failovers, receipts, rollback, `SHADOW_ROUTING`), `state.py` (`InFlightTaskState`, contrastive ring buffers), `contracts.py` (`TASK_COMPLETION_JSON_SCHEMA`), `events.py` (`EventKind`), `capabilities.py` (`readonly`/`edit`/`destructive`/`full`), `approval.py` (HITL policies), `context_guard.py`, `context_inclusion.py` (`ContextKnapsack`), `meta_harness.py` (episodic lessons, 800 B cap), `swarm_store.py` (`SWARM_SCHEMA_VERSION=4`, SQLite WAL), `work_order.py` (`WorkOrder` supervisor, policy, `CostLedger`), `blackbox.py`, `tracing.py`.
 *   **`botex/edge/`** - Outbound WSS Edge Bridge & local OS execution: `runner.py` (WSS tunnel, `--edge-daemon` QoS Control Lane on `127.0.0.1` loopback), `host_os_driver.py` (Win64/POSIX), `verify_gate.py` (`PATHEXT`, Test-Taint Guard, `supervisor_ledger.jsonl`), downward adapters & epoch checkpoints.
 *   **`botex/providers/`** - Provider registry & adapters (`providers.py`), `analytics.py` (ledger + shadow meta-routing), `benchmarks.py` (tier estimation), `catalog.py`, `denylist.py`, `pricing.py`, `rate_limiter.py`, `retry.py` (`max_retries=0` when active), `wallet.py`, `http_pool.py`, `prompt_cache.py`.
 *   **`botex/tools/`** - Worker tools: `patch_engine.py` (fuzzy patch, in-memory syntax gate, snapshots), `file_tools.py` (outline-first), `security.py` (Path Traversal, secret masking), `exec_tools.py`, `net_tools.py` (SSRF guards), `vision.py`.
@@ -39,7 +39,7 @@ BoteX records its own runs and feeds the evidence back deterministically. Learni
 
 ### 1.2. Swarm & Edge Runtime (ADR-SWARM-02)
 
-*   **Tethered Bots & Supervisor:** `swarm_store.py` (`SWARM_SCHEMA_VERSION=1`, versioned SQLite WAL) tracks bots, leases, and `WorkOrder` handoffs with unit-separated `CostLedger` and `swarm fence` / `night-pulse` lifecycle controls.
+*   **Tethered Bots & Supervisor:** `swarm_store.py` (`SWARM_SCHEMA_VERSION=4`, versioned SQLite WAL) tracks bots, leases, and `WorkOrder` handoffs with unit-separated `CostLedger` and `botex night-pulse` + REST `/api/swarm/orders/{order_id}/fence` lifecycle controls.
 *   **Hardened Thin Edge Bridge:** Outbound compressed WSS bridge (`--edge-daemon` QoS Control Lane on `127.0.0.1` loopback), `host_os_driver` (Win64/POSIX), local capability signing (`delegate_local:<ws>`), and `verify_gate.py` (`PATHEXT`, Test-Taint Guard, `supervisor_ledger.jsonl`).
 *   **VPS Topology:** Oracle Cloud VPS (4 vCPU / 24 GB RAM) runs `botex-cloud.service` alongside warm Ollama without OOM, backed by a private bare Git swarm remote for epoch checkpoints.
 

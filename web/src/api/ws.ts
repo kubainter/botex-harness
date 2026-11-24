@@ -1,5 +1,5 @@
 import { getStoredBackendUrl, getStoredAccessToken } from './client'
-import type { ChatChunk, PendingAction, TaskEvent } from './types'
+import type { ChatChunk, PendingAction, TaskEvent, SwarmRealtimeEvent } from './types'
 
 export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING'
 
@@ -7,6 +7,16 @@ type ChunkListener = (chunk: ChatChunk) => void
 type ApprovalListener = (action: PendingAction) => void
 type StatusListener = (status: ConnectionStatus) => void
 type TaskEventListener = (event: TaskEvent) => void
+type SwarmEventListener = (event: SwarmRealtimeEvent) => void
+
+// Swarm realtime push frames; they must never fall through to chat chunk listeners.
+const SWARM_EVENT_TYPES = new Set([
+  'bot_status',
+  'host_harness_update',
+  'work_order_update',
+  'channel_message',
+  'host_workspace_update'
+])
 
 class WebSocketManager {
   private ws: WebSocket | null = null
@@ -20,6 +30,7 @@ class WebSocketManager {
   private chunkListeners: Set<ChunkListener> = new Set()
   private approvalListeners: Set<ApprovalListener> = new Set()
   private statusListeners: Set<StatusListener> = new Set()
+  private swarmListeners: Set<SwarmEventListener> = new Set()
 
   // Per-task event subscriptions: task_id -> callback set
   private taskListeners: Map<string, Set<TaskEventListener>> = new Map()
@@ -42,6 +53,11 @@ class WebSocketManager {
     this.statusListeners.add(fn)
     fn(this.status)
     return () => this.statusListeners.delete(fn)
+  }
+
+  public onSwarmEvent(fn: SwarmEventListener): () => void {
+    this.swarmListeners.add(fn)
+    return () => this.swarmListeners.delete(fn)
   }
 
   // ---------------------------------------------------------------------------
@@ -83,6 +99,16 @@ class WebSocketManager {
         listener(event)
       } catch (err) {
         console.error('[WS] task event listener failed', err)
+      }
+    }
+  }
+
+  private emitSwarmEvent(event: SwarmRealtimeEvent) {
+    for (const listener of Array.from(this.swarmListeners)) {
+      try {
+        listener(event)
+      } catch (err) {
+        console.error('[WS] swarm event listener failed', err)
       }
     }
   }
@@ -144,6 +170,12 @@ class WebSocketManager {
           // Live task event push -> route to per-task listeners
           if (data.type === 'task_event' && data.task_id && data.event) {
             this.emitTaskEvent(String(data.task_id), data.event as TaskEvent)
+            return
+          }
+
+          // Swarm realtime push (bots / harnesses / orders / channels) -> dedicated listeners
+          if (typeof data.type === 'string' && SWARM_EVENT_TYPES.has(data.type)) {
+            this.emitSwarmEvent(data as SwarmRealtimeEvent)
             return
           }
 
