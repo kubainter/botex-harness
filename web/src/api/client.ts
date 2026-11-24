@@ -30,7 +30,16 @@ import type {
   PluginResolveRequest,
   PluginResolveResponse,
   VisionInspectRequest,
-  VisionInspectResponse
+  VisionInspectResponse,
+  BotInfo,
+  BotBrief,
+  BotBriefUpdateRequest,
+  BotLease,
+  HostHarnessInfo,
+  WorkOrderInfo,
+  WorkOrderCreateRequest,
+  WorkOrderActionRequest,
+  WorkOrderFenceRequest
 } from './types'
 
 
@@ -568,6 +577,119 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body)
     })
+  },
+
+  // 13. Swarm Cockpit — Teammates (bots), Edge host harnesses, Work orders
+  async listBots(params?: { namespace?: string; status?: string }): Promise<{
+    ok: boolean
+    schema_version?: number
+    bots: BotInfo[]
+    active_leases_count: number
+  }> {
+    const q = new URLSearchParams()
+    if (params?.namespace) q.set('namespace', params.namespace)
+    if (params?.status) q.set('status', params.status)
+    const qs = q.toString()
+    return request<{ ok: boolean; schema_version?: number; bots: BotInfo[]; active_leases_count: number }>(
+      `/api/bots${qs ? '?' + qs : ''}`
+    )
+  },
+
+  async getBot(slug: string): Promise<{ ok: boolean; bot: BotInfo; leases: BotLease[] }> {
+    return request<{ ok: boolean; bot: BotInfo; leases: BotLease[] }>(`/api/bots/${encodeURIComponent(slug)}`)
+  },
+
+  async getBotBrief(slug: string): Promise<BotBrief> {
+    return request<BotBrief>(`/api/bots/${encodeURIComponent(slug)}/brief`)
+  },
+
+  // `ifMatch` carries the last-seen revision tag so a concurrent edit is
+  // rejected server-side (409) instead of being silently overwritten.
+  async updateBotBrief(slug: string, body: BotBriefUpdateRequest, ifMatch?: string): Promise<BotBrief> {
+    const headers: Record<string, string> = {}
+    if (ifMatch) headers['If-Match'] = `"${ifMatch}"`
+    return request<BotBrief>(`/api/bots/${encodeURIComponent(slug)}/brief`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+      headers
+    })
+  },
+
+  async refreshBotBrief(slug: string, force: boolean = false): Promise<BotBrief> {
+    const q = new URLSearchParams()
+    if (force) q.set('force', 'true')
+    const qs = q.toString()
+    return request<BotBrief>(`/api/bots/${encodeURIComponent(slug)}/brief/refresh${qs ? '?' + qs : ''}`, {
+      method: 'POST'
+    })
+  },
+
+  async pauseBot(slug: string): Promise<BotInfo & { ok: boolean }> {
+    return request<BotInfo & { ok: boolean }>(`/api/bots/${encodeURIComponent(slug)}/pause`, { method: 'POST' })
+  },
+
+  async resumeBot(slug: string): Promise<BotInfo & { ok: boolean }> {
+    return request<BotInfo & { ok: boolean }>(`/api/bots/${encodeURIComponent(slug)}/resume`, { method: 'POST' })
+  },
+
+  async listHostHarnesses(hostId: string, staleAfterS: number = 120): Promise<{
+    ok: boolean
+    host_id: string
+    harnesses: HostHarnessInfo[]
+    count: number
+  }> {
+    const params = new URLSearchParams({ stale_after_s: String(staleAfterS) })
+    return request<{ ok: boolean; host_id: string; harnesses: HostHarnessInfo[]; count: number }>(
+      `/api/edge/hosts/${encodeURIComponent(hostId)}/harnesses?${params.toString()}`
+    )
+  },
+
+  async listWorkOrders(params?: { status?: string; bot_slug?: string; limit?: number }): Promise<{
+    ok: boolean
+    orders: WorkOrderInfo[]
+    count: number
+  }> {
+    const q = new URLSearchParams()
+    if (params?.status) q.set('status', params.status)
+    if (params?.bot_slug) q.set('bot_slug', params.bot_slug)
+    if (params?.limit !== undefined) q.set('limit', String(params.limit))
+    const qs = q.toString()
+    return request<{ ok: boolean; orders: WorkOrderInfo[]; count: number }>(`/api/swarm/orders${qs ? '?' + qs : ''}`)
+  },
+
+  async createWorkOrder(body: WorkOrderCreateRequest): Promise<{ ok: boolean; order_id: string; status: string; epoch: number }> {
+    return request<{ ok: boolean; order_id: string; status: string; epoch: number }>('/api/swarm/orders', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    })
+  },
+
+  async pauseWorkOrder(orderId: string, body?: WorkOrderActionRequest): Promise<{ ok: boolean; order?: WorkOrderInfo; control_dispatch?: unknown }> {
+    return request<{ ok: boolean; order?: WorkOrderInfo; control_dispatch?: unknown }>(
+      `/api/swarm/orders/${encodeURIComponent(orderId)}/pause`,
+      body ? { method: 'POST', body: JSON.stringify(body) } : { method: 'POST' }
+    )
+  },
+
+  async resumeWorkOrder(orderId: string, body?: WorkOrderActionRequest): Promise<{ ok: boolean; order?: WorkOrderInfo; control_dispatch?: unknown }> {
+    return request<{ ok: boolean; order?: WorkOrderInfo; control_dispatch?: unknown }>(
+      `/api/swarm/orders/${encodeURIComponent(orderId)}/resume`,
+      body ? { method: 'POST', body: JSON.stringify(body) } : { method: 'POST' }
+    )
+  },
+
+  async cancelWorkOrder(orderId: string, body?: WorkOrderActionRequest): Promise<{ ok: boolean; order?: WorkOrderInfo; control_dispatch?: unknown }> {
+    return request<{ ok: boolean; order?: WorkOrderInfo; control_dispatch?: unknown }>(
+      `/api/swarm/orders/${encodeURIComponent(orderId)}/cancel`,
+      body ? { method: 'POST', body: JSON.stringify(body) } : { method: 'POST' }
+    )
+  },
+
+  async fenceWorkOrder(orderId: string, body: WorkOrderFenceRequest): Promise<{ ok: boolean; [key: string]: unknown }> {
+    return request<{ ok: boolean; [key: string]: unknown }>(
+      `/api/swarm/orders/${encodeURIComponent(orderId)}/fence`,
+      { method: 'POST', body: JSON.stringify(body) }
+    )
   }
 }
 

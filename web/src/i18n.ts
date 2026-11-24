@@ -85,6 +85,10 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     'nav.chat.short': 'Chat',
     'nav.tasks': 'Background Tasks',
     'nav.tasks.short': 'Tasks',
+    'nav.bots': 'Swarm Bots',
+    'nav.bots.short': 'Bots',
+    'nav.hosts': 'Edge Hosts',
+    'nav.hosts.short': 'Hosts',
     'nav.approvals': 'Operator Approvals',
     'nav.approvals.short': 'Approvals',
     'nav.memory': 'Memory Vault',
@@ -93,6 +97,20 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     'nav.wallet.short': 'Budget',
     'nav.settings': 'Configuration',
     'nav.settings.short': 'Config',
+
+    // WorkOrder Queue
+    'orders.title': 'WorkOrder Queue',
+    'orders.subtitle': 'Supervisor handoffs for swarm bots',
+    'orders.empty': 'No work orders yet',
+    'orders.orderId': 'Order ID',
+    'orders.bot': 'Bot',
+    'orders.epoch': 'Epoch',
+    'orders.host': 'Host',
+    'orders.reason': 'Reason',
+    'orders.pause': 'Pause',
+    'orders.resume': 'Resume',
+    'orders.cancel': 'Cancel',
+    'orders.fence': 'Fence',
 
     // Header & Sidebar
     'app.subtitle': 'Cloud Gateway & MCP',
@@ -370,6 +388,10 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     'nav.chat.short': 'Czat',
     'nav.tasks': 'Zadania w tle',
     'nav.tasks.short': 'Zadania',
+    'nav.bots': 'Boty roju',
+    'nav.bots.short': 'Boty',
+    'nav.hosts': 'Hosty edge',
+    'nav.hosts.short': 'Hosty',
     'nav.approvals': 'Akceptacja operatora',
     'nav.approvals.short': 'Zgody',
     'nav.memory': 'Pamięć projektu',
@@ -378,6 +400,20 @@ const MESSAGES: Record<UiLang, Record<string, string>> = {
     'nav.wallet.short': 'Budżet',
     'nav.settings': 'Ustawienia',
     'nav.settings.short': 'Opcje',
+
+    // Kolejka zleceń
+    'orders.title': 'Kolejka zleceń',
+    'orders.subtitle': 'Przekazania nadzorcy dla botów roju',
+    'orders.empty': 'Brak zleceń',
+    'orders.orderId': 'ID zlecenia',
+    'orders.bot': 'Bot',
+    'orders.epoch': 'Epoka',
+    'orders.host': 'Host',
+    'orders.reason': 'Powód',
+    'orders.pause': 'Wstrzymaj',
+    'orders.resume': 'Wznów',
+    'orders.cancel': 'Anuluj',
+    'orders.fence': 'Ogrodź',
 
     // Header & Sidebar
     'app.subtitle': 'Brama Cloud i MCP',

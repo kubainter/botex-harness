@@ -711,3 +711,91 @@ export interface DeviceDelegateResponse {
   sha256: string
   approval_required: boolean
 }
+
+// ---------------------------------------------------------------------------
+// Swarm Cockpit (teammates, edge hosts, work orders)
+// ---------------------------------------------------------------------------
+
+export interface BotInfo {
+  slug: string
+  namespace: string
+  role_desc: string
+  instructions_path?: string | null
+  status: 'active' | 'paused' | 'dormant' | 'disabled' | string
+  brief_budget_tokens: number
+  created_at: string
+  updated_at: string
+}
+
+export interface BotBrief {
+  ok?: boolean
+  slug: string
+  namespace?: string
+  role_desc?: string
+  content: string
+  etag: string
+  fencing_epoch: number
+  pinned: boolean
+  author: string
+  updated_at: string
+}
+
+export interface BotBriefUpdateRequest {
+  content: string
+  pinned?: boolean
+}
+
+export interface BotLease {
+  lease_key: string
+  bot_slug: string
+  host_id: string
+  scope_path: string
+  fencing_token: number | string
+  expires_at: number
+  summary: string
+}
+
+export interface HostHarnessInfo {
+  host_id: string
+  harness_id: string
+  transport: string
+  status: 'online' | 'offline' | 'degraded' | 'stale' | string
+  last_seen: string
+  age_s?: number | null
+  capabilities: Record<string, unknown>
+}
+
+export interface WorkOrderInfo {
+  order_id: string
+  bot_slug: string
+  status: 'QUEUED' | 'RUNNING' | 'PAUSED' | 'FENCED' | 'DONE' | 'FAILED' | 'CANCELLED' | string
+  epoch: number
+  host_id?: string
+  fencing_token?: number | string
+  status_reason?: string
+  created_at: string
+  updated_at: string
+  [key: string]: unknown
+}
+
+export interface WorkOrderCreateRequest {
+  order_id: string
+  bot_slug?: string
+  host_id?: string
+  fencing_token?: string
+  status?: string
+  payload?: Record<string, unknown>
+}
+
+export interface WorkOrderActionRequest {
+  reason?: string
+  host_id?: string
+  fencing_token?: string
+  fencing_epoch?: number
+}
+
+export interface WorkOrderFenceRequest {
+  expected_epoch: number
+  reason?: string
+  status?: string
+}

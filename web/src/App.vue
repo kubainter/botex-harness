@@ -281,6 +281,12 @@
             <TasksView
               v-else-if="currentView === 'tasks'"
             />
+            <BotsView
+              v-else-if="currentView === 'bots'"
+            />
+            <HostsView
+              v-else-if="currentView === 'hosts'"
+            />
             <ApprovalsView
               v-else-if="currentView === 'approvals'"
             />
@@ -298,7 +304,7 @@
       </div>
 
       <!-- Mobile Bottom Navigation Bar (Safe Bounds & Equal Columns) -->
-      <nav class="md:hidden bg-botex-900 border-t border-botex-800 grid grid-cols-6 w-full max-w-full overflow-hidden py-1 px-0.5 pb-safe shrink-0 z-30 select-none" aria-label="Primary">
+      <nav class="md:hidden bg-botex-900 border-t border-botex-800 grid grid-cols-8 w-full max-w-full overflow-hidden py-1 px-0.5 pb-safe shrink-0 z-30 select-none" aria-label="Primary">
         <button
           v-for="item in navItems"
           :key="item.id"
@@ -337,7 +343,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { authError } from './api/client'
 import { useAuthStore } from './stores/auth'
@@ -348,6 +354,8 @@ import { useThemeStore } from './stores/theme'
 import { useI18n } from './i18n'
 import ChatView from './views/ChatView.vue'
 import TasksView from './views/TasksView.vue'
+import BotsView from './views/BotsView.vue'
+import HostsView from './views/HostsView.vue'
 import ApprovalsView from './views/ApprovalsView.vue'
 import MemoryView from './views/MemoryView.vue'
 import WalletView from './views/WalletView.vue'
@@ -356,6 +364,8 @@ import ApprovalModal from './components/approvals/ApprovalModal.vue'
 import {
   MessageSquare as MessageSquareIcon,
   Cpu as CpuIcon,
+  Bot as BotIcon,
+  Server as ServerIcon,
   ShieldAlert as ShieldAlertIcon,
   Database as DatabaseIcon,
   Wallet as WalletIcon,
@@ -382,11 +392,33 @@ const sidebarCollapsed = ref<boolean>(false)
 const navItems = [
   { id: 'chat', labelKey: 'nav.chat', shortKey: 'nav.chat.short', icon: MessageSquareIcon },
   { id: 'tasks', labelKey: 'nav.tasks', shortKey: 'nav.tasks.short', icon: CpuIcon },
+  { id: 'bots', labelKey: 'nav.bots', shortKey: 'nav.bots.short', icon: BotIcon },
+  { id: 'hosts', labelKey: 'nav.hosts', shortKey: 'nav.hosts.short', icon: ServerIcon },
   { id: 'approvals', labelKey: 'nav.approvals', shortKey: 'nav.approvals.short', icon: ShieldAlertIcon },
   { id: 'memory', labelKey: 'nav.memory', shortKey: 'nav.memory.short', icon: DatabaseIcon },
   { id: 'wallet', labelKey: 'nav.wallet', shortKey: 'nav.wallet.short', icon: WalletIcon },
   { id: 'settings', labelKey: 'nav.settings', shortKey: 'nav.settings.short', icon: SettingsIcon }
 ]
+
+const viewIds = new Set(navItems.map((item) => item.id))
+
+function viewFromHash(): string {
+  const hash = window.location.hash.replace(/^#/, '')
+  return viewIds.has(hash) ? hash : 'chat'
+}
+
+function onHashChange() {
+  const view = viewFromHash()
+  if (currentView.value !== view) currentView.value = view
+}
+
+watch(currentView, (view) => {
+  const expected = `#${view}`
+  if (window.location.hash !== expected) {
+    // Guard against the hashchange echo setting the same view back.
+    window.location.hash = expected
+  }
+})
 
 const backendHost = computed(() => {
   return authStore.backendUrl.replace(/^https?:\/\//, '')
@@ -447,10 +479,16 @@ function toggleTheme() {
 }
 
 onMounted(() => {
+  currentView.value = viewFromHash()
+  window.addEventListener('hashchange', onHashChange)
   authStore.init()
   approvalsStore.init()
   chatStore.init()
   walletStore.fetchWallet()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('hashchange', onHashChange)
 })
 
 function onNavigate(viewName: string) {

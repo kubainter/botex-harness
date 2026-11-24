@@ -71,7 +71,7 @@ targeted + integration tests.
 | `botex/core/events.py` | `EventKind`, `TaskEventEmitter`, `get_emitter`, `emitter_or_none`, `drop_emitter` | `test_analytics.py`, `test_containment_recall_gate.py`, `test_events.py`, `test_security_hardening.py`, +2 more |
 | `botex/core/meta_harness.py` | `SpiralTracker`, `classify_task_taxonomy`, `is_infra_failure`, `get_relevant_meta_lessons`, `extract_meta_lesson`, `pack_lessons_within_budget`, `+4 more` | `test_meta_harness.py` |
 | `botex/core/state.py` | `CanonicalAgentTurn`, `InFlightTaskState`, `save_inflight_checkpoint`, `load_inflight_checkpoints`, `clear_inflight_checkpoint` | `test_context_inclusion.py`, `test_edge_ws_gateway.py`, `test_state_checkpoint.py` |
-| `botex/core/swarm_store.py` | `migrate_swarm_store`, `get_swarm_store_conn`, `close_swarm_store_dbs`, `register_bot`, `get_bot`, `list_bots`, `+18 more` | `test_brief_curator.py`, `test_edge_qos_daemon.py`, `test_edge_ws_gateway.py`, `test_host_os_driver.py`, +3 more |
+| `botex/core/swarm_store.py` | `migrate_swarm_store`, `get_swarm_store_conn`, `close_swarm_store_dbs`, `register_bot`, `get_bot`, `list_bots`, `+23 more` | `test_brief_curator.py`, `test_edge_qos_daemon.py`, `test_edge_ws_gateway.py`, `test_host_os_driver.py`, +3 more |
 | `botex/core/tool_executor.py` | `ToolExecutor`, `LocalToolExecutor`, `register_edge_executor_resolver`, `resolve_edge_executor` | `test_edge_ws_gateway.py`, `test_tool_executor.py` |
 | `botex/core/tracing.py` | `NullSpan`, `get_tracer`, `get_current_trace_id`, `start_span`, `resolve_tracing_config`, `init_tracing` | `test_tracing.py`, `test_tracing_wiring.py` |
 | `botex/core/work_orders.py` | `WorkOrderStatus`, `VerifySpec`, `HandoffPolicy`, `CostLedger`, `AttemptRecord`, `WorkOrder`, `+5 more` | `test_work_order_supervisor.py` |
@@ -148,7 +148,7 @@ targeted + integration tests.
 | `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +18 more |
 | `botex/server/i18n.py` | `detect_language`, `init_language`, `set_language`, `get_language`, `t` | — |
 | `botex/server/plugins.py` | `PluginError`, `PluginValidationError`, `PluginExecutionError`, `PluginExecutionTimeout`, `PluginPermissionError`, `BoteXPluginDefinition`, `+5 more` | `test_approval.py`, `test_plugins_creator.py` |
-| `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+80 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +17 more |
+| `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+86 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +17 more |
 | `botex/server/task_store.py` | `save_task_persistent`, `load_task_persistent`, `load_tasks_persistent` | `test_server_cloud.py`, `test_task_store.py` |
 | `botex/server/ui.py` | `colors_enabled`, `paint`, `title`, `accent`, `ok`, `warn`, `+3 more` | `test_botex.py` |
 
