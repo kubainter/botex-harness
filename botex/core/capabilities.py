@@ -50,6 +50,9 @@ TOOL_REGISTRY = {
     "read_file_lines": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
     "read_file": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
     "list_dir": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
+    "read_scratchpad": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
+    "read_memory": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
+    "recall_memory": ToolPolicy(required_scopes=[CAP_READ], risk=RiskLevel.LOW),
     "apply_patch": ToolPolicy(required_scopes=[CAP_WRITE], risk=RiskLevel.MEDIUM),
     "create_file": ToolPolicy(required_scopes=[CAP_WRITE], risk=RiskLevel.MEDIUM),
     "delete_file": ToolPolicy(

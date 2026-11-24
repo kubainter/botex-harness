@@ -375,6 +375,236 @@ def test_remote_executor_serves_read_scratchpad_locally(tmp_path):
     assert "not found" in res["error"] or "Invalid" in res["error"]
 
 
+class _BoomSession:
+    """Edge session stand-in for cloud-host vault tools: any dispatched call fails."""
+
+    async def dispatch_tool_call(self, **kwargs):
+        raise AssertionError("cloud-host vault tools must not reach the edge wire")
+
+
+def _write_vault_note(mem_dir: Path, note_id: str, body: str) -> None:
+    """Plant a hand-written note in a vault dir (no index.db side files)."""
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / f"{note_id}.md").write_text(
+        f"---\nid: {note_id}\ntitle: {note_id}\n---\n{body}\n", encoding="utf-8"
+    )
+
+
+def _tree_state(root: Path) -> dict[str, tuple[int, int]]:
+    """Map every entry under *root* to (mtime_ns, size) to prove it was not touched."""
+    return {
+        str(p.relative_to(root)): (p.stat().st_mtime_ns, p.stat().st_size)
+        for p in sorted(root.rglob("*"))
+    }
+
+
+@pytest.fixture
+def cloud_vault(tmp_path, monkeypatch):
+    """Isolated Cloud Swarm Vault (scope="global") for cloud-host vault reads.
+
+    The vault dir is served from the cached config, so the env override only
+    takes effect after a reload. Pooled SQLite handles are released afterwards
+    so Windows can reclaim tmp_path.
+    """
+
+    async def _refuse_connect(self, sock, address):
+        raise RuntimeError("Blocked live network socket call during unit test execution")
+
+    # conftest only guards socket.connect, which the event loop bypasses
+    # (IOCP ConnectEx on the Windows proactor loop) — refuse async connects at
+    # the loop too, so a stray LLM synthesis can never leave the machine here.
+    for loop_cls in (asyncio.SelectorEventLoop, getattr(asyncio, "ProactorEventLoop", None)):
+        if loop_cls is not None:
+            monkeypatch.setattr(loop_cls, "sock_connect", _refuse_connect)
+
+    from botex.memory import reset_memory_index_cache
+    from botex.server import config as server_config
+
+    global_dir = tmp_path / "global"
+    monkeypatch.setenv("BOTEX_GLOBAL_MEMORY_DIR", str(global_dir))
+    server_config.load_config(reload=True)
+    yield global_dir
+    reset_memory_index_cache()
+
+
+def test_remote_executor_serves_memory_tools_locally_without_edge_wire(tmp_path, cloud_vault):
+    """Plan 052: read_memory / recall_memory are served from the Cloud Swarm
+    Vault on the cloud host — never dispatched to the edge, never answered
+    from the cloud checkout's own local vault, and scope="local" (which lives
+    on the edge device) fails closed before that vault is even looked at."""
+    from botex.memory import save_memory
+
+    note = save_memory(
+        workspace_dir=str(tmp_path),
+        title="Plan 052 gateway contract",
+        content="Quasar landmark token: vault reads are served on the cloud host.",
+        kind="decision",
+        scope="global",
+        project="swarm",
+    )
+    assert note["ok"] is True
+    mid = note["id"]
+
+    # Same ID in the checkout's local vault: without the edge guard a default
+    # scope="all" lookup checks local first and would answer with this decoy.
+    checkout_dotbotex = tmp_path / ".botex"
+    _write_vault_note(
+        checkout_dotbotex / "memory", mid, "DECOY quasar landmark token from local vault"
+    )
+    ex = RemoteWssToolExecutor(_BoomSession())  # type: ignore[arg-type]
+
+    res = asyncio.run(ex.execute("read_memory", {"memory_id": mid}, tmp_path))
+    assert res["ok"] is True
+    assert "<untrusted_memory_content" in res["content"]
+    assert "vault reads are served on the cloud host" in res["content"]
+    assert "DECOY" not in str(res)
+
+    res = asyncio.run(
+        ex.execute(
+            "recall_memory",
+            {
+                "query": "quasar landmark token",
+                "project": "swarm",
+                "_use_llm_synthesis": False,
+            },
+            tmp_path,
+        )
+    )
+    assert res["ok"] is True
+    assert res["recall_status"] == "DETERMINISTIC_BUDGET"
+    assert "<untrusted_memory_recall>" in res["answer"]
+    assert "vault reads are served on the cloud host" in res["answer"]
+    assert mid in res["sources"]
+    assert "DECOY" not in str(res)
+
+    # The workspace-local vault lives on the edge device: explicit scope="local"
+    # must fail closed without reading (or indexing) the checkout's copy.
+    before = _tree_state(checkout_dotbotex)
+    for tool_name, tool_args in (
+        ("read_memory", {"memory_id": mid, "scope": "local"}),
+        ("recall_memory", {"query": "quasar landmark token", "scope": "local"}),
+    ):
+        res = asyncio.run(ex.execute(tool_name, tool_args, tmp_path))
+        assert res["ok"] is False, tool_name
+        assert res["error"] == "LOCAL_VAULT_UNAVAILABLE_ON_EDGE", tool_name
+        assert "DECOY" not in str(res), tool_name
+    assert _tree_state(checkout_dotbotex) == before
+
+
+def test_remote_executor_serves_memory_tools_with_edge_isolation_kwargs(tmp_path, monkeypatch):
+    """The cloud-host intercept hands the bridge its locked contract: the
+    server-side workspace_root, is_edge_workspace=True, and the engine's
+    _use_llm_synthesis budget flag mapped onto use_llm_synthesis."""
+    import botex.memory.worker_bridge as worker_bridge
+
+    calls: list[tuple[str, str, dict]] = []
+
+    def fake_read_memory(memory_id, *, scope, workspace_dir, is_edge_workspace):
+        calls.append(
+            (
+                "read_memory",
+                memory_id,
+                {
+                    "scope": scope,
+                    "workspace_dir": workspace_dir,
+                    "is_edge_workspace": is_edge_workspace,
+                },
+            )
+        )
+        return {"ok": True, "id": memory_id}
+
+    async def fake_recall_memory(
+        query,
+        *,
+        topic,
+        scope,
+        project,
+        workspace_dir,
+        is_edge_workspace,
+        use_llm_synthesis,
+    ):
+        calls.append(
+            (
+                "recall_memory",
+                query,
+                {
+                    "topic": topic,
+                    "scope": scope,
+                    "project": project,
+                    "workspace_dir": workspace_dir,
+                    "is_edge_workspace": is_edge_workspace,
+                    "use_llm_synthesis": use_llm_synthesis,
+                },
+            )
+        )
+        return {"ok": True, "answer": "<untrusted_memory_recall>stub</untrusted_memory_recall>"}
+
+    monkeypatch.setattr(worker_bridge, "worker_read_memory", fake_read_memory)
+    monkeypatch.setattr(worker_bridge, "worker_recall_memory", fake_recall_memory)
+    # workspace_root on the cloud host is the fallback checkout, not the device.
+    fallback_root = tmp_path / "opt" / "botex"
+    ex = RemoteWssToolExecutor(_BoomSession())  # type: ignore[arg-type]
+
+    read_res = asyncio.run(
+        ex.execute("read_memory", {"memory_id": "mem_abc12345", "scope": "global"}, fallback_root)
+    )
+    recall_res = asyncio.run(
+        ex.execute(
+            "recall_memory",
+            {
+                "query": "wss intercept",
+                "topic": "plan-052",
+                "scope": "all",
+                "project": "swarm",
+                "_use_llm_synthesis": False,
+            },
+            fallback_root,
+        )
+    )
+    # Omitted optional args resolve to the locked defaults.
+    asyncio.run(ex.execute("read_memory", {"memory_id": "mem_abc12345"}, fallback_root))
+    asyncio.run(ex.execute("recall_memory", {"query": "wss intercept"}, fallback_root))
+
+    assert read_res == {"ok": True, "id": "mem_abc12345"}
+    assert "<untrusted_memory_recall>" in recall_res["answer"]
+    assert calls == [
+        (
+            "read_memory",
+            "mem_abc12345",
+            {"scope": "global", "workspace_dir": fallback_root, "is_edge_workspace": True},
+        ),
+        (
+            "recall_memory",
+            "wss intercept",
+            {
+                "topic": "plan-052",
+                "scope": "all",
+                "project": "swarm",
+                "workspace_dir": fallback_root,
+                "is_edge_workspace": True,
+                "use_llm_synthesis": False,
+            },
+        ),
+        (
+            "read_memory",
+            "mem_abc12345",
+            {"scope": "all", "workspace_dir": fallback_root, "is_edge_workspace": True},
+        ),
+        (
+            "recall_memory",
+            "wss intercept",
+            {
+                "topic": None,
+                "scope": "all",
+                "project": None,
+                "workspace_dir": fallback_root,
+                "is_edge_workspace": True,
+                "use_llm_synthesis": True,
+            },
+        ),
+    ]
+
+
 def test_run_command_success_invalidates_read_cache(tmp_path):
     """A successful command may mutate files on the edge; the next read must
     not trust the pre-command cached digest."""

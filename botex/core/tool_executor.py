@@ -11,6 +11,7 @@ share one explicit async execution & read-batching contract.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -46,8 +47,50 @@ except (ImportError, ValueError):
     from patch_engine import apply_patch
 
 READ_ONLY_TOOLS = frozenset(
-    {"get_file_outline", "read_file_lines", "read_file", "list_dir", "read_url"}
+    {
+        "get_file_outline",
+        "read_file_lines",
+        "read_file",
+        "list_dir",
+        "read_url",
+        "read_scratchpad",
+        "read_memory",
+        "recall_memory",
+    }
 )
+
+
+def _load_worker_bridge() -> Any:
+    """Return ``botex.memory.worker_bridge``, imported on first use rather than
+    at module import: the bridge must never make this module (and with it every
+    engine run) unimportable while it is absent or broken.
+
+    Resolved by its full dotted name on purpose: ``botex.memory`` is aliased
+    onto the ``memory.py`` module, so ``from botex.memory import worker_bridge``
+    would load the file a second time under ``botex.memory.memory.*``.
+    """
+    try:
+        return importlib.import_module("botex.memory.worker_bridge")
+    except (ImportError, ValueError) as exc:
+        # Fall back to the legacy flat layout only when the package layout is
+        # unavailable; otherwise the first error names the real problem.
+        flat_layout = isinstance(exc, ModuleNotFoundError) and exc.name in ("botex", "botex.memory")
+        try:
+            return importlib.import_module("memory.worker_bridge")
+        except (ImportError, ValueError):
+            if flat_layout:
+                raise
+            raise exc from None
+
+
+def _worker_read_memory(memory_id: str, **kwargs: Any) -> Dict[str, Any]:
+    """Sync proxy for ``worker_bridge.worker_read_memory`` (see ``_load_worker_bridge``)."""
+    return _load_worker_bridge().worker_read_memory(memory_id, **kwargs)
+
+
+async def _worker_recall_memory(query: str, **kwargs: Any) -> Dict[str, Any]:
+    """Async proxy for ``worker_bridge.worker_recall_memory`` (see ``_load_worker_bridge``)."""
+    return await _load_worker_bridge().worker_recall_memory(query, **kwargs)
 
 
 def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
@@ -167,6 +210,8 @@ class LocalToolExecutor(ToolExecutor):
             "read_file_lines": read_file_lines,
             "read_file": read_file,
             "read_scratchpad": read_scratchpad,
+            "read_memory": _worker_read_memory,
+            "recall_memory": _worker_recall_memory,
             "apply_patch": apply_patch,
             "create_file": create_file,
             "delete_file": delete_file,
@@ -204,6 +249,27 @@ class LocalToolExecutor(ToolExecutor):
             return fn(args.get("path", ""), workspace_root)
         if tool_name == "read_scratchpad":
             return fn(args.get("memory_id", ""), cwd=workspace_root)
+        if tool_name == "read_memory":
+            memory_kw: Dict[str, Any] = {
+                "scope": str(args.get("scope") or "all"),
+                "workspace_dir": workspace_root,
+                "is_edge_workspace": False,
+            }
+            memory_id = str(args.get("memory_id") or "")
+            if inspect.iscoroutinefunction(fn):
+                return await fn(memory_id, **memory_kw)
+            return await asyncio.to_thread(fn, memory_id, **memory_kw)
+        if tool_name == "recall_memory":
+            res = fn(
+                str(args.get("query") or ""),
+                topic=args.get("topic") or None,
+                scope=str(args.get("scope") or "all"),
+                project=args.get("project") or None,
+                workspace_dir=workspace_root,
+                is_edge_workspace=False,
+                use_llm_synthesis=bool(args.get("_use_llm_synthesis", True)),
+            )
+            return await res if inspect.isawaitable(res) else res
         if tool_name == "list_dir":
             return fn(args.get("path", "."), workspace_root)
         if tool_name == "apply_patch":
