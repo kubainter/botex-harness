@@ -1657,6 +1657,11 @@ def resolve_local_model_id(requested_model: str, available_ids: Sequence[str]) -
     for mid in ids:
         if mid.lower() == req_low:
             return mid
+    if ":" not in req:
+        tagged = f"{req}:latest"
+        for mid in ids:
+            if mid.lower() == tagged.lower():
+                return mid
     if "bielik" in req_low:
         bielik_matches = [mid for mid in ids if "bielik" in mid.lower()]
         if bielik_matches:
