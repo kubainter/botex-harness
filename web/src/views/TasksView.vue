@@ -99,7 +99,7 @@
                 {{ dev.healthy ? t('deviceOnline') : t('deviceStale') }}
               </Badge>
             </div>
-            <p class="font-mono text-slate-400 truncate mt-0.5">{{ dev.workspace_id }}</p>
+            <p class="font-mono text-slate-400 truncate mt-0.5">{{ safeDeviceWorkspaceLabel(dev.workspace_id) }}</p>
           </div>
           <button
             v-if="dev.can_delegate"
@@ -296,65 +296,204 @@
       <div
         v-for="order in orders"
         :key="order.order_id"
-        class="p-4 rounded-xl border border-botex-800 bg-botex-900 hover:border-slate-600 transition-all flex flex-wrap items-center justify-between gap-3"
+        class="p-4 rounded-xl border border-botex-800 bg-botex-900 hover:border-slate-600 transition-all space-y-3"
       >
-        <div class="min-w-0 space-y-1">
-          <div class="flex flex-wrap items-center gap-2">
-            <span class="text-sm font-semibold text-slate-100 font-mono truncate">{{ order.order_id }}</span>
-            <Badge :variant="orderBadgeVariant(order)">{{ order.status }}</Badge>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="min-w-0 space-y-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-sm font-semibold text-slate-100 font-mono truncate">{{ order.order_id }}</span>
+              <Badge :variant="orderBadgeVariant(order)">{{ order.status }}</Badge>
+              <Badge v-if="order.verification_pending && !isTerminalOrder(order)" variant="info">
+                {{ t('orders.verificationPending') }}
+              </Badge>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-slate-300 font-mono">
+              <span>{{ t('orders.bot') }}: <span class="text-cyan-300">{{ order.bot_slug }}</span></span>
+              <span>{{ t('orders.epoch') }}: <span class="text-slate-100">{{ order.epoch }}</span></span>
+              <span v-if="order.host_id" class="truncate">{{ t('orders.host') }}: <span class="text-slate-100">{{ order.host_id }}</span></span>
+              <span v-if="safeOrderWorkspaceId(order)" class="truncate">
+                {{ t('orders.workspace') }}: <span class="text-slate-100">{{ safeOrderWorkspaceId(order) }}</span>
+              </span>
+              <span v-if="order.harness_id" class="truncate">
+                {{ t('orders.harness') }}: <span class="text-slate-100">{{ order.harness_id }}</span>
+              </span>
+              <span v-if="order.last_event_kind" class="truncate">
+                {{ t('orders.lastEvent') }}: <span class="text-slate-200">{{ order.last_event_kind }}</span>
+              </span>
+            </div>
+            <p v-if="order.status_reason" class="text-xs text-amber-300/90 font-mono truncate">
+              {{ t('orders.reason') }}: {{ order.status_reason }}
+            </p>
           </div>
-          <div class="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-slate-300 font-mono">
-            <span>{{ t('orders.bot') }}: <span class="text-cyan-300">{{ order.bot_slug }}</span></span>
-            <span>{{ t('orders.epoch') }}: <span class="text-slate-100">{{ order.epoch }}</span></span>
-            <span v-if="order.host_id" class="truncate">{{ t('orders.host') }}: <span class="text-slate-100">{{ order.host_id }}</span></span>
+
+          <div class="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              v-if="order.status === 'RUNNING'"
+              type="button"
+              :disabled="mutatingOrderId === order.order_id"
+              class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 text-xs border border-amber-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+              @click="pauseOrder(order)"
+            >
+              <PauseIcon class="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{{ t('orders.pause') }}</span>
+            </button>
+            <button
+              v-if="order.status === 'PAUSED'"
+              type="button"
+              :disabled="mutatingOrderId === order.order_id"
+              class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-200 text-xs border border-emerald-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+              @click="resumeOrder(order)"
+            >
+              <PlayIcon class="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{{ t('orders.resume') }}</span>
+            </button>
+            <button
+              v-if="!isTerminalOrder(order)"
+              type="button"
+              :disabled="mutatingOrderId === order.order_id"
+              class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-sky-950/60 hover:bg-sky-900/70 text-sky-200 text-xs border border-sky-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+              @click="fenceOrder(order)"
+            >
+              <FenceIcon class="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{{ t('orders.fence') }}</span>
+            </button>
+            <button
+              v-if="!isTerminalOrder(order)"
+              type="button"
+              :disabled="mutatingOrderId === order.order_id"
+              class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 text-xs border border-rose-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
+              @click="cancelOrder(order)"
+            >
+              <Loader2Icon v-if="mutatingOrderId === order.order_id" class="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+              <BanIcon v-else class="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{{ t('orders.cancel') }}</span>
+            </button>
           </div>
-          <p v-if="order.status_reason" class="text-xs text-amber-300/90 font-mono truncate">
-            {{ t('orders.reason') }}: {{ order.status_reason }}
-          </p>
         </div>
 
-        <div class="flex flex-wrap items-center gap-2 shrink-0">
-          <button
-            v-if="order.status === 'RUNNING'"
-            type="button"
-            :disabled="mutatingOrderId === order.order_id"
-            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 text-xs border border-amber-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
-            @click="pauseOrder(order)"
+        <!-- Inline dispatch controls for QUEUED orders -->
+        <div
+          v-if="order.status === 'QUEUED'"
+          class="pt-3 border-t border-botex-800 space-y-2"
+        >
+          <div class="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-300">
+            <span class="uppercase tracking-wider font-semibold text-cyan-300">{{ t('orders.dispatch.title') }}</span>
+            <span
+              v-if="dispatchDraft(order).host_id && isHostInventoryLoading(dispatchDraft(order).host_id)"
+              class="flex items-center gap-1.5 text-slate-400"
+            >
+              <Loader2Icon class="w-3 h-3 animate-spin text-cyan-400" aria-hidden="true" />
+              <span>{{ t('orders.dispatch.loadingInventory') }}</span>
+            </span>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 items-end text-xs">
+            <div>
+              <label :for="`dispatch-host-${order.order_id}`" class="block text-[11px] font-mono text-slate-400 mb-1">
+                {{ t('orders.host') }}
+              </label>
+              <select
+                :id="`dispatch-host-${order.order_id}`"
+                :value="dispatchDraft(order).host_id"
+                class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-2.5 py-1.5 text-base sm:text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
+                @change="onDispatchHostSelect(order.order_id, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">
+                  {{ dispatchHosts.length ? t('orders.dispatch.selectHost') : t('orders.dispatch.noHosts') }}
+                </option>
+                <option v-for="h in dispatchHosts" :key="h.host_id" :value="h.host_id">
+                  {{ h.host_id }}
+                </option>
+              </select>
+            </div>
+
+            <div>
+              <label :for="`dispatch-ws-${order.order_id}`" class="block text-[11px] font-mono text-slate-400 mb-1">
+                {{ t('orders.workspace') }}
+              </label>
+              <select
+                :id="`dispatch-ws-${order.order_id}`"
+                :value="dispatchDraft(order).workspace_id"
+                :disabled="!dispatchDraft(order).host_id"
+                class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-2.5 py-1.5 text-base sm:text-xs text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:border-cyan-500"
+                @change="onDispatchFieldChange(order.order_id, 'workspace_id', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">
+                  {{
+                    !dispatchDraft(order).host_id || dispatchWorkspacesForHost(dispatchDraft(order).host_id).length
+                      ? t('orders.dispatch.selectWorkspace')
+                      : t('orders.dispatch.noWorkspaces')
+                  }}
+                </option>
+                <option
+                  v-for="ws in dispatchWorkspacesForHost(dispatchDraft(order).host_id)"
+                  :key="ws.workspace_id"
+                  :value="ws.workspace_id"
+                >
+                  {{ formatDispatchWorkspaceOption(ws) }}
+                </option>
+              </select>
+            </div>
+
+            <div>
+              <label :for="`dispatch-harness-${order.order_id}`" class="block text-[11px] font-mono text-slate-400 mb-1">
+                {{ t('orders.harness') }}
+              </label>
+              <select
+                :id="`dispatch-harness-${order.order_id}`"
+                :value="dispatchDraft(order).harness_id"
+                :disabled="!dispatchDraft(order).host_id"
+                class="w-full min-h-[44px] lg:min-h-[36px] bg-botex-950 border border-botex-700 rounded-lg px-2.5 py-1.5 text-base sm:text-xs text-slate-100 font-mono disabled:opacity-50 focus:outline-none focus:border-cyan-500"
+                @change="onDispatchFieldChange(order.order_id, 'harness_id', ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">
+                  {{
+                    !dispatchDraft(order).host_id || dispatchHarnessesForHost(dispatchDraft(order).host_id).length
+                      ? t('orders.dispatch.selectHarness')
+                      : t('orders.dispatch.noHarnesses')
+                  }}
+                </option>
+                <option
+                  v-for="h in dispatchHarnessesForHost(dispatchDraft(order).host_id)"
+                  :key="h.harness_id"
+                  :value="h.harness_id"
+                >
+                  {{ formatDispatchHarnessOption(h) }}
+                </option>
+              </select>
+            </div>
+
+            <div>
+              <button
+                type="button"
+                :disabled="!canSubmitDispatch(order)"
+                class="w-full min-h-[44px] lg:min-h-[36px] px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-1.5"
+                @click="submitOrderDispatch(order)"
+              >
+                <Loader2Icon
+                  v-if="dispatchingOrderId === order.order_id || mutatingOrderId === order.order_id"
+                  class="w-3.5 h-3.5 animate-spin"
+                  aria-hidden="true"
+                />
+                <SendIcon v-else class="w-3.5 h-3.5" aria-hidden="true" />
+                <span>
+                  {{
+                    dispatchingOrderId === order.order_id
+                      ? t('orders.dispatch.submitting')
+                      : t('orders.dispatch.submit')
+                  }}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <p
+            v-if="dispatchErrorByOrder[order.order_id]"
+            role="alert"
+            class="text-xs font-mono text-rose-300 bg-rose-950/40 border border-rose-700/50 rounded-lg px-2.5 py-1.5"
           >
-            <PauseIcon class="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{{ t('orders.pause') }}</span>
-          </button>
-          <button
-            v-if="order.status === 'PAUSED'"
-            type="button"
-            :disabled="mutatingOrderId === order.order_id"
-            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-200 text-xs border border-emerald-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
-            @click="resumeOrder(order)"
-          >
-            <PlayIcon class="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{{ t('orders.resume') }}</span>
-          </button>
-          <button
-            v-if="!isTerminalOrder(order)"
-            type="button"
-            :disabled="mutatingOrderId === order.order_id"
-            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-sky-950/60 hover:bg-sky-900/70 text-sky-200 text-xs border border-sky-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
-            @click="fenceOrder(order)"
-          >
-            <FenceIcon class="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{{ t('orders.fence') }}</span>
-          </button>
-          <button
-            v-if="!isTerminalOrder(order)"
-            type="button"
-            :disabled="mutatingOrderId === order.order_id"
-            class="min-h-[44px] lg:min-h-[36px] px-2.5 py-1 rounded bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 text-xs border border-rose-700/60 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1.5"
-            @click="cancelOrder(order)"
-          >
-            <Loader2Icon v-if="mutatingOrderId === order.order_id" class="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-            <BanIcon v-else class="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{{ t('orders.cancel') }}</span>
-          </button>
+            {{ dispatchErrorByOrder[order.order_id] }}
+          </p>
         </div>
       </div>
       </template>
@@ -431,7 +570,7 @@
                 :key="`${dev.device_id}:${dev.workspace_id}`"
                 :value="`${dev.device_id}:${dev.workspace_id}`"
               >
-                {{ dev.device_id }} · {{ dev.workspace_id }}{{ dev.can_delegate ? '' : ' (locked)' }}
+                {{ dev.device_id }} · {{ safeDeviceWorkspaceLabel(dev.workspace_id) }}{{ dev.can_delegate ? '' : ' (locked)' }}
               </option>
             </select>
           </div>
@@ -604,9 +743,12 @@ import type {
   CatalogModel,
   ConnectedDeviceInfo,
   ConnectedDeviceSkill,
+  HostHarnessInfo,
+  HostWorkspace,
   TaskCreateRequest,
   TaskDetail,
   TaskSummary,
+  WorkOrderDispatchPayload,
   WorkOrderInfo
 } from '../api/types'
 import { api } from '../api/client'
@@ -626,7 +768,8 @@ import {
   Pause as PauseIcon,
   Play as PlayIcon,
   Ban as BanIcon,
-  Fence as FenceIcon
+  Fence as FenceIcon,
+  Send as SendIcon
 } from 'lucide-vue-next'
 
 const tasksStore = useTasksStore()
@@ -640,9 +783,20 @@ const { locale, t } = useI18n()
 const activeTab = ref<'tasks' | 'orders'>('tasks')
 
 const ORDER_TERMINAL_STATUSES = new Set(['DONE', 'FAILED', 'CANCELLED'])
+const OPAQUE_WS_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
 
 function isTerminalOrder(order: WorkOrderInfo): boolean {
   return ORDER_TERMINAL_STATUSES.has(order.status)
+}
+
+function safeOrderWorkspaceId(order: WorkOrderInfo): string {
+  const ws = typeof order.workspace_id === 'string' ? order.workspace_id.trim() : ''
+  return OPAQUE_WS_ID_RE.test(ws) ? ws : ''
+}
+
+function safeDeviceWorkspaceLabel(wsId: unknown): string {
+  const ws = typeof wsId === 'string' ? wsId.trim() : ''
+  return OPAQUE_WS_ID_RE.test(ws) ? ws : 'workspace'
 }
 
 function orderBadgeVariant(order: WorkOrderInfo): 'default' | 'success' | 'warning' | 'danger' | 'info' | 'purple' {
@@ -658,8 +812,201 @@ function orderBadgeVariant(order: WorkOrderInfo): 'default' | 'success' | 'warni
   }
 }
 
+interface DispatchHostOption {
+  host_id: string
+  healthy: boolean
+}
+
+const dispatchDraftByOrder = ref<Record<string, WorkOrderDispatchPayload>>({})
+const dispatchErrorByOrder = ref<Record<string, string>>({})
+const dispatchingOrderId = ref<string | null>(null)
+
+const dispatchHosts = computed<DispatchHostOption[]>(() => {
+  const seen = new Map<string, DispatchHostOption>()
+  for (const dev of swarmStore.devices) {
+    if (!dev.device_id) continue
+    const prev = seen.get(dev.device_id)
+    if (!prev) {
+      seen.set(dev.device_id, { host_id: dev.device_id, healthy: Boolean(dev.healthy) })
+    } else if (dev.healthy) {
+      prev.healthy = true
+    }
+  }
+  return Array.from(seen.values())
+})
+
+function dispatchDraft(order: WorkOrderInfo): WorkOrderDispatchPayload {
+  const existing = dispatchDraftByOrder.value[order.order_id]
+  if (existing) return existing
+  const presetHost =
+    order.host_id && dispatchHosts.value.some((h) => h.host_id === order.host_id) ? order.host_id : ''
+  return { host_id: presetHost, workspace_id: '', harness_id: '' }
+}
+
+function isHostInventoryLoading(hostId: string): boolean {
+  if (!hostId) return false
+  return swarmStore.loadingWorkspacesHost.has(hostId) || swarmStore.loadingHarnessHost.has(hostId)
+}
+
+function dispatchWorkspacesForHost(hostId: string): HostWorkspace[] {
+  if (!hostId) return []
+  const reported = swarmStore.workspacesByHost[hostId] || []
+  const liveWsIds = new Set(
+    swarmStore.devices
+      .filter((d) => d.device_id === hostId && d.workspace_id && OPAQUE_WS_ID_RE.test(d.workspace_id))
+      .map((d) => d.workspace_id)
+  )
+  const out: HostWorkspace[] = []
+  const blockedIds = new Set<string>()
+  for (const ws of reported) {
+    if (!OPAQUE_WS_ID_RE.test(ws.workspace_id)) continue
+    if (ws.state !== 'enrolled') {
+      blockedIds.add(ws.workspace_id)
+      continue
+    }
+    if (ws.connected || liveWsIds.has(ws.workspace_id)) {
+      out.push(ws)
+    }
+  }
+  for (const wsId of liveWsIds) {
+    if (blockedIds.has(wsId) || out.some((w) => w.workspace_id === wsId)) continue
+    out.push({
+      workspace_id: wsId,
+      label: wsId,
+      state: 'enrolled',
+      connected: true,
+      last_seen: ''
+    })
+  }
+  return out
+}
+
+function dispatchHarnessesForHost(hostId: string): HostHarnessInfo[] {
+  if (!hostId) return []
+  return (swarmStore.harnessesByHost[hostId] || []).filter((h) => h.status !== 'offline')
+}
+
+function formatDispatchLimitNum(val: number): string {
+  return Number.isInteger(val) ? String(val) : val.toFixed(2).replace(/\.?0+$/, '')
+}
+
+function formatDispatchWorkspaceOption(ws: HostWorkspace): string {
+  const title = ws.label || ws.workspace_id
+  return `${title} (${ws.workspace_id})`
+}
+
+function formatDispatchHarnessOption(h: HostHarnessInfo): string {
+  const lim = h.limits
+  if (lim && typeof lim.remaining === 'number' && typeof lim.limit === 'number') {
+    const unit = lim.unit && lim.unit !== 'unknown' ? ` ${lim.unit}` : ''
+    return `${h.harness_id} (${formatDispatchLimitNum(lim.remaining)}/${formatDispatchLimitNum(lim.limit)}${unit})`
+  }
+  if (lim && typeof lim.used === 'number' && typeof lim.limit === 'number') {
+    const rem = Math.max(0, lim.limit - lim.used)
+    const unit = lim.unit && lim.unit !== 'unknown' ? ` ${lim.unit}` : ''
+    return `${h.harness_id} (${formatDispatchLimitNum(rem)}/${formatDispatchLimitNum(lim.limit)}${unit})`
+  }
+  return h.harness_id
+}
+
+function syncDefaultHostSelections(orderId: string, hostId: string): void {
+  const current = dispatchDraftByOrder.value[orderId]
+  if (!current || current.host_id !== hostId) return
+  const workspaces = dispatchWorkspacesForHost(hostId)
+  const harnesses = dispatchHarnessesForHost(hostId)
+  const nextWs =
+    current.workspace_id && workspaces.some((w) => w.workspace_id === current.workspace_id)
+      ? current.workspace_id
+      : workspaces[0]?.workspace_id ?? ''
+  const nextHarness =
+    current.harness_id && harnesses.some((h) => h.harness_id === current.harness_id)
+      ? current.harness_id
+      : harnesses[0]?.harness_id ?? ''
+  dispatchDraftByOrder.value = {
+    ...dispatchDraftByOrder.value,
+    [orderId]: { host_id: hostId, workspace_id: nextWs, harness_id: nextHarness }
+  }
+}
+
+async function onDispatchHostSelect(orderId: string, hostId: string): Promise<void> {
+  const { [orderId]: _err, ...restErrors } = dispatchErrorByOrder.value
+  dispatchErrorByOrder.value = restErrors
+  dispatchDraftByOrder.value = {
+    ...dispatchDraftByOrder.value,
+    [orderId]: { host_id: hostId, workspace_id: '', harness_id: '' }
+  }
+  if (!hostId) return
+  await Promise.all([swarmStore.fetchHostWorkspaces(hostId), swarmStore.fetchHostHarnesses(hostId)])
+  syncDefaultHostSelections(orderId, hostId)
+}
+
+function onDispatchFieldChange(
+  orderId: string,
+  field: 'workspace_id' | 'harness_id',
+  value: string
+): void {
+  const order = orders.value.find((o) => o.order_id === orderId)
+  const base = order ? dispatchDraft(order) : { host_id: '', workspace_id: '', harness_id: '' }
+  const { [orderId]: _err, ...restErrors } = dispatchErrorByOrder.value
+  dispatchErrorByOrder.value = restErrors
+  dispatchDraftByOrder.value = {
+    ...dispatchDraftByOrder.value,
+    [orderId]: { ...base, [field]: value }
+  }
+}
+
+function canSubmitDispatch(order: WorkOrderInfo): boolean {
+  if (order.status !== 'QUEUED') return false
+  if (mutatingOrderId.value === order.order_id || dispatchingOrderId.value === order.order_id) return false
+  const draft = dispatchDraft(order)
+  return Boolean(draft.host_id && draft.workspace_id && draft.harness_id)
+}
+
+async function submitOrderDispatch(order: WorkOrderInfo): Promise<void> {
+  const draft = dispatchDraft(order)
+  if (!draft.host_id || !draft.workspace_id || !draft.harness_id) return
+  const { [order.order_id]: _err, ...restErrors } = dispatchErrorByOrder.value
+  dispatchErrorByOrder.value = restErrors
+  dispatchingOrderId.value = order.order_id
+  try {
+    const res = await swarmStore.dispatchOrder(order.order_id, {
+      host_id: draft.host_id,
+      workspace_id: draft.workspace_id,
+      harness_id: draft.harness_id
+    })
+    if (!res.ok) {
+      dispatchErrorByOrder.value = {
+        ...dispatchErrorByOrder.value,
+        [order.order_id]: res.message || t('orders.dispatch.error')
+      }
+    }
+  } finally {
+    dispatchingOrderId.value = null
+  }
+}
+
+watch(
+  [orders, dispatchHosts],
+  ([orderList, hosts]) => {
+    for (const order of orderList) {
+      if (order.status !== 'QUEUED') continue
+      if (dispatchDraftByOrder.value[order.order_id]) continue
+      if (order.host_id && hosts.some((h) => h.host_id === order.host_id)) {
+        void onDispatchHostSelect(order.order_id, order.host_id)
+      }
+    }
+  },
+  { immediate: true }
+)
+
+watch(activeTab, (tab) => {
+  if (tab === 'orders') {
+    void swarmStore.fetchHosts()
+  }
+})
+
 async function refreshOrders() {
-  await swarmStore.fetchOrders()
+  await Promise.all([swarmStore.fetchOrders(), swarmStore.fetchHosts()])
 }
 
 async function pauseOrder(order: WorkOrderInfo) {

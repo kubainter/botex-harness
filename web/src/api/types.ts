@@ -682,6 +682,7 @@ export interface ConnectedDeviceInfo {
   capabilities?: {
     allow_exec?: boolean
     allow_destructive?: boolean
+    harness_spawn?: boolean
     max_output_bytes?: number
     allowed_tools?: string[]
     delegation?: {
@@ -758,15 +759,23 @@ export interface BotLease {
 // Forward-compatible usage window for a harness row: every field is optional
 // so partial provider snapshots stay representable until fully populated.
 export interface HarnessLimits {
-  unit?: string
+  unit?: 'requests' | 'tokens' | 'credits' | 'models_loaded' | 'unknown' | string
   used?: number | null
   remaining?: number | null
   limit?: number | null
   reset_at?: string | null
   window_s?: number | null
   source?: string
-  confidence?: string
+  confidence?: 'exact' | 'estimated' | 'unknown' | string
   collected_at?: string
+}
+
+export interface HostWorkspace {
+  workspace_id: string
+  label: string
+  state: 'enrolled' | 'candidate' | 'disabled' | string
+  connected: boolean
+  last_seen: string
 }
 
 export interface HostHarnessInfo {
@@ -786,11 +795,24 @@ export interface WorkOrderInfo {
   status: 'QUEUED' | 'RUNNING' | 'PAUSED' | 'FENCED' | 'DONE' | 'FAILED' | 'CANCELLED' | string
   epoch: number
   host_id?: string
+  workspace_id?: string
+  harness_id?: string
+  pid?: number | null
   fencing_token?: number | string
   status_reason?: string
+  verification_pending?: boolean
+  last_event_kind?: string
+  last_event_ts?: string
+  last_event_seq?: number | null
   created_at: string
   updated_at: string
   [key: string]: unknown
+}
+
+export interface WorkOrderDispatchPayload {
+  host_id: string
+  workspace_id: string
+  harness_id: string
 }
 
 export interface WorkOrderCreateRequest {
@@ -860,6 +882,38 @@ export interface ChannelMessagePayload {
 export type SwarmRealtimeEvent =
   | { type: 'bot_status'; slug?: string; status?: string; bot?: BotInfo }
   | { type: 'host_harness_update'; host_id?: string; harnesses?: HostHarnessInfo[]; last_seen?: string }
-  | { type: 'work_order_update'; order_id?: string; status?: string; epoch?: number; order?: WorkOrderInfo }
+  | {
+      type: 'work_order_update'
+      order_id?: string
+      status?: string
+      epoch?: number
+      host_id?: string
+      workspace_id?: string
+      harness_id?: string
+      pid?: number | null
+      order?: WorkOrderInfo
+    }
   | { type: 'channel_message'; channel_id?: string; message?: ChannelMessageInfo }
-  | { type: 'host_workspace_update'; host_id?: string; workspaces?: Array<Record<string, unknown>> }
+  | {
+      type: 'host_workspace_update'
+      host_id?: string
+      workspaces?: Array<Partial<HostWorkspace> | Record<string, unknown>>
+      last_seen?: string
+    }
+  | {
+      type: 'host_workspaces_update'
+      host_id?: string
+      workspaces?: Array<Partial<HostWorkspace> | Record<string, unknown>>
+      last_seen?: string
+    }
+  | {
+      type: 'work_order_event'
+      host_id?: string
+      order_id?: string
+      workspace_id?: string
+      seq?: number | null
+      kind?: string
+      ts?: string | null
+      data?: Record<string, unknown>
+      verification_pending?: boolean
+    }

@@ -456,7 +456,7 @@ def test_ws_hello_ack_and_ping_pong(tmp_path, caplog):
                     "type": "hello_ack",
                     "device_id": hello["device_id"],
                     "workspace_id": hello["workspace_id"],
-                    "server_version": "2.1.0",
+                    "server_version": "2.2.0",
                     "min_client_version": "99.0.0",
                     "latest_client_version": "99.9.9",
                 }
@@ -478,7 +478,7 @@ def test_ws_hello_ack_and_ping_pong(tmp_path, caplog):
     assert hello["capabilities"]["allowed_tools"]
     assert events["pong"] == {"type": "pong", "ts": 12345}
     runner = state["runner"]
-    assert runner.hello_ack["server_version"] == "2.1.0"
+    assert runner.hello_ack["server_version"] == "2.2.0"
     assert any("min_client_version" in r.getMessage() for r in caplog.records)
 
 

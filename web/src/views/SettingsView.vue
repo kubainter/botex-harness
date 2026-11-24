@@ -228,7 +228,7 @@
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
         <div class="p-3 bg-botex-950 rounded-lg border border-botex-800">
           <span class="block text-xs text-slate-300 uppercase">App Version</span>
-          <span class="text-sky-300 font-semibold font-mono">v{{ authStore.healthData?.version || '2.1.0' }}</span>
+          <span class="text-sky-300 font-semibold font-mono">v{{ authStore.healthData?.version || '2.2.0' }}</span>
         </div>
         <div class="p-3 bg-botex-950 rounded-lg border border-botex-800">
           <span class="block text-xs text-slate-300 uppercase">Service Worker</span>

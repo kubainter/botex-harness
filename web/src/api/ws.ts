@@ -14,8 +14,10 @@ const SWARM_EVENT_TYPES = new Set([
   'bot_status',
   'host_harness_update',
   'work_order_update',
+  'work_order_event',
   'channel_message',
-  'host_workspace_update'
+  'host_workspace_update',
+  'host_workspaces_update'
 ])
 
 class WebSocketManager {

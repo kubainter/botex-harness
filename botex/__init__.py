@@ -14,7 +14,7 @@ import importlib.util
 import sys
 from typing import Dict
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 LEGACY_MODULE_DOMAINS: Dict[str, str] = {
     # botex/core
