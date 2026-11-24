@@ -744,6 +744,34 @@ class RemoteWssToolExecutor(ToolExecutor):
             # device — serve it locally so engine offloads keep working.
             return read_scratchpad(str(args.get("memory_id") or ""), cwd=workspace_root)
 
+        # Memory Vault reads are cloud-host vaults too (plan 052): serve them
+        # here so swarm notes never cross the edge wire, and flag the edge
+        # workspace so the bridge never falls back to the cloud checkout's
+        # own local vault.
+        if tool_name == "read_memory":
+            from botex.memory.worker_bridge import worker_read_memory
+
+            return await asyncio.to_thread(
+                worker_read_memory,
+                str(args.get("memory_id") or ""),
+                scope=str(args.get("scope") or "all"),
+                workspace_dir=workspace_root,
+                is_edge_workspace=True,
+            )
+
+        if tool_name == "recall_memory":
+            from botex.memory.worker_bridge import worker_recall_memory
+
+            return await worker_recall_memory(
+                str(args.get("query") or ""),
+                topic=args.get("topic") or None,
+                scope=str(args.get("scope") or "all"),
+                project=args.get("project") or None,
+                workspace_dir=workspace_root,
+                is_edge_workspace=True,
+                use_llm_synthesis=bool(args.get("_use_llm_synthesis", True)),
+            )
+
         del workspace_root
         cache_key = self._cache_key(tool_name, args)
         cached_entry = self._get_cached(task_id, cache_key)
