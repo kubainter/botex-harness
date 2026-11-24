@@ -143,6 +143,8 @@ def test_edge_ws_handshake_ping_and_revocation(_isolated_cloud_state):
             assert ack["type"] == "hello_ack"
             assert ack["device_id"] == "box1"
             assert ack["workspace_id"] == "ws1"
+            assert ack["server_version"] == "2.2.0"
+            assert ack["min_client_version"] == "2.1.0"
 
             ws.send_json({"type": "ping", "ts": 123.0})
             pong = ws.receive_json()
@@ -488,3 +490,324 @@ def test_edge_ws_ingests_harness_inventory_and_dispatches_typed_control(monkeypa
     )
     assert bad["dispatched"] is False
     assert bad["reason"] == "forbidden_control_action"
+
+
+def test_edge_ws_v5_workspaces_manifest_root_stripping_and_limits_ingest(monkeypatch, tmp_path):
+    """Plan 051: hello/heartbeat ingest workspaces_manifest (stripping root/path) and harness limits."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "edge_ws_v5.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+
+    tok_store = DeviceTokenStore(tmp_path / "v5_tokens.json")
+    raw_token, _ = tok_store.issue_token("host_v5a1", "ws_main01")
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        server_cloud, "_broadcast_swarm_event", lambda et, pl: events.append((et, pl))
+    )
+
+    with TestClient(server_cloud.app) as client:
+        with client.websocket_connect(
+            "/api/edge/ws", headers={"Authorization": f"Bearer {raw_token}"}
+        ) as ws:
+            ws.send_json(
+                {
+                    "type": "hello",
+                    "device_id": "host_v5a1",
+                    "workspace_id": "ws_main01",
+                    "client_version": "2.1.0",
+                    "last_seen": "2026-11-24T15:00:00+00:00",
+                    "workspaces_manifest": [
+                        {
+                            "workspace_id": "ws_main01",
+                            "label": "Main App",
+                            "state": "enrolled",
+                            "root": "C:\\Users\\alice\\secret_main",
+                            "path": "/secret/main",
+                        },
+                        {
+                            "workspace_id": "ws_cand02",
+                            "label": "Found Candidate",
+                            "state": "candidate",
+                            "root": "/Users/alice/secret_cand",
+                        },
+                    ],
+                    "harnesses": [
+                        {
+                            "harness_id": "devin",
+                            "transport": "acp",
+                            "status": "online",
+                            "capabilities": {"available": True},
+                            "limits": {
+                                "unit": "credits",
+                                "used": 10.0,
+                                "remaining": 90.0,
+                                "limit": 100.0,
+                                "confidence": "exact",
+                                "source": "cli",
+                            },
+                        }
+                    ],
+                    "capabilities": {},
+                }
+            )
+            ack = ws.receive_json()
+            assert ack["type"] == "hello_ack"
+            assert ack["server_version"] == "2.2.0"
+            assert ack["min_client_version"] == "2.1.0"
+
+            # Query GET /workspaces while ws_main01 is connected
+            ws_resp = client.get("/api/edge/hosts/host_v5a1/workspaces")
+            assert ws_resp.status_code == 200
+            assert "secret_main" not in ws_resp.text
+            assert "secret_cand" not in ws_resp.text
+            assert '"root"' not in ws_resp.text
+            ws_map = {w["workspace_id"]: w for w in ws_resp.json()["workspaces"]}
+            assert ws_map["ws_main01"]["connected"] is True
+            assert ws_map["ws_cand02"]["connected"] is False
+
+            # Heartbeat updates manifest + adds ollama limits
+            ws.send_json(
+                {
+                    "type": "heartbeat",
+                    "device_id": "host_v5a1",
+                    "workspace_id": "ws_main01",
+                    "last_seen": "2026-11-24T15:01:00+00:00",
+                    "workspaces_manifest": [
+                        {
+                            "workspace_id": "ws_main01",
+                            "label": "Main App Renamed",
+                            "state": "enrolled",
+                            "root": "/attempt/path/leak",
+                        }
+                    ],
+                    "harnesses": [
+                        {
+                            "harness_id": "ollama",
+                            "transport": "http",
+                            "status": "online",
+                            "capabilities": {"available": True},
+                            "limits": {
+                                "unit": "models_loaded",
+                                "used": 2.0,
+                                "confidence": "exact",
+                                "source": "loopback",
+                            },
+                        }
+                    ],
+                }
+            )
+            ws.send_json({"type": "ping", "ts": 2.0})
+            assert ws.receive_json()["type"] == "pong"
+
+    stored_ws = swarm_store.list_host_workspaces("host_v5a1", db_path=db_file)
+    assert "secret_main" not in str(stored_ws)
+    assert "/attempt/path/leak" not in str(stored_ws)
+    assert "secret_main" not in str(events)
+    assert "/attempt/path/leak" not in str(events)
+    ws_by_id = {w["workspace_id"]: w for w in stored_ws}
+    assert ws_by_id["ws_main01"]["label"] == "Main App Renamed"
+    assert any(et == "host_workspaces_update" for et, _ in events)
+
+    harnesses = swarm_store.list_host_harnesses(
+        host_id="host_v5a1", stale_after_s=999999999, db_path=db_file
+    )
+    h_by_id = {h["harness_id"]: h for h in harnesses}
+    assert h_by_id["devin"]["limits"]["remaining"] == 90.0
+    assert h_by_id["ollama"]["limits"]["unit"] == "models_loaded"
+
+
+def test_edge_ws_work_order_event_dedup_and_no_self_report_done(monkeypatch, tmp_path):
+    """Plan 051 STOP #5: work_order_event deduplicates (order_id, seq) and NEVER transitions order to DONE."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "edge_ws_events.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+
+    tok_store = DeviceTokenStore(tmp_path / "ev_tokens.json")
+    raw_token, _ = tok_store.issue_token("host_ev1", "ws_ev1")
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+
+    swarm_store.create_work_order(
+        {"order_id": "ord_ev_1", "status": "RUNNING", "epoch": 1},
+        db_path=db_file,
+    )
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        server_cloud, "_broadcast_swarm_event", lambda et, pl: events.append((et, pl))
+    )
+
+    with TestClient(server_cloud.app) as client:
+        with client.websocket_connect(
+            "/api/edge/ws", headers={"Authorization": f"Bearer {raw_token}"}
+        ) as ws:
+            ws.send_json(
+                {
+                    "type": "hello",
+                    "device_id": "host_ev1",
+                    "workspace_id": "ws_ev1",
+                    "capabilities": {},
+                }
+            )
+            assert ws.receive_json()["type"] == "hello_ack"
+
+            ev_frame_1 = {
+                "type": "work_order_event",
+                "order_id": "ord_ev_1",
+                "workspace_id": "ws_spoofed",
+                "seq": 1,
+                "kind": "started",
+                "ts": "2026-11-24T15:10:00+00:00",
+                "data": {
+                    "pid": 9876,
+                    "secret": "sk-abc123def456ghi789jkl012mno",
+                    "root": "C:\\Users\\secret\\repo",
+                },
+            }
+            # Send twice to verify (order_id, seq) idempotent deduplication
+            ws.send_json(ev_frame_1)
+            ws.send_json(ev_frame_1)
+
+            # Hostile/exited events attempting to self-report DONE
+            ws.send_json(
+                {
+                    "type": "work_order_event",
+                    "order_id": "ord_ev_1",
+                    "seq": 2,
+                    "kind": "exited",
+                    "status": "DONE",
+                    "data": {"exit_code": 0, "status": "DONE"},
+                }
+            )
+            ws.send_json(
+                {
+                    "type": "work_order_event",
+                    "order_id": "ord_ev_1",
+                    "seq": 3,
+                    "kind": "done",
+                    "status": "DONE",
+                    "data": {"ok": True, "status": "DONE"},
+                }
+            )
+            ws.send_json({"type": "ping", "ts": 3.0})
+            assert ws.receive_json()["type"] == "pong"
+
+    stored_events = swarm_store.list_work_order_events("ord_ev_1", db_path=db_file)
+    assert [e["seq"] for e in stored_events] == [1, 2, 3]
+    # Workspace ID comes from authenticated session, not untrusted frame payload
+    assert stored_events[0]["workspace_id"] == "ws_ev1"
+    assert "sk-abc123def456ghi789jkl012mno" not in str(stored_events)
+    assert "C:\\Users\\secret\\repo" not in str(stored_events)
+
+    wo_broadcasts = [pl for et, pl in events if et == "work_order_event"]
+    assert [b["seq"] for b in wo_broadcasts] == [1, 2, 3]
+    assert wo_broadcasts[1].get("verification_pending") is True
+
+    # CRITICAL STOP #5: WorkOrder status MUST remain RUNNING (never DONE without verify_gate)
+    order_after = swarm_store.get_work_order("ord_ev_1", db_path=db_file)
+    assert order_after["status"] == "RUNNING"
+
+
+def test_edge_ws_live_dispatch_work_order_roundtrip(monkeypatch, tmp_path):
+    """End-to-end WS roundtrip for POST /api/edge/tokens/upgrade + POST /api/swarm/orders/{id}/dispatch."""
+    import threading
+
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "edge_ws_dispatch_rt.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+
+    swarm_store.create_work_order(
+        {"order_id": "ord_rt_ok", "status": "QUEUED", "goal": "Ship feature"},
+        db_path=db_file,
+    )
+    swarm_store.create_work_order(
+        {"order_id": "ord_rt_nack", "status": "QUEUED", "goal": "Blocked run"},
+        db_path=db_file,
+    )
+
+    with TestClient(server_cloud.app) as client:
+        init_res = client.post(
+            "/api/edge/tokens",
+            json={"device_id": "host_rt1", "workspace_id": "ws_rt1"},
+        ).json()
+        up_res = client.post(
+            "/api/edge/tokens/upgrade",
+            json={
+                "device_id": "host_rt1",
+                "workspace_id": "ws_rt1",
+                "replace_jti": init_res["record"]["jti"],
+            },
+        ).json()
+        assert up_res["ok"] is True
+        upgraded_token = up_res["token"]
+
+        with client.websocket_connect(
+            "/api/edge/ws", headers={"Authorization": f"Bearer {upgraded_token}"}
+        ) as ws:
+            ws.send_json(
+                {
+                    "type": "hello",
+                    "device_id": "host_rt1",
+                    "workspace_id": "ws_rt1",
+                    "capabilities": {"harness_spawn": True},
+                }
+            )
+            assert ws.receive_json()["type"] == "hello_ack"
+
+            seen_dispatches: list[dict] = []
+
+            def _responder():
+                for _ in range(2):
+                    frame = ws.receive_json()
+                    seen_dispatches.append(frame)
+                    if frame.get("order_id") == "ord_rt_ok":
+                        ws.send_json(
+                            {
+                                "type": "control_ack",
+                                "request_id": frame["request_id"],
+                                "order_id": frame["order_id"],
+                                "ok": True,
+                                "pid": 55501,
+                            }
+                        )
+                    else:
+                        ws.send_json(
+                            {
+                                "type": "control_nack",
+                                "request_id": frame["request_id"],
+                                "order_id": frame["order_id"],
+                                "ok": False,
+                                "reason": "candidate_workspace",
+                            }
+                        )
+
+            t = threading.Thread(target=_responder, daemon=True)
+            t.start()
+
+            r_ok = client.post(
+                "/api/swarm/orders/ord_rt_ok/dispatch",
+                json={"host_id": "host_rt1", "workspace_id": "ws_rt1", "harness_id": "zcode"},
+            )
+            assert r_ok.status_code == 200, r_ok.text
+            assert r_ok.json()["status"] == "RUNNING"
+            assert r_ok.json()["pid"] == 55501
+
+            r_nack = client.post(
+                "/api/swarm/orders/ord_rt_nack/dispatch",
+                json={"host_id": "host_rt1", "workspace_id": "ws_rt1", "harness_id": "zcode"},
+            )
+            assert r_nack.status_code == 409
+
+            t.join(timeout=5.0)
+
+    assert len(seen_dispatches) == 2
+    assert seen_dispatches[0]["type"] == "dispatch_work_order"
+    assert seen_dispatches[0]["workspace_id"] == "ws_rt1"
+    assert seen_dispatches[0]["fencing_epoch"] == 1
+    assert seen_dispatches[0]["fencing_token"]
+    assert swarm_store.get_work_order("ord_rt_ok", db_path=db_file)["status"] == "RUNNING"
+    assert swarm_store.get_work_order("ord_rt_nack", db_path=db_file)["status"] == "QUEUED"

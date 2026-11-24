@@ -99,6 +99,9 @@ The runner resolves credentials in order: `--token`, `--token-file`, explicit pr
 
 - `botex edge tokens list` — show stored credentials (`device_id`, `workspace_id`, `jti`, `updated_at`; raw tokens are never displayed).
 - `botex edge tokens remove --device-id <id> --workspace-id <id>` — delete a stored credential.
+- `botex edge tokens upgrade --device-id <id> --workspace-id <id>` — rotate a stored token through the Cloud upgrade endpoint (adds the `delegate_local:<workspace_id>` scope; see Section 7).
+
+To expose several project directories from one machine, register them with `botex edge workspaces add|list|remove|discover` and run `botex edge --edge-daemon` in host daemon mode (Section 7).
 
 CI/service overrides: `BOTEX_EDGE_TOKEN` (env or `.env`) or `--token-file` still work unchanged. Optionally set `BOTEX_EDGE_SERVER`, `BOTEX_EDGE_DEVICE_ID`, `BOTEX_EDGE_WORKSPACE_ID` in your environment:
 
@@ -182,3 +185,66 @@ The Cloud REST API and the local supervisor pulse control the work-order lifecyc
 - `POST /api/bots/{slug}/pause` | `.../resume` — freeze/release a Tethered Bot (`paused` / `active`).
 
 Successful bot and order mutations broadcast `bot_status` and `work_order_update` events to connected `/api/chat/ws` clients, `hello` and `heartbeat` inventory updates emit `host_harness_update`, and new channel posts emit `channel_message`. Every payload passes secret masking before fan-out.
+
+## 7. Host Daemon Multi-Workspace Mode (Plan 051)
+
+`botex edge --edge-daemon` can serve **multiple workspaces from one host process**. When the host workspace registry holds `enrolled` entries, the CLI starts the multi-workspace `EdgeHostDaemon` instead of the legacy single-workspace runner; with no enrolled entries the legacy `attach_or_spawn_edge_daemon` + single `EdgeRunner` flow runs unchanged (100% backwards compatible).
+
+### Host workspace registry (`host_workspaces.json`)
+
+- Default location `~/.botex/host_workspaces.json`; override with `BOTEX_WORKSPACES_FILE`. The file is written atomically with tightened ACLs on Windows.
+- Entries carry an **opaque** `workspace_id` (`ws_` + 12 hex chars) and the registry mints an opaque `host_` + 8 hex `device_id` on first save. Human-readable `label`, `state` (`enrolled` / `candidate` / `disabled`), `source` (`manual` / `discover`), `local_admin`, and per-workspace `caps_overrides` stay host-local.
+- **Local `root` paths never leave the host**: the Cloud-facing manifest (`to_wire_manifest`) emits only `{workspace_id, label, state}`.
+- **Capacity:** at most **8 enrolled** workspaces per host daemon.
+- Adding a workspace validates the realpath (symlink rejection + containment) before registration; `discover` registers only `state=candidate` entries and never auto-enrolls.
+
+### Managing workspaces
+
+```bash
+botex edge workspaces add <path> [--label <lbl>] [--workspace-id ws_<hex>] [--candidate] [--local-admin]
+botex edge workspaces list [--include-disabled]   # WORKSPACE_ID / LABEL / STATE / SOURCE table
+botex edge workspaces remove --workspace-id <ws_id>
+botex edge workspaces discover [roots...]          # scan 1-2 levels deep for project markers
+```
+
+`add` prints only the opaque `workspace_id`, `label`, and `state`. `discover` accepts one or more roots (default: current directory) and registers marker-bearing project directories (`.git`, `pyproject.toml`, `package.json`, ...) as candidates.
+
+### Token upgrade for daemon workspaces (`delegate_local:<ws>`)
+
+```bash
+botex edge tokens upgrade --device-id <id> --workspace-id <ws_id> [--cloud-url https://<host>] [--label <lbl>]
+```
+
+- Derives the Cloud HTTPS base URL from `--cloud-url` or `BOTEX_EDGE_SERVER` (`wss://host/api/edge/ws` → `https://host`; `ws://` → `http://`; port preserved, path and userinfo dropped).
+- Authenticates with the Cloud bearer token from the **`BOTEX_ACCESS_TOKEN` environment variable** (environment only — the command never reads `.env`).
+- Sends `POST /api/edge/tokens/upgrade` with `{"device_id", "workspace_id", "replace_jti", "label"}`; `replace_jti` is the JTI extracted from the locally stored token so Cloud can revoke the previous JTI atomically, and the upgraded token carries the `delegate_local:<workspace_id>` scope required by Section 4 skill delegation.
+- Stores the returned token in the isolated credential store and prints only the `old jti -> new jti` summary — raw token material is never displayed or logged.
+
+### Harness `limits` telemetry
+
+`hello` and `heartbeat` frames may carry a `limits` array describing per-harness quota telemetry, normalized by `normalize_limits_payload` (`botex/edge/adapters.py`). Each entry uses the schema:
+
+```json
+{
+  "unit": "requests",
+  "used": 12,
+  "remaining": 88,
+  "limit": 100,
+  "reset_at": "2026-11-24T13:00:00+00:00",
+  "window_s": 3600,
+  "source": "cli",
+  "confidence": 0.9,
+  "collected_at": "2026-11-24T12:05:00+00:00"
+}
+```
+
+Unknown or partially collected limits degrade to `confidence: 0.0` `unknown` entries instead of being dropped, so Cloud dashboards can distinguish "measured" from "not measured".
+
+### Downward work-order frames & hardened loopback IPC
+
+The host daemon extends the typed Control Lane (Section 5) with:
+
+- `dispatch_work_order` (Cloud → host): delivers a supervisor `WorkOrder` to the daemon; like all typed frames it is allowlist-enforced and work-order payloads carry `order_id` + `fencing_token`, verified against the locally registered active order before any local execution (verify gate applies).
+- `work_order_event` (host → Cloud): lifecycle status events for dispatched orders, surfaced to `/api/chat/ws` clients as `work_order_update` broadcasts after secret masking.
+
+The daemon's loopback IPC listens on `127.0.0.1` only (never external interfaces), requires a bearer token on every control call (`probe_edge_daemon_loopback` rejects anonymous or wrong-token callers), and keeps the existing strict frame allowlist — arbitrary commands are always rejected.

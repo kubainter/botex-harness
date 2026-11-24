@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -23,9 +23,18 @@ from botex.core.swarm_store import (
     upsert_host_lease,
 )
 from botex.edge.runner import (
+    CONTROL_LANE_FRAME_TYPES,
+    LOOPBACK_CONTROL_ALLOWLIST,
+    MAX_ENROLLED_WORKSPACES,
     QOS_PRIORITY_CONTROL,
     QOS_PRIORITY_DATA,
+    TYPED_CONTROL_FRAME_TYPES,
+    EdgeActiveOrdersStore,
+    EdgeCapabilities,
+    EdgeHostDaemon,
+    EdgeOutboxBuffer,
     EdgeRunner,
+    EdgeWorkspaceAgent,
     attach_or_spawn_edge_daemon,
     frame_qos_priority,
     probe_edge_daemon_loopback,
@@ -883,3 +892,641 @@ def test_loopback_control_accepts_typed_harness_frames_with_fencing_token(tmp_pa
             await runner.stop_loopback_ipc()
 
     asyncio.run(_exercise())
+
+
+# ---------------------------------------------------------------------------
+# Plan 051 — EdgeHostDaemon, dispatch_work_order, durable persistence, F3/F5/F7
+# ---------------------------------------------------------------------------
+
+
+_WS_A = "ws_aaaabbbb0001"
+_WS_B = "ws_ccccddee0002"
+
+
+def _ws_entry(
+    ws_id: str,
+    root: Path,
+    *,
+    state: str = "enrolled",
+    local_admin: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "workspace_id": ws_id,
+        "root": str(root),
+        "label": ws_id,
+        "state": state,
+        "added_at": "2026-11-24T00:00:00+00:00",
+        "source": "manual",
+        "local_admin": local_admin,
+        "caps_overrides": {},
+    }
+
+
+def _write_registry(path: Path, entries: List[Dict[str, Any]]) -> None:
+    from botex.edge.workspaces import save_workspaces_registry
+
+    save_workspaces_registry(
+        {"version": 1, "device_id": "host_test01", "workspaces": entries}, path=path
+    )
+
+
+class _FakeInventoryService:
+    def __init__(self, snapshot: List[Dict[str, Any]]) -> None:
+        self._snapshot = snapshot
+        self.started = False
+        self.stopped = False
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    def get_cached_snapshot(self) -> List[Dict[str, Any]]:
+        return list(self._snapshot)
+
+
+class _FakeHostDriver:
+    def __init__(self, pre_ok: bool = True) -> None:
+        self._pre_ok = pre_ok
+        self.prepared: List[tuple] = []
+
+    def preflight_runtime(self, cli_name: str, *a: Any, **k: Any) -> Dict[str, Any]:
+        if self._pre_ok:
+            return {"ok": True, "status": "allowed", "cli": cli_name}
+        return {"ok": False, "status": "infra_blocked_runtime", "reason": "blocked"}
+
+    def prepare_epoch_worktree(self, origin_repo: Any, order_id: str, epoch: int, **k: Any) -> Path:
+        self.prepared.append((origin_repo, order_id, epoch))
+        return Path(origin_repo)
+
+
+def _spec_ok(harness: str) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "status": "READY",
+        "harness": harness,
+        "order_id": "ord-9",
+        "epoch": 1,
+        "branch": "swarm/wip/ord-9/e1",
+        "worktree": "ord-9_e1",
+        "mode": "edit",
+        "prompt": "run it",
+        "base_ref": "HEAD",
+    }
+
+
+def test_dispatch_frame_constants_and_harness_spawn_cap() -> None:
+    """Plan 051 §4.1: dispatch_work_order joins all typed/control sets;
+    work_order_event is Control Lane; EdgeCapabilities.harness_spawn round-trips."""
+    assert "dispatch_work_order" in TYPED_CONTROL_FRAME_TYPES
+    assert "dispatch_work_order" in LOOPBACK_CONTROL_ALLOWLIST
+    assert "dispatch_work_order" in CONTROL_LANE_FRAME_TYPES
+    assert "work_order_event" in CONTROL_LANE_FRAME_TYPES
+    assert frame_qos_priority({"type": "dispatch_work_order"}) == QOS_PRIORITY_CONTROL
+    assert frame_qos_priority({"type": "work_order_event"}) == QOS_PRIORITY_CONTROL
+
+    caps = EdgeCapabilities()
+    assert caps.harness_spawn is False
+    assert caps.to_dict()["harness_spawn"] is False
+    loaded = EdgeCapabilities.from_dict({"harness_spawn": True})
+    assert loaded.harness_spawn is True
+    assert loaded.to_dict()["harness_spawn"] is True
+
+
+def test_dispatch_work_order_pipeline_persistence_and_env_scrub(tmp_path: Path) -> None:
+    """dispatch_work_order: enrolled re-verify -> translate -> preflight -> spawn,
+    durable active_orders.json + offline edge_outbox.jsonl, F6 env scrub."""
+    ws_root = tmp_path / "ws_a"
+    ws_root.mkdir()
+    cand_root = tmp_path / "ws_cand"
+    cand_root.mkdir()
+    ws_file = tmp_path / "host_workspaces.json"
+    swarm_home = tmp_path / "swarm"
+    _write_registry(
+        ws_file,
+        [
+            _ws_entry(_WS_A, ws_root, state="enrolled"),
+            _ws_entry(_WS_B, cand_root, state="candidate"),
+        ],
+    )
+
+    spawned: Dict[str, Any] = {}
+
+    def fake_spawn(argv: List[str], cwd: Path, env: Dict[str, str]) -> Dict[str, Any]:
+        spawned.update({"argv": list(argv), "cwd": str(cwd), "env": dict(env)})
+        return {"pid": 98765, "job_guard": None}
+
+    agent = EdgeWorkspaceAgent(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="host_test01",
+        workspace=_ws_entry(_WS_A, ws_root),
+        workspaces_file=ws_file,
+        credentials_dir=tmp_path / "creds",
+        swarm_home=swarm_home,
+        caps=EdgeCapabilities(harness_spawn=True),
+        daemon_salt="boot-salt",
+        daemon_gen_id="gen-1",
+        resolve_token_fn=lambda *a, **k: ("tok-abc", "test"),
+        check_eligible_fn=lambda h: {"ok": True, "harness": h, "transport": "acp"},
+        translate_order_fn=lambda order, h: _spec_ok(h),
+        spawn_fn=fake_spawn,
+        host_driver=_FakeHostDriver(),
+    )
+
+    async def _run() -> None:
+        import os
+
+        os.environ["SWARM_TEST_SECRET"] = "1"
+        os.environ["BOTEX_EDGE_TOKEN"] = "leak-me-not"
+        try:
+            reply = await agent.handle_control_frame(
+                {
+                    "type": "dispatch_work_order",
+                    "request_id": "r-1",
+                    "order_id": "ord-9",
+                    "fencing_token": "ft-1",
+                    "fencing_epoch": 2,
+                    "order": {"order_id": "ord-9", "epoch": 1, "goal": "x"},
+                    "target_harness": "zcode",
+                }
+            )
+            assert reply["type"] == "control_ack"
+            assert reply["ok"] is True
+            assert reply["request_id"] == "r-1"
+            assert reply["order_id"] == "ord-9"
+            assert reply["pid"] == 98765
+            assert reply["spec_echo"]["harness"] == "zcode"
+            assert spawned["argv"] == ["zcode"]
+            assert "SWARM_TEST_SECRET" not in spawned["env"]
+            assert "BOTEX_EDGE_TOKEN" not in spawned["env"]
+            assert "leak-me-not" not in spawned["env"].values()
+
+            # durable record keyed by order_id
+            rec = EdgeActiveOrdersStore(swarm_home / "active_orders.json").get("ord-9")
+            assert rec is not None
+            assert rec["pid"] == 98765
+            assert rec["workspace_id"] == _WS_A
+            assert rec["fencing_token"] == "ft-1"
+            assert rec["fencing_epoch"] == 2
+            assert rec["daemon_gen_id"] == "gen-1"
+            assert rec["last_seq"] == 1
+
+            # offline -> started event buffered to edge_outbox.jsonl
+            events = EdgeOutboxBuffer(swarm_home / "edge_outbox.jsonl").pending()
+            assert any(
+                e.get("type") == "work_order_event"
+                and e.get("order_id") == "ord-9"
+                and e.get("workspace_id") == _WS_A
+                and e.get("seq") == 1
+                and e.get("kind") == "started"
+                for e in events
+            )
+
+            # candidate workspace is never dispatched
+            reply_c = await agent.handle_control_frame(
+                {
+                    "type": "dispatch_work_order",
+                    "order_id": "ord-10",
+                    "workspace_id": _WS_B,
+                    "fencing_token": "ft-x",
+                    "order": {"order_id": "ord-10"},
+                }
+            )
+            assert reply_c["type"] == "control_nack"
+            assert reply_c["reason"] == "workspace_not_enrolled"
+
+            # harness_spawn ceiling off -> clean nack, no spawn
+            agent.caps.harness_spawn = False
+            reply_d = await agent.handle_control_frame(
+                {
+                    "type": "dispatch_work_order",
+                    "order_id": "ord-11",
+                    "fencing_token": "ft-x",
+                    "order": {"order_id": "ord-11"},
+                }
+            )
+            assert reply_d["type"] == "control_nack"
+            assert reply_d["reason"] == "harness_spawn_disabled"
+        finally:
+            os.environ.pop("SWARM_TEST_SECRET", None)
+            os.environ.pop("BOTEX_EDGE_TOKEN", None)
+
+    asyncio.run(_run())
+
+
+def test_dispatch_work_order_nacks_for_single_workspace_runner(tmp_path: Path) -> None:
+    """A plain single-workspace EdgeRunner without harness_spawn nacks cleanly."""
+    runner = EdgeRunner(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="dev-single",
+        workspace_id="ws-single",
+        workspace_root=tmp_path,
+    )
+
+    async def _run() -> None:
+        reply = await runner.handle_control_frame(
+            {
+                "type": "dispatch_work_order",
+                "order_id": "ord-1",
+                "fencing_token": "ft",
+                "order": {"order_id": "ord-1"},
+            }
+        )
+        assert reply["type"] == "control_nack"
+        assert reply["reason"] == "harness_spawn_disabled"
+
+    asyncio.run(_run())
+
+
+def test_f5_stale_pid_refusal_marks_order_stale(tmp_path: Path) -> None:
+    """F5: control frames refuse signaling when live create-time mismatches."""
+    import os
+
+    class _FakeDriver:
+        def __init__(self) -> None:
+            self.calls: List[str] = []
+
+        def pause_process_tree(self, pid: int, *, job_guard=None) -> Dict[str, Any]:
+            self.calls.append("pause")
+            return {"ok": True, "action": "pause", "pid": pid}
+
+    driver = _FakeDriver()
+    runner = EdgeRunner(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="dev-f5",
+        workspace_id="ws-f5",
+        workspace_root=tmp_path,
+        os_driver=driver,
+    )
+    runner.register_active_order(
+        "ord-stale",
+        pid=os.getpid(),
+        pid_create_time=1.0,  # recorded in 1970 -> live ctime cannot match
+        fencing_token="ft-stale",
+        fencing_epoch=1,
+    )
+    runner.register_active_order(
+        "ord-legacy",
+        pid=424242,  # never existed -> pid_create_time capture returns None
+        fencing_token="ft-legacy",
+        fencing_epoch=1,
+    )
+
+    async def _run() -> None:
+        stale = await runner.handle_control_frame(
+            {"type": "harness_pause", "order_id": "ord-stale", "fencing_token": "ft-stale"}
+        )
+        assert stale["type"] == "control_nack"
+        assert stale["reason"] == "stale_pid"
+        assert runner._active_order_controls["ord-stale"]["stale"] is True
+        assert driver.calls == []
+
+        legacy = await runner.handle_control_frame(
+            {
+                "type": "harness_pause",
+                "order_id": "ord-legacy",
+                "fencing_token": "ft-legacy",
+            }
+        )
+        # no recorded create time -> check skipped; driver decides the outcome
+        assert legacy["type"] == "control_ack"
+        assert driver.calls == ["pause"]
+
+    asyncio.run(_run())
+
+
+def test_edge_workspace_agent_manifest_jitter_and_outbox_replay(tmp_path: Path) -> None:
+    """Agents emit zero-path workspaces_manifest, salted jitter, and replay the
+    durable outbox in (order_id, seq) order after hello_ack."""
+    ws_root = tmp_path / "ws_a"
+    ws_root.mkdir()
+    ws_file = tmp_path / "host_workspaces.json"
+    swarm_home = tmp_path / "swarm"
+    swarm_home.mkdir()
+    _write_registry(
+        ws_file,
+        [
+            _ws_entry(_WS_A, ws_root),
+            _ws_entry(_WS_B, ws_root, state="disabled"),
+        ],
+    )
+    snapshot = [
+        {
+            "harness_id": "zcode",
+            "status": "online",
+            "limits": {"unit": "requests", "confidence": "exact"},
+        }
+    ]
+    svc = _FakeInventoryService(snapshot)
+    agent = EdgeWorkspaceAgent(
+        "ws://127.0.0.1:9/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="host_test01",
+        workspace=_ws_entry(_WS_A, ws_root),
+        workspaces_file=ws_file,
+        swarm_home=swarm_home,
+        daemon_salt="boot-salt",
+        inventory_service=svc,
+    )
+
+    # seed durable state: store last_seq=3, outbox seq 4-5 for this ws + 1 other ws
+    store = EdgeActiveOrdersStore(swarm_home / "active_orders.json")
+    store.upsert(
+        {
+            "order_id": "ord-a",
+            "workspace_id": _WS_A,
+            "pid": 111,
+            "pid_create_time": None,
+            "daemon_gen_id": "g0",
+            "fencing_token": "ft",
+            "fencing_epoch": 1,
+            "last_seq": 3,
+        }
+    )
+    buf = EdgeOutboxBuffer(swarm_home / "edge_outbox.jsonl")
+    buf.append(
+        {
+            "type": "work_order_event",
+            "order_id": "ord-a",
+            "workspace_id": _WS_A,
+            "seq": 5,
+            "kind": "progress",
+            "ts": "t",
+            "data": {},
+        }
+    )
+    buf.append(
+        {
+            "type": "work_order_event",
+            "order_id": "ord-a",
+            "workspace_id": _WS_A,
+            "seq": 4,
+            "kind": "started",
+            "ts": "t",
+            "data": {},
+        }
+    )
+    buf.append(
+        {
+            "type": "work_order_event",
+            "order_id": "ord-b",
+            "workspace_id": _WS_B,
+            "seq": 1,
+            "kind": "started",
+            "ts": "t",
+            "data": {},
+        }
+    )
+    agent._seed_order_seqs()
+    assert agent._order_seqs["ord-a"] == 5
+
+    async def _run() -> None:
+        hello = await agent.build_hello_frame()
+        assert hello["workspaces_manifest"]
+        assert all("root" not in m for m in hello["workspaces_manifest"])
+        assert {m["workspace_id"] for m in hello["workspaces_manifest"]} == {
+            _WS_A,
+            _WS_B,
+        }
+        assert hello["harnesses"] == snapshot
+
+        hb = await agent.build_heartbeat_frame()
+        assert hb["harnesses"] == snapshot
+        assert "workspaces_manifest" in hb
+
+        import hashlib
+
+        expect = (
+            int.from_bytes(hashlib.sha256(f"{_WS_A}:boot-salt".encode()).digest()[:4], "big") % 10
+        )
+        assert agent._extra_reconnect_delay_s() == float(expect)
+
+        ws = _DummyWebSocket()
+        await agent._post_hello_ack(ws)
+        seqs = [f.get("seq") for f in ws.sent_frames]
+        kinds = [f.get("kind") for f in ws.sent_frames]
+        assert seqs == [4, 5]
+        assert kinds == ["started", "progress"]
+        remaining = buf.pending()
+        assert len(remaining) == 1
+        assert remaining[0]["workspace_id"] == _WS_B
+
+    asyncio.run(_run())
+
+
+def test_edge_host_daemon_supervises_only_enrolled_and_drains(tmp_path: Path) -> None:
+    """Daemon spawns <=8 enrolled agents, never candidate/disabled, and drains."""
+    ws_file = tmp_path / "host_workspaces.json"
+    swarm_home = tmp_path / "swarm"
+    entries = []
+    for i in range(MAX_ENROLLED_WORKSPACES + 2):
+        root = tmp_path / f"ws_{i}"
+        root.mkdir()
+        entries.append(_ws_entry(f"ws_{i:012x}", root))
+    cand = tmp_path / "cand"
+    cand.mkdir()
+    disabled = tmp_path / "dis"
+    disabled.mkdir()
+    entries.append(_ws_entry(_WS_B, cand, state="candidate"))
+    entries.append(_ws_entry("ws_ffff0000eeee", disabled, state="disabled"))
+    _write_registry(ws_file, entries)
+
+    svc = _FakeInventoryService([])
+    daemon = EdgeHostDaemon(
+        "ws://127.0.0.1:9/api/edge/ws",
+        workspaces_file=ws_file,
+        swarm_home=swarm_home,
+        state_file=swarm_home / "edge_daemon.json",
+        lock_path=swarm_home / "edge_daemon.lock",
+        inventory_service=svc,
+        resolve_token_fn=lambda *a, **k: ("tok", "test"),
+    )
+
+    async def _run() -> None:
+        res = await daemon.start()
+        try:
+            assert res["ok"] is True
+            assert res["mode"] == "spawned"
+            assert len(daemon.agents) == MAX_ENROLLED_WORKSPACES
+            assert _WS_B not in daemon._ws_agent_index
+            assert "ws_ffff0000eeee" not in daemon._ws_agent_index
+            assert svc.started is True
+            assert daemon._lock is not None and daemon._lock.locked is True
+            assert all(a.daemon_gen_id == daemon.daemon_gen_id for a in daemon.agents)
+        finally:
+            await daemon.stop(drain_timeout_s=1.0)
+        assert daemon._draining is True
+        assert svc.stopped is False  # injected service is not owned by the daemon
+        assert daemon._lock is None
+
+    asyncio.run(_run())
+
+
+async def _loopback_request(
+    port: int,
+    method: str,
+    path: str,
+    *,
+    token: str = "",
+    host: str = "",
+    body: Optional[Dict[str, Any]] = None,
+) -> bytes:
+    """Fire one raw HTTP request at a loopback IPC endpoint; returns raw bytes."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        payload = json.dumps(body).encode("utf-8") if body is not None else b""
+        lines = [f"{method} {path} HTTP/1.1"]
+        if host:
+            lines.append(f"Host: {host}")
+        if token:
+            lines.append(f"X-Loopback-Token: {token}")
+        if payload:
+            lines.append(f"Content-Length: {len(payload)}")
+        lines.append("\r\n")
+        writer.write("\r\n".join(lines).encode("ascii") + payload)
+        await writer.drain()
+        return await asyncio.wait_for(reader.read(65536), timeout=3.0)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+def test_edge_host_daemon_loopback_ipc_host_token_and_routes(tmp_path: Path) -> None:
+    """F3/F7: Host pinning, constant-time token on every route, /workspaces root
+    stripping, /harnesses limits, and the $0/branch-only /orders ceiling."""
+    ws_root = tmp_path / "ws_a"
+    ws_root.mkdir()
+    admin_root = tmp_path / "ws_admin"
+    admin_root.mkdir()
+    ws_file = tmp_path / "host_workspaces.json"
+    swarm_home = tmp_path / "swarm"
+    _write_registry(
+        ws_file,
+        [
+            _ws_entry(_WS_A, ws_root),
+            _ws_entry("ws_adbeff00beef", admin_root, local_admin=True),
+        ],
+    )
+    svc = _FakeInventoryService(
+        [{"harness_id": "zcode", "limits": {"unit": "requests", "confidence": "exact"}}]
+    )
+    daemon = EdgeHostDaemon(
+        "ws://127.0.0.1:9/api/edge/ws",
+        workspaces_file=ws_file,
+        swarm_home=swarm_home,
+        state_file=swarm_home / "edge_daemon.json",
+        lock_path=swarm_home / "edge_daemon.lock",
+        loopback_token="lb-tok-123",
+        inventory_service=svc,
+        resolve_token_fn=lambda *a, **k: ("tok", "test"),
+    )
+
+    async def _run() -> None:
+        res = await daemon.start()
+        assert res["ok"] is True
+        port = int(res["loopback_port"])
+        good_host = f"127.0.0.1:{port}"
+        try:
+            # 1. missing Host -> 403
+            assert b"403 Forbidden" in await _loopback_request(
+                port, "GET", "/workspaces", token="lb-tok-123"
+            )
+            # 2. foreign Host -> 403 (DNS rebinding)
+            assert b"403 Forbidden" in await _loopback_request(
+                port, "GET", "/workspaces", token="lb-tok-123", host="evil.example.com:80"
+            )
+            # 3. valid Host, missing token -> 401
+            assert b"401 Unauthorized" in await _loopback_request(
+                port, "GET", "/workspaces", host=good_host
+            )
+            # 4. valid Host+token -> 200, roots stripped
+            raw = await _loopback_request(
+                port, "GET", "/workspaces", token="lb-tok-123", host=good_host
+            )
+            assert b"200 OK" in raw
+            body = json.loads(raw.split(b"\r\n\r\n", 1)[1])
+            assert body["ok"] is True
+            assert len(body["workspaces"]) == 2
+            assert all("root" not in ws for ws in body["workspaces"])
+            # 5. include_paths=1 -> roots returned
+            raw2 = await _loopback_request(
+                port,
+                "GET",
+                "/workspaces?include_paths=1",
+                token="lb-tok-123",
+                host=good_host,
+            )
+            body2 = json.loads(raw2.split(b"\r\n\r\n", 1)[1])
+            assert any("root" in ws for ws in body2["workspaces"])
+            # 6. /harnesses returns cached limits
+            raw3 = await _loopback_request(
+                port, "GET", "/harnesses", token="lb-tok-123", host=good_host
+            )
+            body3 = json.loads(raw3.split(b"\r\n\r\n", 1)[1])
+            assert body3["harnesses"][0]["limits"]["confidence"] == "exact"
+            # 7. /orders mode=edit on non-admin -> 403 ceiling
+            raw4 = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="lb-tok-123",
+                host=good_host,
+                body={"workspace_id": _WS_A, "order_id": "ord-x", "mode": "edit"},
+            )
+            assert b"403 Forbidden" in raw4
+            assert b"mode_exceeds_ceiling" in raw4
+            # 8. /orders explicit provider on non-admin -> 403 paid ceiling
+            raw5 = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="lb-tok-123",
+                host=good_host,
+                body={
+                    "workspace_id": _WS_A,
+                    "order_id": "ord-x",
+                    "mode": "plan",
+                    "provider": "openrouter",
+                },
+            )
+            assert b"403 Forbidden" in raw5
+            assert b"paid_ceiling_exceeded" in raw5
+            # 9. /orders mode=plan non-admin passes ceiling -> dispatch nacks
+            raw6 = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="lb-tok-123",
+                host=good_host,
+                body={
+                    "workspace_id": _WS_A,
+                    "order_id": "ord-y",
+                    "mode": "plan",
+                    "order": {"order_id": "ord-y", "mode_request": "plan"},
+                },
+            )
+            assert b"409" in raw6.split(b"\r\n", 1)[0]
+            assert b"harness_spawn_disabled" in raw6
+            # 10. admin workspace still hits dispatch path (ceiling lifted)
+            raw7 = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="lb-tok-123",
+                host=good_host,
+                body={
+                    "workspace_id": "ws_adbeff00beef",
+                    "order_id": "ord-z",
+                    "mode": "edit",
+                    "provider": "openrouter",
+                },
+            )
+            assert b"403 Forbidden" not in raw7.split(b"\r\n", 1)[0]
+        finally:
+            await daemon.stop(drain_timeout_s=1.0)
+
+    asyncio.run(_run())
