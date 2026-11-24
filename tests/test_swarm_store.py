@@ -37,8 +37,8 @@ def db_path(tmp_path):
 
 def test_schema_version_and_tables(db_path):
     conn = swarm_store.get_swarm_store_conn(db_path)
-    assert swarm_store.SWARM_SCHEMA_VERSION == 4
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+    assert swarm_store.SWARM_SCHEMA_VERSION == 5
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
     assert conn.execute("PRAGMA journal_mode;").fetchone()[0].lower() == "wal"
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
     assert {
@@ -49,7 +49,9 @@ def test_schema_version_and_tables(db_path):
         "channel_messages",
         "host_leases",
         "host_harness_inventory",
+        "host_workspaces",
         "work_orders",
+        "work_order_events",
     } <= tables
 
 
@@ -57,7 +59,7 @@ def test_migrate_swarm_store_idempotent(db_path):
     conn = swarm_store.get_swarm_store_conn(db_path)
     swarm_store.migrate_swarm_store(conn)
     swarm_store.migrate_swarm_store(conn)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
     assert {
         "bots_registry",
@@ -67,7 +69,9 @@ def test_migrate_swarm_store_idempotent(db_path):
         "channel_messages",
         "host_leases",
         "host_harness_inventory",
+        "host_workspaces",
         "work_orders",
+        "work_order_events",
     } <= tables
 
 
@@ -76,7 +80,7 @@ def test_migrate_swarm_store_standalone_conn(tmp_path):
     try:
         assert conn.execute("PRAGMA user_version;").fetchone()[0] == 0
         swarm_store.migrate_swarm_store(conn)
-        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
     finally:
         conn.close()
 
@@ -103,7 +107,7 @@ def test_migrate_swarm_store_v2_to_v3_preserves_rows(tmp_path):
         conn.commit()
 
         swarm_store.migrate_swarm_store(conn)
-        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
         assert "host_harness_inventory" in tables
         assert {"channels", "channel_messages"} <= tables
@@ -136,7 +140,7 @@ def test_migrate_swarm_store_v1_to_v2_preserves_rows(tmp_path):
         conn.commit()
 
         swarm_store.migrate_swarm_store(conn)
-        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
     finally:
         conn.close()
 
@@ -919,7 +923,7 @@ def test_migrate_swarm_store_v3_to_v4_preserves_rows(tmp_path):
         assert "channels" not in tables_before and "channel_messages" not in tables_before
 
         swarm_store.migrate_swarm_store(conn)
-        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
         assert {"channels", "channel_messages"} <= tables
         idx = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index';")}
@@ -1147,3 +1151,273 @@ def test_channel_messages_never_mutate_work_orders(db_path):
     stored = swarm_store.list_channel_messages("chan-sec", db_path=db_path)
     assert len(stored) == len(hostile_bodies)
     assert "harness_cancel_task" in stored[-1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Schema v5 — host workspaces, harness limits, work-order event log
+# ---------------------------------------------------------------------------
+
+
+def _build_v4_db(conn):
+    """Replay schema versions 1..4 exactly as shipped (bot_briefs ALTERs included)."""
+    conn.executescript(swarm_store._SCHEMA_V1_SQL)
+    conn.executescript(swarm_store._SCHEMA_V2_COUNTERS_SQL)
+    conn.execute("ALTER TABLE bot_briefs ADD COLUMN pinned INTEGER DEFAULT 0;")
+    conn.execute("ALTER TABLE bot_briefs ADD COLUMN author TEXT DEFAULT 'human';")
+    conn.executescript(swarm_store._SCHEMA_V3_SQL)
+    conn.executescript(swarm_store._SCHEMA_V4_SQL)
+    conn.execute("PRAGMA user_version = 4;")
+    conn.commit()
+
+
+def test_migrate_swarm_store_v4_to_v5_idempotent(tmp_path):
+    db = tmp_path / "v4_upgrade.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        _build_v4_db(conn)
+        conn.execute(
+            "INSERT INTO host_harness_inventory"
+            " (host_id, harness_id, transport, status, last_seen, capabilities_json)"
+            " VALUES ('h4', 'botex', 'wss', 'online', 't0', '{}');"
+        )
+        conn.commit()
+        pre_cols = {
+            str(r["name"])
+            for r in conn.execute("PRAGMA table_info(host_harness_inventory);").fetchall()
+        }
+        assert "limits_json" not in pre_cols
+
+        swarm_store.migrate_swarm_store(conn)
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")}
+        assert {"host_workspaces", "work_order_events"} <= tables
+        post_cols = {
+            str(r["name"])
+            for r in conn.execute("PRAGMA table_info(host_harness_inventory);").fetchall()
+        }
+        assert "limits_json" in post_cols
+
+        # Idempotent: a second run must not re-ALTER or fail.
+        swarm_store.migrate_swarm_store(conn)
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
+    finally:
+        conn.close()
+
+    # Pre-existing harness rows surface the empty limits default.
+    harnesses = swarm_store.list_host_harnesses("h4", db_path=db)
+    assert [h["harness_id"] for h in harnesses] == ["botex"]
+    assert harnesses[0]["limits"] == {}
+    swarm_store.close_swarm_store_dbs()
+
+
+def test_migrate_swarm_store_v5_skips_existing_limits_column(tmp_path):
+    """A v4 DB whose inventory was already hot-patched must not re-ALTER."""
+    db = tmp_path / "v4_prelimits.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        _build_v4_db(conn)
+        conn.execute(
+            "ALTER TABLE host_harness_inventory ADD COLUMN limits_json TEXT NOT NULL DEFAULT '{}';"
+        )
+        conn.commit()
+        swarm_store.migrate_swarm_store(conn)
+        assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
+    finally:
+        conn.close()
+    swarm_store.close_swarm_store_dbs()
+
+
+def test_upsert_and_list_host_workspaces_zero_paths(db_path):
+    stored = swarm_store.upsert_host_workspaces(
+        "host-a",
+        [
+            {
+                "workspace_id": "ws-alpha",
+                "label": "main repo",
+                "state": "enrolled",
+                "root": "D:\\secret\\path",
+                "path": "/etc/passwd",
+                "mount": "Z:\\",
+            },
+            {"workspace_id": "ws-beta", "state": "CANDIDATE"},
+            {"workspace_id": "ws-gamma", "state": "rogue"},
+            {"workspace_id": "ws-mask", "label": 'token = "abc1234567"'},
+            {"workspace_id": "ws-long", "label": "word " * 60},
+            {"workspace_id": "bad/id"},
+            {"workspace_id": ""},
+            {"label": "no id"},
+        ],
+        last_seen="2026-11-24T10:00:00+00:00",
+        db_path=db_path,
+    )
+    assert [w["workspace_id"] for w in stored] == [
+        "ws-alpha",
+        "ws-beta",
+        "ws-gamma",
+        "ws-mask",
+        "ws-long",
+    ]
+    # Only contract keys survive — never root/path/mount.
+    assert all(set(w) == {"host_id", "workspace_id", "label", "state", "last_seen"} for w in stored)
+    assert stored[0]["label"] == "main repo" and stored[0]["state"] == "enrolled"
+    assert stored[1]["state"] == "candidate"  # case-folded through static map
+    assert stored[2]["state"] == "enrolled"  # unknown state -> enrolled default
+    assert stored[3]["label"] == "[REDACTED]"
+    assert len(stored[4]["label"]) == 128
+
+    # The table itself holds zero path columns.
+    conn = swarm_store.get_swarm_store_conn(db_path)
+    cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(host_workspaces);").fetchall()}
+    assert cols == {"host_id", "workspace_id", "label", "state", "last_seen"}
+
+    # Upsert on (host_id, workspace_id) conflict updates in place.
+    swarm_store.upsert_host_workspaces(
+        "host-a",
+        [{"workspace_id": "ws-alpha", "label": "renamed", "state": "disabled"}],
+        db_path=db_path,
+    )
+    rows = swarm_store.list_host_workspaces("host-a", db_path=db_path)
+    assert [r["workspace_id"] for r in rows] == [
+        "ws-alpha",
+        "ws-beta",
+        "ws-gamma",
+        "ws-long",
+        "ws-mask",
+    ]
+    assert rows[0]["label"] == "renamed" and rows[0]["state"] == "disabled"
+
+    swarm_store.upsert_host_workspaces("host-b", [{"workspace_id": "ws-x"}], db_path=db_path)
+    assert {r["host_id"] for r in swarm_store.list_host_workspaces(db_path=db_path)} == {
+        "host-a",
+        "host-b",
+    }
+    only_b = swarm_store.list_host_workspaces("host-b", db_path=db_path)
+    assert [r["workspace_id"] for r in only_b] == ["ws-x"]
+    assert swarm_store.upsert_host_workspaces("  ", [{"workspace_id": "ws"}], db_path=db_path) == []
+
+
+def test_host_harness_limits_json_roundtrip_and_backcompat(db_path):
+    stored = swarm_store.upsert_host_harnesses(
+        "host-lim",
+        [
+            {
+                "harness_id": "botex",
+                "transport": "wss",
+                "capabilities": {"modes": ["edit"]},
+                "limits": {"max_concurrent": 4, "cpu_cap": "80%"},
+            },
+            {"harness_id": "zcode", "transport": "local", "limits_json": '{"rpm": 60}'},
+            {"harness_id": "devin", "transport": "api"},  # omitted -> {}
+            {"harness_id": "agy", "transport": "api", "limits": "not-json"},
+        ],
+        db_path=db_path,
+    )
+    assert stored[0]["limits"] == {"max_concurrent": 4, "cpu_cap": "80%"}
+    assert stored[1]["limits"] == {"rpm": 60}
+    assert stored[2]["limits"] == {}
+    assert stored[3]["limits"] == {}  # malformed limits degrades safely
+
+    rows = {
+        r["harness_id"]: r for r in swarm_store.list_host_harnesses("host-lim", db_path=db_path)
+    }
+    assert rows["botex"]["limits"] == {"max_concurrent": 4, "cpu_cap": "80%"}
+    assert rows["zcode"]["limits"] == {"rpm": 60}
+    assert '"rpm": 60' in rows["zcode"]["limits_json"]
+    assert rows["devin"]["limits"] == {} and rows["agy"]["limits"] == {}
+
+    # Backward compat: an upsert without limits writes the {} default.
+    swarm_store.upsert_host_harnesses(
+        "host-lim",
+        [{"harness_id": "botex", "transport": "wss", "status": "degraded"}],
+        db_path=db_path,
+    )
+    row = [
+        r
+        for r in swarm_store.list_host_harnesses("host-lim", db_path=db_path)
+        if r["harness_id"] == "botex"
+    ][0]
+    assert row["limits"] == {}
+
+
+def test_record_and_list_work_order_events_dedup(db_path):
+    r1 = swarm_store.record_work_order_event(
+        "ord-ev",
+        workspace_id="ws-1",
+        seq=0,
+        kind="dispatched",
+        ts="2026-11-24T10:00:00+00:00",
+        data={"run_id": "r-1"},
+        db_path=db_path,
+    )
+    assert r1 == {
+        "ok": True,
+        "inserted": True,
+        "duplicate": False,
+        "order_id": "ord-ev",
+        "workspace_id": "ws-1",
+        "seq": 0,
+        "kind": "dispatched",
+        "ts": "2026-11-24T10:00:00+00:00",
+        "data": {"run_id": "r-1"},
+    }
+
+    # Out-of-order seqs are fine; list restores seq order.
+    assert swarm_store.record_work_order_event("ord-ev", seq=2, kind="done", db_path=db_path)[
+        "inserted"
+    ]
+    assert swarm_store.record_work_order_event("ord-ev", seq=1, kind="running", db_path=db_path)[
+        "inserted"
+    ]
+
+    # (order_id, seq) dedup: a replay is an INSERT OR IGNORE no-op.
+    dup = swarm_store.record_work_order_event(
+        "ord-ev", seq=1, kind="different-kind", db_path=db_path
+    )
+    assert dup["ok"] is True and dup["inserted"] is False and dup["duplicate"] is True
+    # Same seq under a different order_id is a distinct key.
+    assert swarm_store.record_work_order_event("ord-ev2", seq=1, kind="k", db_path=db_path)[
+        "inserted"
+    ]
+    sec = swarm_store.record_work_order_event(
+        "ord-ev2",
+        seq=2,
+        kind="note",
+        data={"note": "sk-abcdef1234567890xyz"},
+        db_path=db_path,
+    )
+    assert sec["data"]["note"] == "[REDACTED]"
+
+    events = swarm_store.list_work_order_events("ord-ev", db_path=db_path)
+    assert [e["seq"] for e in events] == [0, 1, 2]
+    assert events[0]["data"] == {"run_id": "r-1"}
+    assert events[1]["kind"] == "running"  # replay did not overwrite
+    assert events[1]["data"] == {}
+    assert [
+        e["seq"] for e in swarm_store.list_work_order_events("ord-ev", limit=2, db_path=db_path)
+    ] == [0, 1]
+    assert [e["seq"] for e in swarm_store.list_work_order_events("ord-ev2", db_path=db_path)] == [
+        1,
+        2,
+    ]
+
+    # Validation rejects bad input before any write.
+    assert swarm_store.record_work_order_event("bad/id", seq=0, kind="k", db_path=db_path) == {
+        "ok": False,
+        "error": "INVALID_ORDER_ID",
+    }
+    assert swarm_store.record_work_order_event("ord-ev", seq=-1, kind="k", db_path=db_path) == {
+        "ok": False,
+        "error": "INVALID_SEQ",
+    }
+    assert swarm_store.record_work_order_event("ord-ev", seq=None, kind="k", db_path=db_path) == {
+        "ok": False,
+        "error": "INVALID_SEQ",
+    }
+    assert swarm_store.record_work_order_event("ord-ev", seq=0, kind="  ", db_path=db_path) == {
+        "ok": False,
+        "error": "INVALID_KIND",
+    }
+    assert swarm_store.list_work_order_events("bad/id", db_path=db_path) == []
+    assert swarm_store.list_work_order_events("ord-ghost", db_path=db_path) == []

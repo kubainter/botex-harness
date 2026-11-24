@@ -17,15 +17,22 @@ the ``no_self_report_done`` terminal hook: only an external
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import ipaddress
+import json
 import logging
 import math
 import os
 import re
 import shutil
 import subprocess
-from collections.abc import Mapping
+import sys
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Awaitable, Mapping, Sequence
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -45,10 +52,13 @@ __all__ = [
     "RESTRICTIVENESS_RANK",
     "SUPPORTED_HARNESSES",
     "EpochCheckpointManager",
+    "HarnessInventoryService",
+    "HarnessLimitsCollector",
     "build_anti_spiral_reset",
     "check_harness_eligible",
     "discover_local_harnesses",
     "finalize_verified_work_order",
+    "normalize_limits_payload",
     "translate_work_order",
 ]
 
@@ -290,6 +300,711 @@ async def _probe_acp_endpoint(endpoint: str, timeout_s: float) -> tuple[str, Dic
     return "online", capabilities
 
 
+_MAX_LIMITS_COLLECT_TIMEOUT_S = 1.5
+_MAX_PROBE_STDOUT_BYTES = 65536
+_DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+_STDLIB_URLOPEN = urllib.request.urlopen
+_STDLIB_CREATE_SUBPROCESS_EXEC = asyncio.create_subprocess_exec
+
+# Static enum maps decouple untrusted probe output from persisted enum fields.
+_VALID_LIMIT_UNITS_MAP: Dict[str, str] = {
+    "requests": "requests",
+    "request": "requests",
+    "req": "requests",
+    "tokens": "tokens",
+    "token": "tokens",
+    "tok": "tokens",
+    "credits": "credits",
+    "credit": "credits",
+    "acu": "credits",
+    "models_loaded": "models_loaded",
+    "models": "models_loaded",
+    "unknown": "unknown",
+}
+
+_VALID_LIMIT_CONFIDENCE_MAP: Dict[str, str] = {
+    "exact": "exact",
+    "estimated": "estimated",
+    "estimate": "estimated",
+    "unknown": "unknown",
+}
+
+DEFAULT_LIMITS_CLI_PROBES: Dict[str, tuple[str, ...]] = {
+    "devin": ("devin", "status", "--json"),
+    "zcode": ("zcode", "status", "--json"),
+}
+_DEFAULT_LIMITS_HARNESS_IDS: tuple[str, ...] = ("devin", "zcode", "ollama")
+
+_SENSITIVE_ENV_PREFIXES: tuple[str, ...] = ("BOTEX_", "SWARM_")
+_SENSITIVE_ENV_SUFFIXES: tuple[str, ...] = (
+    "_API_KEY",
+    "_API_TOKEN",
+    "_ACCESS_TOKEN",
+    "_AUTH_TOKEN",
+    "_BEARER_TOKEN",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_PRIVATE_KEY",
+    "_PASSWORD",
+    "_PASSWD",
+    "_TOKEN",
+    "_CREDENTIALS",
+    "_CREDENTIALS_DIR",
+)
+_SENSITIVE_ENV_EXACT = frozenset(
+    {
+        "API_KEY",
+        "ACCESS_TOKEN",
+        "AUTH_TOKEN",
+        "SECRET",
+        "SECRET_KEY",
+        "PRIVATE_KEY",
+        "PASSWORD",
+        "OPENAI_KEY",
+        "ANTHROPIC_KEY",
+        "GEMINI_KEY",
+        "HF_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GITLAB_TOKEN",
+        "NPM_TOKEN",
+        "PYPI_TOKEN",
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "PYTHONSTARTUP",
+        "NODE_OPTIONS",
+    }
+)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(  # type: ignore[override]
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        raise urllib.error.HTTPError(req.full_url, code, "redirects disallowed", headers, fp)
+
+
+_LOOPBACK_HTTP_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _NoRedirectHandler(),
+)
+
+
+def _coerce_optional_float(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(num):
+        return None
+    return num
+
+
+def _coerce_optional_window_s(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        val = int(value)
+    except (TypeError, ValueError):
+        return None
+    if val < 0:
+        return None
+    return val
+
+
+def _coerce_optional_str(value: Any, limit: int = 64) -> Optional[str]:
+    if value is None or isinstance(value, bool):
+        return None
+    clean = _masked(value, limit)
+    return clean if clean else None
+
+
+def _default_unknown_limits(
+    *,
+    source: str = "unprobed",
+    collected_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    ts = _coerce_optional_str(collected_at, 64) or datetime.now(timezone.utc).isoformat()
+    clean_source = _coerce_optional_str(source, 64) or "unknown"
+    return {
+        "unit": "unknown",
+        "used": None,
+        "remaining": None,
+        "limit": None,
+        "reset_at": None,
+        "window_s": None,
+        "source": clean_source,
+        "confidence": "unknown",
+        "collected_at": ts,
+    }
+
+
+def normalize_limits_payload(
+    payload: Optional[Mapping[str, Any]] = None,
+    *,
+    default_source: str = "unknown",
+    collected_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Normalize a raw quota/limits mapping into the canonical 9-key telemetry schema."""
+    if payload is None or not isinstance(payload, Mapping):
+        return _default_unknown_limits(source=default_source, collected_at=collected_at)
+    raw_unit = str(payload.get("unit") or "").strip().lower()
+    unit = _VALID_LIMIT_UNITS_MAP.get(raw_unit, "unknown")
+    raw_conf = str(payload.get("confidence") or "").strip().lower()
+    confidence = _VALID_LIMIT_CONFIDENCE_MAP.get(raw_conf, "unknown")
+    source = (
+        _coerce_optional_str(payload.get("source"), 64)
+        or _coerce_optional_str(default_source, 64)
+        or "unknown"
+    )
+    ts = (
+        _coerce_optional_str(payload.get("collected_at"), 64)
+        or _coerce_optional_str(collected_at, 64)
+        or datetime.now(timezone.utc).isoformat()
+    )
+    return {
+        "unit": unit,
+        "used": _coerce_optional_float(payload.get("used")),
+        "remaining": _coerce_optional_float(payload.get("remaining")),
+        "limit": _coerce_optional_float(payload.get("limit")),
+        "reset_at": _coerce_optional_str(payload.get("reset_at"), 64),
+        "window_s": _coerce_optional_window_s(payload.get("window_s")),
+        "source": source,
+        "confidence": confidence,
+        "collected_at": ts,
+    }
+
+
+def _scrub_probe_env(base_env: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    src = os.environ if base_env is None else base_env
+    clean: Dict[str, str] = {}
+    for raw_key, raw_val in src.items():
+        key = str(raw_key)
+        upper = key.upper()
+        if (
+            upper.startswith(_SENSITIVE_ENV_PREFIXES)
+            or upper.endswith(_SENSITIVE_ENV_SUFFIXES)
+            or upper in _SENSITIVE_ENV_EXACT
+        ):
+            continue
+        clean[key] = str(raw_val)
+    clean["NO_COLOR"] = "1"
+    clean["TERM"] = "dumb"
+    return clean
+
+
+def _validate_ollama_loopback_base_url(ollama_base_url: str) -> Optional[str]:
+    raw = coerce_text(ollama_base_url).strip()
+    if not raw:
+        return None
+    candidate = raw if "://" in raw else f"http://{raw}"
+    parsed = urlsplit(candidate)
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    scheme, host, port = _parse_loopback_endpoint(candidate)
+    if scheme not in ("http", "https") or host is None or port is None or port <= 0 or port > 65535:
+        return None
+    clean_scheme = "https" if scheme == "https" else "http"
+    host_fmt = f"[{host}]" if ":" in host else host
+    return f"{clean_scheme}://{host_fmt}:{int(port)}"
+
+
+def _http_get_loopback_json(url: str, timeout_s: float) -> Any:
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    req_timeout = max(0.01, float(timeout_s))
+    if urllib.request.urlopen is _STDLIB_URLOPEN:
+        ctx = _LOOPBACK_HTTP_OPENER.open(req, timeout=req_timeout)
+    else:
+        ctx = urllib.request.urlopen(req, timeout=req_timeout)
+    with ctx as resp:
+        raw_bytes = resp.read(_MAX_PROBE_STDOUT_BYTES)
+    if isinstance(raw_bytes, bytes):
+        text = raw_bytes.decode("utf-8", errors="replace")
+    else:
+        text = str(raw_bytes or "")
+    return json.loads(text)
+
+
+def _probe_ollama_sync(
+    clean_base_url: str,
+    timeout_s: float,
+    collected_at: str,
+    http_get_fn: Callable[[str, float], Any],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    deadline = time.monotonic() + max(0.02, float(timeout_s))
+    models_loaded: Optional[int] = None
+    version = ""
+    reachable = False
+
+    rem_ps = deadline - time.monotonic()
+    if rem_ps > 0:
+        try:
+            ps_data = http_get_fn(f"{clean_base_url}/api/ps", rem_ps)
+            if isinstance(ps_data, Mapping):
+                reachable = True
+                models = ps_data.get("models")
+                if isinstance(models, list):
+                    models_loaded = len(models)
+        except Exception:
+            pass
+
+    rem_ver = deadline - time.monotonic()
+    if rem_ver > 0:
+        try:
+            ver_data = http_get_fn(f"{clean_base_url}/api/version", rem_ver)
+            if isinstance(ver_data, Mapping):
+                reachable = True
+                raw_ver = ver_data.get("version")
+                if isinstance(raw_ver, str) and raw_ver.strip():
+                    version = _masked(raw_ver.strip(), 32)
+        except Exception:
+            pass
+
+    source = f"ollama/{version}" if version else ("ollama" if reachable else "ollama_unreachable")
+    meta: Dict[str, Any] = {
+        "reachable": reachable,
+        "status": "online" if reachable else "offline",
+        "models_loaded": models_loaded,
+        "version": version,
+    }
+    if models_loaded is not None:
+        limits = normalize_limits_payload(
+            {
+                "unit": "models_loaded",
+                "used": float(models_loaded),
+                "remaining": None,
+                "limit": None,
+                "reset_at": None,
+                "window_s": None,
+                "source": source,
+                "confidence": "exact",
+                "collected_at": collected_at,
+            },
+            default_source="ollama",
+            collected_at=collected_at,
+        )
+        return limits, meta
+
+    return _default_unknown_limits(source=source, collected_at=collected_at), meta
+
+
+def _parse_cli_limits_stdout(
+    harness_id: str,
+    stdout_bytes: bytes,
+    collected_at: str,
+) -> Dict[str, Any]:
+    default_source = f"{harness_id}_cli"
+    text = (stdout_bytes or b"")[:_MAX_PROBE_STDOUT_BYTES].decode("utf-8", errors="replace").strip()
+    if not text:
+        return _default_unknown_limits(source=default_source, collected_at=collected_at)
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return _default_unknown_limits(source=default_source, collected_at=collected_at)
+    if not isinstance(parsed, Mapping):
+        return _default_unknown_limits(source=default_source, collected_at=collected_at)
+
+    sub: Mapping[str, Any] = parsed
+    for nested_key in ("limits", "quota", "rate_limit", "usage"):
+        candidate = parsed.get(nested_key)
+        if isinstance(candidate, Mapping):
+            sub = candidate
+            break
+
+    def _first_float(keys: Sequence[str]) -> Optional[float]:
+        for k in keys:
+            val = _coerce_optional_float(sub.get(k))
+            if val is not None:
+                return val
+        return None
+
+    used = _first_float(("used", "credits_used", "acu_used", "tokens_used", "requests_used"))
+    remaining = _first_float(
+        (
+            "remaining",
+            "credits_remaining",
+            "acu_remaining",
+            "tokens_remaining",
+            "requests_remaining",
+        )
+    )
+    limit = _first_float(
+        ("limit", "total", "max", "credits_limit", "acu_limit", "tokens_limit", "requests_limit")
+    )
+    if remaining is None and limit is not None and used is not None:
+        remaining = max(0.0, limit - used)
+    if used is None and limit is not None and remaining is not None:
+        used = max(0.0, limit - remaining)
+
+    raw_unit = str(sub.get("unit") or "").strip().lower()
+    if not raw_unit:
+        if any(
+            k in sub
+            for k in (
+                "credits_used",
+                "credits_remaining",
+                "credits_limit",
+                "acu_used",
+                "acu_remaining",
+                "acu_limit",
+            )
+        ):
+            raw_unit = "credits"
+        elif any(k in sub for k in ("tokens_used", "tokens_remaining", "tokens_limit")):
+            raw_unit = "tokens"
+        elif any(k in sub for k in ("requests_used", "requests_remaining", "requests_limit")):
+            raw_unit = "requests"
+
+    has_numeric = used is not None or remaining is not None or limit is not None
+    raw_conf = str(sub.get("confidence") or "").strip().lower()
+    if not raw_conf:
+        if has_numeric:
+            raw_conf = "estimated" if sub.get("estimated") is True else "exact"
+        else:
+            raw_conf = "unknown"
+
+    reset_at: Optional[str] = None
+    for k in ("reset_at", "resets_at", "reset", "period_end"):
+        cand_reset = _coerce_optional_str(sub.get(k), 64)
+        if cand_reset is not None:
+            reset_at = cand_reset
+            break
+
+    window_s: Optional[int] = None
+    for k in ("window_s", "window_seconds", "period_s"):
+        cand_win = _coerce_optional_window_s(sub.get(k))
+        if cand_win is not None:
+            window_s = cand_win
+            break
+
+    return normalize_limits_payload(
+        {
+            "unit": raw_unit,
+            "used": used,
+            "remaining": remaining,
+            "limit": limit,
+            "reset_at": reset_at,
+            "window_s": window_s,
+            "source": sub.get("source") or parsed.get("source") or default_source,
+            "confidence": raw_conf,
+            "collected_at": sub.get("collected_at") or collected_at,
+        },
+        default_source=default_source,
+        collected_at=collected_at,
+    )
+
+
+async def _cleanup_probe_process(proc: Any, job_guard: Any = None) -> None:
+    is_real_proc = isinstance(proc, asyncio.subprocess.Process)
+    if job_guard is not None:
+        with suppress(Exception):
+            job_guard.kill_all()
+    if is_real_proc and sys.platform != "win32":
+        pid = getattr(proc, "pid", None)
+        if not isinstance(pid, bool) and isinstance(pid, int) and pid > 0:
+            try:
+                from botex.edge.host_os_driver import kill_posix_process_group
+
+                kill_posix_process_group(pid)
+            except Exception:
+                pass
+    wait_fn = getattr(proc, "wait", None)
+    try:
+        with suppress(ProcessLookupError, OSError, Exception):
+            proc.terminate()
+        if callable(wait_fn) and getattr(proc, "returncode", None) is None:
+            with suppress(TimeoutError, OSError, Exception):
+                res = wait_fn()
+                if inspect.isawaitable(res):
+                    await asyncio.wait_for(res, timeout=0.01)
+    finally:
+        if getattr(proc, "returncode", None) is None:
+            with suppress(ProcessLookupError, OSError, Exception):
+                proc.kill()
+    if callable(wait_fn):
+        with suppress(TimeoutError, OSError, Exception):
+            res2 = wait_fn()
+            if inspect.isawaitable(res2):
+                await asyncio.wait_for(res2, timeout=0.02)
+
+
+class HarnessLimitsCollector:
+    """Bounded non-blocking quota/headroom collector for local harnesses."""
+
+    def __init__(
+        self,
+        *,
+        cli_probes: Optional[Mapping[str, Sequence[str]]] = None,
+        http_get_json: Optional[Callable[[str, float], Any]] = None,
+    ) -> None:
+        probes_src = DEFAULT_LIMITS_CLI_PROBES if cli_probes is None else cli_probes
+        self._cli_probes: Dict[str, tuple[str, ...]] = {
+            _normalize_harness_name(hid): tuple(coerce_text(arg) for arg in argv)
+            for hid, argv in probes_src.items()
+            if argv
+        }
+        self._http_get_json = http_get_json or _http_get_loopback_json
+
+    @staticmethod
+    def _clamp_budget(timeout_s: Any) -> float:
+        if isinstance(timeout_s, bool):
+            return _MAX_LIMITS_COLLECT_TIMEOUT_S
+        try:
+            val = float(timeout_s)
+        except (TypeError, ValueError):
+            return _MAX_LIMITS_COLLECT_TIMEOUT_S
+        if not math.isfinite(val) or val <= 0:
+            return _MAX_LIMITS_COLLECT_TIMEOUT_S
+        return min(val, _MAX_LIMITS_COLLECT_TIMEOUT_S)
+
+    async def _probe_cli_harness(
+        self,
+        harness_id: str,
+        probe_timeout: float,
+        collected_at: str,
+    ) -> Dict[str, Any]:
+        argv = self._cli_probes.get(harness_id)
+        if not argv:
+            return _default_unknown_limits(source="unprobed", collected_at=collected_at)
+        cli_bin = argv[0]
+        if not _is_bare_cli_name(cli_bin):
+            return _default_unknown_limits(source="invalid_cli_probe", collected_at=collected_at)
+
+        is_stdlib_exec = asyncio.create_subprocess_exec is _STDLIB_CREATE_SUBPROCESS_EXEC
+        exe_target = cli_bin
+        spawn_kwargs: Dict[str, Any] = {}
+        if is_stdlib_exec:
+            try:
+                resolved = await asyncio.wait_for(
+                    asyncio.to_thread(shutil.which, cli_bin),
+                    timeout=max(0.01, probe_timeout * 0.5),
+                )
+            except (TimeoutError, Exception):
+                resolved = None
+            if resolved is None:
+                return _default_unknown_limits(source="cli_unavailable", collected_at=collected_at)
+            exe_target = resolved
+            if sys.platform == "win32":
+                spawn_kwargs["creationflags"] = getattr(
+                    subprocess, "CREATE_NO_WINDOW", 0
+                ) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            else:
+                spawn_kwargs["start_new_session"] = True
+
+        scrubbed_env = _scrub_probe_env()
+        proc: Any = None
+        job_guard: Any = None
+        try:
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    exe_target,
+                    *argv[1:],
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=scrubbed_env,
+                    **spawn_kwargs,
+                ),
+                timeout=max(0.01, probe_timeout),
+            )
+            if isinstance(proc, asyncio.subprocess.Process) and sys.platform == "win32":
+                pid = getattr(proc, "pid", None)
+                if not isinstance(pid, bool) and isinstance(pid, int) and pid > 0:
+                    try:
+                        from botex.edge.host_os_driver import WindowsJobGuard
+
+                        guard = WindowsJobGuard()
+                        guard.assign(pid)
+                        job_guard = guard
+                    except Exception:
+                        job_guard = None
+
+            stdout_bytes, _stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=max(0.01, probe_timeout),
+            )
+        except TimeoutError:
+            if proc is not None:
+                await _cleanup_probe_process(proc, job_guard)
+            return _default_unknown_limits(source="timeout", collected_at=collected_at)
+        except asyncio.CancelledError:
+            if proc is not None:
+                await _cleanup_probe_process(proc, job_guard)
+            raise
+        except (FileNotFoundError, PermissionError, OSError):
+            if proc is not None:
+                await _cleanup_probe_process(proc, job_guard)
+            return _default_unknown_limits(source="cli_unavailable", collected_at=collected_at)
+        except Exception:
+            if proc is not None:
+                await _cleanup_probe_process(proc, job_guard)
+            return _default_unknown_limits(source="probe_error", collected_at=collected_at)
+        finally:
+            if job_guard is not None:
+                with suppress(Exception):
+                    job_guard.kill_all()
+
+        rc = getattr(proc, "returncode", 0)
+        if rc not in (0, None):
+            parsed = _parse_cli_limits_stdout(harness_id, stdout_bytes or b"", collected_at)
+            if parsed.get("confidence") != "unknown":
+                return parsed
+            return _default_unknown_limits(
+                source=f"{harness_id}_cli_error", collected_at=collected_at
+            )
+        return _parse_cli_limits_stdout(harness_id, stdout_bytes or b"", collected_at)
+
+    async def _probe_ollama(
+        self,
+        ollama_base_url: str,
+        probe_timeout: float,
+        collected_at: str,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        clean_base = _validate_ollama_loopback_base_url(ollama_base_url)
+        if clean_base is None:
+            return (
+                _default_unknown_limits(source="non_loopback_rejected", collected_at=collected_at),
+                {
+                    "reachable": False,
+                    "status": "degraded",
+                    "models_loaded": None,
+                    "version": "",
+                    "reason": "unsupported-or-non-loopback-endpoint",
+                },
+            )
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    _probe_ollama_sync,
+                    clean_base,
+                    probe_timeout,
+                    collected_at,
+                    self._http_get_json,
+                ),
+                timeout=max(0.01, probe_timeout),
+            )
+        except TimeoutError:
+            return (
+                _default_unknown_limits(source="timeout", collected_at=collected_at),
+                {
+                    "reachable": False,
+                    "status": "degraded",
+                    "models_loaded": None,
+                    "version": "",
+                    "reason": "connect-timeout",
+                },
+            )
+        except Exception:
+            return (
+                _default_unknown_limits(source="ollama_unreachable", collected_at=collected_at),
+                {
+                    "reachable": False,
+                    "status": "offline",
+                    "models_loaded": None,
+                    "version": "",
+                },
+            )
+
+    async def _collect_with_meta(
+        self,
+        harness_ids: Optional[Sequence[str]] = None,
+        *,
+        timeout_s: float = _MAX_LIMITS_COLLECT_TIMEOUT_S,
+        ollama_base_url: str = _DEFAULT_OLLAMA_BASE_URL,
+        collected_at: Optional[str] = None,
+    ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+        ts = _coerce_optional_str(collected_at, 64) or datetime.now(timezone.utc).isoformat()
+        budget_s = self._clamp_budget(timeout_s)
+        # Reserve cleanup headroom inside budget_s so subprocess termination completes before the outer ceiling.
+        probe_timeout = (
+            max(0.01, min(budget_s * 0.85, budget_s - 0.05))
+            if budget_s > 0.08
+            else max(0.01, budget_s * 0.7)
+        )
+
+        raw_targets = _DEFAULT_LIMITS_HARNESS_IDS if harness_ids is None else harness_ids
+        targets: List[str] = []
+        seen: set[str] = set()
+        for raw_id in raw_targets:
+            norm = _normalize_harness_name(raw_id)
+            clean_id = sanitize_identifier(norm) or norm
+            if clean_id and clean_id not in seen:
+                seen.add(clean_id)
+                targets.append(clean_id)
+
+        out: Dict[str, Dict[str, Any]] = {
+            hid: _default_unknown_limits(source="timeout", collected_at=ts) for hid in targets
+        }
+        ollama_meta: Dict[str, Any] = {
+            "reachable": False,
+            "status": "offline",
+            "models_loaded": None,
+            "version": "",
+        }
+        if not targets:
+            return {}, ollama_meta
+
+        async def _run_one(hid: str) -> None:
+            nonlocal ollama_meta
+            if hid == "ollama":
+                limits, meta = await self._probe_ollama(ollama_base_url, probe_timeout, ts)
+                out[hid] = limits
+                ollama_meta = meta
+            elif hid in self._cli_probes:
+                out[hid] = await self._probe_cli_harness(hid, probe_timeout, ts)
+            else:
+                out[hid] = _default_unknown_limits(source="unprobed", collected_at=ts)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(_run_one(hid) for hid in targets)),
+                timeout=budget_s,
+            )
+        except (TimeoutError, Exception):
+            pass
+        return out, ollama_meta
+
+    async def collect(
+        self,
+        harness_ids: Optional[Sequence[str]] = None,
+        *,
+        timeout_s: float = _MAX_LIMITS_COLLECT_TIMEOUT_S,
+        ollama_base_url: str = _DEFAULT_OLLAMA_BASE_URL,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Collect normalized ``limits`` per harness within ``<= 1.5s``; never raises."""
+        try:
+            limits_map, _meta = await self._collect_with_meta(
+                harness_ids,
+                timeout_s=timeout_s,
+                ollama_base_url=ollama_base_url,
+            )
+            return limits_map
+        except Exception:
+            ts = datetime.now(timezone.utc).isoformat()
+            raw_targets = (
+                _DEFAULT_LIMITS_HARNESS_IDS if harness_ids is None else (harness_ids or ())
+            )
+            fallback: Dict[str, Dict[str, Any]] = {}
+            for raw_id in raw_targets:
+                norm = _normalize_harness_name(raw_id)
+                clean_id = sanitize_identifier(norm) or norm
+                if clean_id:
+                    fallback[clean_id] = _default_unknown_limits(
+                        source="probe_error", collected_at=ts
+                    )
+            return fallback
+
+
 async def _gather_discovery_probes(
     cli_names: List[str],
     endpoint_map: Dict[str, str],
@@ -309,14 +1024,18 @@ async def discover_local_harnesses(
     acp_endpoints: Optional[Dict[str, str]] = None,
     allowlisted_clis: Optional[Dict[str, str]] = None,
     timeout_s: float = 1.5,
+    ollama_base_url: Optional[str] = _DEFAULT_OLLAMA_BASE_URL,
+    include_ollama: Optional[bool] = None,
+    limits_collector: Optional[HarnessLimitsCollector] = None,
 ) -> List[Dict[str, Any]]:
-    """Probe local harness availability without blocking the event loop.
+    """Probe local harness availability and limits without blocking the event loop.
 
-    Returns one record per probe target with the exact keys
-    ``harness_id``/``transport``/``status``/``last_seen``/``capabilities``;
+    Returns one record per probe target with the keys
+    ``harness_id``/``transport``/``status``/``last_seen``/``capabilities``/``limits``;
     the whole pass is bounded by ``timeout_s`` (plus a small scheduling
     grace) and records never contain filesystem paths or endpoint hosts.
     """
+    started_mono = time.monotonic()
     cli_map: Dict[str, str] = dict(
         DEFAULT_DISCOVERY_CLI_ALLOWLIST if allowlisted_clis is None else allowlisted_clis
     )
@@ -327,8 +1046,15 @@ async def discover_local_harnesses(
         timeout = float(timeout_s)
     except (TypeError, ValueError):
         timeout = 1.5
-    if math.isnan(timeout) or timeout <= 0:
+    if isinstance(timeout_s, bool) or math.isnan(timeout) or timeout <= 0:
         timeout = 1.5
+
+    def _harness_id(raw: Any) -> str:
+        norm = _normalize_harness_name(raw)
+        return sanitize_identifier(norm) or norm
+
+    collector = limits_collector or HarnessLimitsCollector()
+    custom_collector = limits_collector is not None
 
     cli_available: Dict[str, bool] = {}
     endpoint_results: List[tuple[str, Dict[str, Any]]] = []
@@ -350,10 +1076,8 @@ async def discover_local_harnesses(
 
     observed_at = datetime.now(timezone.utc).isoformat()
     records: List[Dict[str, Any]] = []
-
-    def _harness_id(raw: Any) -> str:
-        norm = _normalize_harness_name(raw)
-        return sanitize_identifier(norm) or norm
+    online_ids: set[str] = set()
+    all_record_ids: List[str] = []
 
     for raw_id, cli_name in cli_map.items():
         harness_id = _harness_id(raw_id)
@@ -363,11 +1087,15 @@ async def discover_local_harnesses(
         found: Optional[bool] = cli_available.get(cli_name_clean)
         if not _is_bare_cli_name(cli_name_clean):
             found = None
+        status = "online" if found else ("offline" if found is False else "degraded")
+        if status == "online":
+            online_ids.add(harness_id)
+        all_record_ids.append(harness_id)
         records.append(
             {
                 "harness_id": harness_id,
                 "transport": "cli",
-                "status": "online" if found else ("offline" if found is False else "degraded"),
+                "status": status,
                 "last_seen": observed_at,
                 "capabilities": {
                     "available": found is True,
@@ -385,6 +1113,9 @@ async def discover_local_harnesses(
             status, probe_capabilities = endpoint_results[idx]
         else:
             status, probe_capabilities = "degraded", {"probe": "tcp"}
+        if status == "online":
+            online_ids.add(harness_id)
+        all_record_ids.append(harness_id)
         capabilities = dict(probe_capabilities)
         capabilities["available"] = status == "online"
         records.append(
@@ -397,8 +1128,212 @@ async def discover_local_harnesses(
             }
         )
 
+    ollama_queried = include_ollama is True or "ollama" in all_record_ids
+    should_probe_ollama = include_ollama is not False and bool(
+        coerce_text(ollama_base_url or "").strip()
+    )
+
+    limits_targets: List[str] = []
+    for hid in all_record_ids:
+        if hid == "ollama":
+            continue
+        if hid in online_ids and (hid in collector._cli_probes or custom_collector):
+            limits_targets.append(hid)
+    if should_probe_ollama or ollama_queried:
+        limits_targets.append("ollama")
+
+    limits_map: Dict[str, Dict[str, Any]] = {}
+    ollama_meta: Dict[str, Any] = {
+        "reachable": False,
+        "status": "offline",
+        "models_loaded": None,
+        "version": "",
+    }
+    if limits_targets:
+        elapsed = time.monotonic() - started_mono
+        rem_budget = max(0.05, min(_MAX_LIMITS_COLLECT_TIMEOUT_S, timeout - elapsed))
+        limits_map, ollama_meta = await collector._collect_with_meta(
+            limits_targets,
+            timeout_s=rem_budget,
+            ollama_base_url=coerce_text(ollama_base_url or ""),
+            collected_at=observed_at,
+        )
+
+    has_ollama_record = False
+    for record in records:
+        hid = record["harness_id"]
+        if hid == "ollama":
+            has_ollama_record = True
+            if ollama_meta.get("models_loaded") is not None:
+                record["capabilities"]["models_loaded"] = int(ollama_meta["models_loaded"])
+            if ollama_meta.get("version"):
+                record["capabilities"]["version"] = str(ollama_meta["version"])
+        if hid in limits_map:
+            record["limits"] = normalize_limits_payload(
+                limits_map[hid], default_source="unprobed", collected_at=observed_at
+            )
+        else:
+            fallback_src = "cli_unavailable" if record["status"] == "offline" else "unprobed"
+            record["limits"] = _default_unknown_limits(
+                source=fallback_src, collected_at=observed_at
+            )
+
+    if not has_ollama_record and (bool(ollama_meta.get("reachable")) or include_ollama is True):
+        ollama_caps: Dict[str, Any] = {
+            "available": bool(ollama_meta.get("reachable")),
+            "probe": "http",
+        }
+        if ollama_meta.get("models_loaded") is not None:
+            ollama_caps["models_loaded"] = int(ollama_meta["models_loaded"])
+        if ollama_meta.get("version"):
+            ollama_caps["version"] = str(ollama_meta["version"])
+        if ollama_meta.get("reason"):
+            ollama_caps["reason"] = str(ollama_meta["reason"])
+        ollama_limits = normalize_limits_payload(
+            limits_map.get("ollama"),
+            default_source="ollama",
+            collected_at=observed_at,
+        )
+        records.append(
+            {
+                "harness_id": "ollama",
+                "transport": "http",
+                "status": str(
+                    ollama_meta.get("status")
+                    or ("online" if ollama_meta.get("reachable") else "offline")
+                ),
+                "last_seen": observed_at,
+                "capabilities": ollama_caps,
+                "limits": ollama_limits,
+            }
+        )
+
     records.sort(key=lambda record: (record["harness_id"], record["transport"]))
     return records
+
+
+class HarnessInventoryService:
+    """Async background harness-inventory cache shared across workspace heartbeats."""
+
+    def __init__(
+        self,
+        refresh_interval_s: float = 25.0,
+        ttl_s: float = 30.0,
+        discover_fn: Optional[Callable[..., Awaitable[List[Dict[str, Any]]]]] = None,
+        time_fn: Optional[Callable[[], float]] = None,
+    ) -> None:
+        if isinstance(refresh_interval_s, bool):
+            interval = 25.0
+        else:
+            try:
+                interval = float(refresh_interval_s)
+            except (TypeError, ValueError):
+                interval = 25.0
+        if not math.isfinite(interval) or interval <= 0:
+            interval = 25.0
+
+        if isinstance(ttl_s, bool):
+            ttl = 30.0
+        else:
+            try:
+                ttl = float(ttl_s)
+            except (TypeError, ValueError):
+                ttl = 30.0
+        if not math.isfinite(ttl) or ttl < 0:
+            ttl = 30.0
+
+        self._refresh_interval_s = max(0.01, interval)
+        self._ttl_s = ttl
+        self._discover_fn = discover_fn or discover_local_harnesses
+        self._time_fn = time_fn or time.monotonic
+        self._snapshot: List[Dict[str, Any]] = []
+        self._last_refresh_mono: Optional[float] = None
+        self._task: Optional[asyncio.Task[None]] = None
+        self._stop_event: Optional[asyncio.Event] = None
+        self._refresh_lock: Optional[asyncio.Lock] = None
+
+    async def refresh_once(self) -> List[Dict[str, Any]]:
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+        async with self._refresh_lock:
+            try:
+                res = self._discover_fn()
+                if inspect.isawaitable(res):
+                    res = await res
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOG.debug("harness inventory refresh failed (%s)", type(exc).__name__)
+                return self.get_cached_snapshot()
+
+            if isinstance(res, list):
+                now_iso = datetime.now(timezone.utc).isoformat()
+                cleaned: List[Dict[str, Any]] = []
+                for item in res:
+                    if not isinstance(item, Mapping):
+                        continue
+                    rec = copy.deepcopy(dict(item))
+                    rec["limits"] = normalize_limits_payload(
+                        rec.get("limits"),
+                        default_source="inventory",
+                        collected_at=str(rec.get("last_seen") or now_iso),
+                    )
+                    cleaned.append(rec)
+                self._snapshot = cleaned
+                self._last_refresh_mono = float(self._time_fn())
+            return self.get_cached_snapshot()
+
+    async def _run_loop(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                await self.refresh_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self._refresh_interval_s)
+            except TimeoutError:
+                continue
+
+    async def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        stop_event = asyncio.Event()
+        self._stop_event = stop_event
+        self._task = asyncio.create_task(self._run_loop(stop_event), name="botex-harness-inventory")
+        await asyncio.sleep(0)
+
+    async def stop(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+        task = self._task
+        self._task = None
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    def get_cached_snapshot(self) -> List[Dict[str, Any]]:
+        """Return a deep copy of the cached snapshot without awaiting I/O."""
+        if not self._snapshot:
+            return []
+        out = copy.deepcopy(self._snapshot)
+        is_stale = self._last_refresh_mono is None or (
+            (float(self._time_fn()) - self._last_refresh_mono) > self._ttl_s
+        )
+        if is_stale:
+            for record in out:
+                limits = normalize_limits_payload(
+                    record.get("limits"),
+                    default_source="stale_cache",
+                    collected_at=str(record.get("last_seen") or ""),
+                )
+                limits["confidence"] = "unknown"
+                limits["source"] = "stale_cache"
+                record["limits"] = limits
+        return out
 
 
 # ---------------------------------------------------------------------------

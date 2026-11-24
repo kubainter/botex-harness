@@ -62,11 +62,15 @@ __all__ = [
     "get_active_leases",
     "upsert_host_harnesses",
     "list_host_harnesses",
+    "upsert_host_workspaces",
+    "list_host_workspaces",
     "create_work_order",
     "get_work_order",
     "list_work_orders",
     "update_work_order_status",
     "list_expired_work_orders",
+    "record_work_order_event",
+    "list_work_order_events",
     "list_active_brief_payloads",
     "create_channel",
     "list_channels",
@@ -75,7 +79,7 @@ __all__ = [
     "list_channel_messages",
 ]
 
-SWARM_SCHEMA_VERSION = 4
+SWARM_SCHEMA_VERSION = 5
 
 
 # server/skills stay lazy-imported: core must not hard-depend on upper layers
@@ -238,6 +242,26 @@ CREATE INDEX IF NOT EXISTS idx_channel_messages_chan_created
     ON channel_messages(channel_id, created_at);
 """
 
+_SCHEMA_V5_SQL = """
+CREATE TABLE IF NOT EXISTS host_workspaces (
+    host_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'enrolled',
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (host_id, workspace_id)
+);
+CREATE TABLE IF NOT EXISTS work_order_events (
+    order_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL DEFAULT '',
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    data_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (order_id, seq)
+);
+"""
+
 
 def migrate_swarm_store(conn: sqlite3.Connection) -> None:
     """Apply in-place schema migrations gated by ``PRAGMA user_version``; idempotent."""
@@ -266,6 +290,19 @@ def migrate_swarm_store(conn: sqlite3.Connection) -> None:
     if current < 4:
         conn.executescript(_SCHEMA_V4_SQL)
         conn.execute("PRAGMA user_version = 4;")
+        conn.commit()
+    if current < 5:
+        conn.executescript(_SCHEMA_V5_SQL)
+        harness_cols = {
+            str(r["name"] if isinstance(r, sqlite3.Row) else r[1])
+            for r in conn.execute("PRAGMA table_info(host_harness_inventory);").fetchall()
+        }
+        if "limits_json" not in harness_cols:
+            conn.execute(
+                "ALTER TABLE host_harness_inventory"
+                " ADD COLUMN limits_json TEXT NOT NULL DEFAULT '{}';"
+            )
+        conn.execute("PRAGMA user_version = 5;")
         conn.commit()
 
 
@@ -1038,16 +1075,19 @@ def upsert_host_harnesses(
             caps_json = _coerce_capabilities_json(
                 entry.get("capabilities", entry.get("capabilities_json"))
             )
+            limits_json = _coerce_capabilities_json(entry.get("limits", entry.get("limits_json")))
             conn.execute(
                 "INSERT INTO host_harness_inventory"
-                " (host_id, harness_id, transport, status, last_seen, capabilities_json)"
-                " VALUES (?, ?, ?, ?, ?, ?)"
+                " (host_id, harness_id, transport, status, last_seen,"
+                "  capabilities_json, limits_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(host_id, harness_id) DO UPDATE SET"
                 "   transport=excluded.transport,"
                 "   status=excluded.status,"
                 "   last_seen=excluded.last_seen,"
-                "   capabilities_json=excluded.capabilities_json;",
-                (clean_host, harness_id, transport, clean_status, seen, caps_json),
+                "   capabilities_json=excluded.capabilities_json,"
+                "   limits_json=excluded.limits_json;",
+                (clean_host, harness_id, transport, clean_status, seen, caps_json, limits_json),
             )
             stored.append(
                 {
@@ -1058,6 +1098,8 @@ def upsert_host_harnesses(
                     "last_seen": seen,
                     "capabilities": _parse_capabilities(caps_json),
                     "capabilities_json": caps_json,
+                    "limits": _parse_capabilities(limits_json),
+                    "limits_json": limits_json,
                 }
             )
     return stored
@@ -1073,8 +1115,8 @@ def list_host_harnesses(
     """List reported harnesses; rows idle beyond ``stale_after_s`` surface as ``stale``."""
     conn = get_swarm_store_conn(db_path)
     sql = (
-        "SELECT host_id, harness_id, transport, status, last_seen, capabilities_json"
-        " FROM host_harness_inventory"
+        "SELECT host_id, harness_id, transport, status, last_seen,"
+        " capabilities_json, limits_json FROM host_harness_inventory"
     )
     params: List[Any] = []
     if host_id and str(host_id).strip():
@@ -1089,6 +1131,7 @@ def list_host_harnesses(
     for row in conn.execute(sql, params).fetchall():
         item = dict(row)
         item["capabilities"] = _parse_capabilities(item.get("capabilities_json"))
+        item["limits"] = _parse_capabilities(item.get("limits_json"))
         age_s: Optional[float] = None
         try:
             seen_dt = datetime.fromisoformat(str(item.get("last_seen") or ""))
@@ -1102,6 +1145,88 @@ def list_host_harnesses(
             item["status"] = "stale"
         out.append(item)
     return out
+
+
+# ============================================================================
+# Host workspaces (Edge-reported workspace enrolment; ZERO filesystem paths)
+# ============================================================================
+
+
+_VALID_WORKSPACE_STATES: Dict[str, str] = {
+    "enrolled": "enrolled",
+    "candidate": "candidate",
+    "disabled": "disabled",
+}
+_MAX_WORKSPACE_LABEL_CHARS = 128
+
+
+def upsert_host_workspaces(
+    host_id: str,
+    workspaces: List[dict],
+    *,
+    last_seen: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Upsert workspace enrolments reported by an Edge host; returns stored rows.
+
+    Only ``workspace_id``/``label``/``state``/``last_seen`` are read from each
+    entry — unexpected keys (``root``, ``path``, ...) are stripped so no
+    filesystem path can ever reach this table.
+    """
+    clean_host = coerce_text(str(host_id or "")).strip()
+    if not clean_host:
+        return []
+    seen_default = coerce_text(str(last_seen or "")).strip() or _utc_now_iso()
+    conn = get_swarm_store_conn(db_path)
+    stored: list[dict] = []
+    with _SWARM_LOCK, conn:
+        for entry in workspaces or ():
+            if not isinstance(entry, Mapping):
+                continue
+            ws_id = sanitize_identifier(str(entry.get("workspace_id") or ""))
+            if not ws_id:
+                continue
+            label = coerce_text(mask_secrets(str(entry.get("label") or ""))).strip()
+            label = label[:_MAX_WORKSPACE_LABEL_CHARS]
+            state_key = coerce_text(str(entry.get("state") or "")).strip().lower()
+            clean_state = _VALID_WORKSPACE_STATES.get(state_key, "enrolled")
+            seen = coerce_text(str(entry.get("last_seen") or seen_default)).strip() or seen_default
+            conn.execute(
+                "INSERT INTO host_workspaces"
+                " (host_id, workspace_id, label, state, last_seen)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(host_id, workspace_id) DO UPDATE SET"
+                "   label=excluded.label,"
+                "   state=excluded.state,"
+                "   last_seen=excluded.last_seen;",
+                (clean_host, ws_id, label, clean_state, seen),
+            )
+            stored.append(
+                {
+                    "host_id": clean_host,
+                    "workspace_id": ws_id,
+                    "label": label,
+                    "state": clean_state,
+                    "last_seen": seen,
+                }
+            )
+    return stored
+
+
+def list_host_workspaces(
+    host_id: Optional[str] = None,
+    *,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """List enrolled workspaces, optionally scoped to a single host."""
+    sql = "SELECT host_id, workspace_id, label, state, last_seen FROM host_workspaces"
+    params: List[Any] = []
+    if host_id and str(host_id).strip():
+        sql += " WHERE host_id = ?"
+        params.append(coerce_text(str(host_id).strip()))
+    sql += " ORDER BY host_id, workspace_id;"
+    conn = get_swarm_store_conn(db_path)
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 # ============================================================================
@@ -1359,6 +1484,90 @@ def list_expired_work_orders(
         (*skipped, now_ts),
     ).fetchall()
     return [_order_row_dict(r) for r in rows]
+
+
+_MAX_EVENT_KIND_CHARS = 64
+
+
+def record_work_order_event(
+    order_id: str,
+    *,
+    workspace_id: str = "",
+    seq: int,
+    kind: str,
+    ts: Optional[str] = None,
+    data: Optional[dict] = None,
+    db_path: Optional[Path] = None,
+) -> dict:
+    """Append a deduplicated lifecycle event for a work order.
+
+    ``(order_id, seq)`` is the dedup key: a replayed sequence number is an
+    ``INSERT OR IGNORE`` no-op reported as ``duplicate=True``.
+    """
+    clean_order_id = sanitize_identifier(str(order_id or ""))
+    if not clean_order_id:
+        return {"ok": False, "error": "INVALID_ORDER_ID"}
+    if isinstance(seq, bool):
+        return {"ok": False, "error": "INVALID_SEQ"}
+    try:
+        seq_int = int(seq)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "INVALID_SEQ"}
+    if seq_int < 0:
+        return {"ok": False, "error": "INVALID_SEQ"}
+    clean_kind = coerce_text(mask_secrets(str(kind or ""))).strip()[:_MAX_EVENT_KIND_CHARS]
+    if not clean_kind:
+        return {"ok": False, "error": "INVALID_KIND"}
+    clean_ws = sanitize_identifier(str(workspace_id or ""))
+    clean_ts = coerce_text(str(ts or "")).strip() or _utc_now_iso()
+    data_json = _coerce_capabilities_json(data) if data is not None else "{}"
+    parsed_data = _parse_capabilities(data_json)
+    conn = get_swarm_store_conn(db_path)
+    with _SWARM_LOCK, conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO work_order_events"
+            " (order_id, workspace_id, seq, kind, ts, data_json)"
+            " VALUES (?, ?, ?, ?, ?, ?);",
+            (clean_order_id, clean_ws, seq_int, clean_kind, clean_ts, data_json),
+        )
+        inserted = cur.rowcount == 1
+    return {
+        "ok": True,
+        "inserted": inserted,
+        "duplicate": not inserted,
+        "order_id": clean_order_id,
+        "workspace_id": clean_ws,
+        "seq": seq_int,
+        "kind": clean_kind,
+        "ts": clean_ts,
+        "data": parsed_data,
+    }
+
+
+def list_work_order_events(
+    order_id: str,
+    *,
+    limit: int = 200,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """Return stored events for ``order_id`` ordered by ``seq`` ascending."""
+    clean_id = sanitize_identifier(str(order_id or ""))
+    if not clean_id:
+        return []
+    lim = max(1, min(_coerce_int(limit, 200), 1000))
+    conn = get_swarm_store_conn(db_path)
+    rows = conn.execute(
+        "SELECT order_id, workspace_id, seq, kind, ts, data_json"
+        " FROM work_order_events WHERE order_id = ?"
+        " ORDER BY seq ASC LIMIT ?;",
+        (clean_id, lim),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item["data"] = _parse_capabilities(item.get("data_json"))
+        out.append(item)
+    return out
 
 
 # ============================================================================
