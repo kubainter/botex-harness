@@ -312,7 +312,11 @@ async def test_llm_inference_primary_and_fallback(tmp_path, monkeypatch):
         }
     )
 
-    with patch.object(service, "_try_nemotron_inference", AsyncMock(return_value=mock_json_reply)):
+    # Local tier runs first; Nemotron is the cloud fallback.
+    with (
+        patch.object(service, "_try_local_llm_inference", AsyncMock(return_value=None)),
+        patch.object(service, "_try_nemotron_inference", AsyncMock(return_value=mock_json_reply)),
+    ):
         tier, analysis = await service._execute_batch_llm_analysis(
             health={"total_nodes": 5, "total_edges": 4, "broken_links": []},
             recent_nodes=[{"id": "node_b", "title": "Node B"}],
@@ -322,10 +326,11 @@ async def test_llm_inference_primary_and_fallback(tmp_path, monkeypatch):
         assert len(analysis["recommended_links"]) == 1
         assert analysis["recommended_links"][0]["source_id"] == "orphan_a"
 
-    # Test Tier 1 returns None -> Falls to Tier 2 (Local)
+    # Local tier succeeds -> Nemotron is never consulted
+    nemotron_mock = AsyncMock(return_value=None)
     with (
-        patch.object(service, "_try_nemotron_inference", AsyncMock(return_value=None)),
         patch.object(service, "_try_local_llm_inference", AsyncMock(return_value=mock_json_reply)),
+        patch.object(service, "_try_nemotron_inference", nemotron_mock),
     ):
         tier, analysis = await service._execute_batch_llm_analysis(
             health={"total_nodes": 5, "total_edges": 4, "broken_links": []},
@@ -334,6 +339,7 @@ async def test_llm_inference_primary_and_fallback(tmp_path, monkeypatch):
         )
         assert tier == "local-bielik"
         assert analysis["cluster_themes"] == ["auth", "database"]
+        nemotron_mock.assert_not_called()
 
     # Test Both Tier 1 and Tier 2 return None -> Falls to Tier 3 (Deterministic)
     with (
@@ -598,7 +604,7 @@ def test_local_llm_inference_passes_decision_mode_for_bielik(
     service = CuratorService(workspace_dir=str(tmp_path), local_model="bielik:latest")
     out = asyncio.run(service._try_local_llm_inference("test prompt"))
     assert out == '{"summary": "ok"}'
-    assert captured["client_timeout"] == 45.0
+    assert captured["client_timeout"] == 1800.0
     assert captured["extra_body"] == {
         "chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}
     }
