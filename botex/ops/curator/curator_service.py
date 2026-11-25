@@ -35,9 +35,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from botex import memory, obsidian
 from botex.config import resolve_workspace
+from botex.ops.curator import recall_briefing
 from botex.ops.curator.prompts import (
     COMPILED_TRUTH_SYSTEM_PROMPT,
     CURATOR_SYSTEM_PROMPT,
+    RECALL_BRIEFING_SYSTEM_PROMPT,
     build_compiled_truth_user_prompt,
     build_curator_user_prompt,
 )
@@ -1383,6 +1385,17 @@ class CuratorService:
                 lines.append(f"- [[{tid}]]: zsyntetyzowano z klastra {c_size} notatek składowych.")
             lines.append("")
 
+        briefings_info = analysis.get("recall_briefings")
+        if briefings_info and briefings_info.get("compiled", 0) > 0:
+            lines.append("### Odprawy Recall (Pre-compiled Briefings)")
+            for item in briefings_info.get("results", [])[:10]:
+                if item.get("action") == "compiled":
+                    lines.append(
+                        f"- project `{item.get('project')}`: [[{item.get('briefing_id')}]] "
+                        f"z {item.get('sources', 0)} notatek źródłowych."
+                    )
+            lines.append("")
+
         lines.extend(
             [
                 "## Gwarancje Integralności (Invariants)",
@@ -1532,6 +1545,37 @@ class CuratorService:
                 providers_cfg,
                 limiter=None,
                 system_prompt=COMPILED_TRUTH_SYSTEM_PROMPT,
+            )
+            if out:
+                return out
+        return None
+
+    async def _infer_briefing(self, prompt: str) -> Optional[str]:
+        lanes = self._available_provider_lanes()
+        # Local-first like the drain: the nightly window tolerates slow local
+        # inference and cloud quota stays untouched when the box can do it.
+        if "local-bielik" in lanes:
+            out = await self._try_local_llm_inference(
+                prompt, system_prompt=RECALL_BRIEFING_SYSTEM_PROMPT
+            )
+            if out:
+                return out
+        if "nvidia" in lanes:
+            out = await self._try_nemotron_inference(
+                prompt, system_prompt=RECALL_BRIEFING_SYSTEM_PROMPT
+            )
+            if out:
+                return out
+        providers_cfg = self._load_providers_config()
+        for lane in lanes:
+            if lane in ("nvidia", "local-bielik"):
+                continue
+            out = await self._try_cloud_lane_inference(
+                lane,
+                prompt,
+                providers_cfg,
+                limiter=None,
+                system_prompt=RECALL_BRIEFING_SYSTEM_PROMPT,
             )
             if out:
                 return out
@@ -1812,6 +1856,27 @@ class CuratorService:
             "compiled": compiled_records,
             "skipped": skipped_records,
         }
+
+    async def _run_briefing_phase(self, deadline: Optional[float] = None) -> Dict[str, Any]:
+        """Compile per-project recall briefings (zero-LLM first-line recall)."""
+        try:
+            from botex.config import load_config
+
+            curator_cfg = load_config().get("curator") or {}
+        except Exception as exc:
+            logger.debug("Briefing config load notice: %s", exc)
+            curator_cfg = {}
+        if not curator_cfg.get("briefings_enabled", True):
+            return {"enabled": False, "compiled": 0}
+        max_projects = int(curator_cfg.get("briefings_max_per_night", 8) or 8)
+        min_notes = int(curator_cfg.get("briefings_min_notes", 5) or 5)
+        return await recall_briefing.run_briefing_compilation(
+            workspace_dir=str(self.ws_path),
+            infer_fn=self._infer_briefing,
+            deadline=deadline,
+            min_notes=min_notes,
+            max_projects=max_projects,
+        )
 
     def _lesson_confirmation_counts(self) -> Dict[str, set]:
         """Count distinct confirming task_ids per lesson from the analytics ledger.
@@ -2713,6 +2778,15 @@ class CuratorService:
                 except Exception as exc:
                     logger.warning("Skill crystallization cycle notice: %s", exc)
             analysis["skill_proposals"] = proposal_stats
+
+            # 6f. Recall Briefings (pre-compiled zero-LLM first-line recall)
+            briefing_stats: Dict[str, Any] = {"compiled": 0}
+            if deadline is None or time.time() < deadline:
+                try:
+                    briefing_stats = await self._run_briefing_phase(deadline=deadline)
+                except Exception as exc:
+                    logger.warning("Recall briefing compilation notice: %s", exc)
+            analysis["recall_briefings"] = briefing_stats
 
             assess = _compute_health_assessment(health)
             duration = time.time() - start_time
