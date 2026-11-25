@@ -35,8 +35,8 @@ targeted + integration tests.
 | `botex.memory` | `botex/memory/__init__.py` | 6 | 21 |
 | `botex.tools.file_tools` | `botex/tools/file_tools.py` | 6 | 2 |
 | `botex.core.context_guard` | `botex/core/context_guard.py` | 5 | 1 |
+| `botex.providers.providers` | `botex/providers/providers.py` | 5 | 7 |
 | `botex.tools.net_tools` | `botex/tools/net_tools.py` | 5 | 1 |
-| `botex.core.tracing` | `botex/core/tracing.py` | 4 | 2 |
 
 ## Domain Dependencies
 

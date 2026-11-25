@@ -139,14 +139,13 @@
     },
     "ollama": {
       "api_key_env": "OLLAMA_API_KEY",
-      "base_url": "http://127.0.0.1:8080/v1",
       "zdr": {
         "enabled": false
       },
       "models": {
-        "default": "Bielik-11B-v3.1-instruct.Q4_K_M",
-        "coding": "Bielik-11B-v3.1-instruct.Q4_K_M",
-        "fast": "Bielik-11B-v3.1-instruct.Q4_K_M"
+        "default": "SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M",
+        "coding": "SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M",
+        "fast": "SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M"
       }
     }
   },
@@ -314,7 +313,7 @@
   "memory": {
     "recall": {
       "ollama": {
-        "model": "Qwen3.5-9B-OBLITERATED.i1-Q4_K_M",
+        "model": "qwen2.5:3b",
         "enabled": true,
         "timeout_s": 12
       },

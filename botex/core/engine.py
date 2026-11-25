@@ -19,6 +19,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from openai import APITimeoutError, AsyncOpenAI
@@ -2266,11 +2267,11 @@ async def _run_botex_task_once_impl(
     # Configured local model ids may be aliases (e.g. Ollama tags, HF slugs)
     # — llama-server only serves its live ids. Remote providers skip the
     # extra /models round-trip.
-    _resolved_llm_base = str(provider_cfg.get("base_url") or "")
-    if (
-        provider_name.lower().strip() in ("ollama", "bielik", "local")
-        or "127.0.0.1" in _resolved_llm_base
-        or "localhost" in _resolved_llm_base
+    _resolved_llm_host = urlparse(str(provider_cfg.get("base_url") or "")).hostname or ""
+    if provider_name.lower().strip() in ("ollama", "bielik", "local") or _resolved_llm_host in (
+        "127.0.0.1",
+        "localhost",
+        "::1",
     ):
         model = await resolve_model_for_openai_client(client, model)
     # The wire flag follows the same zdr_enforced() decision as the local
