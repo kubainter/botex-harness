@@ -825,3 +825,241 @@ def test_engine_stream_uses_with_streaming_response(tmp_path, monkeypatch):
     assert any(
         p == "nvidia" and h.get("x-ratelimit-remaining-requests") == "9" for p, h, *_ in seen
     ), f"headers never observed: {seen}"
+
+
+def test_engine_stream_awaits_coroutine_parse(tmp_path, monkeypatch):
+    """openai>=3.51 AsyncAPIResponse.parse() is a coroutine — the streamed
+    path must await it, else a coroutine lands in normalize_response and the
+    call dies with 'no_choices' (observed live as provider_error ~1-4s)."""
+    from types import SimpleNamespace
+
+    import botex.engine as engine
+
+    chunk = SimpleNamespace(
+        id="c1",
+        model="nvidia/test",
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content="STATUS: DONE\nok", reasoning_content=None, tool_calls=None
+                ),
+                finish_reason="stop",
+                index=0,
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+    class _AsyncChunks:
+        def __aiter__(self):
+            async def _gen():
+                yield chunk
+
+            return _gen()
+
+    class _RawResp:
+        headers = {"x-ratelimit-remaining-requests": "9"}
+
+        async def parse(self):
+            return _AsyncChunks()
+
+    class _StreamingCM:
+        async def __aenter__(self):
+            return _RawResp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    wsr_calls = []
+    wsr = SimpleNamespace(create=lambda **kw: wsr_calls.append(kw) or _StreamingCM())
+    wr = SimpleNamespace(
+        create=AsyncMock(side_effect=AssertionError("with_raw_response used for stream"))
+    )
+    fake = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(side_effect=AssertionError("plain create used")),
+                with_streaming_response=wsr,
+                with_raw_response=wr,
+            )
+        )
+    )
+
+    monkeypatch.setattr(engine, "AsyncOpenAI", lambda **_: fake)
+    monkeypatch.setattr(engine, "resolve_model_candidates", lambda *a, **k: ["nvidia/test"])
+    monkeypatch.setattr(engine, "check_model_price", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_model_tools", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_budget_limit", lambda *a, **k: (False, 0.0))
+    monkeypatch.setattr(engine, "log_run", lambda **kw: {"cost_usd": 0.0})
+    monkeypatch.setattr(engine, "print_run_summary", lambda *a, **k: None)
+    result = asyncio.run(
+        engine.run_botex_task(
+            task="stream probe",
+            workspace_dir=str(tmp_path),
+            model="nvidia/test",
+            api_key="x",
+            provider="nvidia",
+            mode="readonly",
+        )
+    )
+    assert result["status"] == "DONE", result
+    assert len(wsr_calls) == 1, f"with_streaming_response.create calls: {wsr_calls}"
+
+
+def test_engine_remote_provider_skips_alias_resolution(tmp_path, monkeypatch):
+    """Remote providers must not pay the extra /models round-trip — the local
+    alias resolution is loopback-only."""
+    from types import SimpleNamespace
+
+    import botex.engine as engine
+
+    chunk = SimpleNamespace(
+        id="c1",
+        model="nvidia/test",
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content="STATUS: DONE\nok", reasoning_content=None, tool_calls=None
+                ),
+                finish_reason="stop",
+                index=0,
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+    class _AsyncChunks:
+        def __aiter__(self):
+            async def _gen():
+                yield chunk
+
+            return _gen()
+
+    class _RawResp:
+        headers = {"x-ratelimit-remaining-requests": "9"}
+
+        def parse(self):
+            return _AsyncChunks()
+
+    class _StreamingCM:
+        async def __aenter__(self):
+            return _RawResp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    wsr_calls = []
+    wsr = SimpleNamespace(create=lambda **kw: wsr_calls.append(kw) or _StreamingCM())
+    wr = SimpleNamespace(
+        create=AsyncMock(side_effect=AssertionError("with_raw_response used for stream"))
+    )
+    fake = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(side_effect=AssertionError("plain create used")),
+                with_streaming_response=wsr,
+                with_raw_response=wr,
+            )
+        )
+    )
+
+    resolve_calls = []
+
+    async def _spy(client, model):
+        resolve_calls.append(model)
+        return model
+
+    monkeypatch.setattr(engine, "AsyncOpenAI", lambda **_: fake)
+    monkeypatch.setattr(engine, "resolve_model_for_openai_client", _spy)
+    monkeypatch.setattr(engine, "resolve_model_candidates", lambda *a, **k: ["nvidia/test"])
+    monkeypatch.setattr(engine, "check_model_price", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_model_tools", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_budget_limit", lambda *a, **k: (False, 0.0))
+    monkeypatch.setattr(engine, "log_run", lambda **kw: {"cost_usd": 0.0})
+    monkeypatch.setattr(engine, "print_run_summary", lambda *a, **k: None)
+    result = asyncio.run(
+        engine.run_botex_task(
+            task="stream probe",
+            workspace_dir=str(tmp_path),
+            model="nvidia/test",
+            api_key="x",
+            provider="nvidia",
+            mode="readonly",
+        )
+    )
+    assert result["status"] == "DONE", result
+    assert resolve_calls == [], f"remote provider triggered alias resolution: {resolve_calls}"
+
+
+def test_engine_loopback_provider_applies_alias_resolution(tmp_path, monkeypatch):
+    """Loopback providers route the configured model id through
+    resolve_model_for_openai_client and use the resolved live id on the wire."""
+    from types import SimpleNamespace
+
+    import botex.engine as engine
+
+    completion = SimpleNamespace(
+        id="cc1",
+        model="live/resolved-id",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="STATUS: DONE\nok", tool_calls=None),
+                finish_reason="stop",
+                index=0,
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+    class _RawResp:
+        headers = {}
+
+        def parse(self):
+            return completion
+
+    wr_calls = []
+
+    async def _wr_create(**kw):
+        wr_calls.append(kw)
+        return _RawResp()
+
+    wr = SimpleNamespace(create=_wr_create)
+    wsr = SimpleNamespace(
+        create=lambda **kw: (_ for _ in ()).throw(AssertionError("stream used for ollama"))
+    )
+    fake = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(side_effect=AssertionError("plain create used")),
+                with_streaming_response=wsr,
+                with_raw_response=wr,
+            )
+        )
+    )
+
+    resolve_calls = []
+
+    async def _spy(client, model):
+        resolve_calls.append(model)
+        return "live/resolved-id"
+
+    monkeypatch.setattr(engine, "AsyncOpenAI", lambda **_: fake)
+    monkeypatch.setattr(engine, "resolve_model_for_openai_client", _spy)
+    monkeypatch.setattr(engine, "check_model_price", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_model_tools", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(engine, "check_budget_limit", lambda *a, **k: (False, 0.0))
+    monkeypatch.setattr(engine, "log_run", lambda **kw: {"cost_usd": 0.0})
+    monkeypatch.setattr(engine, "print_run_summary", lambda *a, **k: None)
+    result = asyncio.run(
+        engine.run_botex_task(
+            task="local probe",
+            workspace_dir=str(tmp_path),
+            model="SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M",
+            api_key="x",
+            provider="ollama",
+            mode="readonly",
+        )
+    )
+    assert result["status"] == "DONE", result
+    assert resolve_calls == ["SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M"], resolve_calls
+    assert wr_calls and wr_calls[0].get("model") == "live/resolved-id", wr_calls

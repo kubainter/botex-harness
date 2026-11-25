@@ -1147,3 +1147,46 @@ def test_generic_ollama_fetch_catalog_falls_back_to_llama_server_port():
         assert prov.base_url == "http://127.0.0.1:8080/v1"
     finally:
         _LOCAL_LLM_BASE_URL_RESOLVED.clear()
+
+
+def test_resolve_model_for_openai_client_fails_open_on_list_error():
+    """/models failure must return the requested id unchanged (fail-open) —
+    a wobbly local server must never block task start."""
+    import asyncio
+
+    from botex.providers.providers import resolve_model_for_openai_client
+
+    class _Models:
+        async def list(self, timeout=0):
+            raise ConnectionError("refused")
+
+    class _Client:
+        models = _Models()
+
+    out = asyncio.run(resolve_model_for_openai_client(_Client(), "qwen2.5:3b"))
+    assert out == "qwen2.5:3b"
+
+
+def test_resolve_model_for_openai_client_maps_alias_and_handles_bare_clients():
+    import asyncio
+    from types import SimpleNamespace
+
+    from botex.providers.providers import resolve_model_for_openai_client
+
+    class _Models:
+        async def list(self, timeout=0):
+            return SimpleNamespace(data=[SimpleNamespace(id="Bielik-11B-v3.1-instruct.Q4_K_M")])
+
+    class _Client:
+        models = _Models()
+
+    out = asyncio.run(
+        resolve_model_for_openai_client(_Client(), "SpeakLeash/bielik-11b-v3.1-instruct:Q4_K_M")
+    )
+    assert out == "Bielik-11B-v3.1-instruct.Q4_K_M"
+
+    class _BareClient:
+        pass
+
+    out2 = asyncio.run(resolve_model_for_openai_client(_BareClient(), "qwen2.5:3b"))
+    assert out2 == "qwen2.5:3b"

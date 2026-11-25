@@ -4763,3 +4763,83 @@ def test_mcp_provider_gate_env_fallback(monkeypatch):
         server.run_subagent = real_run_subagent
         server.run_botex_task = real_run_botex_task
     print("[PASS] MCP provider gate env-fallback tests")
+
+
+def test_check_health_live_false_makes_no_catalog_calls(monkeypatch):
+    """live=False must stay env-presence-only — zero endpoint probes."""
+    import asyncio
+
+    import server
+
+    catalog_calls = []
+
+    class _Adapter:
+        def resolve_api_key(self, **k):
+            return "x"
+
+        def fetch_catalog(self, timeout=0):
+            catalog_calls.append(1)
+            return []
+
+    monkeypatch.setattr(server.ProviderRegistry, "get", lambda *a, **k: _Adapter())
+    out = asyncio.run(server.check_health(live=False))
+    assert "Live endpoint probe" not in out
+    assert catalog_calls == []
+
+
+def test_check_health_live_probes_resolve_first_and_parallel(monkeypatch):
+    """live=True: base_url resolution runs before ProviderRegistry.get, probes
+    overlap (asyncio.gather), failures surface sanitized per provider."""
+    import asyncio
+    import threading
+    import time as _time
+
+    import server
+
+    events = []
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_resolve(name, pcfg):
+        events.append(("resolve", name))
+        return pcfg
+
+    def make_adapter(name):
+        class _Adapter:
+            def resolve_api_key(self, **k):
+                return "x"
+
+            def fetch_catalog(self, timeout=0):
+                nonlocal active, max_active
+                if name == "groq":
+                    raise ConnectionError("boom")
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                _time.sleep(0.2)
+                with lock:
+                    active -= 1
+                return [{"id": "m1"}, {"id": "m2"}]
+
+        return _Adapter()
+
+    monkeypatch.setattr(server, "resolve_local_llm_base_url", fake_resolve)
+    monkeypatch.setattr(
+        server.ProviderRegistry,
+        "get",
+        lambda name, pcfg=None: (events.append(("get", name)), make_adapter(name))[1],
+    )
+    out = asyncio.run(server.check_health(live=True))
+
+    assert "Live endpoint probe:" in out
+    providers_cfg = server.load_config().get("providers", {})
+    probed = [n for kind, n in events if kind == "resolve"]
+    assert set(probed) == set(providers_cfg), events
+    for pname in providers_cfg:
+        ridx = events.index(("resolve", pname))
+        gidx = max(i for i, e in enumerate(events) if e == ("get", pname))
+        assert ridx < gidx, f"{pname}: registry access before base_url resolution"
+    assert "[FAIL] groq:" in out
+    assert "reachable (2 models)" in out
+    assert max_active >= 2, f"probes did not overlap (max_active={max_active})"

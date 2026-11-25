@@ -1682,7 +1682,10 @@ async def resolve_model_for_openai_client(client: Any, requested_model: str) -> 
         raw_data = getattr(resp, "data", None) or []
         ids = [getattr(m, "id", "") for m in raw_data if getattr(m, "id", "")]
         return resolve_local_model_id(requested_model, ids)
-    except Exception:
+    except Exception as e:
+        _LOCAL_LLM_LOG.info(
+            "Model alias resolution failed-open for '%s': %s", requested_model, type(e).__name__
+        )
         return requested_model
 
 

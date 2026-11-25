@@ -130,21 +130,28 @@ def _probe_tcp(url: str, timeout: float) -> bool:
 
 
 def _ollama_base_url() -> str:
-    """Resolve the Ollama OpenAI-compatible base URL from OLLAMA_HOST or default."""
+    """Resolve the Ollama OpenAI-compatible base URL from OLLAMA_HOST or default.
+
+    Loopback port drift (llama.cpp :8080 vs Ollama :11434) self-heals through
+    the shared resolver — probes are cached per process after first success.
+    """
     raw = (os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_URL).strip().rstrip("/")
     if "://" not in raw:
         raw = f"http://{raw}"
     if not raw.endswith("/v1"):
         raw = f"{raw}/v1"
-    return raw
+    try:
+        from botex.providers.providers import resolve_local_llm_base_url
+
+        resolved = resolve_local_llm_base_url("ollama", {"base_url": raw})
+        return str(resolved.get("base_url") or raw)
+    except Exception:
+        return raw
 
 
 def _ollama_native_base() -> str:
     """Resolve the native Ollama API root (scheme://host:port, no /v1 path)."""
-    raw = (os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_URL).strip().rstrip("/")
-    if "://" not in raw:
-        raw = f"http://{raw}"
-    parsed = urlparse(raw)
+    parsed = urlparse(_ollama_base_url())
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 11434
     scheme = parsed.scheme or "http"
@@ -345,7 +352,10 @@ async def _try_local_ollama(prompt: str, tcfg: dict) -> Optional[str]:
     try:
         from openai import AsyncOpenAI
 
+        from botex.providers.providers import resolve_model_for_openai_client
+
         client = AsyncOpenAI(base_url=_ollama_base_url(), api_key="ollama", timeout=timeout_s)
+        model = await resolve_model_for_openai_client(client, model)
         resp = await client.chat.completions.create(
             model=model,
             messages=messages,
