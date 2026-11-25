@@ -34,7 +34,12 @@ from botex.curator import (
 )
 from botex.memory import read_memory, save_memory, search_memory
 from botex.server_cloud import app
-from botex.ops.curator.curator_service import CuratorLock, check_active_agent_tasks
+from botex.ops.curator.curator_service import (
+    CuratorLock,
+    _extract_first_json_object,
+    _parse_json_analysis,
+    check_active_agent_tasks,
+)
 from botex.ops.curator.telegram import (
     format_curator_telegram_message,
     get_telegram_config,
@@ -1552,8 +1557,6 @@ async def test_compiled_truth_local_first_order(tmp_path):
 
 # --- Lenient parser regression tests (measured failure modes, VPS A/B 2026-11-25) ---
 
-from botex.ops.curator.curator_service import _extract_first_json_object, _parse_json_analysis
-
 
 def test_parse_json_analysis_trailing_junk_qwen_mode():
     """Qwen3.5-9B emitted a valid JSON object followed by trailing junk."""
@@ -1597,3 +1600,29 @@ def test_parse_json_analysis_clean_and_fenced_unchanged():
     assert _parse_json_analysis(clean)["summary"] == "s"
     fenced = "```json\n" + clean + "\n```"
     assert _parse_json_analysis(fenced)["summary"] == "s"
+
+
+def test_parse_fenced_json_with_trailing_junk_inside_fence():
+    raw = '```json\n{"summary": "ok"}\n} trailing note\n```'
+    parsed = _parse_json_analysis(raw)
+    assert parsed is not None
+    assert parsed["summary"] == "ok"
+
+
+def test_parse_preceding_non_json_fence_falls_back_to_payload():
+    raw = '```text\nnot json\n```\nsome prose\n{"summary": "ok", "links": []}'
+    parsed = _parse_json_analysis(raw)
+    assert parsed is not None
+    assert parsed["summary"] == "ok"
+
+
+def test_parse_think_block_and_preamble_braces_before_payload():
+    raw = '<think>Consider {id} and {"draft": true}</think>\nNote {broken:\n{"summary": "ok", "links": []}'
+    parsed = _parse_json_analysis(raw)
+    assert parsed is not None
+    assert parsed["summary"] == "ok"
+
+
+def test_parse_truncated_json_still_returns_none():
+    raw = '{"summary": "ok", "links": ['
+    assert _parse_json_analysis(raw) is None
