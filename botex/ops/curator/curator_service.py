@@ -8,7 +8,7 @@ Guarantees:
 1. Non-destructive: Never alters original user notes or technical conclusions.
 2. Zero Memory Vault Bloat: Updates exactly ONE living beacon note (curator_health_status.md).
 3. Concurrency Protection: Lockfile (.botex/curator/curator.lock) + Active task deferral.
-4. Multi-Tier Fallback: NVIDIA Nemotron -> Local Bielik/Ollama -> Deterministic Heuristics.
+4. Multi-Tier Fallback: Local Bielik/Ollama -> NVIDIA Nemotron -> Deterministic Heuristics.
 5. Persistent Audit Trail: Stores run records in .botex/curator/runs/ and status in .botex/curator/status.json.
 6. Telegram Notifications: Dispatches run telemetry to Telegram if configured.
 """
@@ -657,6 +657,11 @@ class CuratorService:
         self.local_model = (
             local_model or os.environ.get("CURATOR_LOCAL_MODEL") or DEFAULT_LOCAL_MODEL
         )
+        # CPU-only llama.cpp measures ~1 tok/s generation + ~5 tok/s prompt
+        # eval — a single batch analysis legitimately needs tens of minutes
+        # inside the nightly window. Headroom costs nothing on fast GPU hosts
+        # (they finish in seconds either way).
+        self.local_timeout_s = float(os.environ.get("CURATOR_LOCAL_TIMEOUT_S") or 1800.0)
         self.notifier = notifier or TelegramNotifier()
 
         self.curator_dir = self.ws_path / ".botex" / "curator"
@@ -770,7 +775,7 @@ class CuratorService:
     async def _try_nemotron_inference(
         self, prompt: str, system_prompt: str = CURATOR_SYSTEM_PROMPT
     ) -> Optional[str]:
-        """Tier 1: NVIDIA Nemotron batch inference via NvidiaProvider."""
+        """Tier 2: NVIDIA Nemotron batch inference via NvidiaProvider."""
         api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
         if not api_key:
             return None
@@ -804,12 +809,21 @@ class CuratorService:
     async def _try_local_llm_inference(
         self, prompt: str, system_prompt: str = CURATOR_SYSTEM_PROMPT
     ) -> Optional[str]:
-        """Tier 2: Local Bielik / Ollama / llama.cpp inference via OpenAI compatible API."""
+        """Tier 1: Local Bielik / Ollama / llama.cpp inference via OpenAI compatible API."""
         local_url = (
             os.environ.get("LOCAL_LLM_URL")
             or os.environ.get("BIELIK_URL")
             or "http://127.0.0.1:8080/v1"
         )
+        try:
+            from botex.providers.providers import resolve_local_llm_base_url
+
+            resolved_cfg = await asyncio.to_thread(
+                resolve_local_llm_base_url, "ollama", {"base_url": local_url}
+            )
+            local_url = str(resolved_cfg.get("base_url") or local_url)
+        except Exception:
+            pass
         try:
             from urllib.parse import urlparse
 
@@ -830,7 +844,9 @@ class CuratorService:
 
             from botex.providers.providers import resolve_model_for_openai_client
 
-            client = AsyncOpenAI(base_url=local_url, api_key="not-needed", timeout=45.0)
+            client = AsyncOpenAI(
+                base_url=local_url, api_key="not-needed", timeout=self.local_timeout_s
+            )
             model_id = await resolve_model_for_openai_client(client, self.local_model)
             model_low = model_id.lower()
             if "qwen" in model_low:
@@ -888,14 +904,16 @@ class CuratorService:
             recent_nodes=recent_nodes,
         )
 
-        # 1. Try Tier 1: Nemotron
-        raw_output = await self._try_nemotron_inference(prompt)
-        tier_used = "nvidia-nemotron"
+        # 1. Try Tier 1: Local Bielik/Ollama — the nightly window is wide and
+        # local inference costs nothing; cloud tiers are the fallback. Hosts
+        # without a local server lose only the fast TCP pre-check.
+        raw_output = await self._try_local_llm_inference(prompt)
+        tier_used = "local-bielik"
 
-        # 2. Try Tier 2: Local Bielik
+        # 2. Try Tier 2: Nemotron
         if not raw_output:
-            raw_output = await self._try_local_llm_inference(prompt)
-            tier_used = "local-bielik"
+            raw_output = await self._try_nemotron_inference(prompt)
+            tier_used = "nvidia-nemotron"
 
         # 3. Parse JSON or fall back to Tier 3: Deterministic
         if raw_output:
