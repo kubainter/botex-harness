@@ -1080,6 +1080,19 @@ class CuratorService:
         total_edges = health.get("total_edges", 0)
         broken_links = health.get("broken_links", [])
 
+        # Local-first spillover: the wide nightly window lets the free local
+        # lane drain batches serially; cloud lanes hold back until the local
+        # lane can no longer finish within the deadline (or fails). Without a
+        # local lane the event starts set and cloud lanes race as before.
+        spillover = asyncio.Event()
+        local_done = asyncio.Event()
+        local_active = "local-bielik" in lanes
+        if not local_active:
+            spillover.set()
+            local_done.set()
+        est_batch_s = float(os.environ.get("CURATOR_LOCAL_BATCH_EST_S") or 1200.0)
+        SPILLOVER_SAFETY = 0.8
+
         queue: asyncio.Queue[Optional[Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]]] = (
             asyncio.Queue()
         )
@@ -1095,8 +1108,37 @@ class CuratorService:
         processed = 0
         yielded = False
 
+        def _local_feasible() -> bool:
+            if deadline is None:
+                return True
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            pending = queue.qsize()
+            if pending == 0:
+                return True
+            return pending * est_batch_s <= remaining * SPILLOVER_SAFETY
+
         async def _worker(lane: str) -> None:
-            nonlocal processed, yielded
+            nonlocal processed, yielded, est_batch_s
+            is_local = lane == "local-bielik"
+            # Cloud lanes hold back while the local lane can finish alone in time.
+            if not is_local and lane != "deterministic" and local_active:
+                while not spillover.is_set():
+                    if queue.empty() and local_done.is_set():
+                        return
+                    if deadline is not None and time.time() >= deadline:
+                        return
+                    if not force and await asyncio.to_thread(check_active_agent_tasks):
+                        yielded = True
+                        return
+                    if not _local_feasible():
+                        spillover.set()
+                        break
+                    try:
+                        await asyncio.wait_for(spillover.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
             while True:
                 if deadline is not None and time.time() >= deadline:
                     break
@@ -1122,9 +1164,20 @@ class CuratorService:
 
                 raw_output: Optional[str] = None
                 tier_label = lane
-                if lane == "local-bielik":
+                if is_local:
+                    batch_t0 = time.time()
                     async with local_sem:
                         raw_output = await self._try_local_llm_inference(prompt)
+                    if raw_output:
+                        measured = time.time() - batch_t0
+                        est_batch_s = min(2400.0, max(300.0, 0.5 * est_batch_s + 0.5 * measured))
+                    else:
+                        # Transport-level failure: retrying at ~20 min per batch is
+                        # the most expensive fallback on the box — spill to cloud.
+                        queue.put_nowait(item)
+                        queue.task_done()
+                        spillover.set()
+                        break
                 elif lane == "deterministic":
                     raw_output = None
                 else:
@@ -1154,8 +1207,19 @@ class CuratorService:
 
                 queue.task_done()
 
+        async def _tracked_local() -> None:
+            try:
+                await _worker("local-bielik")
+            finally:
+                local_done.set()
+
         active_lanes = lanes if lanes else ["deterministic"]
-        await asyncio.gather(*(_worker(lane) for lane in active_lanes))
+        await asyncio.gather(
+            *(
+                _tracked_local() if lane == "local-bielik" else _worker(lane)
+                for lane in active_lanes
+            )
+        )
 
         unique_tiers = list(dict.fromkeys(tiers_used))
         primary_tier = (
@@ -1171,6 +1235,7 @@ class CuratorService:
             "tier_used": primary_tier,
             "batches_processed": processed,
             "yielded": yielded,
+            "spillover": spillover.is_set(),
             "analysis": {
                 "summary": summary,
                 "cluster_themes": themes_set[:10],
@@ -1391,14 +1456,16 @@ class CuratorService:
 
     async def _infer_compiled_truth(self, prompt: str) -> Optional[str]:
         lanes = self._available_provider_lanes()
-        if "nvidia" in lanes:
-            out = await self._try_nemotron_inference(
+        # Local-first like the drain: the nightly window tolerates slow local
+        # inference and cloud quota stays untouched when the box can do it.
+        if "local-bielik" in lanes:
+            out = await self._try_local_llm_inference(
                 prompt, system_prompt=COMPILED_TRUTH_SYSTEM_PROMPT
             )
             if out:
                 return out
-        if "local-bielik" in lanes:
-            out = await self._try_local_llm_inference(
+        if "nvidia" in lanes:
+            out = await self._try_nemotron_inference(
                 prompt, system_prompt=COMPILED_TRUTH_SYSTEM_PROMPT
             )
             if out:
