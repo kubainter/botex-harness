@@ -253,3 +253,45 @@ def test_cloud_tiers_exhausted_vocabulary():
     assert server._cloud_tiers_exhausted([{"tier": "nvidia", "status": "ok"}]) is False
     assert server._cloud_tiers_exhausted([]) is False
     assert server._cloud_tiers_exhausted([{"tier": "local-ollama", "status": "timeout"}]) is False
+
+
+@pytest.mark.anyio
+async def test_compile_then_serve_roundtrip(ws):
+    """End-to-end: nightly compile output is served by the query-time path."""
+    from botex.ops.curator.recall_briefing import run_briefing_compilation
+
+    ids = []
+    for i in range(5):
+        res = memory.save_memory(
+            workspace_dir=str(ws),
+            title=f"alpha roundtrip {i}",
+            content=f"alpha roundtrip {i}: recall token budget discipline and POSIX paths.",
+            kind="context",
+            tags=["alpha"],
+            origin="botex",
+            scope="global",
+            project="alpha",
+        )
+        assert res.get("ok"), res
+        ids.append(res["id"])
+
+    async def _fake_infer(prompt: str) -> str:
+        return (
+            f"## Decisions\n- Recall token budget stays bounded [[{ids[0]}]]\n\n"
+            f"## Conventions\n- POSIX paths everywhere [[{ids[1]}]]\n\n"
+            f"## Gotchas\n- num_ctx guard truncates prompts [[{ids[0]}]]\n\n"
+            "## Open threads\n- None.\n"
+        )
+
+    report = await run_briefing_compilation(str(ws), _fake_infer, min_notes=5, max_projects=2)
+    assert report["compiled"] == 1, report
+
+    with patch(
+        "botex.ops.curator.synthesize_recall",
+        new=AsyncMock(side_effect=AssertionError("cascade must not fire")),
+    ):
+        result = await server._recall_memory_impl(str(ws), QUERY, project="alpha")
+    assert result["recall_status"] == "BRIEFING_SERVED"
+    assert result["tier_used"] == "briefing"
+    assert result["briefing_id"]
+    assert "token budget" in result["answer"]

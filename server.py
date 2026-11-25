@@ -1307,10 +1307,13 @@ def _cloud_tiers_exhausted(tier_attempts: list[dict[str, Any]]) -> bool:
     ]
     if not cloud:
         return False
-    return all(
-        str(a.get("status") or "") in ("unavailable", "error", "timeout", "neg_cached")
-        for a in cloud
-    )
+    statuses = [str(a.get("status") or "") for a in cloud]
+    if not all(s in ("unavailable", "error", "timeout", "neg_cached") for s in statuses):
+        return False
+    # Plain unavailable-everywhere means structural misconfiguration (missing
+    # keys/probe-down) where a retry hint is pointless; quota exhaustion
+    # instead leaves transient markers on at least one tier.
+    return any(s in ("error", "timeout", "neg_cached") for s in statuses)
 
 
 def _try_briefing_first_line(
@@ -1418,9 +1421,9 @@ async def _recall_memory_impl(
         result = _deterministic_recall(query, nodes)
         if defer:
             result["answer"] = str(result.get("answer") or "") + (
-                "\n\nWszystkie chmurowe providery są niedostępne (quota wyczerpana) — "
-                "powyższy digest jest deterministyczny; odpytaj ponownie za kilka minut "
-                "dla pełnej syntezy."
+                "\n\nWszystkie chmurowe providery są obecnie niedostępne (quota wyczerpana "
+                "lub awaria/błąd konfiguracji) — powyższy digest jest deterministyczny; "
+                "odpytaj ponownie za kilka minut dla pełnej syntezy."
             )
     logger.info(
         "recall outcome status=%s coverage=%s tier=%s latency_ms=%d",
