@@ -171,7 +171,11 @@ async def run_briefing_compilation(
                 {"project": slug, "action": "skipped_unchanged", "briefing_id": existing.get("id")}
             )
             continue
-        body = await compile_project_briefing(workspace_dir, slug, notes, infer_fn)
+        try:
+            body = await compile_project_briefing(workspace_dir, slug, notes, infer_fn)
+        except Exception as exc:
+            results.append({"project": slug, "action": "inference_error", "error": str(exc)[:200]})
+            continue
         if body is None:
             results.append({"project": slug, "action": "inference_failed_or_invalid"})
             continue
@@ -337,7 +341,10 @@ def _age_hours(generated: str) -> float:
         dt = datetime.fromisoformat(str(generated or ""))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds()) / 3600.0
+        delta = (datetime.now(timezone.utc) - dt).total_seconds()
+        if delta < 0:
+            return float("inf")
+        return delta / 3600.0
     except ValueError:
         return float("inf")
 
@@ -383,7 +390,7 @@ def list_fresh_briefings(
         workspace_dir=workspace_dir,
         query="",
         tag=BRIEFING_TAG,
-        scope="all",
+        scope="global",
         status="active",
     )
     if not res.get("ok"):
@@ -393,6 +400,10 @@ def list_fresh_briefings(
         content = str(entry.get("content") or "")
         header = parse_briefing_header(content)
         if header is None:
+            continue
+        entry_project = memory._normalize_project_slug(str(entry.get("project") or ""))
+        header_project = memory._normalize_project_slug(str(header.get("project") or ""))
+        if not entry_project or entry_project != header_project:
             continue
         if _age_hours(str(header.get("generated") or "")) > float(max_age_h):
             continue
@@ -424,6 +435,14 @@ def _sources_still_active(workspace_dir: str, source_ids: Iterable[str]) -> bool
     return True
 
 
+def parse_max_age_h(value: Any, default: float = BRIEFING_MAX_AGE_H) -> float:
+    """Defensive numeric parse for operator-configured briefing freshness."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def build_briefing_answer(
     workspace_dir: str,
     query: str,
@@ -437,26 +456,28 @@ def build_briefing_answer(
     overlap returns None so the caller falls through to the LLM cascade.
     Shared by the MCP recall path and the worker bridge.
     """
+    norm_project = memory._normalize_project_slug(str(project or ""))
+    if not norm_project:
+        return None
     try:
         briefings = list_fresh_briefings(workspace_dir, max_age_h=max_age_h)
     except Exception:
         return None
     best: Optional[tuple] = None
     for briefing in briefings:
+        if memory._normalize_project_slug(str(briefing.get("project") or "")) != norm_project:
+            continue
         body = strip_briefing_header(str(briefing.get("content") or ""))
         if not body:
             continue
         score = briefing_overlap_score(query, body)
         if score < memory._RECALL_MIN_COVERAGE:
             continue
-        project_match = 1 if project and str(briefing.get("project") or "") == str(project) else 0
-        key = (score, project_match)
-        if best is None or key > best[0]:
-            best = (key, briefing, body)
+        if best is None or score > best[0]:
+            best = (score, briefing, body)
     if best is None:
         return None
-    key, briefing, body = best
-    overlap = int(key[0])
+    overlap, briefing, body = best
     digest_nodes = [
         n
         for n in nodes or []

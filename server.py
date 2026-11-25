@@ -1330,12 +1330,12 @@ def _try_briefing_first_line(
     to the LLM cascade.
     """
     try:
-        from botex.ops.curator.recall_briefing import build_briefing_answer
+        from botex.ops.curator.recall_briefing import build_briefing_answer, parse_max_age_h
     except Exception:
         return None
     try:
         return build_briefing_answer(
-            workspace_dir, query, nodes, project=project, max_age_h=max_age_h
+            workspace_dir, query, nodes, project=project, max_age_h=parse_max_age_h(max_age_h)
         )
     except Exception:
         return None
@@ -1386,7 +1386,7 @@ async def _recall_memory_impl(
             query,
             nodes,
             project,
-            float(bcfg.get("max_age_h", 72) or 72),
+            bcfg.get("max_age_h", 72),
         )
         briefing_served = result is not None
     if nodes and result is None:
@@ -1694,7 +1694,7 @@ async def bot_consult(
             str(query or ""),
             active_nodes,
             ns or None,
-            float(bcfg.get("max_age_h", 72) or 72),
+            bcfg.get("max_age_h", 72),
         )
     if active_nodes and result is None:
         try:

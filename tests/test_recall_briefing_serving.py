@@ -295,3 +295,105 @@ async def test_compile_then_serve_roundtrip(ws):
     assert result["tier_used"] == "briefing"
     assert result["briefing_id"]
     assert "token budget" in result["answer"]
+
+
+@pytest.mark.anyio
+async def test_foreign_project_briefing_not_served(ws, monkeypatch):
+    """A briefing for project beta must never answer a recall for project alpha."""
+    sources = _seed_sources(ws, project="beta")
+    _seed_briefing(ws, sources, project="beta")
+
+    result = await server._recall_memory_impl(str(ws), QUERY, project="alpha")
+    assert result.get("recall_status") != "BRIEFING_SERVED"
+    assert result.get("tier_used") != "briefing"
+
+
+@pytest.mark.anyio
+async def test_missing_project_falls_through_to_cascade(ws, monkeypatch):
+    """No project context means no defined coverage target: cascade, not a guess."""
+    sources = _seed_sources(ws)
+    _seed_briefing(ws, sources)
+
+    result = await server._recall_memory_impl(str(ws), QUERY, project=None)
+    assert result.get("recall_status") != "BRIEFING_SERVED"
+
+
+@pytest.mark.anyio
+async def test_local_scope_decoy_briefing_not_served(ws, monkeypatch):
+    """Briefings are global shared-vault objects; a workspace-local recall-brief
+    note must not be served even with perfect coverage."""
+    sources = _seed_sources(ws)
+    generated = datetime.now(timezone.utc).isoformat()
+    content = _header("alpha", ",".join(sources), generated) + chr(10) + chr(10) + _briefing_body()
+    res = memory.save_memory(
+        workspace_dir=str(ws),
+        title="Recall Briefing: alpha",
+        content=content,
+        kind="context",
+        tags=[BRIEFING_TAG, "project:alpha"],
+        origin="curator",
+        scope="local",
+        project="alpha",
+    )
+    assert res.get("ok"), res
+
+    result = await server._recall_memory_impl(str(ws), QUERY, project="alpha")
+    assert result.get("recall_status") != "BRIEFING_SERVED"
+
+
+@pytest.mark.anyio
+async def test_future_generated_timestamp_is_stale(ws, monkeypatch):
+    """A forged/corrupt future timestamp must not read as maximally fresh."""
+    sources = _seed_sources(ws)
+    _seed_briefing(ws, sources, age_h=-100.0)
+
+    result = await server._recall_memory_impl(str(ws), QUERY, project="alpha")
+    assert result.get("recall_status") != "BRIEFING_SERVED"
+
+
+def test_parse_max_age_h_defensive():
+    from botex.ops.curator.recall_briefing import parse_max_age_h
+
+    assert parse_max_age_h("abc") == 72.0
+    assert parse_max_age_h(None) == 72.0
+    assert parse_max_age_h(24) == 24.0
+    assert parse_max_age_h("48") == 48.0
+
+
+@pytest.mark.anyio
+async def test_compile_loop_isolates_per_project_inference_errors(ws):
+    """One project raising inside infer_fn must not abort compilation of the rest."""
+    from botex.ops.curator.recall_briefing import run_briefing_compilation
+
+    ids = {}
+    for proj in ("alpha", "beta"):
+        ids[proj] = []
+        for i in range(2):
+            res = memory.save_memory(
+                workspace_dir=str(ws),
+                title=f"{proj} isolation {i}",
+                content=f"{proj} isolation {i}: recall token budget discipline.",
+                kind="context",
+                tags=[proj],
+                origin="botex",
+                scope="global",
+                project=proj,
+            )
+            assert res.get("ok"), res
+            ids[proj].append(res["id"])
+
+    async def _infer(prompt: str):
+        if "PROJECT TO BRIEF: alpha" in prompt:
+            raise RuntimeError("provider exploded")
+        bid = ids["beta"][0]
+        return (
+            f"## Decisions\n- beta decision [[{bid}]]\n\n"
+            f"## Conventions\n- beta convention [[{bid}]]\n\n"
+            f"## Gotchas\n- beta gotcha [[{bid}]]\n\n"
+            "## Open threads\n- None.\n"
+        )
+
+    report = await run_briefing_compilation(str(ws), _infer, min_notes=2, max_projects=4)
+    actions = {r["project"]: r["action"] for r in report["results"]}
+    assert actions.get("alpha") == "inference_error", report
+    assert actions.get("beta") == "compiled", report

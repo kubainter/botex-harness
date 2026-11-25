@@ -201,7 +201,7 @@ async def worker_recall_memory(
         and briefing_cfg.get("serve", True)
     ):
         try:
-            from botex.ops.curator.recall_briefing import build_briefing_answer
+            from botex.ops.curator.recall_briefing import build_briefing_answer, parse_max_age_h
 
             result = await asyncio.to_thread(
                 build_briefing_answer,
@@ -209,7 +209,7 @@ async def worker_recall_memory(
                 str(query),
                 nodes,
                 project or None,
-                float(briefing_cfg.get("max_age_h", 72) or 72),
+                parse_max_age_h(briefing_cfg.get("max_age_h", 72)),
             )
             briefing_served = result is not None
         except Exception:

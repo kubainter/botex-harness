@@ -1442,11 +1442,17 @@ def read_memory(
             norm_scope = "global"
 
         candidates: list[tuple[Path, str]] = []
+        swarm_dir = get_swarm_memory_dir()
         if norm_scope == "global":
             candidates.append((get_global_memory_dir(), "global"))
+        elif norm_scope == "swarm":
+            if swarm_dir:
+                candidates.append((swarm_dir, "swarm"))
         elif norm_scope == "all":
             candidates.append((Path(workspace_dir).resolve() / ".botex" / "memory", "local"))
             candidates.append((get_global_memory_dir(), "global"))
+            if swarm_dir:
+                candidates.append((swarm_dir, "swarm"))
         else:
             candidates.append((Path(workspace_dir).resolve() / ".botex" / "memory", "local"))
 

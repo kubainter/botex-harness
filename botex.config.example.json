@@ -356,5 +356,10 @@
       "binary_path": "skillspector",
       "allow_unverified": false
     }
+  },
+  "curator": {
+    "briefings_enabled": true,
+    "briefings_max_per_night": 8,
+    "briefings_min_notes": 5
   }
 }

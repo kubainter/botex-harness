@@ -117,7 +117,7 @@ targeted + integration tests.
 | `botex/ops/curator/brief_curator.py` | `is_brief_curator_inflight`, `refresh_bot_brief` | `test_brief_curator.py` |
 | `botex/ops/curator/curator_service.py` | `CuratorResult`, `CuratorLock`, `CuratorService`, `check_active_agent_tasks`, `get_curator_status`, `run_curation_async`, `+1 more` | `test_curator.py`, `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_idle_layers_l1.py`, +2 more |
 | `botex/ops/curator/prompts.py` | `build_curator_user_prompt`, `build_recall_user_prompt`, `build_compiled_truth_user_prompt`, `build_recall_briefing_user_prompt` | `test_curator_and_migration_f4.py`, `test_recall_briefing.py`, `test_recall_curator.py` |
-| `botex/ops/curator/recall_briefing.py` | `parse_briefing_header`, `compute_inputs_hash`, `select_briefing_projects`, `validate_briefing_body`, `compile_project_briefing`, `run_briefing_compilation`, `+4 more` | `test_recall_briefing.py`, `test_recall_briefing_serving.py` |
+| `botex/ops/curator/recall_briefing.py` | `parse_briefing_header`, `compute_inputs_hash`, `select_briefing_projects`, `validate_briefing_body`, `compile_project_briefing`, `run_briefing_compilation`, `+5 more` | `test_recall_briefing.py`, `test_recall_briefing_serving.py` |
 | `botex/ops/curator/recall_curator.py` | `synthesize_recall` | `test_recall_curator.py`, `test_recall_observability.py`, `test_tracing_wiring.py` |
 | `botex/ops/curator/tasks.py` | `CuratorTask`, `load_task_state`, `run_due_tasks`, `main` | `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_curator_tasks.py` |
 | `botex/ops/curator/telegram.py` | `TelegramNotifier`, `get_telegram_config`, `mask_telegram_token`, `format_curator_telegram_message`, `send_telegram_notification` | `test_curator.py` |
