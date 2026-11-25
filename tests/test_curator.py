@@ -34,7 +34,12 @@ from botex.curator import (
 )
 from botex.memory import read_memory, save_memory, search_memory
 from botex.server_cloud import app
-from botex.ops.curator.curator_service import CuratorLock, check_active_agent_tasks
+from botex.ops.curator.curator_service import (
+    CuratorLock,
+    _extract_first_json_object,
+    _parse_json_analysis,
+    check_active_agent_tasks,
+)
 from botex.ops.curator.telegram import (
     format_curator_telegram_message,
     get_telegram_config,
@@ -1548,3 +1553,76 @@ async def test_compiled_truth_local_first_order(tmp_path):
         out2 = await service._infer_compiled_truth("prompt")
     assert out2 == "nemotron truth"
     nemotron_mock2.assert_called()
+
+
+# --- Lenient parser regression tests (measured failure modes, VPS A/B 2026-11-25) ---
+
+
+def test_parse_json_analysis_trailing_junk_qwen_mode():
+    """Qwen3.5-9B emitted a valid JSON object followed by trailing junk."""
+    payload = (
+        '{"summary": "ok", "cluster_themes": [], "recommended_links": [], "orphan_insights": []}'
+    )
+    raw = payload + "\n}\n"
+    parsed = _parse_json_analysis(raw)
+    assert parsed is not None
+    assert parsed["summary"] == "ok"
+
+
+def test_parse_json_analysis_control_chars_bielik_mode():
+    """Bielik-11B emitted raw control characters (newlines) inside strings."""
+    raw = '{\n  "summary": "line one\nline two",\n  "cluster_themes": [],\n  "recommended_links": [],\n  "orphan_insights": []\n}'
+    parsed = _parse_json_analysis(raw)
+    assert parsed is not None
+    assert "line one" in parsed["summary"]
+
+
+def test_parse_json_analysis_unbalanced_returns_none():
+    """Structurally broken output (unbalanced braces) stays unrecoverable."""
+    raw = '{"summary": "broken", "cluster_themes": [{"x": 1}'
+    assert _parse_json_analysis(raw) is None
+
+
+def test_extract_first_json_object_ignores_trailing_braces():
+    raw = '{"a": {"b": 1}} trailing {"unrelated": true} more junk'
+    extracted = _extract_first_json_object(raw)
+    assert extracted == '{"a": {"b": 1}}'
+
+
+def test_extract_first_json_object_respects_string_braces():
+    raw = '{"summary": "braces {} inside strings"} tail'
+    extracted = _extract_first_json_object(raw)
+    assert extracted == '{"summary": "braces {} inside strings"}'
+
+
+def test_parse_json_analysis_clean_and_fenced_unchanged():
+    clean = '{"summary": "s", "cluster_themes": [], "recommended_links": [], "orphan_insights": []}'
+    assert _parse_json_analysis(clean)["summary"] == "s"
+    fenced = "```json\n" + clean + "\n```"
+    assert _parse_json_analysis(fenced)["summary"] == "s"
+
+
+def test_parse_fenced_json_with_trailing_junk_inside_fence():
+    raw = '```json\n{"summary": "ok"}\n} trailing note\n```'
+    parsed = _parse_json_analysis(raw)
+    assert parsed is not None
+    assert parsed["summary"] == "ok"
+
+
+def test_parse_preceding_non_json_fence_falls_back_to_payload():
+    raw = '```text\nnot json\n```\nsome prose\n{"summary": "ok", "links": []}'
+    parsed = _parse_json_analysis(raw)
+    assert parsed is not None
+    assert parsed["summary"] == "ok"
+
+
+def test_parse_think_block_and_preamble_braces_before_payload():
+    raw = '<think>Consider {id} and {"draft": true}</think>\nNote {broken:\n{"summary": "ok", "links": []}'
+    parsed = _parse_json_analysis(raw)
+    assert parsed is not None
+    assert parsed["summary"] == "ok"
+
+
+def test_parse_truncated_json_still_returns_none():
+    raw = '{"summary": "ok", "links": ['
+    assert _parse_json_analysis(raw) is None

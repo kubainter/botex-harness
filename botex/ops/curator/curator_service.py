@@ -617,25 +617,89 @@ def _apply_recommended_links(
     return {"applied": len(applied), "skipped": skipped, "applied_links": applied}
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _iter_json_objects(text: str):
+    """Yield balanced {...} substrings, aware of JSON strings/escapes.
+
+    Small local LLMs emit stray braces in preambles/think-blocks before the
+    real payload; a single-scan extractor anchors on the first "{" and
+    discards the batch when that brace is not the payload. Yielding every
+    balanced candidate lets the caller skip impostors, while structurally
+    broken (unbalanced) output still yields nothing — never hallucinate
+    missing braces.
+    """
+    pos = 0
+    n = len(text)
+    while pos < n:
+        start = text.find("{", pos)
+        if start < 0:
+            return
+        depth = 0
+        in_str = False
+        esc = False
+        end = -1
+        for i in range(start, n):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end < 0:
+            pos = start + 1
+            continue
+        yield text[start:end]
+        pos = end
+
+
+def _extract_first_json_object(text: str) -> Optional[str]:
+    return next(_iter_json_objects(text), None)
+
+
 def _parse_json_analysis(raw_output: Optional[str]) -> Optional[Dict[str, Any]]:
     """Parse structured JSON curator output from an LLM response."""
     if not raw_output:
         return None
-    try:
-        cleaned = raw_output.strip()
-        if "```json" in cleaned:
-            cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
-        elif "```" in cleaned:
-            cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
-        else:
-            match = re.search(r"\{[\s\S]*\}", cleaned)
-            if match:
-                cleaned = match.group(0)
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict) and "summary" in parsed:
-            return parsed
-    except Exception as exc:
-        logger.warning("Failed to parse LLM curator output: %s", exc)
+    cleaned = raw_output.strip()
+    candidates = []
+    if "```json" in cleaned:
+        candidates.append(cleaned.split("```json", 1)[1].split("```", 1)[0].strip())
+    elif "```" in cleaned:
+        candidates.append(cleaned.split("```", 1)[1].split("```", 1)[0].strip())
+    # Raw fallback covers junk inside fences, foreign fences before the
+    # payload, and think-block/preamble braces. strict=False tolerates raw
+    # control characters inside strings — small local models emit unescaped
+    # newlines in long rationales.
+    candidates.append(_THINK_BLOCK_RE.sub("", cleaned))
+    last_exc: Optional[Exception] = None
+    for candidate_text in candidates:
+        for obj_text in _iter_json_objects(candidate_text):
+            parsed: Optional[Dict[str, Any]] = None
+            for strict in (True, False):
+                try:
+                    parsed = json.loads(obj_text, strict=strict)
+                    break
+                except Exception as exc:
+                    if last_exc is None:
+                        last_exc = exc
+            if isinstance(parsed, dict) and "summary" in parsed:
+                return parsed
+    if last_exc is not None:
+        logger.warning("Failed to parse LLM curator output: %s", last_exc)
     return None
 
 
@@ -917,21 +981,9 @@ class CuratorService:
 
         # 3. Parse JSON or fall back to Tier 3: Deterministic
         if raw_output:
-            try:
-                cleaned = raw_output.strip()
-                if "```json" in cleaned:
-                    cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
-                elif "```" in cleaned:
-                    cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
-                else:
-                    match = re.search(r"\{[\s\S]*\}", cleaned)
-                    if match:
-                        cleaned = match.group(0)
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, dict) and "summary" in parsed:
-                    return tier_used, parsed
-            except Exception as exc:
-                logger.warning("Failed to parse LLM curator output: %s", exc)
+            parsed = _parse_json_analysis(raw_output)
+            if parsed is not None:
+                return tier_used, parsed
 
         # Tier 3: Deterministic heuristic analysis
         deterministic_res = _compute_deterministic_recommendations(orphan_nodes, recent_nodes)
