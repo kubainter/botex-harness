@@ -1396,3 +1396,155 @@ async def test_curator_run_step6e_wires_proposals(tmp_path, monkeypatch):
         ws / ".botex" / "proposals" / "skills" / "learned-bugfix-svc-handler-py" / "SKILL.md"
     ).is_file()
     assert (ws / ".botex" / "proposals" / "recipes" / "learned-bugfix-svc-handler-py.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Local-first drain spillover semantics
+# ---------------------------------------------------------------------------
+
+
+def _drain_batch(project, orphan_id, mtime=1000.0):
+    orphans = [{"id": orphan_id, "mtime": mtime, "title": f"Orphan {orphan_id}", "tags": ["x"]}]
+    anchors = [{"id": "anchor_a", "mtime": mtime, "title": "Anchor", "tags": ["x"]}]
+    return (project, orphans, anchors)
+
+
+def _valid_analysis_json():
+    return json.dumps(
+        {
+            "summary": "Analiza testowa z wystarczajaca liczba znakow.",
+            "cluster_themes": ["x"],
+            "recommended_links": [],
+            "orphan_insights": [],
+        }
+    )
+
+
+class _HeartbeatLock:
+    def heartbeat(self):
+        pass
+
+
+def _drain_kwargs(service, batches, deadline=None):
+    return {
+        "batches": batches,
+        "health": {"total_nodes": 10, "total_edges": 5, "broken_links": []},
+        "lock": _HeartbeatLock(),
+        "force": True,
+        "deadline": deadline,
+        "max_batches": None,
+        "drain_state": {},
+    }
+
+
+@pytest.mark.anyio
+async def test_drain_local_first_holds_back_cloud(tmp_path):
+    """Cloud lanes must not touch batches the local lane can finish within the window."""
+    service = CuratorService(workspace_dir=str(tmp_path))
+    local_mock = AsyncMock(return_value=_valid_analysis_json())
+    cloud_mock = AsyncMock(return_value=_valid_analysis_json())
+    with (
+        patch.object(service, "_available_provider_lanes", return_value=["nvidia", "local-bielik"]),
+        patch.object(service, "_try_local_llm_inference", local_mock),
+        patch.object(service, "_try_cloud_lane_inference", cloud_mock),
+    ):
+        res = await service._drain_batches_parallel(
+            **_drain_kwargs(
+                service,
+                [_drain_batch("proj", "mem_o1"), _drain_batch("proj", "mem_o2")],
+                deadline=time.time() + 10000,
+            )
+        )
+    assert res["batches_processed"] == 2
+    assert res["tier_used"] == "local-bielik"
+    assert res["spillover"] is False
+    assert local_mock.await_count == 2
+    cloud_mock.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_drain_spillover_on_deadline_pressure(tmp_path, monkeypatch):
+    """When local cannot finish within the deadline, cloud lanes join as spillover."""
+    monkeypatch.setenv("CURATOR_LOCAL_BATCH_EST_S", "10000")
+    service = CuratorService(workspace_dir=str(tmp_path))
+    local_mock = AsyncMock(return_value=_valid_analysis_json())
+    cloud_mock = AsyncMock(return_value=_valid_analysis_json())
+    with (
+        patch.object(service, "_available_provider_lanes", return_value=["nvidia", "local-bielik"]),
+        patch.object(service, "_try_local_llm_inference", local_mock),
+        patch.object(service, "_try_cloud_lane_inference", cloud_mock),
+    ):
+        res = await service._drain_batches_parallel(
+            **_drain_kwargs(
+                service,
+                [_drain_batch("proj", "mem_o1"), _drain_batch("proj", "mem_o2")],
+                deadline=time.time() + 100,
+            )
+        )
+    assert res["batches_processed"] == 2
+    assert res["spillover"] is True
+    assert cloud_mock.await_count >= 1
+
+
+@pytest.mark.anyio
+async def test_drain_local_failure_spills_to_cloud(tmp_path):
+    """Transport-level local failure requeues the batch and activates cloud spillover."""
+    service = CuratorService(workspace_dir=str(tmp_path))
+    local_mock = AsyncMock(return_value=None)
+    cloud_mock = AsyncMock(return_value=_valid_analysis_json())
+    with (
+        patch.object(service, "_available_provider_lanes", return_value=["nvidia", "local-bielik"]),
+        patch.object(service, "_try_local_llm_inference", local_mock),
+        patch.object(service, "_try_cloud_lane_inference", cloud_mock),
+    ):
+        res = await service._drain_batches_parallel(
+            **_drain_kwargs(service, [_drain_batch("proj", "mem_o1")], deadline=time.time() + 10000)
+        )
+    assert res["batches_processed"] == 1
+    assert res["tier_used"] == "nvidia"
+    assert res["spillover"] is True
+    cloud_mock.assert_called()
+
+
+@pytest.mark.anyio
+async def test_drain_no_local_lane_cloud_immediate(tmp_path):
+    """Without a local lane the cloud lanes race immediately (no hold-back)."""
+    service = CuratorService(workspace_dir=str(tmp_path))
+    cloud_mock = AsyncMock(return_value=_valid_analysis_json())
+    with (
+        patch.object(service, "_available_provider_lanes", return_value=["nvidia"]),
+        patch.object(service, "_try_cloud_lane_inference", cloud_mock),
+    ):
+        res = await service._drain_batches_parallel(
+            **_drain_kwargs(service, [_drain_batch("proj", "mem_o1")], deadline=None)
+        )
+    assert res["batches_processed"] == 1
+    assert res["tier_used"] == "nvidia"
+    assert res["spillover"] is True
+
+
+@pytest.mark.anyio
+async def test_compiled_truth_local_first_order(tmp_path):
+    """Compiled-truth cascade tries local before nvidia; nvidia only on local failure."""
+    service = CuratorService(workspace_dir=str(tmp_path))
+    nemotron_mock = AsyncMock(return_value="nemotron truth")
+    local_mock = AsyncMock(return_value="local truth")
+    with (
+        patch.object(service, "_available_provider_lanes", return_value=["nvidia", "local-bielik"]),
+        patch.object(service, "_try_local_llm_inference", local_mock),
+        patch.object(service, "_try_nemotron_inference", nemotron_mock),
+    ):
+        out = await service._infer_compiled_truth("prompt")
+    assert out == "local truth"
+    nemotron_mock.assert_not_called()
+
+    nemotron_mock2 = AsyncMock(return_value="nemotron truth")
+    local_none = AsyncMock(return_value=None)
+    with (
+        patch.object(service, "_available_provider_lanes", return_value=["nvidia", "local-bielik"]),
+        patch.object(service, "_try_local_llm_inference", local_none),
+        patch.object(service, "_try_nemotron_inference", nemotron_mock2),
+    ):
+        out2 = await service._infer_compiled_truth("prompt")
+    assert out2 == "nemotron truth"
+    nemotron_mock2.assert_called()
