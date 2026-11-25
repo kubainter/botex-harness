@@ -26,7 +26,7 @@ targeted + integration tests.
 | Module | File | Imported By (modules) | Direct Tests |
 |---|---|---:|---:|
 | `botex.tools.security` | `botex/tools/security.py` | 39 | 9 |
-| `botex.server.config` | `botex/server/config.py` | 25 | 23 |
+| `botex.server.config` | `botex/server/config.py` | 25 | 24 |
 | `botex.memory.memory` | `botex/memory/memory.py` | 10 | 6 |
 | `botex.providers` | `botex/providers/__init__.py` | 8 | 12 |
 | `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 6 |
@@ -115,7 +115,7 @@ targeted + integration tests.
 | `botex/ops/__init__.py` | — | `test_idle_layers_l1.py` |
 | `botex/ops/curator/__init__.py` | — | `test_brief_curator.py`, `test_curator.py`, `test_curator_f7.py`, `test_curator_tasks.py`, +4 more |
 | `botex/ops/curator/brief_curator.py` | `is_brief_curator_inflight`, `refresh_bot_brief` | `test_brief_curator.py` |
-| `botex/ops/curator/curator_service.py` | `CuratorResult`, `CuratorLock`, `CuratorService`, `check_active_agent_tasks`, `get_curator_status`, `run_curation_async`, `+1 more` | `test_curator.py`, `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_idle_layers_l1.py`, +1 more |
+| `botex/ops/curator/curator_service.py` | `CuratorResult`, `CuratorLock`, `CuratorService`, `check_active_agent_tasks`, `get_curator_status`, `run_curation_async`, `+1 more` | `test_curator.py`, `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_idle_layers_l1.py`, +2 more |
 | `botex/ops/curator/prompts.py` | `build_curator_user_prompt`, `build_recall_user_prompt`, `build_compiled_truth_user_prompt` | `test_curator_and_migration_f4.py`, `test_recall_curator.py` |
 | `botex/ops/curator/recall_curator.py` | `synthesize_recall` | `test_recall_curator.py`, `test_recall_observability.py`, `test_tracing_wiring.py` |
 | `botex/ops/curator/tasks.py` | `CuratorTask`, `load_task_state`, `run_due_tasks`, `main` | `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_curator_tasks.py` |
@@ -147,7 +147,7 @@ targeted + integration tests.
 |---|---|---|
 | `botex/server/__init__.py` | — | `test_brief_curator.py`, `test_containment_recall_gate.py`, `test_edge_delegation_api.py`, `test_edge_integration.py`, +7 more |
 | `botex/server/chat.py` | `ChatMessage`, `ChatSession`, `ChatManager`, `execute_chat_tool`, `stream_chat_turn`, `chat_turn` | `test_chat.py`, `test_chat_error_observability.py`, `test_server_f4_provenance.py`, `test_stage_4_8.py` |
-| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +19 more |
+| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +20 more |
 | `botex/server/i18n.py` | `detect_language`, `init_language`, `set_language`, `get_language`, `t` | — |
 | `botex/server/plugins.py` | `PluginError`, `PluginValidationError`, `PluginExecutionError`, `PluginExecutionTimeout`, `PluginPermissionError`, `BoteXPluginDefinition`, `+5 more` | `test_approval.py`, `test_plugins_creator.py` |
 | `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+92 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +17 more |

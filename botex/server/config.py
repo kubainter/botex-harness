@@ -675,7 +675,7 @@ DEFAULTS: Dict[str, Any] = {
         # local free tier first, quota tiers as fallback. Env vars
         # BOTEX_RECALL_*_MODEL remain per-run overrides.
         "recall": {
-            "ollama": {"model": "qwen2.5:3b", "enabled": True, "timeout_s": 12.0},
+            "ollama": {"model": "bielik:latest", "enabled": True, "timeout_s": 12.0},
             "nvidia": {
                 "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
                 "enabled": True,

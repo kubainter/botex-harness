@@ -311,7 +311,7 @@
   "memory": {
     "recall": {
       "ollama": {
-        "model": "qwen2.5:3b",
+        "model": "bielik:latest",
         "enabled": true,
         "timeout_s": 12
       },

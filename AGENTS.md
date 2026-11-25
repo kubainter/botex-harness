@@ -145,7 +145,7 @@ External engine bridges and sandboxes (context-mode, ue4ss-bridge, tw3se-bridge,
 
 ### 6.4. Memory Vault & Zero-Bloat Knowledge Recall (`recall_memory`)
 - When querying project context, architectural decisions, or prior lessons from BoteX Memory Vault, ALWAYS use `recall_memory(query="...")` first via direct MCP.
-- `recall_memory` performs automatic 1-hop graph expansion (wikilinks + backlinks) and server-side curator synthesis (hedged 4-tier cascade: local qwen2.5:3b → NVIDIA → Gemini → OR-free), returning concise facts and cited sources in 1 turn without token-stuffing agent history.
+- `recall_memory` performs automatic 1-hop graph expansion (wikilinks + backlinks) and server-side curator synthesis (hedged 4-tier cascade: local bielik:latest → NVIDIA → Gemini → OR-free), returning concise facts and cited sources in 1 turn without token-stuffing agent history.
 - **Vault Locality (Cloud-First):** Shared swarm knowledge lives in **BoteX Cloud** (`scope="global"`, `project="swarm"`). Physical vault location follows the called server endpoint (`botex` cloud vs `botex-local`), not `scope` alone. Never pass local Windows `workspace_dir` paths (`C:\Users\...`) to a remote Linux VPS for swarm queries — use `scope="global"`, `project="swarm"`, `workspace_dir=""` (remote `save_memory` also auto-populates `origin` from `X-Agent-Id`/`X-Host` headers or the `origin` parameter).
 - Local notes (`scope="local"`) are reserved for workspace-private context or ephemeral `temp-handoff` entries (`tags=["temp-handoff"]`, `expires: YYYY-MM-DD`), which are swept automatically by the Curator.
 - Swarm knowledge is also reachable via `scope="swarm"` (optional third read-only root, configured in `paths.swarm_memory_dir`); `scope="all"` includes it when configured.

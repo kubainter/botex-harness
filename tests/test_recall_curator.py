@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -687,6 +688,89 @@ async def test_ollama_shim_fallback_when_native_fails():
 
 
 @pytest.mark.anyio
+async def test_ollama_shim_first_skips_native_and_resolves_bielik_alias():
+    """llama.cpp detection uses /v1 directly and sends Bielik template kwargs."""
+    fake_client = MagicMock()
+    fake_client.models.list = AsyncMock(
+        return_value=SimpleNamespace(data=[SimpleNamespace(id="Bielik-11B-v3.1-instruct.Q4_K_M")])
+    )
+    fake_client.chat.completions.create = AsyncMock(return_value=_fake_completion(_payload()))
+
+    with (
+        patch.object(
+            recall_curator,
+            "_post_json",
+            side_effect=AssertionError("native /api/chat must not be called"),
+        ) as m_post,
+        patch.object(recall_curator, "_ollama_base_url", return_value="http://127.0.0.1:8080/v1"),
+        patch("openai.AsyncOpenAI", return_value=fake_client),
+    ):
+        raw = await recall_curator._try_local_ollama(
+            "prompt", _tcfg(model="bielik:latest", shim_first=True)
+        )
+
+    assert raw == _payload()
+    m_post.assert_not_called()
+    kwargs = fake_client.chat.completions.create.await_args.kwargs
+    assert kwargs["model"] == "Bielik-11B-v3.1-instruct.Q4_K_M"
+    assert kwargs["extra_body"] == {
+        "chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}
+    }
+
+
+@pytest.mark.anyio
+async def test_tier1_inconclusive_native_probe_with_v1_sets_shim_first():
+    """L7-inconclusive + L4/TCP + /v1/models means llama.cpp-style transport."""
+    captured = {}
+
+    async def _fake_local(prompt, tcfg):
+        captured.update(tcfg)
+        return _payload()
+
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(recall_curator, "_probe_ollama_model", MagicMock(return_value=None))
+        )
+        stack.enter_context(
+            patch.object(recall_curator, "_probe_tcp", MagicMock(return_value=True))
+        )
+        stack.enter_context(
+            patch.object(recall_curator, "_probe_openai_models", MagicMock(return_value=True))
+        )
+        stack.enter_context(patch.object(recall_curator, "_try_local_ollama", _fake_local))
+        result = await synthesize_recall("what is alpha?", _nodes())
+
+    assert result["tier_used"] == "local-ollama"
+    assert captured["shim_first"] is True
+
+
+@pytest.mark.anyio
+async def test_tier1_inconclusive_native_probe_without_v1_keeps_native_first():
+    """A wobbly native Ollama must not be downgraded to shim-only transport."""
+    captured = {}
+
+    async def _fake_local(prompt, tcfg):
+        captured.update(tcfg)
+        return _payload()
+
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(recall_curator, "_probe_ollama_model", MagicMock(return_value=None))
+        )
+        stack.enter_context(
+            patch.object(recall_curator, "_probe_tcp", MagicMock(return_value=True))
+        )
+        stack.enter_context(
+            patch.object(recall_curator, "_probe_openai_models", MagicMock(return_value=False))
+        )
+        stack.enter_context(patch.object(recall_curator, "_try_local_ollama", _fake_local))
+        result = await synthesize_recall("what is alpha?", _nodes())
+
+    assert result["tier_used"] == "local-ollama"
+    assert "shim_first" not in captured
+
+
+@pytest.mark.anyio
 async def test_nvidia_tier_uses_registry_and_disables_thinking(monkeypatch):
     """NVIDIA tier resolves via ProviderRegistry and sends thinking=False for nemotron-3."""
     monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
@@ -776,6 +860,23 @@ def test_probe_ollama_model_tri_state():
         assert recall_curator._probe_ollama_model("http://h:11434", "llama3", 0.8) is False
     with patch.object(recall_curator, "_get_json", side_effect=TimeoutError("slow")):
         assert recall_curator._probe_ollama_model("http://h:11434", "qwen2.5:3b", 0.8) is None
+
+
+def test_recall_local_model_default_aligned_with_curator_and_config():
+    from botex.ops.curator.curator_service import DEFAULT_LOCAL_MODEL
+    from botex.server.config import DEFAULTS
+
+    assert recall_curator.DEFAULT_OLLAMA_MODEL == DEFAULT_LOCAL_MODEL
+    assert DEFAULTS["memory"]["recall"]["ollama"]["model"] == DEFAULT_LOCAL_MODEL
+
+
+def test_probe_openai_models_bool():
+    with patch.object(recall_curator, "_get_json", return_value={"data": []}):
+        assert recall_curator._probe_openai_models("http://h:8080/v1", 0.8) is True
+    with patch.object(recall_curator, "_get_json", return_value={"models": []}):
+        assert recall_curator._probe_openai_models("http://h:8080/v1", 0.8) is False
+    with patch.object(recall_curator, "_get_json", side_effect=OSError("down")):
+        assert recall_curator._probe_openai_models("http://h:8080/v1", 0.8) is False
 
 
 def test_normalize_ollama_tag():
