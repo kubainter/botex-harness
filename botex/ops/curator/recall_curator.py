@@ -7,9 +7,10 @@ Multi-tier model cascade that synthesizes a structured, hallucination-free
 answer from pre-gathered Memory Vault notes for the ``recall_memory`` tool.
 
 Cascade order (first VALID structured answer wins):
-1. local-ollama    - native POST /api/chat with keep_alive (fallback: /v1 shim);
-                     L7 /api/tags model probe (800ms, tolerant), prompt-size
-                     guard, serialized via Semaphore(1) with bounded FIFO wait.
+1. local-ollama    - native POST /api/chat with keep_alive, or shim-first on
+                     llama.cpp-style hosts where /api/tags is inconclusive but
+                     /v1/models answers; L7 probe, prompt-size guard, serialized
+                     via Semaphore(1) with bounded FIFO wait.
 2. nvidia          - NVIDIA NIM via ProviderRegistry (NVIDIA_API_KEY); hedged:
                      starts in parallel after ``hedge_s`` of tier-1 silence.
 3. gemini          - Google AI Studio via ProviderRegistry (sequential).
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 # --- Contract §1 defaults (must mirror get_recall_config() fallbacks) ---
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_OLLAMA_MODEL = "qwen2.5:3b"
+DEFAULT_OLLAMA_MODEL = "bielik:latest"
 DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3.5-lightning:free"
@@ -203,6 +204,15 @@ def _probe_ollama_model(native_base: str, model: str, timeout_s: float) -> Optio
         return None
 
 
+def _probe_openai_models(base_url: str, timeout_s: float) -> bool:
+    """Return True when the OpenAI-compatible /models endpoint is usable."""
+    try:
+        data = _get_json(f"{base_url.rstrip('/')}/models", timeout_s)
+        return isinstance(data, dict) and isinstance(data.get("data"), list)
+    except Exception:
+        return False
+
+
 def _estimate_prompt_tokens(text: str) -> int:
     """Cheap token estimate (~4 chars/token) for the prompt-size guard."""
     return max(1, len(text) // 4)
@@ -317,11 +327,49 @@ def _cache_put(key: str, ttl_s: float, payload: dict) -> None:
         _ANSWER_CACHE.popitem(last=False)
 
 
-async def _try_local_ollama(prompt: str, tcfg: dict) -> Optional[str]:
-    """Tier 1 request: native POST /api/chat with keep_alive (model stays hot).
+def _local_chat_extra_body(model: str) -> Optional[Dict[str, Any]]:
+    model_low = model.lower()
+    if "qwen" in model_low:
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    if "bielik" in model_low:
+        return {"chat_template_kwargs": {"decision_mode": True, "reasoning_effort": "none"}}
+    return None
 
-    Fallback: OpenAI-compatible /v1 shim — keep_alive is unsupported there
-    (shim path is untested upstream).
+
+async def _try_local_ollama_shim(tcfg: dict, messages: list[dict]) -> Optional[str]:
+    """OpenAI-compatible local request with model-alias resolution."""
+    timeout_s = float(tcfg["timeout_s"])
+    try:
+        from openai import AsyncOpenAI
+
+        from botex.providers.providers import resolve_model_for_openai_client
+
+        client = AsyncOpenAI(base_url=_ollama_base_url(), api_key="ollama", timeout=timeout_s)
+        model = await resolve_model_for_openai_client(client, tcfg["model"])
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": RECALL_TEMPERATURE,
+            "max_tokens": RECALL_MAX_TOKENS,
+        }
+        extra_body = _local_chat_extra_body(model)
+        if extra_body is not None:
+            kwargs["extra_body"] = extra_body
+        resp = await client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content
+    except Exception as exc:
+        logger.info(
+            "Recall tier local-ollama shim unavailable or failed: %s",
+            coerce_text(mask_secrets(str(exc))),
+        )
+        return None
+
+
+async def _try_local_ollama(prompt: str, tcfg: dict) -> Optional[str]:
+    """Tier 1 request: native POST /api/chat with keep_alive when available.
+
+    llama.cpp exposes only the OpenAI-compatible /v1 surface; shim_first skips
+    its guaranteed-404 native endpoint while preserving native as a last resort.
     """
     model = tcfg["model"]
     timeout_s = float(tcfg["timeout_s"])
@@ -329,6 +377,11 @@ async def _try_local_ollama(prompt: str, tcfg: dict) -> Optional[str]:
         {"role": "system", "content": RECALL_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
+    shim_first = bool(tcfg.get("shim_first"))
+    if shim_first:
+        shim_result = await _try_local_ollama_shim(tcfg, messages)
+        if shim_result:
+            return shim_result
     native_payload = {
         "model": model,
         "messages": messages,
@@ -349,26 +402,9 @@ async def _try_local_ollama(prompt: str, tcfg: dict) -> Optional[str]:
             "Recall tier local-ollama native /api/chat failed, trying shim: %s",
             coerce_text(mask_secrets(str(exc))),
         )
-    try:
-        from openai import AsyncOpenAI
-
-        from botex.providers.providers import resolve_model_for_openai_client
-
-        client = AsyncOpenAI(base_url=_ollama_base_url(), api_key="ollama", timeout=timeout_s)
-        model = await resolve_model_for_openai_client(client, model)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=RECALL_TEMPERATURE,
-            max_tokens=RECALL_MAX_TOKENS,
-        )
-        return resp.choices[0].message.content
-    except Exception as exc:
-        logger.info(
-            "Recall tier local-ollama unavailable or failed: %s",
-            coerce_text(mask_secrets(str(exc))),
-        )
+    if shim_first:
         return None
+    return await _try_local_ollama_shim(tcfg, messages)
 
 
 async def _try_nvidia(prompt: str, tcfg: dict) -> Optional[str]:
@@ -675,14 +711,19 @@ async def _tier1_flow_impl(
             _mark_tier_down(name)
             rec(ST_MODEL_ABSENT)
             return None
-        if verdict is None and not await asyncio.to_thread(
-            _probe_tcp, native_base, OLLAMA_TCP_PROBE_TIMEOUT_S
-        ):
-            _mark_tier_down(name)
-            rec(ST_UNAVAILABLE)
-            return None
+        request_cfg = tcfg
+        if verdict is None:
+            if not await asyncio.to_thread(_probe_tcp, native_base, OLLAMA_TCP_PROBE_TIMEOUT_S):
+                _mark_tier_down(name)
+                rec(ST_UNAVAILABLE)
+                return None
+            if await asyncio.to_thread(
+                _probe_openai_models, _ollama_base_url(), OLLAMA_TAGS_PROBE_TIMEOUT_S
+            ):
+                request_cfg = dict(tcfg)
+                request_cfg["shim_first"] = True
         raw = await asyncio.wait_for(
-            _try_local_ollama(prompt, tcfg), timeout=float(tcfg["timeout_s"]) + 1.0
+            _try_local_ollama(prompt, request_cfg), timeout=float(tcfg["timeout_s"]) + 1.0
         )
     except asyncio.CancelledError:
         rec(ST_CANCELLED)

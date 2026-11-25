@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 77 Python modules (`server.py` + `botex/`), 96 test files (`tests/`).
+- **Codebase footprint:** 78 Python modules (`server.py` + `botex/`), 98 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -26,17 +26,17 @@ targeted + integration tests.
 | Module | File | Imported By (modules) | Direct Tests |
 |---|---|---:|---:|
 | `botex.tools.security` | `botex/tools/security.py` | 39 | 9 |
-| `botex.server.config` | `botex/server/config.py` | 25 | 23 |
+| `botex.server.config` | `botex/server/config.py` | 26 | 24 |
 | `botex.memory.memory` | `botex/memory/memory.py` | 10 | 6 |
 | `botex.providers` | `botex/providers/__init__.py` | 8 | 12 |
+| `botex.skills.skills` | `botex/skills/skills.py` | 8 | 2 |
+| `botex.memory` | `botex/memory/__init__.py` | 7 | 23 |
 | `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 6 |
 | `botex.providers.denylist` | `botex/providers/denylist.py` | 7 | 6 |
-| `botex.skills.skills` | `botex/skills/skills.py` | 7 | 2 |
-| `botex.memory` | `botex/memory/__init__.py` | 6 | 21 |
 | `botex.tools.file_tools` | `botex/tools/file_tools.py` | 6 | 2 |
 | `botex.core.context_guard` | `botex/core/context_guard.py` | 5 | 1 |
+| `botex.ops.curator` | `botex/ops/curator/__init__.py` | 5 | 9 |
 | `botex.providers.providers` | `botex/providers/providers.py` | 5 | 7 |
-| `botex.tools.net_tools` | `botex/tools/net_tools.py` | 5 | 1 |
 
 ## Domain Dependencies
 
@@ -101,7 +101,7 @@ targeted + integration tests.
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/memory/__init__.py` | — | `test_botex.py`, `test_challenger_m7_concurrency.py`, `test_context_guard.py`, `test_curator.py`, +17 more |
+| `botex/memory/__init__.py` | — | `test_botex.py`, `test_challenger_m7_concurrency.py`, `test_context_guard.py`, `test_curator.py`, +19 more |
 | `botex/memory/curator.py` | — | `test_curator.py` |
 | `botex/memory/embeddings.py` | `EmbeddingEngine`, `is_fastembed_available`, `get_engine`, `embed_text`, `embed_texts` | `test_embeddings.py` |
 | `botex/memory/memory.py` | `get_swarm_memory_dir`, `get_recall_config`, `extract_wikilinks`, `extract_implicit_links`, `reciprocal_rank_fusion`, `get_global_memory_dir`, `+18 more` | `test_challenger_m7_empirical.py`, `test_curator_f7.py`, `test_e2e_contracts.py`, `test_idle_layers_l1.py`, +2 more |
@@ -113,10 +113,11 @@ targeted + integration tests.
 | File | Key Public Symbols | Tests |
 |---|---|---|
 | `botex/ops/__init__.py` | — | `test_idle_layers_l1.py` |
-| `botex/ops/curator/__init__.py` | — | `test_brief_curator.py`, `test_curator.py`, `test_curator_f7.py`, `test_curator_tasks.py`, +4 more |
+| `botex/ops/curator/__init__.py` | — | `test_brief_curator.py`, `test_curator.py`, `test_curator_f7.py`, `test_curator_tasks.py`, +5 more |
 | `botex/ops/curator/brief_curator.py` | `is_brief_curator_inflight`, `refresh_bot_brief` | `test_brief_curator.py` |
-| `botex/ops/curator/curator_service.py` | `CuratorResult`, `CuratorLock`, `CuratorService`, `check_active_agent_tasks`, `get_curator_status`, `run_curation_async`, `+1 more` | `test_curator.py`, `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_idle_layers_l1.py`, +1 more |
-| `botex/ops/curator/prompts.py` | `build_curator_user_prompt`, `build_recall_user_prompt`, `build_compiled_truth_user_prompt` | `test_curator_and_migration_f4.py`, `test_recall_curator.py` |
+| `botex/ops/curator/curator_service.py` | `CuratorResult`, `CuratorLock`, `CuratorService`, `check_active_agent_tasks`, `get_curator_status`, `run_curation_async`, `+1 more` | `test_curator.py`, `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_idle_layers_l1.py`, +2 more |
+| `botex/ops/curator/prompts.py` | `build_curator_user_prompt`, `build_recall_user_prompt`, `build_compiled_truth_user_prompt`, `build_recall_briefing_user_prompt` | `test_curator_and_migration_f4.py`, `test_recall_briefing.py`, `test_recall_curator.py` |
+| `botex/ops/curator/recall_briefing.py` | `parse_briefing_header`, `compute_inputs_hash`, `select_briefing_projects`, `validate_briefing_body`, `compile_project_briefing`, `run_briefing_compilation`, `+5 more` | `test_recall_briefing.py`, `test_recall_briefing_serving.py` |
 | `botex/ops/curator/recall_curator.py` | `synthesize_recall` | `test_recall_curator.py`, `test_recall_observability.py`, `test_tracing_wiring.py` |
 | `botex/ops/curator/tasks.py` | `CuratorTask`, `load_task_state`, `run_due_tasks`, `main` | `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_curator_tasks.py` |
 | `botex/ops/curator/telegram.py` | `TelegramNotifier`, `get_telegram_config`, `mask_telegram_token`, `format_curator_telegram_message`, `send_telegram_notification` | `test_curator.py` |
@@ -147,7 +148,7 @@ targeted + integration tests.
 |---|---|---|
 | `botex/server/__init__.py` | — | `test_brief_curator.py`, `test_containment_recall_gate.py`, `test_edge_delegation_api.py`, `test_edge_integration.py`, +7 more |
 | `botex/server/chat.py` | `ChatMessage`, `ChatSession`, `ChatManager`, `execute_chat_tool`, `stream_chat_turn`, `chat_turn` | `test_chat.py`, `test_chat_error_observability.py`, `test_server_f4_provenance.py`, `test_stage_4_8.py` |
-| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +19 more |
+| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +20 more |
 | `botex/server/i18n.py` | `detect_language`, `init_language`, `set_language`, `get_language`, `t` | — |
 | `botex/server/plugins.py` | `PluginError`, `PluginValidationError`, `PluginExecutionError`, `PluginExecutionTimeout`, `PluginPermissionError`, `BoteXPluginDefinition`, `+5 more` | `test_approval.py`, `test_plugins_creator.py` |
 | `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+92 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +17 more |
@@ -179,5 +180,5 @@ targeted + integration tests.
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/__init__.py` | — | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m7_concurrency.py`, `test_curator_and_migration_f4.py`, +23 more |
-| `server.py` | `SubagentAttemptResult`, `SubagentTaskResult`, `mask_secrets_recursive`, `mask_stream_chunk`, `start_task`, `get_task_status`, `+29 more` | `test_analytics.py`, `test_approval.py`, `test_blackbox_penal.py`, `test_botex.py`, +28 more |
+| `botex/__init__.py` | — | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m7_concurrency.py`, `test_curator_and_migration_f4.py`, +25 more |
+| `server.py` | `SubagentAttemptResult`, `SubagentTaskResult`, `mask_secrets_recursive`, `mask_stream_chunk`, `start_task`, `get_task_status`, `+29 more` | `test_analytics.py`, `test_approval.py`, `test_blackbox_penal.py`, `test_botex.py`, +29 more |

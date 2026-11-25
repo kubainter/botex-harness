@@ -183,8 +183,39 @@ async def worker_recall_memory(
     nodes = ctx.get("nodes") or []
 
     result: Optional[Dict[str, Any]] = None
+    briefing_served = False
 
-    if nodes and use_llm_synthesis:
+    briefing_cfg: Dict[str, Any] = {}
+    try:
+        from botex.server.config import load_config as _load_cfg
+
+        briefing_cfg = dict(
+            (((_load_cfg().get("memory") or {}).get("recall") or {}).get("briefing") or {})
+        )
+    except Exception:
+        briefing_cfg = {}
+    if (
+        nodes
+        and use_llm_synthesis
+        and briefing_cfg.get("enabled", True)
+        and briefing_cfg.get("serve", True)
+    ):
+        try:
+            from botex.ops.curator.recall_briefing import build_briefing_answer, parse_max_age_h
+
+            result = await asyncio.to_thread(
+                build_briefing_answer,
+                str(workspace_dir),
+                str(query),
+                nodes,
+                project or None,
+                parse_max_age_h(briefing_cfg.get("max_age_h", 72)),
+            )
+            briefing_served = result is not None
+        except Exception:
+            result = None
+
+    if nodes and use_llm_synthesis and result is None:
         try:
             from botex.ops.curator import synthesize_recall
 
@@ -196,7 +227,7 @@ async def worker_recall_memory(
 
     # Determine recall status
     if result is not None:
-        recall_status = "SYNTHESIZED"
+        recall_status = "BRIEFING_SERVED" if briefing_served else "SYNTHESIZED"
     elif nodes and not use_llm_synthesis:
         recall_status = "DETERMINISTIC_BUDGET"
     elif nodes:

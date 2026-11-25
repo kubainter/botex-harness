@@ -311,7 +311,7 @@
   "memory": {
     "recall": {
       "ollama": {
-        "model": "qwen2.5:3b",
+        "model": "bielik:latest",
         "enabled": true,
         "timeout_s": 12
       },
@@ -333,7 +333,12 @@
       "hedge_s": 4,
       "cache_ttl_s": 300,
       "queue_wait_s": 3,
-      "num_ctx_guard_tokens": 4000
+      "num_ctx_guard_tokens": 4000,
+      "briefing": {
+        "enabled": true,
+        "serve": true,
+        "max_age_h": 72
+      }
     }
   },
   "cloud": {
@@ -351,5 +356,10 @@
       "binary_path": "skillspector",
       "allow_unverified": false
     }
+  },
+  "curator": {
+    "briefings_enabled": true,
+    "briefings_max_per_night": 8,
+    "briefings_min_notes": 5
   }
 }

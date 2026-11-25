@@ -675,7 +675,7 @@ DEFAULTS: Dict[str, Any] = {
         # local free tier first, quota tiers as fallback. Env vars
         # BOTEX_RECALL_*_MODEL remain per-run overrides.
         "recall": {
-            "ollama": {"model": "qwen2.5:3b", "enabled": True, "timeout_s": 12.0},
+            "ollama": {"model": "bielik:latest", "enabled": True, "timeout_s": 12.0},
             "nvidia": {
                 "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
                 "enabled": True,
@@ -693,6 +693,9 @@ DEFAULTS: Dict[str, Any] = {
             "cache_ttl_s": 300,
             "queue_wait_s": 3.0,
             "num_ctx_guard_tokens": 4000,
+            # Pre-compiled per-project briefings (plan 055): served as a
+            # zero-LLM first-line answer when coverage+freshness pass.
+            "briefing": {"enabled": True, "serve": True, "max_age_h": 72},
         }
     },
     "cloud": {

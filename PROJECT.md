@@ -17,7 +17,7 @@ id: PROJECT
   - Temporal range queries (`since`, `until`) and confidence thresholding (`min_confidence`).
   - Spreading activation across wikilink graph blended with FTS5 lexical search via Reciprocal Rank Fusion (RRF).
   - MCP Tool `reflect_memory`: In-memory reflection and synthesis of architectural knowledge.
-  - Recall modernization (arena-recall-20261107): per-token OR FTS matching with a coverage admission gate (≥2 distinct tokens, single-token queries exempt from the stop-list rule only), third read-only search root `paths.swarm_memory_dir` (scope `swarm`), and a hedged 4-tier curator cascade (`memory.recall` config section, local qwen2.5:3b first, NVIDIA hedges after `hedge_s`) with `recall_status`/`tier_attempts`/`workspace_searched` in every response.
+  - Recall modernization (arena-recall-20261107): per-token OR FTS matching with a coverage admission gate (≥2 distinct tokens, single-token queries exempt from the stop-list rule only), third read-only search root `paths.swarm_memory_dir` (scope `swarm`), and a hedged 4-tier curator cascade (`memory.recall` config section, local bielik:latest first, NVIDIA hedges after `hedge_s`) with `recall_status`/`tier_attempts`/`workspace_searched` in every response.
 
 - **Provider Subsystem (`botex/providers.py` or `botex/providers/`)**:
   - `BaseProvider`: Abstract base class defining provider interface (`resolve_api_key`, `get_client`, `normalize_response`, `sanitize_error`, `fetch_catalog`, `get_credits`).

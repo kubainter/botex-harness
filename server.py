@@ -1288,6 +1288,59 @@ async def _recall_rate_gate() -> Optional[dict[str, Any]]:
     }
 
 
+def _briefing_recall_config() -> dict[str, Any]:
+    try:
+        mem = load_config().get("memory") or {}
+        recall = mem.get("recall") or {}
+        bcfg = recall.get("briefing")
+        return dict(bcfg) if isinstance(bcfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def _cloud_tiers_exhausted(tier_attempts: list[dict[str, Any]]) -> bool:
+    """Every cloud tier attempted and failed — the defer-path signal (plan 055)."""
+    cloud = [
+        a
+        for a in tier_attempts or []
+        if str(a.get("tier") or "") in ("nvidia", "gemini", "openrouter-free")
+    ]
+    if not cloud:
+        return False
+    statuses = [str(a.get("status") or "") for a in cloud]
+    if not all(s in ("unavailable", "error", "timeout", "neg_cached") for s in statuses):
+        return False
+    # Plain unavailable-everywhere means structural misconfiguration (missing
+    # keys/probe-down) where a retry hint is pointless; quota exhaustion
+    # instead leaves transient markers on at least one tier.
+    return any(s in ("error", "timeout", "neg_cached") for s in statuses)
+
+
+def _try_briefing_first_line(
+    workspace_dir: str,
+    query: str,
+    nodes: list[dict[str, Any]],
+    project: Optional[str] = None,
+    max_age_h: float = 72.0,
+) -> Optional[dict[str, Any]]:
+    """Zero-LLM first-line recall answer from a fresh pre-compiled briefing, or None.
+
+    Thin wrapper over ``recall_briefing.build_briefing_answer`` (shared with
+    the worker bridge); weak coverage returns None so the caller falls through
+    to the LLM cascade.
+    """
+    try:
+        from botex.ops.curator.recall_briefing import build_briefing_answer, parse_max_age_h
+    except Exception:
+        return None
+    try:
+        return build_briefing_answer(
+            workspace_dir, query, nodes, project=project, max_age_h=parse_max_age_h(max_age_h)
+        )
+    except Exception:
+        return None
+
+
 async def _recall_memory_impl(
     workspace_dir: str,
     query: str,
@@ -1298,6 +1351,7 @@ async def _recall_memory_impl(
     limited = await _recall_rate_gate()
     if limited is not None:
         return limited
+    _recall_t0 = time.monotonic()
     try:
         ctx = _gather_recall_context(
             workspace_dir=workspace_dir,
@@ -1323,7 +1377,19 @@ async def _recall_memory_impl(
     nodes = ctx.get("nodes") or []
     result: Optional[dict[str, Any]] = None
     tier_attempts: list[dict[str, Any]] = []
-    if nodes:
+    briefing_served = False
+    bcfg = _briefing_recall_config()
+    if nodes and bcfg.get("enabled", True) and bcfg.get("serve", True):
+        result = await asyncio.to_thread(
+            _try_briefing_first_line,
+            workspace_dir,
+            query,
+            nodes,
+            project,
+            bcfg.get("max_age_h", 72),
+        )
+        briefing_served = result is not None
+    if nodes and result is None:
         try:
             from botex.ops.curator import synthesize_recall
 
@@ -1343,14 +1409,29 @@ async def _recall_memory_impl(
                 result = None  # cascade reported failure -> deterministic
         else:
             result = None
+    defer = False
     if result is not None:
-        recall_status = "SYNTHESIZED"
+        recall_status = "BRIEFING_SERVED" if briefing_served else "SYNTHESIZED"
     elif nodes:
-        recall_status = "FALLBACK_MODELS_FAILED"
+        defer = _cloud_tiers_exhausted(tier_attempts)
+        recall_status = "QUOTA_EXHAUSTED_DEFER" if defer else "FALLBACK_MODELS_FAILED"
     else:
         recall_status = "ZERO_NODES_FOUND"
     if not result:
         result = _deterministic_recall(query, nodes)
+        if defer:
+            result["answer"] = str(result.get("answer") or "") + (
+                "\n\nWszystkie chmurowe providery są obecnie niedostępne (quota wyczerpana "
+                "lub awaria/błąd konfiguracji) — powyższy digest jest deterministyczny; "
+                "odpytaj ponownie za kilka minut dla pełnej syntezy."
+            )
+    logger.info(
+        "recall outcome status=%s coverage=%s tier=%s latency_ms=%d",
+        recall_status,
+        "briefing" if briefing_served else "miss",
+        str(result.get("tier_used") or "-"),
+        int((time.monotonic() - _recall_t0) * 1000),
+    )
     return _attach_swarm_visibility_piggyback(
         {
             "ok": True,
@@ -1605,7 +1686,17 @@ async def bot_consult(
         n for n in nodes if str(n.get("status") or "active").strip().lower() == "active"
     ]
     result: Optional[dict[str, Any]] = None
-    if active_nodes:
+    bcfg = _briefing_recall_config()
+    if active_nodes and bcfg.get("enabled", True) and bcfg.get("serve", True):
+        result = await asyncio.to_thread(
+            _try_briefing_first_line,
+            resolve_workspace(""),
+            str(query or ""),
+            active_nodes,
+            ns or None,
+            bcfg.get("max_age_h", 72),
+        )
+    if active_nodes and result is None:
         try:
             from botex.ops.curator import synthesize_recall
 
