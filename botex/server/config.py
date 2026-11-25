@@ -693,6 +693,9 @@ DEFAULTS: Dict[str, Any] = {
             "cache_ttl_s": 300,
             "queue_wait_s": 3.0,
             "num_ctx_guard_tokens": 4000,
+            # Pre-compiled per-project briefings (plan 055): served as a
+            # zero-LLM first-line answer when coverage+freshness pass.
+            "briefing": {"enabled": True, "serve": True, "max_age_h": 72},
         }
     },
     "cloud": {

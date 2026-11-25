@@ -2470,6 +2470,9 @@ def _load_recall_node(workspace_dir: str, memory_id: str, scope: str) -> Optiona
             meta, body = _parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             return None
+        raw_tags = meta.get("tags") or []
+        if isinstance(raw_tags, str):
+            raw_tags = [t.strip() for t in raw_tags.strip("[]").split(",") if t.strip()]
         return {
             "id": mid,
             "title": str(meta.get("title") or mid),
@@ -2477,6 +2480,7 @@ def _load_recall_node(workspace_dir: str, memory_id: str, scope: str) -> Optiona
             "status": str(meta.get("status") or "active"),
             "scope": sc,
             "content": body,
+            "tags": [str(t) for t in raw_tags],
         }
     return None
 
@@ -2530,6 +2534,9 @@ def gather_recall_context(
             if not mid or mid in seen:
                 continue
             seen.add(mid)
+            m_tags = m.get("tags") or []
+            if isinstance(m_tags, str):
+                m_tags = [t.strip() for t in m_tags.strip("[]").split(",") if t.strip()]
             candidates.append(
                 {
                     "id": mid,
@@ -2538,6 +2545,7 @@ def gather_recall_context(
                     "scope": str(m.get("scope") or "local"),
                     "relation": "match",
                     "content": str(m.get("content") or ""),
+                    "tags": [str(t) for t in m_tags],
                 }
             )
 
@@ -2586,6 +2594,7 @@ def gather_recall_context(
                     "scope": node["scope"],
                     "relation": node["relation"],
                     "content": content,
+                    "tags": list(node.get("tags") or []),
                 }
             )
             used += cost

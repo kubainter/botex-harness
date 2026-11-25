@@ -340,3 +340,85 @@ def _age_hours(generated: str) -> float:
         return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds()) / 3600.0
     except ValueError:
         return float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Query-time serving side (plan 055 W2): coverage lookup + overlap gate.
+# ---------------------------------------------------------------------------
+
+
+def strip_briefing_header(content: str) -> str:
+    """Briefing body without the machine-readable HTML comment header."""
+    return BRIEFING_HEADER_RE.sub("", str(content or ""), count=1).strip()
+
+
+def briefing_overlap_score(query: str, body: str) -> int:
+    """Distinct non-stop query tokens (len >= 3) present in the briefing body.
+
+    Mirrors the recall admission-gate vocabulary: stop tokens never count
+    towards coverage, and the caller requires score >= _RECALL_MIN_COVERAGE.
+    """
+    tokens = {
+        t
+        for t in re.findall(r"[\w\-]{3,}", str(query or "").lower())
+        if t not in memory._RECALL_STOP_TOKENS
+    }
+    if not tokens:
+        return 0
+    text = str(body or "").lower()
+    return sum(1 for token in tokens if token in text)
+
+
+def list_fresh_briefings(
+    workspace_dir: str,
+    max_age_h: float = BRIEFING_MAX_AGE_H,
+) -> List[Dict[str, Any]]:
+    """Active recall briefings inside the age window with structurally valid sources.
+
+    Deterministic tag metadata lookup (never FTS): freshness means generated
+    within ``max_age_h`` AND no source note missing/superseded/deprecated.
+    Content drift is absorbed by the nightly idempotent recompile instead.
+    """
+    res = memory.search_memory(
+        workspace_dir=workspace_dir,
+        query="",
+        tag=BRIEFING_TAG,
+        scope="all",
+        status="active",
+    )
+    if not res.get("ok"):
+        return []
+    out: List[Dict[str, Any]] = []
+    for entry in res.get("memories") or []:
+        content = str(entry.get("content") or "")
+        header = parse_briefing_header(content)
+        if header is None:
+            continue
+        if _age_hours(str(header.get("generated") or "")) > float(max_age_h):
+            continue
+        if not _sources_still_active(workspace_dir, header.get("sources") or []):
+            continue
+        out.append(
+            {
+                "id": str(entry.get("id") or ""),
+                "project": str(header.get("project") or ""),
+                "generated": str(header.get("generated") or ""),
+                "sources": list(header.get("sources") or []),
+                "content": content,
+            }
+        )
+    return out
+
+
+def _sources_still_active(workspace_dir: str, source_ids: Iterable[str]) -> bool:
+    for sid in source_ids or []:
+        try:
+            res = memory.read_memory(workspace_dir=workspace_dir, memory_id=str(sid), scope="all")
+        except Exception:
+            return False
+        if not res.get("ok"):
+            return False
+        meta = res.get("metadata") or {}
+        if str(meta.get("status") or "active").strip().lower() != "active":
+            return False
+    return True

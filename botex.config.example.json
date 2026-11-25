@@ -333,7 +333,12 @@
       "hedge_s": 4,
       "cache_ttl_s": 300,
       "queue_wait_s": 3,
-      "num_ctx_guard_tokens": 4000
+      "num_ctx_guard_tokens": 4000,
+      "briefing": {
+        "enabled": true,
+        "serve": true,
+        "max_age_h": 72
+      }
     }
   },
   "cloud": {

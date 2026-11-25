@@ -59,7 +59,8 @@ def test_gather_expands_links_and_backlinks(vault):
     assert ids["adr"] in by_id
     assert ids["ref"] in by_id
     assert all(
-        set(n) == {"id", "title", "kind", "scope", "relation", "content"} for n in res["nodes"]
+        set(n) == {"id", "title", "kind", "scope", "relation", "content", "tags"}
+        for n in res["nodes"]
     )
     # matches come before neighbours
     relations = [n["relation"] for n in res["nodes"]]
