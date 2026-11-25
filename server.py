@@ -1322,60 +1322,20 @@ def _try_briefing_first_line(
 ) -> Optional[dict[str, Any]]:
     """Zero-LLM first-line recall answer from a fresh pre-compiled briefing, or None.
 
-    Coverage = deterministic tag lookup + token-overlap admission gate; a weak
-    overlap returns None so the caller falls through to the LLM cascade.
+    Thin wrapper over ``recall_briefing.build_briefing_answer`` (shared with
+    the worker bridge); weak coverage returns None so the caller falls through
+    to the LLM cascade.
     """
     try:
-        from botex.memory import _RECALL_MIN_COVERAGE
-        from botex.ops.curator.recall_briefing import (
-            BRIEFING_TAG,
-            briefing_overlap_score,
-            list_fresh_briefings,
-            strip_briefing_header,
+        from botex.ops.curator.recall_briefing import build_briefing_answer
+    except Exception:
+        return None
+    try:
+        return build_briefing_answer(
+            workspace_dir, query, nodes, project=project, max_age_h=max_age_h
         )
     except Exception:
         return None
-    try:
-        briefings = list_fresh_briefings(workspace_dir, max_age_h=max_age_h)
-    except Exception:
-        return None
-    best: Optional[tuple] = None
-    for b in briefings:
-        body = strip_briefing_header(str(b.get("content") or ""))
-        if not body:
-            continue
-        score = briefing_overlap_score(query, body)
-        if score < _RECALL_MIN_COVERAGE:
-            continue
-        project_match = 1 if project and str(b.get("project") or "") == str(project) else 0
-        key = (score, project_match)
-        if best is None or key > best[0]:
-            best = (key, b, body)
-    if best is None:
-        return None
-    key, briefing, body = best
-    overlap = int(key[0])
-    digest_nodes = [
-        n
-        for n in nodes or []
-        if BRIEFING_TAG not in {str(t).strip().lower() for t in (n.get("tags") or [])}
-    ][:3]
-    answer = body
-    sources = [str(briefing.get("id") or "")]
-    if digest_nodes:
-        digest = _deterministic_recall(query, digest_nodes)
-        digest_answer = str(digest.get("answer") or "").strip()
-        if digest_answer:
-            answer = body + "\n\n---\n\nPowiązane notatki:\n" + digest_answer
-        sources.extend(str(n.get("id")) for n in digest_nodes if n.get("id"))
-    return {
-        "answer": answer,
-        "sources": sources,
-        "confidence": "HIGH" if overlap >= 4 else "MEDIUM",
-        "tier_used": "briefing",
-        "briefing_id": str(briefing.get("id") or ""),
-        "briefing_generated": str(briefing.get("generated") or ""),
-    }
 
 
 async def _recall_memory_impl(

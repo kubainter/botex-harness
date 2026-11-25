@@ -422,3 +422,59 @@ def _sources_still_active(workspace_dir: str, source_ids: Iterable[str]) -> bool
         if str(meta.get("status") or "active").strip().lower() != "active":
             return False
     return True
+
+
+def build_briefing_answer(
+    workspace_dir: str,
+    query: str,
+    nodes: List[Dict[str, Any]],
+    project: Optional[str] = None,
+    max_age_h: float = BRIEFING_MAX_AGE_H,
+) -> Optional[Dict[str, Any]]:
+    """Zero-LLM first-line recall answer from a fresh briefing, or None.
+
+    Coverage = deterministic tag lookup + token-overlap admission gate; weak
+    overlap returns None so the caller falls through to the LLM cascade.
+    Shared by the MCP recall path and the worker bridge.
+    """
+    try:
+        briefings = list_fresh_briefings(workspace_dir, max_age_h=max_age_h)
+    except Exception:
+        return None
+    best: Optional[tuple] = None
+    for briefing in briefings:
+        body = strip_briefing_header(str(briefing.get("content") or ""))
+        if not body:
+            continue
+        score = briefing_overlap_score(query, body)
+        if score < memory._RECALL_MIN_COVERAGE:
+            continue
+        project_match = 1 if project and str(briefing.get("project") or "") == str(project) else 0
+        key = (score, project_match)
+        if best is None or key > best[0]:
+            best = (key, briefing, body)
+    if best is None:
+        return None
+    key, briefing, body = best
+    overlap = int(key[0])
+    digest_nodes = [
+        n
+        for n in nodes or []
+        if BRIEFING_TAG not in {str(t).strip().lower() for t in (n.get("tags") or [])}
+    ][:3]
+    answer = body
+    sources = [str(briefing.get("id") or "")]
+    if digest_nodes:
+        digest = memory.deterministic_recall(query, digest_nodes)
+        digest_answer = str(digest.get("answer") or "").strip()
+        if digest_answer:
+            answer = body + "\n\n---\n\nPowiązane notatki:\n" + digest_answer
+        sources.extend(str(n.get("id")) for n in digest_nodes if n.get("id"))
+    return {
+        "answer": answer,
+        "sources": sources,
+        "confidence": "HIGH" if overlap >= 4 else "MEDIUM",
+        "tier_used": "briefing",
+        "briefing_id": str(briefing.get("id") or ""),
+        "briefing_generated": str(briefing.get("generated") or ""),
+    }
