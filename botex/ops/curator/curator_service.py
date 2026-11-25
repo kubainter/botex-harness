@@ -617,6 +617,41 @@ def _apply_recommended_links(
     return {"applied": len(applied), "skipped": skipped, "applied_links": applied}
 
 
+def _extract_first_json_object(text: str) -> Optional[str]:
+    """Return the first balanced {...} object, tracking string state.
+
+    Small local LLMs append trailing junk after the JSON payload (stray
+    braces, commentary); greedy regex extraction over-captures it and the
+    strict parser then rejects the whole batch, wasting tens of minutes of
+    CPU inference.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _parse_json_analysis(raw_output: Optional[str]) -> Optional[Dict[str, Any]]:
     """Parse structured JSON curator output from an LLM response."""
     if not raw_output:
@@ -628,12 +663,25 @@ def _parse_json_analysis(raw_output: Optional[str]) -> Optional[Dict[str, Any]]:
         elif "```" in cleaned:
             cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
         else:
-            match = re.search(r"\{[\s\S]*\}", cleaned)
-            if match:
-                cleaned = match.group(0)
-        parsed = json.loads(cleaned)
+            extracted = _extract_first_json_object(cleaned)
+            if extracted:
+                cleaned = extracted
+        parsed: Optional[Dict[str, Any]] = None
+        strict_exc: Optional[Exception] = None
+        for strict in (True, False):
+            try:
+                candidate = json.loads(cleaned, strict=strict)
+                parsed = candidate
+                break
+            except Exception as exc:
+                if strict_exc is None:
+                    strict_exc = exc
+        # strict=False tolerates raw control characters inside strings —
+        # small local models emit unescaped newlines in long rationales.
         if isinstance(parsed, dict) and "summary" in parsed:
             return parsed
+        if parsed is None and strict_exc is not None:
+            raise strict_exc
     except Exception as exc:
         logger.warning("Failed to parse LLM curator output: %s", exc)
     return None
@@ -917,21 +965,9 @@ class CuratorService:
 
         # 3. Parse JSON or fall back to Tier 3: Deterministic
         if raw_output:
-            try:
-                cleaned = raw_output.strip()
-                if "```json" in cleaned:
-                    cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
-                elif "```" in cleaned:
-                    cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
-                else:
-                    match = re.search(r"\{[\s\S]*\}", cleaned)
-                    if match:
-                        cleaned = match.group(0)
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, dict) and "summary" in parsed:
-                    return tier_used, parsed
-            except Exception as exc:
-                logger.warning("Failed to parse LLM curator output: %s", exc)
+            parsed = _parse_json_analysis(raw_output)
+            if parsed is not None:
+                return tier_used, parsed
 
         # Tier 3: Deterministic heuristic analysis
         deterministic_res = _compute_deterministic_recommendations(orphan_nodes, recent_nodes)
