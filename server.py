@@ -148,7 +148,7 @@ from botex.memory import (
 from botex.memory import (
     search_memory as _search_memory,
 )
-from botex.providers import ProviderRegistry
+from botex.providers import ProviderRegistry, sanitize_provider_error
 from botex.server.task_store import load_task_persistent
 
 try:
@@ -1739,8 +1739,13 @@ async def get_stats(
 
 
 @mcp.tool()
-async def check_health() -> str:
-    """Checks BoteX environment readiness (provider keys, snapshot dir, disk)."""
+async def check_health(live: bool = False) -> str:
+    """Checks BoteX environment readiness (provider keys, snapshot dir, disk).
+
+    ``live=True`` additionally probes each provider's ``/models`` endpoint —
+    a configured key alone does not prove the endpoint is reachable and
+    serving models.
+    """
     cfg = load_config()
     secrets = cfg.get("secrets", {})
     key_lines = []
@@ -1763,6 +1768,16 @@ async def check_health() -> str:
             f"{'configured' if has_key else '(check .env)'}"
         )
     keys_report = "\n".join(key_lines) or "[MISSING] No providers configured"
+    if live:
+        live_lines = []
+        for pname, pcfg in cfg.get("providers", {}).items():
+            try:
+                adapter = ProviderRegistry.get(pname, pcfg)
+                catalog = await asyncio.to_thread(adapter.fetch_catalog, timeout=6.0)
+                live_lines.append(f"[OK] {pname}: reachable ({len(catalog)} models)")
+            except Exception as e:
+                live_lines.append(f"[FAIL] {pname}: {sanitize_provider_error(e)}")
+        keys_report += "\nLive endpoint probe:\n" + "\n".join(live_lines)
     snaps = snapshot_manager.list_snapshots()
     total_mb = sum(s["size_kb"] for s in snaps) / 1024
     def_pname, def_pcfg = resolve_provider()

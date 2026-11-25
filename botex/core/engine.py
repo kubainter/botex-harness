@@ -49,6 +49,8 @@ try:
         normalize_streaming_chunks,
         provider_forbids_stream,
         resolve_api_key,
+        resolve_local_llm_base_url,
+        resolve_model_for_openai_client,
         sanitize_provider_error,
     )
     from botex.providers.retry import (
@@ -219,6 +221,8 @@ except (ImportError, ValueError):
         normalize_streaming_chunks,
         provider_forbids_stream,
         resolve_api_key,
+        resolve_local_llm_base_url,
+        resolve_model_for_openai_client,
         sanitize_provider_error,
     )
     from recipes import list_recipes, load_recipe
@@ -1873,6 +1877,10 @@ async def _run_botex_task_once_impl(
             "files_touched": [],
             "steps": 0,
         }
+    # Local LLM stacks drift between loopback ports (llama-server :8080 vs
+    # Ollama :11434); a stale config base_url must not pin a dead socket.
+    # Non-local providers return the cfg untouched without probing.
+    provider_cfg = await asyncio.to_thread(resolve_local_llm_base_url, provider_name, provider_cfg)
     # When the caller names neither model nor profile, the capability mode
     # picks the model tier (engine.mode_profiles): readonly recon goes to
     # the cheap "fast" profile, mutating modes to default/coding.
@@ -2255,6 +2263,16 @@ async def _run_botex_task_once_impl(
         api_key,
         client_factory=AsyncOpenAI,
     )
+    # Configured local model ids may be aliases (e.g. Ollama tags, HF slugs)
+    # — llama-server only serves its live ids. Remote providers skip the
+    # extra /models round-trip.
+    _resolved_llm_base = str(provider_cfg.get("base_url") or "")
+    if (
+        provider_name.lower().strip() in ("ollama", "bielik", "local")
+        or "127.0.0.1" in _resolved_llm_base
+        or "localhost" in _resolved_llm_base
+    ):
+        model = await resolve_model_for_openai_client(client, model)
     # The wire flag follows the same zdr_enforced() decision as the local
     # gate — a relaxed run keeping data_collection=deny would leave :free
     # models with no eligible upstream endpoints. Deep-copied: the shared
@@ -2729,7 +2747,10 @@ async def _run_botex_task_once_impl(
                 get_rate_limiter().observe_headers(
                     provider_name, getattr(raw_resp, "headers", None), model
                 )
-                return raw_resp.parse()
+                parsed_resp = raw_resp.parse()
+                if inspect.isawaitable(parsed_resp):
+                    return await parsed_resp
+                return parsed_resp
 
             async def _collect_stream(stream_resp) -> Any:
                 chunks = []
@@ -2762,6 +2783,8 @@ async def _run_botex_task_once_impl(
                                 provider_name, getattr(raw_resp, "headers", None), model
                             )
                             parsed = raw_resp.parse()
+                            if inspect.isawaitable(parsed):
+                                parsed = await parsed
                             if hasattr(parsed, "__aiter__"):
                                 return await _collect_stream(parsed)
                             return normalize_response(parsed)
