@@ -20,14 +20,17 @@ Environment=BIELIK_MODELS_DIR=/opt/bielik/models
 # Router mode: serves all GGUFs in /opt/bielik/models with --models-max 1 so
 # switching between Bielik and Qwen happens passively on request without OOM.
 # --load-mode mmap lets the kernel page cache retain pages across swaps.
-ExecStart=/opt/llama.cpp/build/bin/llama-server --models-dir /opt/bielik/models --models-preset /opt/botex/deploy/oracle-vps/models-preset.ini --models-max 1 --models-autoload --host 127.0.0.1 --port 8080 -c 8192 --threads 2 --load-mode mmap
+ExecStart=/opt/llama.cpp/build/bin/llama-server --models-dir /opt/bielik/models --models-preset /opt/botex/deploy/oracle-vps/models-preset.ini --models-max 1 --models-autoload --host 127.0.0.1 --port 8080 -c 8192 --threads 4 --load-mode mmap
 
 Restart=on-failure
 RestartSec=10
 
-# OCPUs 1-2 at idle scheduling priority: inference yields to BoteX (OCPU 0)
-# and to any regular-priority work on its own cores.
-CPUAffinity=1-2
+# All 4 OCPUs at idle scheduling priority: inference still yields to any
+# regular-priority work (CPUSchedulingPolicy=idle is the real protection),
+# while scaling is near-linear on this Ampere hardware — measured llama-bench
+# 2026-11-25: pp 5.53/8.18/10.92 tok/s and tg 2.42/3.60/4.59 tok/s at 2/3/4
+# threads. Nighttime drain batches halve from ~25 min to ~12 min.
+CPUAffinity=0-3
 CPUSchedulingPolicy=idle
 CPUWeight=1
 Nice=19
