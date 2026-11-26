@@ -112,6 +112,7 @@ class NormalizedResponse:
     # Message-level provider extras (same echo requirement as the per-tool-
     # call extras above).
     extra_content: Optional[Dict[str, Any]] = None
+    response_shape: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -337,6 +338,17 @@ def _coerce_arguments(raw: Any) -> str:
         return str(raw)
 
 
+def _empty_response_shape(response: Any) -> Dict[str, Any]:
+    shape: Dict[str, Any] = {"response_type": type(response).__name__}
+    choices = _get(response, "choices")
+    shape["choices_type"] = type(choices).__name__ if choices is not None else "missing"
+    if isinstance(choices, (list, tuple)):
+        shape["choices_len"] = len(choices)
+    if isinstance(response, Mapping):
+        shape["top_level_keys"] = sorted(str(k) for k in response.keys())[:20]
+    return shape
+
+
 def normalize_response(response: Any) -> NormalizedResponse:
     """Flatten an OpenAI-compatible response into the common model."""
     choices = _get(response, "choices") or []
@@ -356,9 +368,11 @@ def normalize_response(response: Any) -> NormalizedResponse:
     # A response with no choices is a provider protocol violation, not a
     # model turn — mark it so the engine classifies it as provider_error
     # instead of burning retry turns on an empty message.
+    response_shape = None
     if choice is None:
         finish_kind = "provider_error"
         raw_fr = "no_choices"
+        response_shape = _empty_response_shape(response)
     else:
         finish_kind = (
             _VALID_FINISH_KIND_MAP.get("tool_calls", "tool_call")
@@ -414,6 +428,7 @@ def normalize_response(response: Any) -> NormalizedResponse:
         generation_id=gen_id,
         model=resp_model,
         extra_content=_extract_extra_content(msg),
+        response_shape=response_shape,
     )
 
 
