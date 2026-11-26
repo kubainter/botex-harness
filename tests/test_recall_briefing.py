@@ -23,6 +23,7 @@ global memory dir; no LLM or network access.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -84,6 +85,15 @@ def _find_briefing(ws, project: str) -> dict:
     memories = res.get("memories") or []
     assert len(memories) == 1, memories
     return memories[0]
+
+
+def _manual_briefing_content(
+    project: str, generated: str, inputs_hash: str, sources: list[str]
+) -> str:
+    return (
+        f"<!-- recall-briefing v1 project={project} generated={generated} "
+        f"inputs=sha256:{inputs_hash} sources={','.join(sources)} -->\n\n" + _briefing_body()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +228,13 @@ def test_validate_enforces_token_cap():
     out = validate_briefing_body(body, {"note_a"})
     assert memory._estimate_tokens(out) <= 1200
     assert len(out) < len(body)
+    for heading in ("## Decisions", "## Conventions", "## Gotchas", "## Open threads"):
+        assert heading in out
+
+
+def test_validate_compliant_input_passes_through_unchanged():
+    body = _briefing_body()
+    assert recall_briefing._enforce_token_cap(body, 1200) == body
 
 
 def test_validate_requires_all_four_sections():
@@ -347,6 +364,73 @@ async def test_run_idempotent_skip_on_same_inputs(ws, monkeypatch):
     assert second["compiled"] == 0
     assert second["results"][0]["action"] == "skipped_unchanged"
     assert save_calls == []
+
+
+@pytest.mark.anyio
+async def test_local_scope_briefing_is_not_adopted(ws):
+    ids = _seed_project(ws, "alpha", 5)
+    notes = recall_briefing._gather_project_notes(str(ws), "alpha")
+    inputs_hash = compute_inputs_hash(notes)
+    local = memory.save_memory(
+        workspace_dir=str(ws),
+        title="Recall Briefing: alpha",
+        content=_manual_briefing_content("alpha", "2026-01-01T00:00:00+00:00", inputs_hash, ids),
+        tags=[BRIEFING_TAG, "project:alpha"],
+        origin="curator",
+        scope="local",
+        project="alpha",
+    )
+    assert local.get("ok"), local
+
+    async def infer(prompt):
+        return _briefing_body()
+
+    res = await run_briefing_compilation(str(ws), infer)
+    assert res["compiled"] == 1
+    global_id = res["results"][0]["briefing_id"]
+    assert global_id != local["id"]
+    stored = memory.read_memory(workspace_dir=str(ws), memory_id=global_id, scope="global")
+    assert stored.get("ok"), stored
+
+
+@pytest.mark.anyio
+async def test_duplicate_global_briefings_newest_wins_and_older_deprecated(ws):
+    ids = _seed_project(ws, "alpha", 5)
+    notes = recall_briefing._gather_project_notes(str(ws), "alpha")
+    inputs_hash = compute_inputs_hash(notes)
+    now = datetime.now(timezone.utc)
+    older = memory.save_memory(
+        workspace_dir=str(ws),
+        title="Recall Briefing: alpha",
+        content=_manual_briefing_content(
+            "alpha", (now - timedelta(hours=2)).isoformat(), inputs_hash, ids
+        ),
+        tags=[BRIEFING_TAG, "project:alpha"],
+        origin="curator",
+        scope="global",
+        project="alpha",
+    )
+    newer = memory.save_memory(
+        workspace_dir=str(ws),
+        title="Recall Briefing: alpha",
+        content=_manual_briefing_content(
+            "alpha", (now - timedelta(hours=1)).isoformat(), inputs_hash, ids
+        ),
+        tags=[BRIEFING_TAG, "project:alpha"],
+        origin="curator",
+        scope="global",
+        project="alpha",
+    )
+    assert older.get("ok") and newer.get("ok")
+
+    async def infer(prompt):
+        raise AssertionError("matching newest briefing must skip inference")
+
+    res = await run_briefing_compilation(str(ws), infer)
+    assert res["results"][0]["action"] == "skipped_unchanged"
+    assert res["results"][0]["briefing_id"] == newer["id"]
+    old_read = memory.read_memory(workspace_dir=str(ws), memory_id=older["id"], scope="global")
+    assert (old_read.get("metadata") or {}).get("status") == "deprecated"
 
 
 @pytest.mark.anyio

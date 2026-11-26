@@ -202,7 +202,9 @@ def wrap_untrusted_content(content: str, tag: str = "untrusted_content", **attrs
 # they freeze or impersonate privileged vault provenance (Curator Human Freeze
 # Gate). ``RESERVED_TAGS`` additionally covers ``frozen``.
 RESERVED_ORIGIN_AGENTS = frozenset({"human", "human-curated", "operator", "curator"})
-RESERVED_TAGS = frozenset({"human", "human-curated", "frozen", "operator", "curator"})
+RESERVED_TAGS = frozenset(
+    {"human", "human-curated", "frozen", "operator", "curator", "recall-brief"}
+)
 
 _ORIGIN_DISALLOWED = re.compile(r"[^a-zA-Z0-9_.-]")
 

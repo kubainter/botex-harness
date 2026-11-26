@@ -93,6 +93,29 @@ ST_MODEL_ABSENT = "model_absent"
 ST_CANCELLED = "cancelled"
 ST_CACHE_HIT = "hit"
 
+RECALL_QUOTA_DEFER_HINT = (
+    "\n\nWszystkie chmurowe providery są obecnie niedostępne (quota wyczerpana "
+    "lub awaria/błąd konfiguracji) — powyższy digest jest deterministyczny; "
+    "odpytaj ponownie za kilka minut dla pełnej syntezy."
+)
+
+
+def _cloud_tiers_exhausted(tier_attempts: List[Dict[str, Any]]) -> bool:
+    """Return True when cloud-tier attempts carry transient failure evidence."""
+    cloud = [
+        a
+        for a in tier_attempts or []
+        if str(a.get("tier") or "") in ("nvidia", "gemini", "openrouter-free")
+    ]
+    if not cloud:
+        return False
+    statuses = [str(a.get("status") or "") for a in cloud]
+    transient = {ST_ERROR, ST_TIMEOUT, ST_NEG_CACHED}
+    if not all(s in ({ST_UNAVAILABLE} | transient) for s in statuses):
+        return False
+    return any(s in transient for s in statuses)
+
+
 # Tiers marked down are skipped for this many seconds (infra failures only).
 _NEGATIVE_TIER_MARKS: Dict[str, float] = {}
 # LRU answer cache: key -> (expires_at_monotonic, payload)
@@ -437,7 +460,7 @@ async def _try_nvidia(prompt: str, tcfg: dict) -> Optional[str]:
         logger.info(
             "Recall tier nvidia unavailable or failed: %s", coerce_text(mask_secrets(str(exc)))
         )
-        return None
+        raise
 
 
 async def _try_gemini(prompt: str, tcfg: dict) -> Optional[str]:
@@ -466,7 +489,7 @@ async def _try_gemini(prompt: str, tcfg: dict) -> Optional[str]:
         logger.info(
             "Recall tier gemini unavailable or failed: %s", coerce_text(mask_secrets(str(exc)))
         )
-        return None
+        raise
 
 
 async def _try_openrouter_free(prompt: str, tcfg: dict) -> Optional[str]:
@@ -496,7 +519,7 @@ async def _try_openrouter_free(prompt: str, tcfg: dict) -> Optional[str]:
             "Recall tier openrouter-free unavailable or failed: %s",
             coerce_text(mask_secrets(str(exc))),
         )
-        return None
+        raise
 
 
 def _extract_json_object(raw: str) -> Optional[Dict[str, Any]]:

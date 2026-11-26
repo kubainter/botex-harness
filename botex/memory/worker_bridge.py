@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from botex.memory.memory import deterministic_recall, gather_recall_context
 from botex.tools.security import mask_secrets, wrap_untrusted_content
+
+logger = logging.getLogger(__name__)
 
 _MAX_WORKER_RECALL_CALLS = 3
 _MAX_WORKER_MEMORY_PAYLOAD_BYTES = 16_384
@@ -38,28 +42,33 @@ def _cap_wrapped_text(
     tag: str,
     entry_id: Optional[str] = None,
     overhead_bytes: int = 0,
+    trailing_suffix: str = "",
 ) -> tuple[str, bool]:
     """Mask secrets, cap bytes, and wrap with untrusted content boundary.
 
     Returns (wrapped_body, truncated_flag).
-    The closing </{tag}> is ALWAYS preserved; we never double-wrap.
+    The closing </{tag}> is ALWAYS preserved; we never double-wrap. When
+    trailing_suffix is present, bytes are reserved so the suffix survives
+    truncation intact inside the boundary.
     """
     masked = mask_secrets(raw_body)
+    suffix = mask_secrets(str(trailing_suffix or ""))
     available = max(256, _MAX_WORKER_MEMORY_PAYLOAD_BYTES - overhead_bytes - 240)
     encoded = masked.encode("utf-8")
+    suffix_len = len(suffix.encode("utf-8"))
     truncated = False
-    if len(encoded) > available:
-        # Trim to available bytes, keeping valid UTF-8
-        trimmed = encoded[:available]
-        # Decode what we can; drop incomplete trailing byte
+    if len(encoded) + suffix_len > available:
+        marker = "\n...[truncated]"
+        budget = max(0, available - suffix_len - len(marker.encode("utf-8")))
+        trimmed = encoded[:budget]
         try:
             body = trimmed.decode("utf-8")
         except UnicodeDecodeError:
             body = trimmed.decode("utf-8", errors="ignore")
         truncated = True
-        body += "\n...[truncated]"
+        body += marker + suffix
     else:
-        body = masked
+        body = masked + suffix
 
     if entry_id is not None:
         wrapped = wrap_untrusted_content(body, tag=tag, id=entry_id)
@@ -159,6 +168,7 @@ async def worker_recall_memory(
     if not str(query or "").strip():
         return {"ok": False, "error": "EMPTY_QUERY", "detail": "query must be a non-empty string."}
 
+    recall_t0 = time.monotonic()
     norm_scope = _WORKER_SCOPE_MAP.get(str(scope or "").strip().lower(), "all")
 
     if is_edge_workspace:
@@ -183,6 +193,7 @@ async def worker_recall_memory(
     nodes = ctx.get("nodes") or []
 
     result: Optional[Dict[str, Any]] = None
+    tier_attempts: list[dict[str, Any]] = []
     briefing_served = False
 
     briefing_cfg: Dict[str, Any] = {}
@@ -222,21 +233,36 @@ async def worker_recall_memory(
             result = await synthesize_recall(str(query), nodes)
         except Exception:
             result = None
+        if isinstance(result, dict):
+            raw_attempts = result.get("tier_attempts")
+            if isinstance(raw_attempts, list):
+                tier_attempts = raw_attempts
         if not (isinstance(result, dict) and result.get("answer")):
             result = None
 
-    # Determine recall status
+    defer = False
+    defer_hint = ""
     if result is not None:
         recall_status = "BRIEFING_SERVED" if briefing_served else "SYNTHESIZED"
     elif nodes and not use_llm_synthesis:
         recall_status = "DETERMINISTIC_BUDGET"
     elif nodes:
-        recall_status = "FALLBACK_MODELS_FAILED"
+        try:
+            from botex.ops.curator.recall_curator import _cloud_tiers_exhausted
+
+            defer = _cloud_tiers_exhausted(tier_attempts)
+        except Exception:
+            defer = False
+        recall_status = "QUOTA_EXHAUSTED_DEFER" if defer else "FALLBACK_MODELS_FAILED"
     else:
         recall_status = "ZERO_NODES_FOUND"
 
     if result is None:
         result = deterministic_recall(str(query), nodes)
+        if defer:
+            from botex.ops.curator.recall_curator import RECALL_QUOTA_DEFER_HINT
+
+            defer_hint = RECALL_QUOTA_DEFER_HINT
 
     # Build metadata dict
     sources = result.get("sources") if isinstance(result, dict) else None
@@ -259,9 +285,18 @@ async def worker_recall_memory(
         answer_raw,
         tag="untrusted_memory_recall",
         overhead_bytes=overhead,
+        trailing_suffix=defer_hint,
     )
 
     truncated_flag = bool(ctx.get("truncated")) or was_capped
+
+    logger.info(
+        "recall outcome status=%s coverage=%s tier=%s latency_ms=%d path=worker",
+        recall_status,
+        "briefing" if briefing_served else "miss",
+        str(result.get("tier_used") or "-"),
+        int((time.monotonic() - recall_t0) * 1000),
+    )
 
     return {
         "ok": True,

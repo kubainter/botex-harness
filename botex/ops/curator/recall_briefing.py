@@ -108,7 +108,9 @@ def validate_briefing_body(body: str, source_ids: Iterable[str]) -> str:
     text = _strip_outer_code_fence(str(body or "").strip())
     text = _strip_foreign_citations(text, source_ids)
     _require_sections(text)
-    return _enforce_token_cap(text, BRIEFING_MAX_TOKENS)
+    capped = _enforce_token_cap(text, BRIEFING_MAX_TOKENS)
+    _require_sections(capped)
+    return capped
 
 
 async def compile_project_briefing(
@@ -257,8 +259,33 @@ def _gather_project_notes(
     return pool[:limit]
 
 
+def _briefing_generated_sort_key(entry: Dict[str, Any], header: Dict[str, Any]) -> tuple:
+    try:
+        dt = datetime.fromisoformat(str(header.get("generated") or ""))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        generated_ts = dt.timestamp()
+    except ValueError:
+        generated_ts = float("-inf")
+    return (generated_ts, str(entry.get("id") or ""))
+
+
+def _deprecate_briefing_duplicate(
+    workspace_dir: str, entry: Dict[str, Any], winner_id: str
+) -> None:
+    if not memory.set_memory_status(
+        workspace_dir,
+        str(entry.get("id") or ""),
+        "deprecated",
+        superseded_by=winner_id,
+        reason="duplicate recall briefing reconciliation",
+        scope="global",
+    ):
+        raise RuntimeError("failed to deprecate duplicate recall briefing")
+
+
 def _find_existing_briefing(workspace_dir: str, project: str) -> Optional[Dict[str, Any]]:
-    """Find the current briefing note for a project via tag metadata lookup."""
+    """Find the newest parseable global briefing, deprecating older duplicates."""
     slug = memory._normalize_project_slug(project)
     if not slug:
         return None
@@ -267,13 +294,21 @@ def _find_existing_briefing(workspace_dir: str, project: str) -> Optional[Dict[s
         query="",
         tag=BRIEFING_TAG,
         project=slug,
-        scope="all",
+        scope="global",
         status="active",
     )
+    parseable = []
     for entry in res.get("memories") or []:
-        if parse_briefing_header(str(entry.get("content") or "")):
-            return entry
-    return None
+        header = parse_briefing_header(str(entry.get("content") or ""))
+        if header and memory._normalize_project_slug(str(header.get("project") or "")) == slug:
+            parseable.append((entry, header))
+    if not parseable:
+        return None
+    winner, _winner_header = max(parseable, key=lambda pair: _briefing_generated_sort_key(*pair))
+    for duplicate, _header in parseable:
+        if str(duplicate.get("id") or "") != str(winner.get("id") or ""):
+            _deprecate_briefing_duplicate(workspace_dir, duplicate, str(winner.get("id") or ""))
+    return winner
 
 
 def _render_briefing_content(
@@ -327,13 +362,41 @@ def _require_sections(text: str) -> None:
 
 
 def _enforce_token_cap(text: str, cap: int) -> str:
+    """Trim trailing lines inside sections without deleting section headings.
+
+    Policy: trim from the end of the last section first, then walk backwards;
+    every markdown heading line is structural and is never removed. If the
+    heading-only skeleton still exceeds ``cap``, keep the complete skeleton and
+    return it over cap rather than corrupting the required structure.
+    """
     if memory._estimate_tokens(text) <= cap:
         return text
-    cut = text[: cap * 4]
-    last_newline = cut.rfind("\n")
-    if last_newline > 0:
-        cut = cut[:last_newline]
-    return cut.rstrip()
+    segments: List[List[str]] = []
+    current: List[str] = []
+    for line in str(text).splitlines():
+        if re.match(r"^#{1,6}\s", line) and current:
+            segments.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        segments.append(current)
+
+    def _render() -> str:
+        return "\n\n".join("\n".join(segment).strip() for segment in segments if segment).strip()
+
+    trimmed = _render()
+    while memory._estimate_tokens(trimmed) > cap:
+        changed = False
+        for segment in reversed(segments):
+            if len(segment) > 1:
+                segment.pop()
+                changed = True
+                break
+        if not changed:
+            break
+        trimmed = _render()
+    return trimmed
 
 
 def _age_hours(generated: str) -> float:

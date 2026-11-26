@@ -1300,20 +1300,11 @@ def _briefing_recall_config() -> dict[str, Any]:
 
 def _cloud_tiers_exhausted(tier_attempts: list[dict[str, Any]]) -> bool:
     """Every cloud tier attempted and failed — the defer-path signal (plan 055)."""
-    cloud = [
-        a
-        for a in tier_attempts or []
-        if str(a.get("tier") or "") in ("nvidia", "gemini", "openrouter-free")
-    ]
-    if not cloud:
+    try:
+        from botex.ops.curator.recall_curator import _cloud_tiers_exhausted as _impl
+    except Exception:
         return False
-    statuses = [str(a.get("status") or "") for a in cloud]
-    if not all(s in ("unavailable", "error", "timeout", "neg_cached") for s in statuses):
-        return False
-    # Plain unavailable-everywhere means structural misconfiguration (missing
-    # keys/probe-down) where a retry hint is pointless; quota exhaustion
-    # instead leaves transient markers on at least one tier.
-    return any(s in ("error", "timeout", "neg_cached") for s in statuses)
+    return _impl(tier_attempts)
 
 
 def _try_briefing_first_line(
@@ -1420,13 +1411,11 @@ async def _recall_memory_impl(
     if not result:
         result = _deterministic_recall(query, nodes)
         if defer:
-            result["answer"] = str(result.get("answer") or "") + (
-                "\n\nWszystkie chmurowe providery są obecnie niedostępne (quota wyczerpana "
-                "lub awaria/błąd konfiguracji) — powyższy digest jest deterministyczny; "
-                "odpytaj ponownie za kilka minut dla pełnej syntezy."
-            )
+            from botex.ops.curator.recall_curator import RECALL_QUOTA_DEFER_HINT
+
+            result["answer"] = str(result.get("answer") or "") + RECALL_QUOTA_DEFER_HINT
     logger.info(
-        "recall outcome status=%s coverage=%s tier=%s latency_ms=%d",
+        "recall outcome status=%s coverage=%s tier=%s latency_ms=%d path=mcp",
         recall_status,
         "briefing" if briefing_served else "miss",
         str(result.get("tier_used") or "-"),
