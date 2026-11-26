@@ -549,12 +549,12 @@ async def test_google_shim_error_operational_classification(shape, status, paylo
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(("shape", "status", "payload", "expected"), _ERROR_CASES)
-async def test_google_shim_error_body_and_string_are_openai_dict_shaped(
+async def test_google_shim_error_body_and_string_are_openai_compatible(
     shape, status, payload, expected
 ):
     exc = normalize_api_error_shape(await _capture_mocked_error(status, payload))
     expected_error = expected["error"]
-    expected_text_prefix = f"Error code: {status} - {{'error':"
+    expected_text_prefix = f"Error code: {status} - "
 
     failures = []
     if exc.body != expected_error:

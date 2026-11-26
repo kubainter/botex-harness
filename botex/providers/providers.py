@@ -574,6 +574,15 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
     )
 
 
+def _exception_text_with_body(exc: BaseException) -> str:
+    body = getattr(exc, "body", None)
+    try:
+        body_text = json.dumps(body, default=str) if body else ""
+    except (TypeError, ValueError):
+        body_text = str(body)
+    return f"{exc} {body_text}".lower()
+
+
 def normalize_api_error_shape(exc: BaseException) -> BaseException:
     """Normalize single-item list-shaped OpenAI-shim error bodies in-place.
 
@@ -590,10 +599,8 @@ def normalize_api_error_shape(exc: BaseException) -> BaseException:
         return exc
     try:
         status = getattr(exc, "status_code", None)
-        wire_error = {"error": error}
-        message = (
-            f"Error code: {status} - {wire_error!r}" if status is not None else repr(wire_error)
-        )
+        detail = str(error.get("message") or repr({"error": error}))
+        message = f"Error code: {status} - {detail}" if status is not None else detail
         exc.body = error  # type: ignore[attr-defined]
         exc.args = (message,)
         if hasattr(exc, "message"):
@@ -1392,7 +1399,7 @@ class GoogleAIStudioProvider(BaseProvider):
             return True
         # Gemini signals transient cluster pressure as 503 "overloaded" —
         # unbilled and safe to retry, unlike other 5xx.
-        return status_code_of(exc) == 503 and "overload" in str(exc).lower()
+        return status_code_of(exc) == 503 and "overload" in _exception_text_with_body(exc)
 
 
 class GroqProvider(BaseProvider):
