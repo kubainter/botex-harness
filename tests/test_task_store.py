@@ -164,6 +164,24 @@ def test_get_task_status_unknown_id_no_side_effects():
         path.unlink(missing_ok=True)
 
 
+def test_mcp_list_tasks_merges_persisted_without_rehydrate():
+    """MCP list_tasks serves disk-backed terminal tasks after process state loss."""
+    ids = [uuid.uuid4().hex[:12] for _ in range(2)]
+    paths = [_seed_task_file(t) for t in ids]
+    try:
+        result = asyncio.run(botex_server.list_tasks(limit=200))
+        assert result["ok"] is True
+        listed = {t["task_id"] for t in result["tasks"]}
+        assert ids[0] in listed and ids[1] in listed
+        assert ids[0] not in botex_server._TASKS
+        assert ids[1] not in botex_server._TASKS
+    finally:
+        for t in ids:
+            botex_server._TASKS.pop(t, None)
+        for p in paths:
+            p.unlink(missing_ok=True)
+
+
 def test_get_task_route_restores_only_requested_task(client):
     """REST GET /api/tasks/{id} also restores O(1) — no full scan on 404 path."""
     ids = [uuid.uuid4().hex[:12] for _ in range(3)]

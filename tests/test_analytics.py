@@ -782,7 +782,7 @@ def test_calculate_cost_uses_catalog_cache_before_fallback(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr("botex.providers.catalog.CACHE_FILE_DEFAULT", cache_file)
+    monkeypatch.setattr("botex.config.catalog_cache_file", lambda: cache_file)
 
     # Catalog pricing wins over the 0.20/0.80 default...
     assert calculate_cost_usd("vendor/catalog-model", 1_000_000, 1_000_000) == pytest.approx(40.0)

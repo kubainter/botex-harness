@@ -112,6 +112,7 @@ class NormalizedResponse:
     # Message-level provider extras (same echo requirement as the per-tool-
     # call extras above).
     extra_content: Optional[Dict[str, Any]] = None
+    response_shape: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -337,6 +338,17 @@ def _coerce_arguments(raw: Any) -> str:
         return str(raw)
 
 
+def _empty_response_shape(response: Any) -> Dict[str, Any]:
+    shape: Dict[str, Any] = {"response_type": type(response).__name__}
+    choices = _get(response, "choices")
+    shape["choices_type"] = type(choices).__name__ if choices is not None else "missing"
+    if isinstance(choices, (list, tuple)):
+        shape["choices_len"] = len(choices)
+    if isinstance(response, Mapping):
+        shape["top_level_keys"] = sorted(str(k) for k in response.keys())[:20]
+    return shape
+
+
 def normalize_response(response: Any) -> NormalizedResponse:
     """Flatten an OpenAI-compatible response into the common model."""
     choices = _get(response, "choices") or []
@@ -356,9 +368,11 @@ def normalize_response(response: Any) -> NormalizedResponse:
     # A response with no choices is a provider protocol violation, not a
     # model turn — mark it so the engine classifies it as provider_error
     # instead of burning retry turns on an empty message.
+    response_shape = None
     if choice is None:
         finish_kind = "provider_error"
         raw_fr = "no_choices"
+        response_shape = _empty_response_shape(response)
     else:
         finish_kind = (
             _VALID_FINISH_KIND_MAP.get("tool_calls", "tool_call")
@@ -414,6 +428,7 @@ def normalize_response(response: Any) -> NormalizedResponse:
         generation_id=gen_id,
         model=resp_model,
         extra_content=_extract_extra_content(msg),
+        response_shape=response_shape,
     )
 
 
@@ -425,6 +440,7 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
     message_extra: Optional[Dict[str, Any]] = None
     raw_finish_reason = "unknown"
     usage_obj = None
+    saw_choices = False
 
     for chunk in chunks:
         if not chunk:
@@ -438,6 +454,7 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         choices = _get(chunk, "choices") or []
         if not choices:
             continue
+        saw_choices = True
         choice = choices[0]
         fr = _get(choice, "finish_reason")
         if fr:
@@ -509,11 +526,17 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         for _, v in sorted(accumulated_tool_calls.items())
     )
 
-    finish_kind = (
-        _VALID_FINISH_KIND_MAP.get("tool_calls", "tool_call")
-        if tool_calls
-        else _VALID_FINISH_KIND_MAP.get(str(raw_finish_reason), "unknown")
-    )
+    if not saw_choices:
+        finish_kind = "provider_error"
+        raw_finish_reason = "no_choices"
+        response_shape = {"response_type": "stream", "choices_type": "missing", "choices_len": 0}
+    else:
+        finish_kind = (
+            _VALID_FINISH_KIND_MAP.get("tool_calls", "tool_call")
+            if tool_calls
+            else _VALID_FINISH_KIND_MAP.get(str(raw_finish_reason), "unknown")
+        )
+        response_shape = None
 
     comp_details = _get(usage_obj, "completion_tokens_details") if usage_obj else None
     real_reasoning = _safe_int(_get(comp_details, "reasoning_tokens", 0) if comp_details else 0, 0)
@@ -547,7 +570,44 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         generation_id="",
         model=mask_secrets(raw_model),
         extra_content=message_extra,
+        response_shape=response_shape,
     )
+
+
+def _exception_text_with_body(exc: BaseException) -> str:
+    body = getattr(exc, "body", None)
+    try:
+        body_text = json.dumps(body, default=str) if body else ""
+    except (TypeError, ValueError):
+        body_text = str(body)
+    return f"{exc} {body_text}".lower()
+
+
+def normalize_api_error_shape(exc: BaseException) -> BaseException:
+    """Normalize single-item list-shaped OpenAI-shim error bodies in-place.
+
+    Google's compatibility shim sometimes returns ``[{"error": {...}}]`` where
+    the OpenAI API contract requires ``{"error": {...}}``. Exception classes
+    are unaffected, but normalizing the representation keeps logs and retry
+    metadata consumers on the OpenAI shape.
+    """
+    body = getattr(exc, "body", None)
+    if not (isinstance(body, list) and len(body) == 1 and isinstance(body[0], dict)):
+        return exc
+    error = body[0].get("error")
+    if not isinstance(error, dict):
+        return exc
+    try:
+        status = getattr(exc, "status_code", None)
+        detail = str(error.get("message") or repr({"error": error}))
+        message = f"Error code: {status} - {detail}" if status is not None else detail
+        exc.body = error  # type: ignore[attr-defined]
+        exc.args = (message,)
+        if hasattr(exc, "message"):
+            exc.message = message  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return exc
 
 
 def sanitize_provider_error(exc: BaseException, max_chars: int = 1024) -> str:
@@ -1339,7 +1399,7 @@ class GoogleAIStudioProvider(BaseProvider):
             return True
         # Gemini signals transient cluster pressure as 503 "overloaded" —
         # unbilled and safe to retry, unlike other 5xx.
-        return status_code_of(exc) == 503 and "overload" in str(exc).lower()
+        return status_code_of(exc) == 503 and "overload" in _exception_text_with_body(exc)
 
 
 class GroqProvider(BaseProvider):

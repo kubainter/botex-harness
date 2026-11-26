@@ -956,7 +956,7 @@ def test_dcp_list_tasks_and_collection():
     try:
         server.run_subagent = fake_run
         done_id, slow_id = asyncio.run(exercise())
-        task_obj = server._TASKS.get(slow_id, {}).get("task")
+        task_obj = server._TASKS.get(slow_id, {}).get("async_task")
         if task_obj is not None and not task_obj.done():
             task_obj.cancel()
     finally:

@@ -378,7 +378,7 @@ async def test_tier1_probe_inconclusive_falls_back_to_tcp():
             mock = AsyncMock(return_value=_payload() if tier == "nvidia" else None)
             stack.enter_context(patch.object(recall_curator, fname, mock))
             mocks[tier] = mock
-        result = await synthesize_recall("what is alpha?", _nodes())
+        result = await synthesize_recall("what is alpha?", _nodes(), cfg={"hedge_s": 60.0})
 
     assert result["tier_used"] == "nvidia"
     t1_attempt = next(a for a in result["tier_attempts"] if a["tier"] == "local-ollama")
@@ -572,7 +572,7 @@ async def test_negative_tier_marker_skips_then_expires():
                 "nvidia": _payload(confidence="MEDIUM"),
             },
         )
-        first = await synthesize_recall("what is alpha?", _nodes())
+        first = await synthesize_recall("what is alpha?", _nodes(), cfg={"hedge_s": 60.0})
         assert first["tier_used"] == "nvidia"
         assert mocks["local-ollama"].await_count == 1
         assert mocks["local-ollama"].side_effect is not None
@@ -582,14 +582,14 @@ async def test_negative_tier_marker_skips_then_expires():
         stack.enter_context(
             patch.object(recall_curator, "_try_local_ollama", mocks["local-ollama"])
         )
-        second = await synthesize_recall("what is beta?", _nodes())
+        second = await synthesize_recall("what is beta?", _nodes(), cfg={"hedge_s": 60.0})
         assert mocks["local-ollama"].await_count == 0
         t1_attempt = next(a for a in second["tier_attempts"] if a["tier"] == "local-ollama")
         assert t1_attempt["status"] == "neg_cached"
 
         # After negative TTL elapses the tier is retried.
         clock["t"] += recall_curator.DEFAULT_NEGATIVE_TIER_TTL_S + 1.0
-        third = await synthesize_recall("what is gamma?", _nodes())
+        third = await synthesize_recall("what is gamma?", _nodes(), cfg={"hedge_s": 60.0})
         assert mocks["local-ollama"].await_count == 1
         assert third["tier_used"] == "local-ollama"
 
@@ -824,8 +824,8 @@ async def test_gemini_and_openrouter_key_gating(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_tier_exception_returns_none(monkeypatch):
-    """A provider client raising mid-request returns None rather than propagating."""
+async def test_tier_exception_reraises_for_attempt_wrapper(monkeypatch):
+    """Cloud tier request failures re-raise so _attempt_impl records transient evidence."""
     monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
 
     fake_client = MagicMock()
@@ -836,11 +836,90 @@ async def test_tier_exception_returns_none(monkeypatch):
     fake_provider.get_client.return_value = fake_client
 
     with patch("botex.providers.ProviderRegistry.get", return_value=fake_provider):
-        raw = await recall_curator._try_nvidia(
-            "prompt", _tcfg(model=recall_curator.DEFAULT_NVIDIA_MODEL)
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            await recall_curator._try_nvidia(
+                "prompt", _tcfg(model=recall_curator.DEFAULT_NVIDIA_MODEL)
+            )
+
+
+@pytest.mark.anyio
+async def test_cloud_attempt_exception_records_error_and_marks_tier_down(monkeypatch):
+    """Real cloud-tier exception behavior produces error evidence, not unavailable."""
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("quota exhausted"))
+    fake_provider = MagicMock()
+    fake_provider.get_client.return_value = fake_client
+
+    attempts = []
+    with patch("botex.providers.ProviderRegistry.get", return_value=fake_provider):
+        raw = await recall_curator._attempt_impl(
+            "nvidia",
+            recall_curator._try_nvidia,
+            "prompt",
+            _tcfg(model=recall_curator.DEFAULT_NVIDIA_MODEL),
+            60.0,
+            frozenset(),
+            attempts,
         )
 
     assert raw is None
+    assert attempts[-1]["tier"] == "nvidia"
+    assert attempts[-1]["status"] == "error"
+    assert recall_curator._tier_marked_down("nvidia", 60.0) is True
+
+
+@pytest.mark.anyio
+async def test_cloud_missing_key_stays_unavailable_without_negative_mark():
+    """Missing API keys remain structural-unavailable and never poison the tier."""
+    attempts = []
+    raw = await recall_curator._attempt_impl(
+        "nvidia",
+        recall_curator._try_nvidia,
+        "prompt",
+        _tcfg(model=recall_curator.DEFAULT_NVIDIA_MODEL),
+        60.0,
+        frozenset(),
+        attempts,
+    )
+
+    assert raw is None
+    assert attempts[-1]["status"] == "unavailable"
+    assert recall_curator._tier_marked_down("nvidia", 60.0) is False
+
+
+@pytest.mark.anyio
+async def test_end_to_end_cloud_exceptions_satisfy_defer_gate(monkeypatch):
+    """Real cloud helper exceptions produce attempts accepted by _cloud_tiers_exhausted."""
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-test-key")
+    monkeypatch.setenv("OPENROUTER_API_FREE_KEY", "or-free-test-key")
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("quota exhausted"))
+    fake_provider = MagicMock()
+    fake_provider.get_client.return_value = fake_client
+
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(recall_curator, "_probe_ollama_model", MagicMock(return_value=True))
+        )
+        stack.enter_context(
+            patch.object(recall_curator, "_try_local_ollama", AsyncMock(return_value=None))
+        )
+        stack.enter_context(
+            patch("botex.providers.ProviderRegistry.get", return_value=fake_provider)
+        )
+        result = await synthesize_recall("what is alpha?", _nodes())
+
+    assert result is not None
+    assert result["answer"] is None
+    statuses = {a["tier"]: a["status"] for a in result["tier_attempts"]}
+    assert statuses["nvidia"] == "error"
+    assert statuses["gemini"] == "error"
+    assert statuses["openrouter-free"] == "error"
+    assert recall_curator._cloud_tiers_exhausted(result["tier_attempts"]) is True
 
 
 # ---------------------------------------------------------------------------

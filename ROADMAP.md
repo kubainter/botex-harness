@@ -304,6 +304,11 @@ ruleset (LiteLLM-style). Deferred: the probe costs a call, and prefix rules
 guess at unverified formats — the explicit `providers.<name>.capabilities`
 declaration covers the need today.
 
+2026-11-25: availability drift sync landed as a separate Night-Pulse mechanism.
+It refreshes provider `/models` catalogs on a slow schedule and reports configured
+IDs absent from live catalogs; it still performs no per-call capability probes
+and never auto-writes config.
+
 ### NVIDIA pricing adapter
 `integrate.api.nvidia.com` `/models` publishes no price fields, so the
 pricing guardrail treats every NVIDIA model as "unknown" (`on_unknown`
@@ -470,7 +475,16 @@ rest.
   `GOOGLE_API_KEY` > `secrets.google_api_key` key resolution, configured
   `pricing_overrides`/`capabilities` standing in for a catalog that publishes
   neither, no credits API, Gemini `thought_signature` echoed via
-  `extra_content` so thinking turns stay valid)
+  `extra_content` so thinking turns stay valid). Empty-choice Google shim
+  responses now carry structure-only diagnostics, empty streams classify as
+  `provider_error/no_choices`, and single-item list-shaped shim error bodies
+  normalize to OpenAI-shaped representation without changing retry semantics
+- Live catalog drift visibility: Night Pulse `catalog_sync` refreshes provider
+  catalogs through the shared cache without overwriting last-known-good data,
+  computes configured-model drift across slots/fallbacks, persists a bounded
+  `.botex/catalog_drift.json` report, and exposes a compact `catalog_drift`
+  summary in cloud health; cache consumers resolve the canonical configured
+  catalog cache path
 - Free-tier rate limiting and state carryover: token-bucket rate limiter (`botex/providers/rate_limiter.py`) tracking RPM/TPM with debt queues and cooldown windows; in-flight task checkpointing (`botex/core/state.py`) capturing plan steps, findings, and inspected files across model and provider fallbacks without losing context after clean snapshot rollbacks
 - Shared retry layer (`botex/providers/retry.py`): unbilled-failure backoff for
   provider calls — HTTP 429, connection errors, provider-blessed overloads

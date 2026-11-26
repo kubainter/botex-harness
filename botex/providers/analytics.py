@@ -163,7 +163,11 @@ def _catalog_cache_pricing(model: str) -> Optional[Dict[str, float]]:
     except Exception:
         return None
     try:
-        cache_path = Path(_catalog_mod.CACHE_FILE_DEFAULT)
+        try:
+            from botex.config import catalog_cache_file
+        except (ImportError, ValueError):
+            from config import catalog_cache_file  # type: ignore[no-redef]
+        cache_path = Path(catalog_cache_file())
         if not cache_path.is_file():
             return None
         payload = json.loads(cache_path.read_text(encoding="utf-8"))

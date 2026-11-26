@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Set
+from unittest.mock import AsyncMock
 
 import pytest
 
 from botex.core.capabilities import MODES, TOOL_REGISTRY, tool_allowed, check_agency_policy
 from botex.memory.worker_bridge import (
+    _cap_wrapped_text,
     worker_read_memory,
     worker_recall_memory,
 )
@@ -183,4 +186,104 @@ def test_worker_recall_memory_deterministic_and_payload_cap(tmp_path, monkeypatc
     assert read_res["content"].rstrip().endswith("</untrusted_memory_content>")
 
     # Cleanup
+    reset_memory_index_cache()
+
+
+def _failing_cloud_attempts() -> list[dict]:
+    return [
+        {"tier": "nvidia", "status": "error", "ms": 10},
+        {"tier": "gemini", "status": "error", "ms": 10},
+        {"tier": "openrouter-free", "status": "error", "ms": 10},
+    ]
+
+
+def test_cap_wrapped_text_preserves_trailing_suffix_when_truncated():
+    suffix = "\n\nSTATIC RETRY HINT"
+    wrapped, truncated = _cap_wrapped_text(
+        "A" * 25000,
+        tag="untrusted_memory_recall",
+        trailing_suffix=suffix,
+    )
+
+    assert truncated is True
+    assert "STATIC RETRY HINT" in wrapped
+    assert wrapped.index("STATIC RETRY HINT") < wrapped.index("</untrusted_memory_recall>")
+
+
+def _seed_global_recall_note(tmp_path, monkeypatch):
+    from botex import server
+
+    global_dir = tmp_path / "global"
+    global_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("BOTEX_GLOBAL_MEMORY_DIR", str(global_dir))
+    server.config.load_config(reload=True)
+
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir(exist_ok=True)
+    save_memory(
+        workspace_dir=str(ws_dir),
+        title="Alpha recall note",
+        content="Alpha service uses bearer tokens.",
+        kind="context",
+        scope="global",
+        project="swarm",
+    )
+    return ws_dir
+
+
+@pytest.mark.anyio
+async def test_worker_recall_transient_cloud_failure_defers_and_logs(tmp_path, monkeypatch, caplog):
+    ws_dir = _seed_global_recall_note(tmp_path, monkeypatch)
+    failing = {
+        "answer": None,
+        "sources": [],
+        "confidence": "LOW",
+        "tier_used": None,
+        "tier_attempts": _failing_cloud_attempts(),
+    }
+    monkeypatch.setattr("botex.ops.curator.synthesize_recall", AsyncMock(return_value=failing))
+
+    with caplog.at_level(logging.INFO, logger="botex.memory.worker_bridge"):
+        res = await worker_recall_memory(
+            "alpha",
+            scope="global",
+            project="swarm",
+            workspace_dir=ws_dir,
+        )
+
+    assert res["ok"] is True
+    assert res["recall_status"] == "QUOTA_EXHAUSTED_DEFER"
+    assert "odpytaj ponownie" in res["answer"]
+    assert any(
+        "recall outcome status=QUOTA_EXHAUSTED_DEFER" in rec.getMessage()
+        and "path=worker" in rec.getMessage()
+        for rec in caplog.records
+    )
+    reset_memory_index_cache()
+
+
+@pytest.mark.anyio
+async def test_worker_recall_deterministic_budget_never_defers(tmp_path, monkeypatch, caplog):
+    ws_dir = _seed_global_recall_note(tmp_path, monkeypatch)
+    synth = AsyncMock()
+    monkeypatch.setattr("botex.ops.curator.synthesize_recall", synth)
+
+    with caplog.at_level(logging.INFO, logger="botex.memory.worker_bridge"):
+        res = await worker_recall_memory(
+            "alpha",
+            scope="global",
+            project="swarm",
+            workspace_dir=ws_dir,
+            use_llm_synthesis=False,
+        )
+
+    assert res["ok"] is True
+    assert res["recall_status"] == "DETERMINISTIC_BUDGET"
+    assert "odpytaj ponownie" not in res["answer"]
+    assert synth.await_count == 0
+    assert any(
+        "recall outcome status=DETERMINISTIC_BUDGET" in rec.getMessage()
+        and "path=worker" in rec.getMessage()
+        for rec in caplog.records
+    )
     reset_memory_index_cache()

@@ -149,7 +149,11 @@ from botex.memory import (
     search_memory as _search_memory,
 )
 from botex.providers import ProviderRegistry, resolve_local_llm_base_url, sanitize_provider_error
-from botex.server.task_store import load_task_persistent
+from botex.server.task_store import (
+    load_task_persistent,
+    load_tasks_persistent,
+    save_task_persistent,
+)
 
 try:
     from botex.core.tool_executor import resolve_edge_executor
@@ -506,6 +510,15 @@ _TASK_SEMAPHORE = asyncio.Semaphore(
 )
 
 
+def _task_persist_workspace(entry: dict[str, Any]) -> str:
+    ws = str((entry.get("request") or {}).get("workspace_dir") or "")
+    return "" if ws.startswith("edge://") else ws
+
+
+async def _persist_task_entry(task_id: str, entry: dict[str, Any]) -> None:
+    await asyncio.to_thread(save_task_persistent, task_id, entry, _task_persist_workspace(entry))
+
+
 async def _background_task(task_id: str, kwargs: dict) -> None:
     entry = _TASKS[task_id]
     entry["status"] = "RUNNING"
@@ -527,6 +540,7 @@ async def _background_task(task_id: str, kwargs: dict) -> None:
         entry["result"] = f"Background task failed: {mask_secrets(str(exc))[:500]}"
     finally:
         entry["finished_at"] = time.time()
+        await _persist_task_entry(task_id, entry)
 
 
 def _cleanup_tasks() -> None:
@@ -827,13 +841,23 @@ async def start_task(
         "approval_policy": approval_policy,
         "origin": effective_origin,
     }
-    task_obj = asyncio.create_task(_background_task(task_id, kwargs))
-    _TASKS[task_id] = {
+    persisted_request = dict(kwargs)
+    persisted_request["api_key"] = ""
+    entry = {
+        "task_id": task_id,
+        "task": mask_secrets(task),
+        "request": mask_secrets_recursive(persisted_request),
         "status": "QUEUED",
         "created_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "result_data": None,
         "origin": effective_origin,
-        "task": task_obj,
+        "async_task": None,
     }
+    _TASKS[task_id] = entry
+    await _persist_task_entry(task_id, entry)
+    entry["async_task"] = asyncio.create_task(_background_task(task_id, kwargs))
     return {"task_id": task_id, "status": "QUEUED", "origin": effective_origin}
 
 
@@ -877,6 +901,7 @@ async def get_task_status(
             entry["collected"] = True
             entry["collected_at"] = time.time()
             entry["collected_by"] = _resolve_call_origin(collected_by)
+            await _persist_task_entry(task_id, entry)
             return result
         if time.monotonic() >= deadline:
             return {
@@ -899,7 +924,10 @@ async def list_tasks(
     """List background tasks (`{task_id, status, created_at, origin, collected}`) for orphan/startup recovery."""
     _cleanup_tasks()
     max_rows = max(1, min(int(limit), 200))
-    entries = sorted(_TASKS.items(), key=lambda kv: kv[1].get("created_at") or 0, reverse=True)
+    restored = await asyncio.to_thread(load_tasks_persistent)
+    merged: dict[str, dict[str, Any]] = dict(restored)
+    merged.update(_TASKS)
+    entries = sorted(merged.items(), key=lambda kv: kv[1].get("created_at") or 0, reverse=True)
     tasks = []
     for tid, entry in entries:
         status = entry.get("status")
@@ -1300,20 +1328,11 @@ def _briefing_recall_config() -> dict[str, Any]:
 
 def _cloud_tiers_exhausted(tier_attempts: list[dict[str, Any]]) -> bool:
     """Every cloud tier attempted and failed — the defer-path signal (plan 055)."""
-    cloud = [
-        a
-        for a in tier_attempts or []
-        if str(a.get("tier") or "") in ("nvidia", "gemini", "openrouter-free")
-    ]
-    if not cloud:
+    try:
+        from botex.ops.curator.recall_curator import _cloud_tiers_exhausted as _impl
+    except Exception:
         return False
-    statuses = [str(a.get("status") or "") for a in cloud]
-    if not all(s in ("unavailable", "error", "timeout", "neg_cached") for s in statuses):
-        return False
-    # Plain unavailable-everywhere means structural misconfiguration (missing
-    # keys/probe-down) where a retry hint is pointless; quota exhaustion
-    # instead leaves transient markers on at least one tier.
-    return any(s in ("error", "timeout", "neg_cached") for s in statuses)
+    return _impl(tier_attempts)
 
 
 def _try_briefing_first_line(
@@ -1420,13 +1439,11 @@ async def _recall_memory_impl(
     if not result:
         result = _deterministic_recall(query, nodes)
         if defer:
-            result["answer"] = str(result.get("answer") or "") + (
-                "\n\nWszystkie chmurowe providery są obecnie niedostępne (quota wyczerpana "
-                "lub awaria/błąd konfiguracji) — powyższy digest jest deterministyczny; "
-                "odpytaj ponownie za kilka minut dla pełnej syntezy."
-            )
+            from botex.ops.curator.recall_curator import RECALL_QUOTA_DEFER_HINT
+
+            result["answer"] = str(result.get("answer") or "") + RECALL_QUOTA_DEFER_HINT
     logger.info(
-        "recall outcome status=%s coverage=%s tier=%s latency_ms=%d",
+        "recall outcome status=%s coverage=%s tier=%s latency_ms=%d path=mcp",
         recall_status,
         "briefing" if briefing_served else "miss",
         str(result.get("tier_used") or "-"),
@@ -3862,6 +3879,204 @@ def _cli_bots(argv: list[str]) -> None:
     sys.exit(0 if args.on_startup else 1)
 
 
+_CATALOG_DRIFT_REPORT_PATH: Optional[Path] = None  # None = default .botex/catalog_drift.json
+
+
+def _catalog_drift_report_path() -> Path:
+    if _CATALOG_DRIFT_REPORT_PATH is not None:
+        return Path(_CATALOG_DRIFT_REPORT_PATH)
+    try:
+        from botex.config import PROJECT_ROOT
+
+        return PROJECT_ROOT / ".botex" / "catalog_drift.json"
+    except Exception:
+        return Path.cwd() / ".botex" / "catalog_drift.json"
+
+
+def _load_cached_catalogs(
+    provider_names: list[str],
+    providers_cfg: dict[str, Any],
+    cache_file: Path,
+) -> dict[str, dict[str, Any]]:
+    """Load per-provider catalogs from the shared cache file only — never network."""
+    from botex.providers.catalog import ModelCatalog, ModelMetadata
+
+    try:
+        raw = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+    except Exception:
+        raw = {}
+    entries = raw.get("catalogs") if isinstance(raw, dict) else None
+    if not isinstance(entries, dict):
+        entries = {}
+
+    catalogs: dict[str, dict[str, Any]] = {}
+    for name in provider_names:
+        models: dict[str, Any] = {}
+        try:
+            pcfg = providers_cfg.get(name) if isinstance(providers_cfg, dict) else None
+            cat = ModelCatalog(
+                provider_name=name,
+                provider_cfg=pcfg if isinstance(pcfg, dict) else None,
+                cache_file=cache_file,
+            )
+            entry = entries.get(cat.cache_key)
+            raw_cat = (
+                (entry.get("catalog") or entry.get("models")) if isinstance(entry, dict) else None
+            )
+            if isinstance(raw_cat, dict):
+                models = {
+                    mid: ModelMetadata.from_dict(d if isinstance(d, dict) else {}, default_id=mid)
+                    for mid, d in raw_cat.items()
+                    if isinstance(mid, str)
+                }
+        except Exception:
+            models = {}
+        catalogs[name] = models
+    return catalogs
+
+
+def _run_catalog_drift_sync(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Night-Pulse live catalog sync + config drift detection. Never raises.
+
+    Refreshes the shared provider-model cache (one GET /models per provider),
+    diffs configured model ids against the freshly loaded cached catalogs,
+    persists the drift report to .botex/catalog_drift.json, and emits one
+    stderr line per drifted model. The static config is never written.
+    """
+    from botex.providers import catalog as catalog_mod
+    from botex.providers.providers import ProviderRegistry
+
+    sync_cfg = cfg.get("catalog_sync") if isinstance(cfg, dict) else None
+    if not isinstance(sync_cfg, dict):
+        sync_cfg = {}
+    if not bool(sync_cfg.get("enabled", True)):
+        return {"status": "disabled"}
+
+    raw_providers = sync_cfg.get("providers")
+    if not isinstance(raw_providers, (list, tuple)) or not raw_providers:
+        raw_providers = ["google", "groq", "nvidia", "cloudflare", "openrouter", "openrouter-free"]
+    provider_names = [str(p).strip() for p in raw_providers if str(p).strip()]
+    try:
+        timeout = float(sync_cfg.get("timeout_s", 10.0) or 10.0)
+    except (ValueError, TypeError):
+        timeout = 10.0
+    try:
+        interval_s = float(sync_cfg.get("interval_s", 43200.0) or 0.0)
+    except (ValueError, TypeError):
+        interval_s = 43200.0
+
+    # Frequency gate: continuous night-pulse loops every minute — a live sync
+    # is a per-provider network call and must stay a ~daily maintenance job.
+    if interval_s > 0.0:
+        try:
+            prev_path = _catalog_drift_report_path()
+            if prev_path.exists():
+                prev = json.loads(prev_path.read_text(encoding="utf-8"))
+                prev_ts = float(prev.get("generated_at") or 0.0) if isinstance(prev, dict) else 0.0
+                age = time.time() - prev_ts
+                if prev_ts > 0.0 and age < interval_s:
+                    return {
+                        "status": "skipped_fresh",
+                        "age_s": round(age, 1),
+                        "report_path": str(prev_path),
+                        "sync": prev.get("sync") if isinstance(prev, dict) else {},
+                        "summary": prev.get("summary") if isinstance(prev, dict) else {},
+                    }
+        except Exception:
+            pass
+
+    cat_cache = (cfg.get("catalog") or {}).get("cache_file") if isinstance(cfg, dict) else None
+    if isinstance(cat_cache, str) and cat_cache.strip():
+        cache_file = Path(cat_cache.strip())
+        if not cache_file.is_absolute():
+            try:
+                from botex.config import PROJECT_ROOT
+
+                cache_file = PROJECT_ROOT / cache_file
+            except Exception:
+                cache_file = cache_file.resolve()
+    else:
+        cache_file = catalog_mod.CACHE_FILE_DEFAULT
+
+    sync_fn = getattr(catalog_mod, "sync_provider_catalogs", None)
+    drift_fn = getattr(catalog_mod, "compute_config_drift", None)
+    if sync_fn is None or drift_fn is None:
+        return {"status": "unavailable", "reason": "catalog sync API missing"}
+
+    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else {}
+    if not isinstance(providers_cfg, dict):
+        providers_cfg = {}
+
+    sync_results: dict[str, Any] = {}
+    try:
+        sync_results = sync_fn(
+            ProviderRegistry,
+            provider_names,
+            cache_file=cache_file,
+            timeout=timeout,
+            provider_configs=providers_cfg,
+        )
+        if not isinstance(sync_results, dict):
+            sync_results = {}
+    except Exception:
+        sys.stderr.write("[BoteX] catalog sync failed\n")
+
+    try:
+        catalogs = _load_cached_catalogs(provider_names, providers_cfg, cache_file)
+        drift_entries = drift_fn(providers_cfg, catalogs)
+        if not isinstance(drift_entries, list):
+            drift_entries = []
+    except Exception:
+        drift_entries = []
+        sys.stderr.write("[BoteX] catalog drift computation failed\n")
+
+    drifted = [
+        e for e in drift_entries if isinstance(e, dict) and e.get("present_in_catalog") is False
+    ]
+    if drifted:
+        sys.stderr.write(
+            f"[BoteX] DRIFT: {len(drifted)} configured model entries absent from live catalog\n"
+        )
+
+    report = {
+        "generated_at": time.time(),
+        "generated_at_iso": datetime.now().isoformat(),
+        "sync": sync_results,
+        "drift": drift_entries,
+        "summary": {
+            "drifted": len(drifted),
+            "no_data": sum(
+                1
+                for e in drift_entries
+                if isinstance(e, dict) and e.get("present_in_catalog") is None
+            ),
+            "present": sum(
+                1
+                for e in drift_entries
+                if isinstance(e, dict) and e.get("present_in_catalog") is True
+            ),
+        },
+    }
+    report_path: Optional[Path] = None
+    try:
+        report_path = _catalog_drift_report_path()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = report_path.with_name(f"{report_path.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        os.replace(str(tmp_path), str(report_path))
+    except Exception:
+        report_path = None
+        sys.stderr.write("[BoteX] catalog drift report write failed\n")
+
+    return {
+        "status": "ok",
+        "sync": sync_results,
+        "drift": drift_entries,
+        "summary": report["summary"],
+        "report_path": str(report_path) if report_path else "",
+    }
+
+
 def _execute_night_pulse_cycle(
     *,
     base_url: str = "",
@@ -3964,12 +4179,21 @@ def _execute_night_pulse_cycle(
             )
         )
 
+    catalog_drift: dict[str, Any] = {"status": "skipped"}
+    try:
+        catalog_drift = _run_catalog_drift_sync(load_config())
+    except Exception as exc:
+        sys.stderr.write("[BoteX] catalog drift sync error\n")
+        catalog_drift = {"status": "error", "error": type(exc).__name__}
+
     return {
         "sync": sync_res,
         "active_leases": len(leases),
         "leases": leases,
         "fenced": fenced_results,
         "verified": verified_results,
+        "catalog_sync": catalog_drift.get("sync") or {},
+        "catalog_drift": catalog_drift,
     }
 
 

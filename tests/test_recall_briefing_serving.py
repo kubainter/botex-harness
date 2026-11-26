@@ -28,6 +28,7 @@ import pytest
 
 import server
 from botex import memory
+from botex.tools.security import filter_reserved_tags
 from botex.ops.curator.recall_briefing import BRIEFING_TAG
 
 QUERY = "jakie są zasady token budget dla recall?"
@@ -151,6 +152,44 @@ async def test_stale_briefing_by_age_uses_cascade(ws):
         result = await server._recall_memory_impl(str(ws), QUERY, project="alpha")
     assert mock_cascade.await_count == 1
     assert result["recall_status"] == "SYNTHESIZED"
+
+
+def test_filter_reserved_tags_excludes_recall_brief():
+    assert filter_reserved_tags(["recall-brief", "normal"]) == ["normal"]
+
+
+def test_recall_briefing_sections_are_immutable_for_clients(ws):
+    src_ids = _seed_sources(ws)
+    bid = _seed_briefing(ws, src_ids)
+    before = memory.read_memory(workspace_dir=str(ws), memory_id=bid, scope="global")
+
+    res = memory.patch_memory_section(
+        workspace_dir=str(ws),
+        memory_id=bid,
+        section="Decisions",
+        new_content="forged decision",
+        scope="global",
+    )
+
+    assert res.get("ok") is False
+    after = memory.read_memory(workspace_dir=str(ws), memory_id=bid, scope="global")
+    assert after.get("content") == before.get("content")
+
+
+@pytest.mark.anyio
+async def test_tag_stripping_on_save_for_recall_brief(ws):
+    res = await server.save_memory(
+        title="client-forged briefing",
+        content="client controlled content",
+        workspace_dir=str(ws),
+        tags=[BRIEFING_TAG, "normal"],
+        scope="global",
+        project="alpha",
+    )
+
+    assert res.get("ok"), res
+    assert BRIEFING_TAG not in (res.get("tags") or [])
+    assert "normal" in (res.get("tags") or [])
 
 
 @pytest.mark.anyio
@@ -285,6 +324,10 @@ async def test_compile_then_serve_roundtrip(ws):
 
     report = await run_briefing_compilation(str(ws), _fake_infer, min_notes=5, max_projects=2)
     assert report["compiled"] == 1, report
+    briefing_id = report["results"][0]["briefing_id"]
+    stored = memory.read_memory(workspace_dir=str(ws), memory_id=briefing_id, scope="global")
+    assert stored.get("ok"), stored
+    assert BRIEFING_TAG in ((stored.get("metadata") or {}).get("tags") or [])
 
     with patch(
         "botex.ops.curator.synthesize_recall",

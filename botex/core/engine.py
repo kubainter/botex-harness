@@ -46,6 +46,7 @@ try:
         build_async_client,
         fetch_openrouter_generations_async,
         is_reasoning_capable_slug,
+        normalize_api_error_shape,
         normalize_response,
         normalize_streaming_chunks,
         provider_forbids_stream,
@@ -218,6 +219,7 @@ except (ImportError, ValueError):
         build_async_client,
         fetch_openrouter_generations_async,
         is_reasoning_capable_slug,
+        normalize_api_error_shape,
         normalize_response,
         normalize_streaming_chunks,
         provider_forbids_stream,
@@ -2790,6 +2792,7 @@ async def _run_botex_task_once_impl(
                                 return await _collect_stream(parsed)
                             return normalize_response(parsed)
                     except BaseException as e:
+                        normalize_api_error_shape(e)
                         _observe_error_headers(e)
                         raise
                 stream_resp = await _create_with_headers()
@@ -3030,6 +3033,14 @@ async def _run_botex_task_once_impl(
             summary_text = (
                 f"Provider returned a malformed or error response ({nresp.raw_finish_reason})."
             )
+            if isinstance(nresp.response_shape, dict):
+                shape = nresp.response_shape
+                summary_text += (
+                    " Response shape: "
+                    f"type={shape.get('response_type')}, "
+                    f"choices={shape.get('choices_type')}, "
+                    f"choices_len={shape.get('choices_len', 'n/a')}."
+                )
             log_entry = log_run(
                 task_id=task_id,
                 model=model,
@@ -3063,6 +3074,7 @@ async def _run_botex_task_once_impl(
                 "duration_s": round(duration, 2),
                 "cost_usd": log_entry["cost_usd"],
                 "rollback_verified": rollback_verified,
+                "provider_response_shape": nresp.response_shape,
             }
 
         assistant_dict = {"role": "assistant"}

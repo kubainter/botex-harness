@@ -1864,6 +1864,9 @@ def patch_memory_section(
     try:
         raw_text = file_path.read_text(encoding="utf-8", errors="replace")
         meta, body = _parse_frontmatter(raw_text)
+        tags = {str(t).strip().lower().lstrip("#") for t in (meta.get("tags") or [])}
+        if "recall-brief" in tags and not (append and norm_sec.lower() == "timeline"):
+            return {"ok": False, "error": "Memory entry is a reserved recall briefing"}
 
         header_pattern = re.compile(
             rf"^(#{{1,6}})\s+{re.escape(norm_sec)}\b.*$", re.MULTILINE | re.IGNORECASE
