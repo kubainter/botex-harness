@@ -110,10 +110,7 @@ def test_night_pulse_drift_emits_stderr_lines(_wired, capsys):
 
     botex_server._execute_night_pulse_cycle()
     err_out = capsys.readouterr().err
-    assert (
-        "[BoteX] DRIFT: configured model 'openai/gpt-oss-120b' "
-        "(provider 'groq', slot 'default') absent from live catalog" in err_out
-    )
+    assert "[BoteX] DRIFT: 3 configured model entries absent from live catalog" in err_out
 
 
 def test_night_pulse_sync_exception_does_not_escape(_wired, monkeypatch):

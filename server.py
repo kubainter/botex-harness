@@ -4018,30 +4018,24 @@ def _run_catalog_drift_sync(cfg: dict[str, Any]) -> dict[str, Any]:
         )
         if not isinstance(sync_results, dict):
             sync_results = {}
-    except Exception as exc:
-        sys.stderr.write(f"[BoteX] catalog sync failed: {mask_secrets(type(exc).__name__)}\n")
+    except Exception:
+        sys.stderr.write("[BoteX] catalog sync failed\n")
 
     try:
         catalogs = _load_cached_catalogs(provider_names, providers_cfg, cache_file)
         drift_entries = drift_fn(providers_cfg, catalogs)
         if not isinstance(drift_entries, list):
             drift_entries = []
-    except Exception as exc:
+    except Exception:
         drift_entries = []
-        sys.stderr.write(
-            f"[BoteX] catalog drift computation failed: {mask_secrets(type(exc).__name__)}\n"
-        )
+        sys.stderr.write("[BoteX] catalog drift computation failed\n")
 
     drifted = [
         e for e in drift_entries if isinstance(e, dict) and e.get("present_in_catalog") is False
     ]
-    for entry in drifted:
-        mid = mask_secrets(str(entry.get("model_id") or ""))
-        prov = mask_secrets(str(entry.get("provider") or ""))
-        slot = mask_secrets(str(entry.get("slot") or ""))
+    if drifted:
         sys.stderr.write(
-            f"[BoteX] DRIFT: configured model '{mid}' (provider '{prov}', slot '{slot}')"
-            " absent from live catalog\n"
+            f"[BoteX] DRIFT: {len(drifted)} configured model entries absent from live catalog\n"
         )
 
     report = {
@@ -4070,11 +4064,9 @@ def _run_catalog_drift_sync(cfg: dict[str, Any]) -> dict[str, Any]:
         tmp_path = report_path.with_name(f"{report_path.name}.{os.getpid()}.tmp")
         tmp_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         os.replace(str(tmp_path), str(report_path))
-    except Exception as exc:
+    except Exception:
         report_path = None
-        sys.stderr.write(
-            f"[BoteX] catalog drift report write failed: {mask_secrets(type(exc).__name__)}\n"
-        )
+        sys.stderr.write("[BoteX] catalog drift report write failed\n")
 
     return {
         "status": "ok",
@@ -4191,7 +4183,7 @@ def _execute_night_pulse_cycle(
     try:
         catalog_drift = _run_catalog_drift_sync(load_config())
     except Exception as exc:
-        sys.stderr.write(f"[BoteX] catalog drift sync error: {mask_secrets(type(exc).__name__)}\n")
+        sys.stderr.write("[BoteX] catalog drift sync error\n")
         catalog_drift = {"status": "error", "error": type(exc).__name__}
 
     return {
