@@ -152,7 +152,7 @@ targeted + integration tests.
 | `botex/server/i18n.py` | `detect_language`, `init_language`, `set_language`, `get_language`, `t` | — |
 | `botex/server/plugins.py` | `PluginError`, `PluginValidationError`, `PluginExecutionError`, `PluginExecutionTimeout`, `PluginPermissionError`, `BoteXPluginDefinition`, `+5 more` | `test_approval.py`, `test_plugins_creator.py` |
 | `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+92 more` | `test_brief_curator.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, `test_curator.py`, +17 more |
-| `botex/server/task_store.py` | `save_task_persistent`, `load_task_persistent`, `load_tasks_persistent` | `test_server_cloud.py`, `test_task_store.py` |
+| `botex/server/task_store.py` | `save_task_persistent`, `load_task_persistent`, `load_tasks_persistent` | `test_server_cloud.py`, `test_server_f4_provenance.py`, `test_task_store.py` |
 | `botex/server/ui.py` | `colors_enabled`, `paint`, `title`, `accent`, `ok`, `warn`, `+3 more` | `test_botex.py` |
 
 ### `botex.skills`

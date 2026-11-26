@@ -16,10 +16,12 @@ from botex.chat import ChatMessage, default_chat_manager
 from botex.config import (
     MCP_CLIENT_ORIGIN,
     get_mcp_client_origin,
+    get_tasks_dir,
     is_cross_host_windows_path,
     resolve_workspace,
 )
 from botex.security import filter_reserved_tags, sanitize_origin_claim
+from botex.server.task_store import load_task_persistent
 from botex.server.server_cloud import (
     CloudAuthMiddleware,
     _MCPSseErrorGuard,
@@ -518,11 +520,18 @@ def test_per_call_origin_across_mcp_tools(tmp_path: Path, monkeypatch):
         assert started["status"] == "QUEUED"
         assert started["origin"] == "zcode@Botek"
         tid = started["task_id"]
-        await botex_server._TASKS[tid]["task"]
+        assert (get_tasks_dir(str(tmp_path)) / f"{tid}.json").exists()
+        await botex_server._TASKS[tid]["async_task"]
         polled = await botex_server.get_task_status(tid)
         assert polled["status"] == "DONE"
         assert polled["origin"] == "zcode@Botek"
         assert polled["result_data"]["origin"] == "zcode@Botek"
+        persisted = load_task_persistent(tid, str(tmp_path))
+        assert persisted is not None
+        assert persisted["status"] == "DONE"
+        assert persisted["collected"] is True
+        assert persisted["task"] == "noop"
+        assert persisted["request"]["api_key"] == ""
 
     asyncio.run(_run_start_and_poll())
 

@@ -707,7 +707,7 @@ def test_start_task_routes_edge_workspace(monkeypatch):
 
     async def main():
         res = await server.start_task(task="t", workspace_dir="edge-ws-1", provider="openrouter")
-        await server._TASKS[res["task_id"]]["task"]
+        await server._TASKS[res["task_id"]]["async_task"]
         return res
 
     res = asyncio.run(main())
@@ -736,7 +736,7 @@ def test_start_task_local_workspace_unchanged(monkeypatch):
 
     async def main():
         res = await server.start_task(task="t", workspace_dir="", provider="openrouter")
-        await server._TASKS[res["task_id"]]["task"]
+        await server._TASKS[res["task_id"]]["async_task"]
         return res
 
     res = asyncio.run(main())

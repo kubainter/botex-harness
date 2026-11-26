@@ -149,7 +149,11 @@ from botex.memory import (
     search_memory as _search_memory,
 )
 from botex.providers import ProviderRegistry, resolve_local_llm_base_url, sanitize_provider_error
-from botex.server.task_store import load_task_persistent
+from botex.server.task_store import (
+    load_task_persistent,
+    load_tasks_persistent,
+    save_task_persistent,
+)
 
 try:
     from botex.core.tool_executor import resolve_edge_executor
@@ -506,6 +510,15 @@ _TASK_SEMAPHORE = asyncio.Semaphore(
 )
 
 
+def _task_persist_workspace(entry: dict[str, Any]) -> str:
+    ws = str((entry.get("request") or {}).get("workspace_dir") or "")
+    return "" if ws.startswith("edge://") else ws
+
+
+async def _persist_task_entry(task_id: str, entry: dict[str, Any]) -> None:
+    await asyncio.to_thread(save_task_persistent, task_id, entry, _task_persist_workspace(entry))
+
+
 async def _background_task(task_id: str, kwargs: dict) -> None:
     entry = _TASKS[task_id]
     entry["status"] = "RUNNING"
@@ -527,6 +540,7 @@ async def _background_task(task_id: str, kwargs: dict) -> None:
         entry["result"] = f"Background task failed: {mask_secrets(str(exc))[:500]}"
     finally:
         entry["finished_at"] = time.time()
+        await _persist_task_entry(task_id, entry)
 
 
 def _cleanup_tasks() -> None:
@@ -827,13 +841,23 @@ async def start_task(
         "approval_policy": approval_policy,
         "origin": effective_origin,
     }
-    task_obj = asyncio.create_task(_background_task(task_id, kwargs))
-    _TASKS[task_id] = {
+    persisted_request = dict(kwargs)
+    persisted_request["api_key"] = ""
+    entry = {
+        "task_id": task_id,
+        "task": mask_secrets(task),
+        "request": mask_secrets_recursive(persisted_request),
         "status": "QUEUED",
         "created_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "result_data": None,
         "origin": effective_origin,
-        "task": task_obj,
+        "async_task": None,
     }
+    _TASKS[task_id] = entry
+    await _persist_task_entry(task_id, entry)
+    entry["async_task"] = asyncio.create_task(_background_task(task_id, kwargs))
     return {"task_id": task_id, "status": "QUEUED", "origin": effective_origin}
 
 
@@ -877,6 +901,7 @@ async def get_task_status(
             entry["collected"] = True
             entry["collected_at"] = time.time()
             entry["collected_by"] = _resolve_call_origin(collected_by)
+            await _persist_task_entry(task_id, entry)
             return result
         if time.monotonic() >= deadline:
             return {
@@ -899,7 +924,10 @@ async def list_tasks(
     """List background tasks (`{task_id, status, created_at, origin, collected}`) for orphan/startup recovery."""
     _cleanup_tasks()
     max_rows = max(1, min(int(limit), 200))
-    entries = sorted(_TASKS.items(), key=lambda kv: kv[1].get("created_at") or 0, reverse=True)
+    restored = await asyncio.to_thread(load_tasks_persistent)
+    merged: dict[str, dict[str, Any]] = dict(restored)
+    merged.update(_TASKS)
+    entries = sorted(merged.items(), key=lambda kv: kv[1].get("created_at") or 0, reverse=True)
     tasks = []
     for tid, entry in entries:
         status = entry.get("status")
