@@ -378,7 +378,7 @@ async def test_tier1_probe_inconclusive_falls_back_to_tcp():
             mock = AsyncMock(return_value=_payload() if tier == "nvidia" else None)
             stack.enter_context(patch.object(recall_curator, fname, mock))
             mocks[tier] = mock
-        result = await synthesize_recall("what is alpha?", _nodes())
+        result = await synthesize_recall("what is alpha?", _nodes(), cfg={"hedge_s": 60.0})
 
     assert result["tier_used"] == "nvidia"
     t1_attempt = next(a for a in result["tier_attempts"] if a["tier"] == "local-ollama")
@@ -572,7 +572,7 @@ async def test_negative_tier_marker_skips_then_expires():
                 "nvidia": _payload(confidence="MEDIUM"),
             },
         )
-        first = await synthesize_recall("what is alpha?", _nodes())
+        first = await synthesize_recall("what is alpha?", _nodes(), cfg={"hedge_s": 60.0})
         assert first["tier_used"] == "nvidia"
         assert mocks["local-ollama"].await_count == 1
         assert mocks["local-ollama"].side_effect is not None
@@ -582,14 +582,14 @@ async def test_negative_tier_marker_skips_then_expires():
         stack.enter_context(
             patch.object(recall_curator, "_try_local_ollama", mocks["local-ollama"])
         )
-        second = await synthesize_recall("what is beta?", _nodes())
+        second = await synthesize_recall("what is beta?", _nodes(), cfg={"hedge_s": 60.0})
         assert mocks["local-ollama"].await_count == 0
         t1_attempt = next(a for a in second["tier_attempts"] if a["tier"] == "local-ollama")
         assert t1_attempt["status"] == "neg_cached"
 
         # After negative TTL elapses the tier is retried.
         clock["t"] += recall_curator.DEFAULT_NEGATIVE_TIER_TTL_S + 1.0
-        third = await synthesize_recall("what is gamma?", _nodes())
+        third = await synthesize_recall("what is gamma?", _nodes(), cfg={"hedge_s": 60.0})
         assert mocks["local-ollama"].await_count == 1
         assert third["tier_used"] == "local-ollama"
 

@@ -169,7 +169,7 @@ def test_mcp_list_tasks_merges_persisted_without_rehydrate():
     ids = [uuid.uuid4().hex[:12] for _ in range(2)]
     paths = [_seed_task_file(t) for t in ids]
     try:
-        result = asyncio.run(botex_server.list_tasks())
+        result = asyncio.run(botex_server.list_tasks(limit=200))
         assert result["ok"] is True
         listed = {t["task_id"] for t in result["tasks"]}
         assert ids[0] in listed and ids[1] in listed

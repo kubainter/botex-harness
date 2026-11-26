@@ -46,6 +46,7 @@ try:
         build_async_client,
         fetch_openrouter_generations_async,
         is_reasoning_capable_slug,
+        normalize_api_error_shape,
         normalize_response,
         normalize_streaming_chunks,
         provider_forbids_stream,
@@ -218,6 +219,7 @@ except (ImportError, ValueError):
         build_async_client,
         fetch_openrouter_generations_async,
         is_reasoning_capable_slug,
+        normalize_api_error_shape,
         normalize_response,
         normalize_streaming_chunks,
         provider_forbids_stream,
@@ -2790,6 +2792,7 @@ async def _run_botex_task_once_impl(
                                 return await _collect_stream(parsed)
                             return normalize_response(parsed)
                     except BaseException as e:
+                        normalize_api_error_shape(e)
                         _observe_error_headers(e)
                         raise
                 stream_resp = await _create_with_headers()

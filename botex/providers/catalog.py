@@ -20,13 +20,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
-    from botex.server.config import PROJECT_ROOT
+    from botex.server.config import PROJECT_ROOT, catalog_cache_file
     from botex.tools.security import mask_secrets
 
     from .providers import BaseProvider, ProviderRegistry
     from .wallet import _sanitize_raw_payload
 except (ImportError, ValueError):
-    from config import PROJECT_ROOT
+    from config import PROJECT_ROOT, catalog_cache_file
     from providers import BaseProvider, ProviderRegistry
     from security import mask_secrets
     from wallet import _sanitize_raw_payload
@@ -233,7 +233,7 @@ class ModelCatalog:
         self.provider_cfg = self.provider.config
         self.api_key = api_key
         self.ttl_hours = float(ttl_hours)
-        self.cache_file = Path(cache_file) if cache_file else CACHE_FILE_DEFAULT
+        self.cache_file = Path(cache_file) if cache_file else catalog_cache_file()
         self._models: Dict[str, ModelMetadata] = {}
         self._fetched_at: float = 0.0
         self._loaded: bool = False
@@ -729,7 +729,7 @@ def get_consolidated_models(
     Uses in-memory TTL caching backed by ModelCatalog's persistent cache to
     respond in <5ms for UI model selectors.
     """
-    resolved_cache_file = Path(cache_file) if cache_file else CACHE_FILE_DEFAULT
+    resolved_cache_file = Path(cache_file) if cache_file else catalog_cache_file()
     cache_path_str = str(resolved_cache_file)
     try:
         mtime = resolved_cache_file.stat().st_mtime if resolved_cache_file.exists() else 0.0
@@ -1095,7 +1095,7 @@ def sync_provider_catalogs(
     pricing data other consumers rely on, so the stale cache is preserved.
     ``fetched_at`` is 0.0 on any error path (nothing was fetched).
     """
-    resolved_cache = Path(cache_file) if cache_file else CACHE_FILE_DEFAULT
+    resolved_cache = Path(cache_file) if cache_file else catalog_cache_file()
     results: Dict[str, Dict[str, Any]] = {}
 
     for raw_name in provider_names:

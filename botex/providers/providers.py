@@ -440,6 +440,7 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
     message_extra: Optional[Dict[str, Any]] = None
     raw_finish_reason = "unknown"
     usage_obj = None
+    saw_choices = False
 
     for chunk in chunks:
         if not chunk:
@@ -453,6 +454,7 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         choices = _get(chunk, "choices") or []
         if not choices:
             continue
+        saw_choices = True
         choice = choices[0]
         fr = _get(choice, "finish_reason")
         if fr:
@@ -524,11 +526,17 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         for _, v in sorted(accumulated_tool_calls.items())
     )
 
-    finish_kind = (
-        _VALID_FINISH_KIND_MAP.get("tool_calls", "tool_call")
-        if tool_calls
-        else _VALID_FINISH_KIND_MAP.get(str(raw_finish_reason), "unknown")
-    )
+    if not saw_choices:
+        finish_kind = "provider_error"
+        raw_finish_reason = "no_choices"
+        response_shape = {"response_type": "stream", "choices_type": "missing", "choices_len": 0}
+    else:
+        finish_kind = (
+            _VALID_FINISH_KIND_MAP.get("tool_calls", "tool_call")
+            if tool_calls
+            else _VALID_FINISH_KIND_MAP.get(str(raw_finish_reason), "unknown")
+        )
+        response_shape = None
 
     comp_details = _get(usage_obj, "completion_tokens_details") if usage_obj else None
     real_reasoning = _safe_int(_get(comp_details, "reasoning_tokens", 0) if comp_details else 0, 0)
@@ -562,7 +570,37 @@ def normalize_streaming_chunks(chunks: Sequence[Any], raw_model: str = "") -> No
         generation_id="",
         model=mask_secrets(raw_model),
         extra_content=message_extra,
+        response_shape=response_shape,
     )
+
+
+def normalize_api_error_shape(exc: BaseException) -> BaseException:
+    """Normalize single-item list-shaped OpenAI-shim error bodies in-place.
+
+    Google's compatibility shim sometimes returns ``[{"error": {...}}]`` where
+    the OpenAI API contract requires ``{"error": {...}}``. Exception classes
+    are unaffected, but normalizing the representation keeps logs and retry
+    metadata consumers on the OpenAI shape.
+    """
+    body = getattr(exc, "body", None)
+    if not (isinstance(body, list) and len(body) == 1 and isinstance(body[0], dict)):
+        return exc
+    error = body[0].get("error")
+    if not isinstance(error, dict):
+        return exc
+    try:
+        status = getattr(exc, "status_code", None)
+        wire_error = {"error": error}
+        message = (
+            f"Error code: {status} - {wire_error!r}" if status is not None else repr(wire_error)
+        )
+        exc.body = error  # type: ignore[attr-defined]
+        exc.args = (message,)
+        if hasattr(exc, "message"):
+            exc.message = message  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return exc
 
 
 def sanitize_provider_error(exc: BaseException, max_chars: int = 1024) -> str:

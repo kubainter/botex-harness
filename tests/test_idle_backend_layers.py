@@ -89,7 +89,7 @@ def test_get_models_marks_stale_headers(tmp_path: Any, monkeypatch: Any) -> None
     cache_file.write_text("{}", encoding="utf-8")
     stale_ts = 1_000_000.0  # far in the past → age far beyond TTL
     os.utime(cache_file, (stale_ts, stale_ts))
-    monkeypatch.setattr(sc, "CACHE_FILE_DEFAULT", cache_file)
+    monkeypatch.setattr(sc, "catalog_cache_file", lambda: cache_file)
 
     response = sc.Response()
     models = asyncio.run(sc.get_models(response=response, provider=None, force_refresh=False))
@@ -108,7 +108,7 @@ def test_get_models_fresh_headers(tmp_path: Any, monkeypatch: Any) -> None:
     cache_file.write_text("{}", encoding="utf-8")
     now = time.time()
     os.utime(cache_file, (now, now))
-    monkeypatch.setattr(sc, "CACHE_FILE_DEFAULT", cache_file)
+    monkeypatch.setattr(sc, "catalog_cache_file", lambda: cache_file)
 
     response = sc.Response()
     asyncio.run(sc.get_models(response=response, provider=None, force_refresh=False))
@@ -119,7 +119,8 @@ def test_get_models_missing_cache_is_stale(tmp_path: Any, monkeypatch: Any) -> N
     import botex.server.server_cloud as sc
 
     monkeypatch.setattr(sc, "get_consolidated_models", lambda **kwargs: [])
-    monkeypatch.setattr(sc, "CACHE_FILE_DEFAULT", tmp_path / "does_not_exist.json")
+    missing_cache = tmp_path / "does_not_exist.json"
+    monkeypatch.setattr(sc, "catalog_cache_file", lambda: missing_cache)
 
     response = sc.Response()
     asyncio.run(sc.get_models(response=response, provider=None, force_refresh=False))

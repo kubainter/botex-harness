@@ -74,7 +74,6 @@ import server as botex_server
 from botex.analytics import aggregate_stats, load_analytics
 from botex.approval import PendingAction, TaskAbortedError, default_approval_manager
 from botex.catalog import (
-    CACHE_FILE_DEFAULT,
     DEFAULT_TTL_HOURS,
     get_consolidated_models,
 )
@@ -83,6 +82,7 @@ from botex.config import (
     MCP_CLIENT_ORIGIN,
     WorkspaceOutOfBounds,
     analytics_setting,
+    catalog_cache_file,
     get_bots_config,
     resolve_provider,
     resolve_workspace,
@@ -2224,7 +2224,8 @@ async def get_models(
     # "last successful fetch". Stale means both the idle warmup and the lazy
     # request-time refresh failed — a real egress degradation.
     try:
-        fetched_at = CACHE_FILE_DEFAULT.stat().st_mtime if CACHE_FILE_DEFAULT.exists() else 0.0
+        catalog_path = catalog_cache_file()
+        fetched_at = catalog_path.stat().st_mtime if catalog_path.exists() else 0.0
     except OSError:
         fetched_at = 0.0
     age_s = max(0.0, datetime.now(timezone.utc).timestamp() - fetched_at)

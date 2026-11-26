@@ -26,9 +26,15 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from botex.analytics import is_free_model
-from botex.config import PROJECT_ROOT
+from botex.config import PROJECT_ROOT, catalog_cache_file
 
 CACHE_FILE = PROJECT_ROOT / ".model_pricing.json"
+
+
+def _cache_file():
+    return catalog_cache_file()
+
+
 DEFAULT_TTL_H = 24.0
 _HTTP_TIMEOUT = 10
 
@@ -77,8 +83,9 @@ def _fetch_catalog(base_url: str, api_key: str = "") -> Dict[str, Dict[str, Any]
 
 def _read_cache() -> Dict[str, Any]:
     try:
-        if CACHE_FILE.exists():
-            return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        cache_file = _cache_file()
+        if cache_file.exists():
+            return json.loads(cache_file.read_text(encoding="utf-8"))
     except Exception:
         pass
     return {}
@@ -89,12 +96,13 @@ def _write_cache(catalogs: Dict[str, Any]) -> None:
         # Atomic replace: the cache file is shared between the live server
         # (request-time refresh) and the idle maintenance job — a torn or
         # interleaved write would wipe the other writers' provider entries.
-        tmp_path = CACHE_FILE.with_name(f"{CACHE_FILE.name}.{os.getpid()}.tmp")
+        cache_file = _cache_file()
+        tmp_path = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.tmp")
         tmp_path.write_text(
             json.dumps({"fetched_at": time.time(), "catalogs": catalogs}),
             encoding="utf-8",
         )
-        os.replace(str(tmp_path), str(CACHE_FILE))
+        os.replace(str(tmp_path), str(cache_file))
     except Exception:
         pass
 
