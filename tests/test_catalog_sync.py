@@ -21,6 +21,7 @@ import pytest
 
 from botex.catalog import ModelCatalog, sync_provider_catalogs
 from botex.providers import BaseProvider
+from botex.providers.providers import ProviderRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -108,6 +109,46 @@ def seed_stale_entry(cache_file: Path, base_url: str, fetched_at: float) -> Dict
 # ---------------------------------------------------------------------------
 # Happy path & cache format compatibility
 # ---------------------------------------------------------------------------
+
+
+def test_sync_threads_provider_config_into_registry_and_cache_key(isolated_cache_path: Path):
+    """Configured base_url/auth env reach the adapter and determine the cache key."""
+    captured: Dict[str, Any] = {}
+
+    class ConfiguredRegistry:
+        def get(self, name: str, provider_cfg: Any = None, strict: bool = False) -> Any:
+            captured["name"] = name
+            captured["provider_cfg"] = provider_cfg
+            return make_mock_provider(
+                name,
+                str(provider_cfg["base_url"]),
+                catalog_payload=[{"id": "vendor/live-model", "object": "model"}],
+            )
+
+    cfg = {"base_url": "https://proxy.example.test/v1", "api_key_env": "CUSTOM_KEY_ENV"}
+    results = sync_provider_catalogs(
+        ConfiguredRegistry(),
+        ["nvidia"],
+        cache_file=isolated_cache_path,
+        provider_configs={"nvidia": cfg},
+    )
+
+    assert results["nvidia"]["status"] == "ok"
+    assert captured["provider_cfg"] == cfg
+    written = read_cache(isolated_cache_path)
+    assert "https://proxy.example.test/v1" in written["catalogs"]
+    assert "https://integrate.api.nvidia.com/v1" not in written["catalogs"]
+
+
+def test_cloudflare_config_only_account_id_reaches_adapter():
+    """ProviderRegistry receives config-only Cloudflare account routing information."""
+    provider = ProviderRegistry.get(
+        "cloudflare",
+        {"account_id": "acct123", "api_key_env": "CLOUDFLARE_TEST_KEY"},
+    )
+    assert provider.config["account_id"] == "acct123"
+    assert provider.config["api_key_env"] == "CLOUDFLARE_TEST_KEY"
+    assert "/accounts/acct123/" in provider.base_url
 
 
 def test_sync_success_writes_shared_cache(isolated_cache_path: Path):

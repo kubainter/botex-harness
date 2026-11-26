@@ -1080,6 +1080,7 @@ def sync_provider_catalogs(
     provider_names: Sequence[str],
     cache_file: Optional[Path | str] = None,
     timeout: float = 10.0,
+    provider_configs: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Live-sync provider catalogs into the shared cache, isolated per provider.
 
@@ -1106,7 +1107,8 @@ def sync_provider_catalogs(
         error: Optional[str] = None
         fetched_at = 0.0
         try:
-            provider = registry.get(name)
+            pcfg = (provider_configs or {}).get(name)
+            provider = registry.get(name, pcfg if isinstance(pcfg, dict) else None)
             catalog = ModelCatalog(provider=provider, cache_file=resolved_cache)
             fetched = catalog.fetch_from_provider(timeout=timeout)
             if not fetched:
@@ -1150,7 +1152,7 @@ def compute_config_drift(
     """
 
     def _norm(mid: str) -> str:
-        return mid.strip().removeprefix("models/").lower()
+        return mid.strip().lower().removeprefix("models/")
 
     records: List[Dict[str, Any]] = []
     seen: set[Tuple[str, str, str]] = set()

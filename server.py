@@ -4003,19 +4003,24 @@ def _run_catalog_drift_sync(cfg: dict[str, Any]) -> dict[str, Any]:
     if sync_fn is None or drift_fn is None:
         return {"status": "unavailable", "reason": "catalog sync API missing"}
 
+    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else {}
+    if not isinstance(providers_cfg, dict):
+        providers_cfg = {}
+
     sync_results: dict[str, Any] = {}
     try:
         sync_results = sync_fn(
-            ProviderRegistry, provider_names, cache_file=cache_file, timeout=timeout
+            ProviderRegistry,
+            provider_names,
+            cache_file=cache_file,
+            timeout=timeout,
+            provider_configs=providers_cfg,
         )
         if not isinstance(sync_results, dict):
             sync_results = {}
     except Exception as exc:
         sys.stderr.write(f"[BoteX] catalog sync failed: {mask_secrets(type(exc).__name__)}\n")
 
-    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else {}
-    if not isinstance(providers_cfg, dict):
-        providers_cfg = {}
     try:
         catalogs = _load_cached_catalogs(provider_names, providers_cfg, cache_file)
         drift_entries = drift_fn(providers_cfg, catalogs)

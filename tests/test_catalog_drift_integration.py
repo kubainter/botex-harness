@@ -33,7 +33,9 @@ def _controlled_config(tmp_path: Path) -> dict:
     }
 
 
-def _fake_sync_seed_unrelated(registry, provider_names, cache_file=None, timeout=10.0):
+def _fake_sync_seed_unrelated(
+    registry, provider_names, cache_file=None, timeout=10.0, provider_configs=None
+):
     """Mimics sync_provider_catalogs: writes a live catalog containing none of the configured ids."""
     results = {}
     for name in provider_names:
