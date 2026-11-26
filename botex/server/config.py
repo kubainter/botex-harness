@@ -751,6 +751,22 @@ DEFAULTS: Dict[str, Any] = {
         "timeout_s": 10.0,
         "on_unknown": "allow",
     },
+    # Night-Pulse live catalog availability sync & config drift detection.
+    # One GET /models per provider per cycle, results cached in the shared
+    # pricing cache; configured model ids absent from the live catalog are
+    # reported in .botex/catalog_drift.json — config is never auto-written.
+    # Ollama is intentionally excluded (local endpoint, not catalog drift).
+    # When new providers are added to `providers`, add them here too.
+    "catalog_sync": {
+        "enabled": True,
+        "providers": ["google", "groq", "nvidia", "cloudflare", "openrouter", "openrouter-free"],
+        "timeout_s": 10.0,
+        # Minimum seconds between live syncs. Night-Pulse can loop every 60s
+        # in continuous mode — without this gate each cycle would hit every
+        # provider's /models endpoint. 12h tolerates daily-timer jitter while
+        # keeping the catalog effectively per-day. 0 = sync every cycle.
+        "interval_s": 43200.0,
+    },
     "benchmarks": {
         "enabled": True,
         "cache_file": "",
@@ -815,6 +831,9 @@ _ENV_MAP = {
     "BOTEX_CATALOG_ENABLED": ("catalog", "enabled"),
     "BOTEX_CATALOG_CACHE_FILE": ("catalog", "cache_file"),
     "BOTEX_CATALOG_TTL_HOURS": ("catalog", "ttl_hours"),
+    "BOTEX_CATALOG_SYNC_ENABLED": ("catalog_sync", "enabled"),
+    "BOTEX_CATALOG_SYNC_PROVIDERS": ("catalog_sync", "providers"),
+    "BOTEX_CATALOG_SYNC_TIMEOUT_S": ("catalog_sync", "timeout_s"),
     "BOTEX_WALLET_ENABLED": ("wallet", "enabled"),
     "BOTEX_WALLET_CACHE_TTL_S": ("wallet", "cache_ttl_s"),
     "BOTEX_GLOBAL_MEMORY_DIR": ("paths", "global_memory_dir"),

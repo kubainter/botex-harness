@@ -2041,6 +2041,72 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 
+# Test hook: when None the default <project>/.botex/catalog_drift.json is used.
+_CATALOG_DRIFT_REPORT_PATH: Optional[Path] = None
+
+# Reports older than this are treated as absent — Night-Pulse is expected to
+# refresh the drift report at least daily.
+_CATALOG_DRIFT_STALE_S = 48 * 3600.0
+
+
+def _catalog_drift_report_file() -> Path:
+    if _CATALOG_DRIFT_REPORT_PATH is not None:
+        return Path(_CATALOG_DRIFT_REPORT_PATH)
+    try:
+        from botex.config import PROJECT_ROOT
+
+        return PROJECT_ROOT / ".botex" / "catalog_drift.json"
+    except Exception:
+        return Path(_root_dir) / ".botex" / "catalog_drift.json"
+
+
+def _catalog_drift_health() -> Dict[str, Any]:
+    """Compact bounded summary of the persisted Night-Pulse drift report. Never raises."""
+    try:
+        path = _catalog_drift_report_file()
+        if not path.exists():
+            return {"status": "unknown"}
+        report = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            return {"status": "error"}
+        generated_at = float(report.get("generated_at") or 0.0)
+        if generated_at <= 0.0 or (time.time() - generated_at) > _CATALOG_DRIFT_STALE_S:
+            return {"status": "unknown"}
+
+        per_provider: Dict[str, int] = {}
+        drifted_ids: List[str] = []
+        drift_entries = report.get("drift")
+        if isinstance(drift_entries, list):
+            for entry in drift_entries:
+                if not isinstance(entry, dict) or entry.get("present_in_catalog") is not False:
+                    continue
+                prov = str(entry.get("provider") or "")
+                mid = str(entry.get("model_id") or "")
+                per_provider[prov] = per_provider.get(prov, 0) + 1
+                if len(drifted_ids) < 10:
+                    drifted_ids.append(f"{prov}:{mid}")
+
+        sync_results = report.get("sync")
+        sync_errors = 0
+        if isinstance(sync_results, dict):
+            sync_errors = sum(
+                1
+                for s in sync_results.values()
+                if isinstance(s, dict) and s.get("status") == "error"
+            )
+
+        return {
+            "status": "ok",
+            "generated_at": generated_at,
+            "drifted": sum(per_provider.values()),
+            "per_provider": per_provider,
+            "drifted_ids": drifted_ids,
+            "sync_errors": sync_errors,
+        }
+    except Exception:
+        return {"status": "unknown"}
+
+
 @app.get("/api/health")
 async def get_health() -> Dict[str, Any]:
     """Health check endpoint for container probes and load balancers (unauthenticated)."""
@@ -2050,6 +2116,7 @@ async def get_health() -> Dict[str, Any]:
         "version": "2.2.0",
         "uptime_s": round(now - START_TIME, 2),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "catalog_drift": _catalog_drift_health(),
     }
 
 

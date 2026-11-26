@@ -304,6 +304,11 @@ ruleset (LiteLLM-style). Deferred: the probe costs a call, and prefix rules
 guess at unverified formats — the explicit `providers.<name>.capabilities`
 declaration covers the need today.
 
+2026-11-25: availability drift sync landed as a separate Night-Pulse mechanism.
+It refreshes provider `/models` catalogs on a slow schedule and reports configured
+IDs absent from live catalogs; it still performs no per-call capability probes
+and never auto-writes config.
+
 ### NVIDIA pricing adapter
 `integrate.api.nvidia.com` `/models` publishes no price fields, so the
 pricing guardrail treats every NVIDIA model as "unknown" (`on_unknown`

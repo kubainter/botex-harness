@@ -1073,3 +1073,145 @@ def get_free_tier_failover_candidates(
             candidates.append(dict(entry))
             attempted_set.add(cand_model)
     return candidates
+
+
+def sync_provider_catalogs(
+    registry: ProviderRegistry,
+    provider_names: Sequence[str],
+    cache_file: Optional[Path | str] = None,
+    timeout: float = 10.0,
+) -> Dict[str, Dict[str, Any]]:
+    """Live-sync provider catalogs into the shared cache, isolated per provider.
+
+    Attempts a live ``fetch_from_provider`` for each named provider (never
+    ``load`` — a sync job must hit the wire) and writes successful results into
+    the shared cache file under the provider's ``cache_key`` using the exact
+    ``_write_cache_entry`` format, so pricing consumers keep working unchanged.
+
+    Failure isolation: an exception in one provider never aborts the others.
+    An empty live response is reported as an error and never written — wiping
+    the shared cache with an empty catalog would destroy the last-known-good
+    pricing data other consumers rely on, so the stale cache is preserved.
+    ``fetched_at`` is 0.0 on any error path (nothing was fetched).
+    """
+    resolved_cache = Path(cache_file) if cache_file else CACHE_FILE_DEFAULT
+    results: Dict[str, Dict[str, Any]] = {}
+
+    for raw_name in provider_names:
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        status = "error"
+        model_count = 0
+        error: Optional[str] = None
+        fetched_at = 0.0
+        try:
+            provider = registry.get(name)
+            catalog = ModelCatalog(provider=provider, cache_file=resolved_cache)
+            fetched = catalog.fetch_from_provider(timeout=timeout)
+            if not fetched:
+                error = "provider returned empty catalog; stale cache preserved"
+            else:
+                models = {m.id: m for m in fetched}
+                catalog._write_cache_entry(models)
+                status = "ok"
+                model_count = len(models)
+                fetched_at = time.time()
+        except Exception as exc:
+            masked = mask_secrets(str(exc) or "").strip()[:200]
+            error = f"{type(exc).__name__}: {masked}" if masked else type(exc).__name__
+        results[name] = {
+            "status": status,
+            "model_count": model_count,
+            "error": error,
+            "fetched_at": fetched_at,
+        }
+    return results
+
+
+def compute_config_drift(
+    config_providers: Dict[str, Any],
+    catalogs: Dict[str, Dict[str, ModelMetadata]],
+) -> List[Dict[str, Any]]:
+    """Compare configured model ids against live catalogs. Pure: no I/O, no clock.
+
+    Collects every configured model id from ``models.*`` values (slot named by
+    the mapping key) and ``model_fallbacks`` (slot ``fallback:<key>`` for the
+    dict form, ``fallback`` for a bare list). Emits one record per configured
+    id: ``{provider, model_id, slot, present_in_catalog}``.
+
+    ``present_in_catalog`` is ``None`` when the provider has no usable catalog
+    data (absent key or empty catalog — a zero-model catalog cannot confirm
+    anything, and sync never writes empty ones), ``True``/``False`` otherwise.
+    Matching is case-insensitive and ignores a leading ``models/`` prefix.
+    Records dedupe on ``(provider, slot, normalized model_id)`` — the same id
+    listed twice in one slot collapses, while the same id in distinct slots
+    stays distinct so the slot-level report remains actionable.
+    """
+
+    def _norm(mid: str) -> str:
+        return mid.strip().removeprefix("models/").lower()
+
+    records: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str, str]] = set()
+
+    for provider_name in sorted(k for k in config_providers.keys() if isinstance(k, str)):
+        pcfg = config_providers.get(provider_name)
+        if not isinstance(pcfg, dict):
+            continue
+
+        configured: List[Tuple[str, str]] = []
+        models_cfg = pcfg.get("models")
+        if isinstance(models_cfg, dict):
+            for slot, mid in models_cfg.items():
+                if isinstance(mid, str) and mid.strip():
+                    configured.append((str(slot), mid.strip()))
+        elif isinstance(models_cfg, (list, tuple)):
+            for mid in models_cfg:
+                if isinstance(mid, str) and mid.strip():
+                    configured.append(("models", mid.strip()))
+
+        fallbacks = pcfg.get("model_fallbacks")
+        if isinstance(fallbacks, dict):
+            for slot, fb in fallbacks.items():
+                if isinstance(fb, str):
+                    fb_ids: List[Any] = [fb]
+                elif isinstance(fb, (list, tuple)):
+                    fb_ids = list(fb)
+                else:
+                    fb_ids = []
+                for mid in fb_ids:
+                    if isinstance(mid, str) and mid.strip():
+                        configured.append((f"fallback:{slot}", mid.strip()))
+        elif isinstance(fallbacks, (list, tuple)):
+            for mid in fallbacks:
+                if isinstance(mid, str) and mid.strip():
+                    configured.append(("fallback", mid.strip()))
+        elif isinstance(fallbacks, str) and fallbacks.strip():
+            configured.append(("fallback", fallbacks.strip()))
+
+        catalog = catalogs.get(provider_name)
+        has_data = bool(catalog)
+        norm_index = (
+            {_norm(k) for k in catalog if isinstance(k, str)}
+            if isinstance(catalog, dict)
+            else set()
+        )
+
+        for slot, mid in configured:
+            dedupe_key = (provider_name, slot, _norm(mid))
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            present: Optional[bool] = None
+            if has_data:
+                present = _norm(mid) in norm_index
+            records.append(
+                {
+                    "provider": provider_name,
+                    "model_id": mid,
+                    "slot": slot,
+                    "present_in_catalog": present,
+                }
+            )
+    return records

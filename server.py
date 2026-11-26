@@ -3879,6 +3879,207 @@ def _cli_bots(argv: list[str]) -> None:
     sys.exit(0 if args.on_startup else 1)
 
 
+_CATALOG_DRIFT_REPORT_PATH: Optional[Path] = None  # None = default .botex/catalog_drift.json
+
+
+def _catalog_drift_report_path() -> Path:
+    if _CATALOG_DRIFT_REPORT_PATH is not None:
+        return Path(_CATALOG_DRIFT_REPORT_PATH)
+    try:
+        from botex.config import PROJECT_ROOT
+
+        return PROJECT_ROOT / ".botex" / "catalog_drift.json"
+    except Exception:
+        return Path.cwd() / ".botex" / "catalog_drift.json"
+
+
+def _load_cached_catalogs(
+    provider_names: list[str],
+    providers_cfg: dict[str, Any],
+    cache_file: Path,
+) -> dict[str, dict[str, Any]]:
+    """Load per-provider catalogs from the shared cache file only — never network."""
+    from botex.providers.catalog import ModelCatalog, ModelMetadata
+
+    try:
+        raw = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+    except Exception:
+        raw = {}
+    entries = raw.get("catalogs") if isinstance(raw, dict) else None
+    if not isinstance(entries, dict):
+        entries = {}
+
+    catalogs: dict[str, dict[str, Any]] = {}
+    for name in provider_names:
+        models: dict[str, Any] = {}
+        try:
+            pcfg = providers_cfg.get(name) if isinstance(providers_cfg, dict) else None
+            cat = ModelCatalog(
+                provider_name=name,
+                provider_cfg=pcfg if isinstance(pcfg, dict) else None,
+                cache_file=cache_file,
+            )
+            entry = entries.get(cat.cache_key)
+            raw_cat = (
+                (entry.get("catalog") or entry.get("models")) if isinstance(entry, dict) else None
+            )
+            if isinstance(raw_cat, dict):
+                models = {
+                    mid: ModelMetadata.from_dict(d if isinstance(d, dict) else {}, default_id=mid)
+                    for mid, d in raw_cat.items()
+                    if isinstance(mid, str)
+                }
+        except Exception:
+            models = {}
+        catalogs[name] = models
+    return catalogs
+
+
+def _run_catalog_drift_sync(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Night-Pulse live catalog sync + config drift detection. Never raises.
+
+    Refreshes the shared provider-model cache (one GET /models per provider),
+    diffs configured model ids against the freshly loaded cached catalogs,
+    persists the drift report to .botex/catalog_drift.json, and emits one
+    stderr line per drifted model. The static config is never written.
+    """
+    from botex.providers import catalog as catalog_mod
+    from botex.providers.providers import ProviderRegistry
+
+    sync_cfg = cfg.get("catalog_sync") if isinstance(cfg, dict) else None
+    if not isinstance(sync_cfg, dict):
+        sync_cfg = {}
+    if not bool(sync_cfg.get("enabled", True)):
+        return {"status": "disabled"}
+
+    raw_providers = sync_cfg.get("providers")
+    if not isinstance(raw_providers, (list, tuple)) or not raw_providers:
+        raw_providers = ["google", "groq", "nvidia", "cloudflare", "openrouter", "openrouter-free"]
+    provider_names = [str(p).strip() for p in raw_providers if str(p).strip()]
+    try:
+        timeout = float(sync_cfg.get("timeout_s", 10.0) or 10.0)
+    except (ValueError, TypeError):
+        timeout = 10.0
+    try:
+        interval_s = float(sync_cfg.get("interval_s", 43200.0) or 0.0)
+    except (ValueError, TypeError):
+        interval_s = 43200.0
+
+    # Frequency gate: continuous night-pulse loops every minute — a live sync
+    # is a per-provider network call and must stay a ~daily maintenance job.
+    if interval_s > 0.0:
+        try:
+            prev_path = _catalog_drift_report_path()
+            if prev_path.exists():
+                prev = json.loads(prev_path.read_text(encoding="utf-8"))
+                prev_ts = float(prev.get("generated_at") or 0.0) if isinstance(prev, dict) else 0.0
+                age = time.time() - prev_ts
+                if prev_ts > 0.0 and age < interval_s:
+                    return {
+                        "status": "skipped_fresh",
+                        "age_s": round(age, 1),
+                        "report_path": str(prev_path),
+                        "sync": prev.get("sync") if isinstance(prev, dict) else {},
+                        "summary": prev.get("summary") if isinstance(prev, dict) else {},
+                    }
+        except Exception:
+            pass
+
+    cat_cache = (cfg.get("catalog") or {}).get("cache_file") if isinstance(cfg, dict) else None
+    if isinstance(cat_cache, str) and cat_cache.strip():
+        cache_file = Path(cat_cache.strip())
+        if not cache_file.is_absolute():
+            try:
+                from botex.config import PROJECT_ROOT
+
+                cache_file = PROJECT_ROOT / cache_file
+            except Exception:
+                cache_file = cache_file.resolve()
+    else:
+        cache_file = catalog_mod.CACHE_FILE_DEFAULT
+
+    sync_fn = getattr(catalog_mod, "sync_provider_catalogs", None)
+    drift_fn = getattr(catalog_mod, "compute_config_drift", None)
+    if sync_fn is None or drift_fn is None:
+        return {"status": "unavailable", "reason": "catalog sync API missing"}
+
+    sync_results: dict[str, Any] = {}
+    try:
+        sync_results = sync_fn(
+            ProviderRegistry, provider_names, cache_file=cache_file, timeout=timeout
+        )
+        if not isinstance(sync_results, dict):
+            sync_results = {}
+    except Exception as exc:
+        sys.stderr.write(f"[BoteX] catalog sync failed: {mask_secrets(type(exc).__name__)}\n")
+
+    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else {}
+    if not isinstance(providers_cfg, dict):
+        providers_cfg = {}
+    try:
+        catalogs = _load_cached_catalogs(provider_names, providers_cfg, cache_file)
+        drift_entries = drift_fn(providers_cfg, catalogs)
+        if not isinstance(drift_entries, list):
+            drift_entries = []
+    except Exception as exc:
+        drift_entries = []
+        sys.stderr.write(
+            f"[BoteX] catalog drift computation failed: {mask_secrets(type(exc).__name__)}\n"
+        )
+
+    drifted = [
+        e for e in drift_entries if isinstance(e, dict) and e.get("present_in_catalog") is False
+    ]
+    for entry in drifted:
+        mid = mask_secrets(str(entry.get("model_id") or ""))
+        prov = mask_secrets(str(entry.get("provider") or ""))
+        slot = mask_secrets(str(entry.get("slot") or ""))
+        sys.stderr.write(
+            f"[BoteX] DRIFT: configured model '{mid}' (provider '{prov}', slot '{slot}')"
+            " absent from live catalog\n"
+        )
+
+    report = {
+        "generated_at": time.time(),
+        "generated_at_iso": datetime.now().isoformat(),
+        "sync": sync_results,
+        "drift": drift_entries,
+        "summary": {
+            "drifted": len(drifted),
+            "no_data": sum(
+                1
+                for e in drift_entries
+                if isinstance(e, dict) and e.get("present_in_catalog") is None
+            ),
+            "present": sum(
+                1
+                for e in drift_entries
+                if isinstance(e, dict) and e.get("present_in_catalog") is True
+            ),
+        },
+    }
+    report_path: Optional[Path] = None
+    try:
+        report_path = _catalog_drift_report_path()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = report_path.with_name(f"{report_path.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        os.replace(str(tmp_path), str(report_path))
+    except Exception as exc:
+        report_path = None
+        sys.stderr.write(
+            f"[BoteX] catalog drift report write failed: {mask_secrets(type(exc).__name__)}\n"
+        )
+
+    return {
+        "status": "ok",
+        "sync": sync_results,
+        "drift": drift_entries,
+        "summary": report["summary"],
+        "report_path": str(report_path) if report_path else "",
+    }
+
+
 def _execute_night_pulse_cycle(
     *,
     base_url: str = "",
@@ -3981,12 +4182,21 @@ def _execute_night_pulse_cycle(
             )
         )
 
+    catalog_drift: dict[str, Any] = {"status": "skipped"}
+    try:
+        catalog_drift = _run_catalog_drift_sync(load_config())
+    except Exception as exc:
+        sys.stderr.write(f"[BoteX] catalog drift sync error: {mask_secrets(type(exc).__name__)}\n")
+        catalog_drift = {"status": "error", "error": type(exc).__name__}
+
     return {
         "sync": sync_res,
         "active_leases": len(leases),
         "leases": leases,
         "fenced": fenced_results,
         "verified": verified_results,
+        "catalog_sync": catalog_drift.get("sync") or {},
+        "catalog_drift": catalog_drift,
     }
 
 

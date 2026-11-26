@@ -411,6 +411,9 @@ def _isolated_cloud_swarm(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("BOTEX_ACCESS_TOKEN_HASH", raising=False)
     monkeypatch.delenv("BOTEX_STRICT_AUTH", raising=False)
     monkeypatch.setenv("BOTEX_GATEWAY_RPM", "240")
+    # Catalog sync is exercised in tests/test_catalog_drift_integration.py —
+    # keep it off here so swarm/verify tests never touch the network.
+    monkeypatch.setenv("BOTEX_CATALOG_SYNC_ENABLED", "false")
     _GATEWAY_RATE_LIMITER.reset()
     server_config.load_config(reload=True)
     try:
@@ -567,6 +570,7 @@ def test_night_pulse_syncs_fences_and_runs_verify(_isolated_cloud_swarm, tmp_pat
     # CLI entry point smoke check (`botex night-pulse --once`)
     cli_env = dict(os.environ)
     cli_env["BOTEX_DISABLE_DOTENV"] = "1"
+    cli_env["BOTEX_CATALOG_SYNC_ENABLED"] = "false"
     cli_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     cli_env["BOTEX_SWARM_STORE_DB"] = str(_isolated_cloud_swarm["db"])
     cli_env["BOTEX_SWARM_HOME"] = str(_isolated_cloud_swarm["swarm_home"])
