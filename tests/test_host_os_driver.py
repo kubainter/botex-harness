@@ -640,12 +640,18 @@ def test_pdeathsig_kills_child_when_parent_dies(tmp_path: Path):
     hook_code = (
         "import os, subprocess, sys, time\n"
         "from botex.edge.host_os_driver import pdeathsig_preexec\n"
-        f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
         "preexec_fn=pdeathsig_preexec(), start_new_session=True)\n"
-        f"open({str(pid_file)!r}, 'w').write(str(p.pid))\n"
+        f"with open({str(pid_file)!r}, 'w', encoding='utf-8') as fh:\n"
+        "    fh.write(str(p.pid))\n"
         "time.sleep(30)\n"
     )
-    parent = subprocess.Popen([sys.executable, "-c", hook_code])
+    repo_root = str(Path(__file__).resolve().parents[1])
+    parent = subprocess.Popen(
+        [sys.executable, "-c", hook_code],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONPATH": repo_root},
+    )
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline and not pid_file.exists():
         time.sleep(0.05)

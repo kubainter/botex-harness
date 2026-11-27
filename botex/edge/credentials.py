@@ -28,6 +28,7 @@ __all__ = [
 _CRED_DIR_ENV = "BOTEX_CREDENTIALS_DIR"
 _TOKEN_PREFIX = "btxd_"
 _SEPARATOR = "__"
+_IS_WINDOWS = os.name == "nt"
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _JTI_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -102,7 +103,7 @@ def save_edge_token(
     cred_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     raw = text.encode("utf-8")
     weak_acl = False
-    if os.name != "nt":
+    if not _IS_WINDOWS:
         os.chmod(cred_dir, 0o700)
         # O_EXCL guarantees the 0o600 mode applies to a fresh inode (no umask window).
         fd: Optional[int] = None

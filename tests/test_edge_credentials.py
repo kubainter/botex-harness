@@ -383,7 +383,7 @@ def test_windows_acl_failure_fails_closed_without_persisting_token(
 ):
     from botex.edge import credentials as cred_mod
 
-    monkeypatch.setattr(cred_mod.os, "name", "nt")
+    monkeypatch.setattr(cred_mod, "_IS_WINDOWS", True)
     monkeypatch.setenv("USERNAME", "tester")
 
     class _FailProc:
@@ -404,7 +404,7 @@ def test_windows_acl_opt_out_allows_weak_acl_when_explicit(
 ):
     from botex.edge import credentials as cred_mod
 
-    monkeypatch.setattr(cred_mod.os, "name", "nt")
+    monkeypatch.setattr(cred_mod, "_IS_WINDOWS", True)
     monkeypatch.setenv("USERNAME", "tester")
     monkeypatch.setattr(
         cred_mod.subprocess,
@@ -422,7 +422,7 @@ def test_windows_acl_post_replace_failure_removes_target(
 ):
     from botex.edge import credentials as cred_mod
 
-    monkeypatch.setattr(cred_mod.os, "name", "nt")
+    monkeypatch.setattr(cred_mod, "_IS_WINDOWS", True)
     monkeypatch.setenv("USERNAME", "tester")
     calls = 0
 
