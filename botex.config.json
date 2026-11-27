@@ -307,6 +307,70 @@
       "openrouter"
     ]
   },
+  "dynamic_candidates": {
+    "mode": "off",
+    "snapshot_file": ".botex/dynamic_model_candidates.json",
+    "max_per_provider": 2,
+    "max_total_per_task": 2,
+    "max_snapshot_age_hours": 72,
+    "providers": {},
+    "task_classes": {
+      "analysis": {
+        "enabled": true,
+        "allow_unproven": true,
+        "min_context_length": 32768,
+        "allow_paid": false
+      },
+      "bugfix": {
+        "enabled": true,
+        "allow_unproven": false,
+        "min_context_length": 65536,
+        "allow_paid": false
+      },
+      "test": {
+        "enabled": true,
+        "allow_unproven": false,
+        "min_context_length": 65536,
+        "allow_paid": false
+      },
+      "feature": {
+        "enabled": false
+      },
+      "refactor": {
+        "enabled": false
+      },
+      "infra": {
+        "enabled": false
+      },
+      "general": {
+        "enabled": false
+      }
+    },
+    "modes": {
+      "readonly": {
+        "enabled": true
+      },
+      "edit": {
+        "enabled": true
+      },
+      "destructive": {
+        "enabled": false
+      },
+      "full": {
+        "enabled": false
+      }
+    },
+    "promotion": {
+      "window_days": 30,
+      "min_runs": 3,
+      "min_done_runs": 2,
+      "min_done_rate": 0.6,
+      "max_rollback_rate": 0.34,
+      "max_syntax_rejections_per_run": 0.5,
+      "quarantine_after_consecutive_quality_failures": 2,
+      "quarantine_hours": 72
+    }
+  },
   "paths": {
     "swarm_memory_dir": ".botex/memory"
   },

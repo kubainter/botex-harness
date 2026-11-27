@@ -1892,10 +1892,50 @@ async def check_health(live: bool = False) -> str:
     def_pname, def_pcfg = resolve_provider()
     zdr_state = "ACTIVE" if zdr_enforced(def_pcfg) else "OFF — provider may log/train on prompts"
 
+    # Plan 059: compact mode/snapshot/active-count line — mode "off" stays
+    # silent; never leaks file paths or account details.
+    dyn_line = ""
+    try:
+        _dc = cfg.get("dynamic_candidates")
+        _dc = _dc if isinstance(_dc, dict) else {}
+        from botex.providers.dynamic_candidates import (
+            DEFAULT_MAX_SNAPSHOT_AGE_HOURS,
+            load_dynamic_snapshot_offline,
+            normalize_dynamic_mode,
+        )
+
+        _dmode = normalize_dynamic_mode(
+            _dc.get("mode"),
+            emergency_env=os.environ.get("BOTEX_DYNAMIC_CANDIDATES_MODE"),
+        )
+        if _dmode != "off":
+            from botex.ops.maintenance import dynamic_candidates_snapshot_path
+
+            try:
+                _age = float(_dc.get("max_snapshot_age_hours"))
+            except (TypeError, ValueError):
+                _age = DEFAULT_MAX_SNAPSHOT_AGE_HOURS
+            _snap, _sstate = load_dynamic_snapshot_offline(
+                dynamic_candidates_snapshot_path(cfg), max_age_hours=_age
+            )
+            _active = 0
+            if isinstance(_snap, dict):
+                for _pe in (_snap.get("providers") or {}).values():
+                    if isinstance(_pe, dict):
+                        for _c in _pe.get("candidates") or []:
+                            if isinstance(_c, dict) and _c.get("state") == "active":
+                                _active += 1
+            dyn_line = (
+                f"[INFO] dynamic_candidates: mode={_dmode} snapshot={_sstate} active={_active}\n"
+            )
+    except Exception:
+        dyn_line = ""
+
     return (
         "=== BOTEX HARNESS HEALTH CHECK ===\n"
         f"{keys_report}\n"
         f"[OK] Snapshot directory: active ({len(snaps)} backups, {total_mb:.2f} MB)\n"
+        f"{dyn_line}"
         f"[OK] Path Traversal protection: ACTIVE | "
         f"Zero-Retention ({def_pname}): {zdr_state}\n"
         "[SUCCESS] BoteX engine is fully ready for autonomous work on disk!"
@@ -4021,6 +4061,20 @@ def _execute_night_pulse_cycle(
         sys.stderr.write("[BoteX] catalog drift sync error\n")
         catalog_drift = {"status": "error", "error": type(exc).__name__}
 
+    # Plan 059: rebuild the dynamic model-candidate snapshot from fresh
+    # catalog/drift data. Fully isolated — a sync failure can never take the
+    # night-pulse cycle down with it.
+    dyn_res: dict[str, Any] = {"status": "skipped"}
+    try:
+        from botex.ops import maintenance as _maintenance
+
+        dyn_res = _maintenance.run_dynamic_candidates_sync(
+            load_config(), drift_report=catalog_drift
+        )
+    except Exception as exc:
+        sys.stderr.write("[BoteX] dynamic candidates sync error\n")
+        dyn_res = {"status": "error", "error": type(exc).__name__}
+
     return {
         "sync": sync_res,
         "active_leases": len(leases),
@@ -4029,6 +4083,7 @@ def _execute_night_pulse_cycle(
         "verified": verified_results,
         "catalog_sync": catalog_drift.get("sync") or {},
         "catalog_drift": catalog_drift,
+        "dynamic_candidates": dyn_res,
     }
 
 

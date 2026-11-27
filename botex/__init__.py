@@ -42,6 +42,7 @@ LEGACY_MODULE_DOMAINS: Dict[str, str] = {
     "benchmarks": "providers",
     "denylist": "providers",
     "http_pool": "providers",
+    "dynamic_candidates": "providers",
     # botex/tools
     "file_tools": "tools",
     "exec_tools": "tools",

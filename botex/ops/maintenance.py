@@ -29,7 +29,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -947,4 +947,346 @@ def _run_catalog_drift_sync_impl(
         "providers_ok": ok_count,
         "providers_error": error_count,
         "report_path": str(written_path) if written_path else "",
+    }
+
+
+# ============================================================================
+# Dynamic candidates offline snapshot (plan 059, wave 1-B)
+# ============================================================================
+
+
+def dynamic_candidates_snapshot_path(cfg: Optional[Dict[str, Any]] = None) -> Path:
+    """Single snapshot-path source for the dynamic-candidates artifact.
+
+    Mirrors ``catalog_drift_report_path`` anchoring: rooted at the
+    installation/config root, never at an arbitrary task workspace or process
+    cwd. ``cfg['dynamic_candidates']['snapshot_file']`` overrides the module
+    default; absolute paths are preserved as the operator wrote them.
+    """
+    configured = ""
+    if isinstance(cfg, dict):
+        dc_cfg = cfg.get("dynamic_candidates")
+        if isinstance(dc_cfg, dict):
+            raw = dc_cfg.get("snapshot_file")
+            if isinstance(raw, str) and raw.strip():
+                configured = raw.strip()
+    if not configured:
+        try:
+            from botex.providers.dynamic_candidates import DEFAULT_SNAPSHOT_PATH
+
+            configured = str(DEFAULT_SNAPSHOT_PATH)
+        except Exception:
+            configured = ".botex/dynamic_model_candidates.json"
+    candidate = Path(configured)
+    if candidate.is_absolute():
+        return candidate
+    try:
+        from botex.server.config import PROJECT_ROOT
+
+        return PROJECT_ROOT / candidate
+    except Exception:
+        return Path(__file__).resolve().parents[2] / candidate
+
+
+def _dynamic_candidates_provider_names(cfg: Dict[str, Any], dc_cfg: Dict[str, Any]) -> list:
+    """Provider universe for the snapshot: every operator-enabled dynamic
+    provider plus the catalog_sync set, so a cached catalog is never silently
+    missing for an enabled provider. Policy filtering happens inside the
+    builder; this side only decides whose *cache entries* get read."""
+    names: list = []
+    seen: set = set()
+
+    dyn_providers = dc_cfg.get("providers")
+    if isinstance(dyn_providers, dict):
+        for key in dyn_providers:
+            name = str(key).strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                names.append(name)
+
+    sync_cfg = cfg.get("catalog_sync") if isinstance(cfg, dict) else None
+    if not isinstance(sync_cfg, dict):
+        sync_cfg = {}
+    raw_sync_providers = sync_cfg.get("providers")
+    if isinstance(raw_sync_providers, (list, tuple)):
+        base_names = [str(p).strip() for p in raw_sync_providers if str(p).strip()]
+    else:
+        base_names = ["google", "groq", "nvidia", "cloudflare", "openrouter", "openrouter-free"]
+    for name in base_names:
+        if name.lower() not in seen:
+            seen.add(name.lower())
+            names.append(name)
+    return names
+
+
+def _catalog_fetched_at_map(
+    provider_names: list,
+    providers_cfg: Dict[str, Any],
+    cache_file: Path,
+) -> Dict[str, float]:
+    """Per-provider ``fetched_at`` from the shared cache JSON — never network.
+
+    Keyed like ``load_cached_catalogs`` (ModelCatalog.cache_key) so timestamps
+    line up with the catalogs handed to the builder; a malformed entry simply
+    contributes no timestamp."""
+    from botex.providers.catalog import ModelCatalog
+
+    try:
+        raw = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+    except Exception:
+        return {}
+    entries = raw.get("catalogs") if isinstance(raw, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+
+    out: Dict[str, float] = {}
+    for name in provider_names:
+        try:
+            pcfg = providers_cfg.get(name) if isinstance(providers_cfg, dict) else None
+            cat = ModelCatalog(
+                provider_name=name,
+                provider_cfg=pcfg if isinstance(pcfg, dict) else None,
+                cache_file=cache_file,
+            )
+            entry = entries.get(cat.cache_key)
+            if not isinstance(entry, dict):
+                continue
+            ts = float(entry.get("fetched_at") or 0.0)
+            if math.isfinite(ts) and ts > 0.0:
+                out[name] = ts
+        except Exception:
+            continue
+    return out
+
+
+def _default_analytics_ledger_path() -> Path:
+    try:
+        from botex.server.config import PROJECT_ROOT
+
+        return PROJECT_ROOT / ".agent_analytics.jsonl"
+    except Exception:
+        return Path(__file__).resolve().parents[2] / ".agent_analytics.jsonl"
+
+
+def _stream_analytics_rows(path: Path) -> list:
+    """Line-by-line ledger read; non-JSON and non-dict lines are skipped.
+
+    Streaming (not load_analytics) keeps the idle job O(1) in memory; the
+    live segment alone covers the promotion window because rotation keeps
+    ~90 days of rows on disk."""
+    rows: list = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    rows.append(rec)
+    except OSError:
+        return []
+    return rows
+
+
+def _count_dynamic_snapshot(snapshot: Dict[str, Any]) -> tuple:
+    """(provider_entry_count, per_state_candidate_counts) from a built
+    snapshot — count-only, tolerant of missing sections so a partial builder
+    output still reports instead of raising."""
+    counts = {"active": 0, "eligible": 0, "observed": 0, "quarantined": 0}
+    providers = snapshot.get("providers") if isinstance(snapshot, dict) else None
+    provider_entries = providers if isinstance(providers, dict) else {}
+    for entry in provider_entries.values():
+        candidates = entry.get("candidates") if isinstance(entry, dict) else None
+        if not isinstance(candidates, list):
+            continue
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            state = str(cand.get("state") or "").strip().lower()
+            if state in counts:
+                counts[state] += 1
+    return len(provider_entries), counts
+
+
+def run_dynamic_candidates_sync(
+    cfg: Dict[str, Any],
+    *,
+    snapshot_path: "Path | None" = None,
+    analytics_path: "Path | None" = None,
+    cache_file: "Path | None" = None,
+    drift_report: "Dict[str, Any] | None" = None,
+    now_ts: "float | None" = None,
+) -> Dict[str, Any]:
+    """Offline dynamic-candidates snapshot generation. Never raises.
+
+    Consumes the shared catalog cache and the local analytics ledger only —
+    never a live provider sync, never benchmarks, never network. ``off``
+    (the default) is a true zero-I/O skip; ``shadow`` and ``append`` differ
+    only in downstream engine consumption, so both produce the same
+    artifact here. The builder itself lives in
+    ``botex.providers.dynamic_candidates`` (plan 059 wave 1-A) and is
+    imported lazily so this module stays importable while it lands in
+    parallel.
+    """
+    try:
+        return _run_dynamic_candidates_sync_impl(
+            cfg,
+            snapshot_path=snapshot_path,
+            analytics_path=analytics_path,
+            cache_file=cache_file,
+            drift_report=drift_report,
+            now_ts=now_ts,
+        )
+    except Exception as exc:
+        # Absolute never-raises: even import catastrophes (e.g. wave-1A not
+        # yet deployed) surface as a compact countable status, never as an
+        # exception into the curator tick.
+        try:
+            import sys
+
+            sys.stderr.write("[BoteX] dynamic candidates sync failed\n")
+        except Exception:
+            pass
+        return {"status": "error", "error": type(exc).__name__}
+
+
+def _run_dynamic_candidates_sync_impl(
+    cfg: Dict[str, Any],
+    *,
+    snapshot_path: "Path | None" = None,
+    analytics_path: "Path | None" = None,
+    cache_file: "Path | None" = None,
+    drift_report: "Dict[str, Any] | None" = None,
+    now_ts: "float | None" = None,
+) -> Dict[str, Any]:
+    import sys
+
+    from botex.providers import dynamic_candidates as dyn
+
+    dc_cfg = cfg.get("dynamic_candidates") if isinstance(cfg, dict) else None
+    if not isinstance(dc_cfg, dict):
+        dc_cfg = {}
+    mode = dyn.normalize_dynamic_mode(
+        dc_cfg.get("mode"),
+        emergency_env=os.environ.get("BOTEX_DYNAMIC_CANDIDATES_MODE"),
+    )
+    if mode == "off":
+        # Default-off is a hard zero-I/O gate: no catalog reads, no analytics
+        # streaming, no snapshot writes, no stderr noise.
+        return {"status": "skipped", "mode": "off", "snapshot_path": ""}
+
+    if now_ts is None:
+        now_ts = time.time()
+
+    provider_names = _dynamic_candidates_provider_names(cfg, dc_cfg)
+    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else {}
+    if not isinstance(providers_cfg, dict):
+        providers_cfg = {}
+
+    if cache_file is not None:
+        resolved_cache = Path(cache_file)
+    else:
+        cat_cfg = cfg.get("catalog") if isinstance(cfg, dict) else None
+        cat_cache = cat_cfg.get("cache_file") if isinstance(cat_cfg, dict) else None
+        if isinstance(cat_cache, str) and cat_cache.strip():
+            resolved_cache = Path(cat_cache.strip())
+            if not resolved_cache.is_absolute():
+                try:
+                    from botex.server.config import PROJECT_ROOT
+
+                    resolved_cache = PROJECT_ROOT / resolved_cache
+                except Exception:
+                    resolved_cache = resolved_cache.resolve()
+        else:
+            from botex.providers import catalog as catalog_mod
+
+            resolved_cache = catalog_mod.CACHE_FILE_DEFAULT
+
+    catalogs = load_cached_catalogs(provider_names, providers_cfg, resolved_cache)
+    fetched_map = _catalog_fetched_at_map(provider_names, providers_cfg, resolved_cache)
+
+    resolved_analytics = (
+        Path(analytics_path) if analytics_path is not None else _default_analytics_ledger_path()
+    )
+    analytics_rows = _stream_analytics_rows(resolved_analytics)
+
+    resolved_snapshot = (
+        Path(snapshot_path) if snapshot_path is not None else dynamic_candidates_snapshot_path(cfg)
+    )
+    # max_age_hours=0 disables the freshness gate: the generator may reuse the
+    # previous snapshot's per-provider state (stale-prior preservation) even
+    # when it is too old for the runtime hot path.
+    existing_snapshot, _existing_status = dyn.load_dynamic_snapshot_offline(
+        resolved_snapshot, now_ts=now_ts, max_age_hours=0
+    )
+
+    from botex.providers.denylist import DenylistFilter
+
+    denylist_filter = DenylistFilter(cfg)
+
+    def denylist_check(provider, model):
+        # Contract order is (provider, model); the filter takes (model,
+        # provider). Fail-closed: a broken lookup must deny, never allow.
+        try:
+            return denylist_filter.is_denied(str(model or ""), provider=str(provider or ""))
+        except Exception:
+            return True
+
+    snapshot = dyn.build_dynamic_candidates_snapshot(
+        cfg=cfg,
+        catalogs=catalogs,
+        analytics_rows=analytics_rows,
+        catalog_fetched_at_map=fetched_map,
+        catalog_drift_generated_at=(
+            drift_report.get("generated_at") if isinstance(drift_report, dict) else None
+        ),
+        existing_snapshot=existing_snapshot if isinstance(existing_snapshot, dict) else None,
+        denylist_check=denylist_check,
+        now_ts=now_ts,
+        generator="night-pulse",
+    )
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+
+    providers_count, counts = _count_dynamic_snapshot(snapshot)
+
+    written = True
+    tmp_path = None
+    try:
+        resolved_snapshot.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = resolved_snapshot.with_name(f"{resolved_snapshot.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+        os.replace(str(tmp_path), str(resolved_snapshot))
+    except Exception:
+        written = False
+        sys.stderr.write("[BoteX] dynamic candidates snapshot write failed\n")
+        try:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+    if not written:
+        return {"status": "error", "error": "write_failed", "mode": mode}
+
+    sys.stderr.write(
+        "[BoteX] dynamic candidates snapshot: mode={} providers={} active={} "
+        "eligible={} quarantined={}\n".format(
+            mode,
+            providers_count,
+            counts.get("active", 0),
+            counts.get("eligible", 0),
+            counts.get("quarantined", 0),
+        )
+    )
+    return {
+        "status": "ok",
+        "mode": mode,
+        "snapshot_path": str(resolved_snapshot),
+        "providers": providers_count,
+        "counts": counts,
     }

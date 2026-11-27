@@ -414,6 +414,8 @@ def log_run(
     rollback_count: int = 0,
     shadow_recommended_model: Optional[str] = None,
     cost_source: Optional[str] = None,
+    candidate_source: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record a completed BoteX run into the ledger.
 
@@ -493,6 +495,10 @@ def log_run(
         entry["routed_tier"] = _attr_text(routed_tier)
     if taxonomy:
         entry["taxonomy"] = _attr_text(taxonomy)
+    if candidate_source:
+        entry["candidate_source"] = _attr_text(candidate_source)
+    if mode:
+        entry["mode"] = _attr_text(mode)
     if applied_skills:
         entry["applied_skills"] = [_attr_text(s) for s in applied_skills][:8]
     if applied_lessons:

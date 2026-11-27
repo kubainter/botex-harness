@@ -105,6 +105,19 @@ def _task_catalog_drift_sync(workspace_dir: str, force: bool = False) -> Dict[st
     err_count = result.get("providers_error")
     if ok_count is None or err_count is None:
         ok_count, err_count = _maintenance.count_provider_evidence(result.get("sync"))
+
+    # Dynamic candidates snapshot (plan 059): offline, consumes the drift
+    # result only as source metadata. Isolated so a dynamic-snapshot failure
+    # can never fail the drift tick — run_dynamic_candidates_sync already
+    # never raises; the except is the belt-and-braces boundary.
+    dyn_res: Dict[str, Any] = {}
+    try:
+        dyn_res = _maintenance.run_dynamic_candidates_sync(cfg, drift_report=result)
+    except Exception as exc:
+        logger.warning("dynamic candidates snapshot failed: %s", type(exc).__name__)
+        dyn_res = {}
+    if not isinstance(dyn_res, dict):
+        dyn_res = {}
     return {
         "status": status,
         "drifted": _bounded_int(summary.get("drifted")),
@@ -112,6 +125,7 @@ def _task_catalog_drift_sync(workspace_dir: str, force: bool = False) -> Dict[st
         "present": _bounded_int(summary.get("present")),
         "providers_ok": _bounded_int(ok_count),
         "providers_error": _bounded_int(err_count),
+        "dynamic_candidates_status": dyn_res.get("status", "error"),
     }
 
 
