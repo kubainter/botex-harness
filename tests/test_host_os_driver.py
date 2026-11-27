@@ -655,7 +655,19 @@ def test_pdeathsig_kills_child_when_parent_dies(tmp_path: Path):
     parent.wait(timeout=5)
     end = time.monotonic() + 5.0
     alive = True
+    proc_stat = Path(f"/proc/{child_pid}/stat")
     while time.monotonic() < end:
+        if proc_stat.exists():
+            try:
+                raw_stat = proc_stat.read_text(encoding="utf-8", errors="replace")
+                rparen = raw_stat.rfind(")")
+                state = raw_stat[rparen + 2 : rparen + 3] if rparen != -1 else ""
+                if state in ("Z", "X"):
+                    alive = False
+                    break
+            except OSError:
+                alive = False
+                break
         try:
             os.kill(child_pid, 0)
             time.sleep(0.05)

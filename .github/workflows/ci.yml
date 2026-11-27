@@ -220,7 +220,7 @@ jobs:
         run: |
           export BOTEX_SWARM_HOME="$RUNNER_TEMP/botex-swarm-home"
           export BOTEX_CREDENTIALS_DIR="$RUNNER_TEMP/botex-creds"
-          export BOTEX_WORKSPACES_FILE="$RUNNER_TEMP/host_workspaces.json"
+          export BOTEX_WORKSPACES_FILE="$RUNNER_TEMP/botex-swarm-home/host_workspaces.json"
           mkdir -p "$BOTEX_SWARM_HOME" "$BOTEX_CREDENTIALS_DIR"
           python - << 'PYEOF'
           import os, signal, subprocess, sys, tempfile, time
