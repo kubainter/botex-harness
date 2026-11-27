@@ -21,6 +21,7 @@ from .tracing import get_current_trace_id
 
 class EventKind:
     PROVIDER_RESOLVED = "provider_resolved"
+    DYNAMIC_CANDIDATES = "dynamic_candidates"
     ATTEMPT_START = "attempt_start"
     ATTEMPT_END = "attempt_end"
     TOOL_CALL = "tool_call"

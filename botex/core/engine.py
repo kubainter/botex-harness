@@ -13,6 +13,7 @@ import contextlib
 import copy
 import inspect
 import json
+import os
 import re
 import sys
 import time
@@ -70,6 +71,7 @@ try:
         resolve_model,
         resolve_model_candidates,
         resolve_provider,
+        resolve_task_model_candidates,
         resolve_workspace,
     )
     from botex.server.plugins import (
@@ -167,6 +169,7 @@ except (ImportError, ValueError):
         resolve_model,
         resolve_model_candidates,
         resolve_provider,
+        resolve_task_model_candidates,
         resolve_workspace,
     )
     from context_guard import compact_verification_summary
@@ -1216,6 +1219,18 @@ def _breaker_cfg_raw(provider_cfg: Optional[Dict[str, Any]]) -> Any:
     return load_config().get("engine", {}).get("circuit_breaker")
 
 
+def _bounded_exclusions(excluded: Any) -> Dict[str, List[str]]:
+    """Bound dynamic-candidate exclusion diagnostics (<=8 model keys x <=4 codes)."""
+    if not isinstance(excluded, dict):
+        return {}
+    out: Dict[str, List[str]] = {}
+    for key in sorted(excluded.keys(), key=lambda k: str(k))[:8]:
+        reasons = excluded.get(key)
+        vals = reasons if isinstance(reasons, (list, tuple)) else [reasons]
+        out[str(key)[:128]] = [str(r)[:64] for r in vals[:4]]
+    return out
+
+
 async def run_botex_task(
     task: str,
     files: Optional[List[str]] = None,
@@ -1264,7 +1279,132 @@ async def run_botex_task(
             # Task-size routing fills only a fully empty resolution —
             # explicit model/profile and mode_profiles keep precedence.
             routed_tier, resolved_profile = _task_size_profile(task, files, engine_cfg)
-    candidates = resolve_model_candidates(model, resolved_profile, provider)
+    # Plan 059: optional offline dynamic candidate tail (default mode "off"
+    # is byte-identical to the static path — zero snapshot reads).
+    cfg_dyn = load_config()
+    _dc_section = (
+        cfg_dyn.get("dynamic_candidates")
+        if isinstance(cfg_dyn.get("dynamic_candidates"), dict)
+        else {}
+    )
+    try:
+        _dyn_max_total = int(_dc_section.get("max_total_per_task"))
+    except (TypeError, ValueError):
+        _dyn_max_total = 2
+    try:
+        _dyn_taxonomy = classify_task_taxonomy(task, files)
+    except Exception:
+        _dyn_taxonomy = "general"
+    try:
+        _dyn_cap_mode = resolve_mode_name(mode)
+    except ValueError:
+        _dyn_cap_mode = "edit"
+    if _dyn_cap_mode not in ("readonly", "edit", "destructive", "full"):
+        _dyn_cap_mode = "readonly"  # e.g. 'chat' maps onto the read-only gate
+    _dyn_mode = "off"
+    try:
+        from botex.providers.dynamic_candidates import (
+            DEFAULT_MAX_SNAPSHOT_AGE_HOURS as _DYN_DEF_AGE,
+        )
+        from botex.providers.dynamic_candidates import (
+            load_dynamic_snapshot_offline as _dyn_load_snap,
+        )
+        from botex.providers.dynamic_candidates import (
+            normalize_dynamic_mode as _dyn_norm_mode,
+        )
+        from botex.providers.dynamic_candidates import (
+            normalize_model_key as _norm_model_key,
+        )
+
+        _dyn_mode = _dyn_norm_mode(
+            _dc_section.get("mode"),
+            emergency_env=os.environ.get("BOTEX_DYNAMIC_CANDIDATES_MODE"),
+        )
+    except Exception:
+        _dyn_mode = "off"
+
+        def _norm_model_key(m: Any) -> str:
+            return str(m or "").strip().lower()
+
+    _dyn_snap: Optional[Dict[str, Any]] = None
+    _dyn_snap_state: Optional[str] = None
+    if _dyn_mode != "off" and not (model and str(model).strip()):
+        # One offline snapshot read per task, shared by both resolutions.
+        try:
+            from botex.ops.maintenance import (
+                dynamic_candidates_snapshot_path as _dyn_snap_path,
+            )
+
+            try:
+                _dyn_max_age = float(_dc_section.get("max_snapshot_age_hours"))
+            except (TypeError, ValueError):
+                _dyn_max_age = _DYN_DEF_AGE
+            _dyn_snap, _dyn_snap_state = _dyn_load_snap(
+                _dyn_snap_path(cfg_dyn), max_age_hours=_dyn_max_age
+            )
+        except Exception:
+            _dyn_snap, _dyn_snap_state = None, "error"
+
+    _dyn_keys: set = set()
+    _dyn_diag: Dict[str, Dict[str, Any]] = {}
+    _dyn_added_total = 0
+    _dyn_active = _dyn_mode != "off"
+
+    def _resolve_chain(prov: str, model_arg: str) -> Dict[str, Any]:
+        nonlocal _dyn_added_total, _dyn_active, _dyn_mode
+        try:
+            _pzdr_pname, _pzdr_pcfg = resolve_provider(prov)
+            _zdr_req = zdr_enforced(_pzdr_pcfg, bool(allow_non_zdr))
+        except Exception:
+            _pzdr_pname, _zdr_req = prov, False
+        res = resolve_task_model_candidates(
+            model_arg,
+            resolved_profile,
+            prov,
+            task_class=_dyn_taxonomy,
+            capability_mode=_dyn_cap_mode,
+            zdr_required=_zdr_req,
+            remaining_task_cap=max(0, _dyn_max_total - _dyn_added_total),
+            snapshot=_dyn_snap,
+            snapshot_state=_dyn_snap_state,
+            static_resolver=resolve_model_candidates,
+        )
+        if not isinstance(res, dict):
+            res = {}
+        res_mode = str(res.get("dynamic_mode") or "off")
+        if res_mode != "off":
+            _dyn_active, _dyn_mode = True, res_mode
+        dyn_tail = [str(m) for m in (res.get("dynamic_candidates") or []) if str(m or "").strip()]
+        _dyn_added_total += len(dyn_tail)
+        for _m in dyn_tail:
+            _dyn_keys.add((_pzdr_pname, _norm_model_key(_m)))
+            if prov and prov != _pzdr_pname:
+                _dyn_keys.add((prov, _norm_model_key(_m)))
+        _pzdr_key = _pzdr_pname or prov
+        _excl = res.get("excluded_reasons")
+        _dyn_diag[_pzdr_key] = {
+            "snapshot_state": str(res.get("snapshot_state") or "unknown"),
+            "static_count": len(res.get("static_candidates") or []),
+            "dynamic_count": len(dyn_tail),
+            "would_append_count": len(res.get("would_append") or []),
+            "excluded_reasons": _bounded_exclusions(_excl),
+        }
+        if res_mode != "off":
+            _emit(
+                progress_cb,
+                EventKind.DYNAMIC_CANDIDATES,
+                provider=_pzdr_key,
+                dynamic_mode=res_mode,
+                snapshot_state=_dyn_diag[_pzdr_key]["snapshot_state"],
+                static_count=_dyn_diag[_pzdr_key]["static_count"],
+                dynamic_count=_dyn_diag[_pzdr_key]["dynamic_count"],
+                would_append_count=_dyn_diag[_pzdr_key]["would_append_count"],
+                excluded_reasons=_dyn_diag[_pzdr_key]["excluded_reasons"],
+            )
+        return res
+
+    _init_res = _resolve_chain(provider, model)
+    candidates = list(_init_res.get("candidates") or [])
     if not candidates:
         denied_msg = (
             f"No eligible model candidates available after denylist filtering for profile "
@@ -1391,6 +1531,11 @@ async def run_botex_task(
                     if tool_executor is not None:
                         _extra_once_kw["tool_executor"] = tool_executor
                     _extra_once_kw["in_flight_state"] = in_flight_state
+                    _cand_src = "static"
+                    if _dyn_active:
+                        if (current_prov, _norm_model_key(candidate)) in _dyn_keys:
+                            _cand_src = "dynamic"
+                        _extra_once_kw["candidate_source"] = _cand_src
                     last_result = await _run_botex_task_once(
                         task=task,
                         files=files,
@@ -1449,6 +1594,8 @@ async def run_botex_task(
                     "cost_usd": float(last_result.get("cost_usd") or 0.0),
                     "zdr_enforced": zdr_on,
                 }
+                if _dyn_active:
+                    attempt_record["candidate_source"] = _cand_src
                 # Record state in in_flight_state checkpoint
                 for f in last_result.get("files_read", []):
                     in_flight_state.add_inspected_file(f)
@@ -1549,7 +1696,7 @@ async def run_botex_task(
                             continue
                         next_provider = candidate_prov
                     next_candidates = (
-                        resolve_model_candidates("", resolved_profile, next_provider)
+                        list(_resolve_chain(next_provider, "").get("candidates") or [])
                         if next_provider
                         else []
                     )
@@ -1574,6 +1721,12 @@ async def run_botex_task(
             clear_inflight_checkpoint(chain_task_id, workspace_dir)
 
     last_result["attempts"] = attempts
+    if _dyn_active:
+        last_result["dynamic_candidates"] = {
+            "dynamic_mode": _dyn_mode,
+            "providers": {k: _dyn_diag[k] for k in sorted(_dyn_diag.keys(), key=str)[:8]},
+            "dynamic_attempted": sum(1 for a in attempts if a.get("candidate_source") == "dynamic"),
+        }
     if routed_tier:
         last_result["routed_tier"] = routed_tier
         last_result["routed_profile"] = resolved_profile
@@ -1842,6 +1995,7 @@ async def _run_botex_task_once_impl(
     contrastive_out: Optional[Dict[str, Any]] = None,
     tool_executor: Optional[ToolExecutor] = None,
     in_flight_state: Optional[InFlightTaskState] = None,
+    candidate_source: str = "",
 ) -> Dict[str, Any]:
     """
     Executes an autonomous coding task in workspace_dir using the BoteX engine.
@@ -2355,7 +2509,13 @@ async def _run_botex_task_once_impl(
         provider_extra_body.setdefault("usage", {"include": True})
 
         primary_clean = (model or "").strip()
-        if primary_clean and primary_clean.lower() not in OPENROUTER_META_ROUTERS:
+        # Dynamic-tail candidates always run as explicit outer attempts —
+        # never inside in-payload models failover (attribution would blur).
+        if (
+            primary_clean
+            and primary_clean.lower() not in OPENROUTER_META_ROUTERS
+            and candidate_source != "dynamic"
+        ):
             raw_fb_list: List[str] = []
             if fallback_models is not None:
                 raw_fb_list = list(fallback_models)
@@ -2516,6 +2676,9 @@ async def _run_botex_task_once_impl(
         attribution_kw["applied_skills"] = applied_skills
     if applied_lesson_ids:
         attribution_kw["applied_lessons"] = applied_lesson_ids
+    if candidate_source:
+        attribution_kw["candidate_source"] = str(candidate_source)
+        attribution_kw["mode"] = resolved_mode
     # Layer C (Shadow Meta-Routing): log best historical model per (recipe, taxonomy)
     # purely as advisory telemetry without overriding active model selection.
     try:

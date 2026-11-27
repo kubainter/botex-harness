@@ -25,6 +25,7 @@ Legacy alias spellings are **load-bearing** for BoteX itself (`server.py`, `depl
 | `botex.providers.benchmarks` | `botex.benchmarks` | — |
 | `botex.providers.catalog` | `botex.catalog` | TTL catalog |
 | `botex.providers.denylist` | `botex.denylist` | — |
+| `botex.providers.dynamic_candidates` | `botex.dynamic_candidates` | offline candidate tail (plan 059) |
 | `botex.providers.pricing` | `botex.pricing` | pre-flight guardrail |
 | `botex.providers.prompt_cache` | — (new in v2.1.0) | cache policy/flags |
 | `botex.providers.rate_limiter` | `botex.rate_limiter` | per-provider throttle |

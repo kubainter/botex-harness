@@ -21,7 +21,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 # Context variable holding the authenticated MCP client's provenance ("<agent>@<host>")
 # populated by server_cloud.py from X-Agent-Id / X-Host headers on SSE/message requests.
@@ -767,6 +767,61 @@ DEFAULTS: Dict[str, Any] = {
         # keeping the catalog effectively per-day. 0 = sync every cycle.
         "interval_s": 43200.0,
     },
+    # Offline dynamic model-candidate tails (plan 059). Default ``off`` —
+    # byte-identical static behavior. ``shadow`` computes would-append
+    # diagnostics without changing the chain; ``append`` adds a gated tail
+    # after the static head from the Night-Pulse snapshot artifact. The
+    # runtime hot path reads only the local snapshot — never the network.
+    "dynamic_candidates": {
+        "mode": "off",
+        "snapshot_file": ".botex/dynamic_model_candidates.json",
+        "max_per_provider": 2,
+        "max_total_per_task": 2,
+        "max_snapshot_age_hours": 72,
+        # Per-provider allowlist gate: a dynamic model is invisible unless
+        # its provider is enabled here AND the id matches allow_models.
+        "providers": {},
+        "task_classes": {
+            "analysis": {
+                "enabled": True,
+                "allow_unproven": True,
+                "min_context_length": 32768,
+                "allow_paid": False,
+            },
+            "bugfix": {
+                "enabled": True,
+                "allow_unproven": False,
+                "min_context_length": 65536,
+                "allow_paid": False,
+            },
+            "test": {
+                "enabled": True,
+                "allow_unproven": False,
+                "min_context_length": 65536,
+                "allow_paid": False,
+            },
+            "feature": {"enabled": False},
+            "refactor": {"enabled": False},
+            "infra": {"enabled": False},
+            "general": {"enabled": False},
+        },
+        "modes": {
+            "readonly": {"enabled": True},
+            "edit": {"enabled": True},
+            "destructive": {"enabled": False},
+            "full": {"enabled": False},
+        },
+        "promotion": {
+            "window_days": 30,
+            "min_runs": 3,
+            "min_done_runs": 2,
+            "min_done_rate": 0.6,
+            "max_rollback_rate": 0.34,
+            "max_syntax_rejections_per_run": 0.5,
+            "quarantine_after_consecutive_quality_failures": 2,
+            "quarantine_hours": 72,
+        },
+    },
     "benchmarks": {
         "enabled": True,
         "cache_file": "",
@@ -1146,6 +1201,150 @@ def resolve_model_candidates(
         require_tools=require_tools,
         catalog=catalog,
     )
+
+
+def resolve_task_model_candidates(
+    model: str = "",
+    profile: str = "",
+    provider: str = "",
+    *,
+    task_class: str = "general",
+    capability_mode: str = "edit",
+    zdr_required: bool = False,
+    remaining_task_cap: Optional[int] = None,
+    snapshot: Optional[Dict[str, Any]] = None,
+    snapshot_state: Optional[str] = None,
+    require_tools: bool = False,
+    catalog: Optional[Any] = None,
+    denylist_filter: Optional[Any] = None,
+    static_resolver: Optional[Callable] = None,
+) -> Dict[str, Any]:
+    """Resolve the full execution chain: static head + optional dynamic tail.
+
+    ``resolve_model_candidates`` stays the static compatibility surface; this
+    wrapper layers the plan-059 offline dynamic tail on top. ``mode == "off"``
+    (the default) and an explicit ``model`` are zero-I/O — no snapshot read,
+    byte-identical output. ``shadow`` computes ``would_append`` diagnostics
+    without changing the chain; ``append`` extends the chain with the
+    snapshot's gated tail. Runtime resolution never touches the network: the
+    only disk input is the Night-Pulse snapshot artifact. Any failure in the
+    dynamic path degrades to the static chain with ``snapshot_state="error"``.
+    ``static_resolver`` defaults to ``resolve_model_candidates``; the engine
+    passes its own module-level binding so the legacy patch surface keeps
+    working.
+    """
+    cfg = load_config()
+    resolver = static_resolver or resolve_model_candidates
+    static_kwargs: Dict[str, Any] = {}
+    if require_tools:
+        static_kwargs["require_tools"] = require_tools
+    if catalog is not None:
+        static_kwargs["catalog"] = catalog
+    if denylist_filter is not None:
+        static_kwargs["denylist_filter"] = denylist_filter
+    static_list = resolver(model, profile, provider, **static_kwargs)
+
+    def _static_payload(mode: str, state: str) -> Dict[str, Any]:
+        return {
+            "candidates": list(static_list),
+            "static_candidates": list(static_list),
+            "dynamic_candidates": [],
+            "would_append": [],
+            "dynamic_mode": mode,
+            "snapshot_state": state,
+            "excluded_reasons": {},
+        }
+
+    try:
+        from botex.providers.dynamic_candidates import (
+            DEFAULT_MAX_SNAPSHOT_AGE_HOURS,
+            DEFAULT_SNAPSHOT_PATH,
+            load_dynamic_snapshot_offline,
+            normalize_dynamic_mode,
+            resolve_execution_candidates,
+        )
+    except (ImportError, ValueError):
+        try:
+            from dynamic_candidates import (
+                DEFAULT_MAX_SNAPSHOT_AGE_HOURS,
+                DEFAULT_SNAPSHOT_PATH,
+                load_dynamic_snapshot_offline,
+                normalize_dynamic_mode,
+                resolve_execution_candidates,
+            )
+        except (ImportError, ValueError):
+            return _static_payload("off", "not_loaded")
+
+    _pname, _pcfg = resolve_provider(provider)
+    emergency_env = os.environ.get("BOTEX_DYNAMIC_CANDIDATES_MODE")
+    dc_cfg = cfg.get("dynamic_candidates")
+    configured_mode = dc_cfg.get("mode") if isinstance(dc_cfg, dict) else None
+    mode = normalize_dynamic_mode(configured_mode, emergency_env=emergency_env)
+    eff_profile = profile or (cfg.get("engine", {}).get("default_profile") or "default")
+    try:
+        if mode == "off" or (model and str(model).strip()):
+            # Zero-I/O path: never read the snapshot for off/explicit runs.
+            return resolve_execution_candidates(
+                static_list,
+                provider=_pname,
+                profile=eff_profile,
+                task_class=task_class,
+                capability_mode=capability_mode,
+                explicit_model=model,
+                cfg=cfg,
+                zdr_required=zdr_required,
+                remaining_task_cap=remaining_task_cap,
+                emergency_env=emergency_env,
+            )
+
+        if snapshot is None and snapshot_state is None:
+            raw_path = (
+                str(dc_cfg.get("snapshot_file") or "").strip() if isinstance(dc_cfg, dict) else ""
+            ) or str(DEFAULT_SNAPSHOT_PATH)
+            try:
+                max_age = float(dc_cfg.get("max_snapshot_age_hours"))
+            except (TypeError, ValueError, AttributeError):
+                max_age = DEFAULT_MAX_SNAPSHOT_AGE_HOURS
+            snapshot, snapshot_state = load_dynamic_snapshot_offline(
+                _resolve_path(raw_path), max_age_hours=max_age
+            )
+        if snapshot_state is None:
+            snapshot_state = "not_loaded"
+
+        if denylist_filter is None:
+            try:
+                from botex.providers.denylist import DenylistFilter
+
+                denylist_filter = DenylistFilter(cfg)
+            except (ImportError, ValueError):
+                from denylist import DenylistFilter
+
+                denylist_filter = DenylistFilter(cfg)
+
+        def _denied(mid: str, _df: Any = denylist_filter) -> bool:
+            # Fail-closed: a broken denylist lookup must deny, never allow.
+            try:
+                return bool(_df.is_denied(mid, provider=_pname, profile=eff_profile))
+            except Exception:
+                return True
+
+        return resolve_execution_candidates(
+            static_list,
+            provider=_pname,
+            profile=eff_profile,
+            task_class=task_class,
+            capability_mode=capability_mode,
+            explicit_model=model,
+            cfg=cfg,
+            snapshot=snapshot,
+            snapshot_state=snapshot_state,
+            zdr_required=zdr_required,
+            denylist_fn=_denied,
+            remaining_task_cap=remaining_task_cap,
+            emergency_env=emergency_env,
+        )
+    except Exception:
+        return _static_payload(mode, "error")
 
 
 def is_decisions_model(model: str, provider_cfg: Dict[str, Any]) -> bool:
