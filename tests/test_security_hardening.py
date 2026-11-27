@@ -250,9 +250,10 @@ def test_sanitize_error_text_strips_urls_and_secrets():
     assert "proxy.example.test" not in out
     assert "[URL]" in out
 
-    # Non-URL secrets still masked residually.
-    out2 = sanitize_error_text(f"api_key={SECRET} exploded")
-    assert SECRET not in out2
+    # Non-URL secrets still masked residually — local non-standard secret
+    # shape, so only the regex (not mask_secrets key formats) can catch it.
+    out2 = sanitize_error_text(f"api_key={secret} exploded")
+    assert secret not in out2
 
     # Length cap and None tolerance.
     assert len(sanitize_error_text("x" * 500)) <= 200
@@ -276,3 +277,25 @@ def test_sanitize_error_text_bare_key_and_schemeless():
     # Ordinary text without secrets survives.
     out4 = sanitize_error_text("connection reset by peer")
     assert out4 == "connection reset by peer"
+
+
+def test_sanitize_error_text_redacts_bearer_token():
+    from botex.tools.security import sanitize_error_text
+
+    token = "dummy_secret_token_999"
+    out = sanitize_error_text(f"HTTP 401 Authorization: Bearer {token}")
+    assert token not in out
+    assert "Bearer" not in out or "[REDACTED]" in out
+
+
+def test_sanitize_error_text_redacts_secret_crossing_max_len_boundary():
+    from botex.tools.security import sanitize_error_text
+
+    secret = "boundarysecret987654321"
+    # Secret starts near the 200-char cap: redaction must run before the final
+    # trim so no unredacted secret prefix leaks at the output boundary.
+    padding = "x" * 190
+    out = sanitize_error_text(f"{padding} api_key={secret} tail", max_len=200)
+    assert secret not in out
+    assert secret[:8] not in out
+    assert len(out) <= 200

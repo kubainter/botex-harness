@@ -642,3 +642,44 @@ async def test_run_injection_output_never_saved(ws):
     assert res["results"][0]["action"] == "inference_failed_or_invalid"
     found = memory.search_memory(workspace_dir=str(ws), query="", tag=BRIEFING_TAG, scope="all")
     assert found.get("count") == 0
+
+
+def test_search_active_notes_propagates_resolved_scope(ws_collapsed, monkeypatch):
+    """Entries must carry the canonical frontmatter-derived scope downstream,
+    not the collapsed "local" scan label; scope dir getters returning str or
+    empty string must not break resolution."""
+    from botex.ops.curator.recall_briefing import _search_active_notes
+
+    _seed_project(ws_collapsed, "swarm", 2, scope="global")
+    entries = _search_active_notes(str(ws_collapsed))
+    assert entries, "expected notes eligible on collapsed deployment"
+    scopes = {str(e.get("scope")) for e in entries}
+    assert "local" not in scopes
+    assert scopes <= {"global", "swarm"}
+
+    # str/empty getter robustness: no TypeError, no Path("") cwd fallback.
+    monkeypatch.setattr(
+        memory, "get_swarm_memory_dir", lambda: str(ws_collapsed / ".botex" / "memory")
+    )
+    entries2 = _search_active_notes(str(ws_collapsed))
+    assert isinstance(entries2, list)
+    monkeypatch.setattr(memory, "get_global_memory_dir", lambda: "")
+    monkeypatch.setattr(memory, "get_swarm_memory_dir", lambda: "")
+    entries3 = _search_active_notes(str(ws_collapsed))
+    assert isinstance(entries3, list)
+
+
+@pytest.mark.anyio
+async def test_compile_e2e_on_collapsed_scope(ws_collapsed):
+    """E2E regression (plan 058): full compilation path on a VPS-shaped collapsed
+    deployment must compile briefings for global-scope projects."""
+    _seed_project(ws_collapsed, "swarm", 5, scope="global")
+
+    async def infer(prompt):
+        return _briefing_body()
+
+    res = await run_briefing_compilation(str(ws_collapsed), infer)
+    assert res["ok"] is True
+    assert res["compiled"] >= 1
+    record = next(r for r in res["results"] if r["project"] == "swarm")
+    assert record["action"] == "compiled"

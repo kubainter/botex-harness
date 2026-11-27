@@ -129,23 +129,26 @@ _URL_PATTERN = re.compile(r"(?:https?://|//)[^\s'\")\]]+", re.IGNORECASE)
 # (Google-style credentials), ``sig=``, ``access_token=`` and Authorization
 # header fragments outside a full URL.
 _ERROR_EXTRA_SECRET_RE = re.compile(
-    r"(?i)\b(key|apikey|access_token|sig|authorization)"
-    r'\s*["\']?\s*[=:]\s*["\']?[^\s"\',&]{4,}["\']?'
+    r"(?i)\b(x-api-key|api[-_]?key|key|client[-_]?secret|access[-_]?token|token|secret|password|sig|authorization)"
+    r'\s*["\']?\s*[=:]\s*(?:(?:bearer|basic|token|digest)\s+)?["\']?[^\s"\',&]{4,}["\']?'
 )
 
 
 def sanitize_error_text(text: Any, max_len: int = 200) -> str:
-    """Error text safe for persistence: input capped first so redaction is the
-    terminal operation, raw URLs removed wholesale (query strings and userinfo
-    can carry secrets regexes cannot enumerate), residual secrets masked. URLs
-    in exceptions are diagnostic noise compared to the leak risk — provider and
+    """Error text safe for persistence: raw URLs removed wholesale (query
+    strings and userinfo can carry secrets regexes cannot enumerate), residual
+    secrets masked, final length trim applied only after redaction. URLs in
+    exceptions are diagnostic noise compared to the leak risk — provider and
     host context belongs in structured fields."""
     if text is None:
         return ""
-    capped = str(text).strip()[:max_len]
-    stripped = _URL_PATTERN.sub("[URL]", capped)
+    # Wide anti-ReDoS input bound only — the final ``max_len`` trim must run
+    # after redaction, otherwise a secret cut mid-way at the cap boundary
+    # leaves an unredacted prefix below the length thresholds of the patterns.
+    bounded = str(text).strip()[:4096]
+    stripped = _URL_PATTERN.sub("[URL]", bounded)
     stripped = _ERROR_EXTRA_SECRET_RE.sub("[REDACTED]", stripped)
-    return mask_secrets(stripped)
+    return mask_secrets(stripped)[:max_len]
 
 
 def exception_evidence(exc: BaseException) -> str:

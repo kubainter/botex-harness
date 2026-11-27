@@ -902,7 +902,7 @@ def _run_catalog_drift_sync_impl(
 
     report = {
         "generated_at": time.time(),
-        "generated_at_iso": datetime.now().isoformat(),
+        "generated_at_iso": datetime.now(timezone.utc).isoformat(),
         "sync": sync_results,
         "drift": drift_entries,
         "summary": {

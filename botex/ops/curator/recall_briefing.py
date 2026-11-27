@@ -215,11 +215,13 @@ def _scope_probe_dirs(workspace_dir: str) -> Dict[str, Optional[Path]]:
     """Physical dir per scope label, resolved once per batch — never per entry."""
     local_dir = Path(workspace_dir).resolve() / ".botex" / "memory"
     try:
-        global_dir: Optional[Path] = Path(memory.get_global_memory_dir())
+        raw_g = memory.get_global_memory_dir()
+        global_dir: Optional[Path] = Path(raw_g) if raw_g else None
     except Exception:
         global_dir = None
     try:
-        swarm_dir = memory.get_swarm_memory_dir()
+        raw_s = memory.get_swarm_memory_dir()
+        swarm_dir: Optional[Path] = Path(raw_s) if raw_s else None
     except Exception:
         swarm_dir = None
     return {"local": local_dir, "global": global_dir, "swarm": swarm_dir}
@@ -299,9 +301,13 @@ def _search_active_notes(workspace_dir: str) -> List[Dict[str, Any]]:
             continue
         if memory._is_ledger_node(entry):
             continue
-        if _effective_scope(entry, dirs) == "local":
+        eff = _effective_scope(entry, dirs)
+        if eff == "local":
             continue
-        entries.append(entry)
+        # Propagate the resolved scope: on collapsed deployments the scan label
+        # says "local" for every note, and downstream readers of entry["scope"]
+        # must see the canonical frontmatter-derived value instead.
+        entries.append({**entry, "scope": eff})
     return entries
 
 
