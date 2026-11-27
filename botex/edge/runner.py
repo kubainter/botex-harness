@@ -31,6 +31,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -50,8 +51,10 @@ from botex.edge.delegation import EdgeDelegationHandler, EdgeDelegationPolicy
 from botex.edge.host_os_driver import (
     SingleInstanceLock,
     SingleInstanceLockError,
+    cancel_process_tree,
     default_swarm_home,
     fence_local_epoch,
+    pdeathsig_preexec,
 )
 from botex.tools.exec_tools import run_command
 from botex.tools.file_tools import (
@@ -132,13 +135,16 @@ TYPED_CONTROL_FRAME_TYPES = frozenset(
         "dispatch_work_order",
     }
 )
+CLOUD_CONTROL_FRAME_TYPES = TYPED_CONTROL_FRAME_TYPES
 
 LOOPBACK_CONTROL_ALLOWLIST = frozenset(
     {
         "lease_heartbeat",
         "fence_ack",
         "ping",
-        *TYPED_CONTROL_FRAME_TYPES,
+        "harness_pause",
+        "harness_resume",
+        "harness_cancel_task",
     }
 )
 
@@ -166,6 +172,12 @@ _DISPATCH_WORK_ORDER_TYPE = "dispatch_work_order"
 _WORK_ORDER_EVENT_TYPE = "work_order_event"
 _OUTBOX_MAX_LINES = 10_000
 _PID_CTIME_TOLERANCE_S = 0.01
+_OUTPUT_TAIL_MAX_LINES = 200
+_OUTPUT_TAIL_MAX_BYTES = 16_384
+_EDIT_CONFIRM_MAX_AGE_S = 900.0
+_EDIT_CONFIRM_ALLOWED_MODES = frozenset({"edit", "destructive"})
+_NON_GIT_EDIT_MODES = frozenset({"edit", "fs_write", "destructive", "full"})
+_RESERVED_CONFIRM_ACTORS = frozenset({"human", "human-curated", "operator", "curator"})
 
 # F6: secret-bearing env vars never reach spawned harness children; the
 # SWARM_* namespace is reserved for supervisor-only state.
@@ -454,6 +466,9 @@ class EdgeActiveOrdersStore:
 
     def __init__(self, path: Optional[Path]) -> None:
         self.path = Path(path) if path is not None else None
+        self.idem_path = (
+            self.path.with_name(f"{self.path.stem}_idem.json") if self.path is not None else None
+        )
 
     def _read(self) -> Dict[str, Any]:
         if self.path is None or not self.path.is_file():
@@ -506,6 +521,40 @@ class EdgeActiveOrdersStore:
             del orders[key]
             self._write(orders)
 
+    def list_orders(self) -> Dict[str, Any]:
+        return {k: dict(v) for k, v in self._read().items() if isinstance(v, dict)}
+
+    def _read_idem(self) -> Dict[str, Any]:
+        if self.idem_path is None or not self.idem_path.is_file():
+            return {}
+        try:
+            data = json.loads(self.idem_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def get_idempotency(self, idem_key: str) -> Optional[Dict[str, Any]]:
+        key = str(idem_key or "").strip()
+        if not key:
+            return None
+        rec = self._read_idem().get(key)
+        return dict(rec) if isinstance(rec, dict) else None
+
+    def set_idempotency(self, idem_key: str, order_id: str, response: Dict[str, Any]) -> None:
+        key = str(idem_key or "").strip()
+        if not key or self.idem_path is None:
+            return
+        records = self._read_idem()
+        records[key] = {"order_id": str(order_id or ""), "response": dict(response)}
+        if len(records) > 1000:
+            oldest = list(records.keys())[: len(records) - 1000]
+            for old_k in oldest:
+                records.pop(old_k, None)
+        try:
+            _atomic_write_json_0600(self.idem_path, records)
+        except OSError as exc:
+            _LOG.debug("active_orders_idem persist failed (%s)", type(exc).__name__)
+
     def last_seqs(self) -> Dict[str, int]:
         out: Dict[str, int] = {}
         for oid, rec in self._read().items():
@@ -516,6 +565,141 @@ class EdgeActiveOrdersStore:
             except (TypeError, ValueError):
                 continue
         return out
+
+
+def _read_bounded_masked_tail(
+    *handles: Any,
+    max_lines: int = _OUTPUT_TAIL_MAX_LINES,
+    max_bytes: int = _OUTPUT_TAIL_MAX_BYTES,
+) -> str:
+    """Seek-bounded read + secret-masking of child ``TemporaryFile`` handles."""
+    chunks: List[str] = []
+    seek_window = max(1024, int(max_bytes) * 2)
+    for fh in handles:
+        if fh is None:
+            continue
+        try:
+            fh.flush()
+            fh.seek(0, os.SEEK_END)
+            size = int(fh.tell())
+            fh.seek(max(0, size - seek_window), os.SEEK_SET)
+            raw = fh.read()
+        except Exception:
+            raw = b""
+        finally:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        if isinstance(raw, bytes):
+            if len(raw) > max_bytes:
+                raw = raw[-max_bytes:]
+            text = raw.decode("utf-8", errors="replace")
+        else:
+            text = str(raw or "")
+        if text:
+            chunks.append(text)
+    combined = "\n".join(chunks).strip()
+    if not combined:
+        return ""
+    lines = combined.splitlines()[-max_lines:]
+    raw_lines = "\n".join(lines).encode("utf-8", errors="replace")
+    if len(raw_lines) > max_bytes:
+        raw_lines = raw_lines[-max_bytes:]
+    return str(mask_secrets(raw_lines.decode("utf-8", errors="replace")))
+
+
+def _cleanup_order_worktree(real_root: Path, wt_path: Path) -> None:
+    """Best-effort removal of a finished order worktree under ``swarm/wip``."""
+    try:
+        resolved_wt = wt_path.resolve()
+        resolved_root = real_root.resolve()
+        if resolved_wt == resolved_root or not resolved_wt.exists():
+            return
+    except OSError:
+        return
+    try:
+        from botex.edge.host_os_driver import _rmtree_with_retries, _run_git
+
+        if (resolved_root / ".git").exists():
+            _run_git(
+                resolved_root, ["worktree", "remove", "--force", str(resolved_wt)], check=False
+            )
+        if resolved_wt.exists():
+            _rmtree_with_retries(resolved_wt)
+    except Exception:
+        pass
+
+
+def _reconcile_orphan_worktrees(
+    workspaces: List[Dict[str, Any]],
+    active_orders: Dict[str, Any],
+) -> int:
+    """Prune ``swarm/wip/<order_id>/e<N>`` git worktrees that have no active order record."""
+    removed = 0
+    try:
+        from botex.edge.host_os_driver import _list_git_worktrees, _rmtree_with_retries, _run_git
+    except ImportError:
+        return 0
+    active_ids = {str(oid).strip() for oid in (active_orders or {}) if str(oid).strip()}
+    for ws in workspaces:
+        root_str = str(ws.get("root") or "").strip()
+        if not root_str:
+            continue
+        real_root = Path(root_str)
+        if not (real_root / ".git").exists():
+            continue
+        try:
+            resolved_root = real_root.resolve()
+        except OSError:
+            continue
+        pruned_any = False
+        for entry in _list_git_worktrees(resolved_root):
+            branch_ref = str(entry.get("branch") or "")
+            if not branch_ref.startswith("refs/heads/swarm/wip/"):
+                continue
+            parts = branch_ref.split("/")
+            order_id = parts[4] if len(parts) >= 5 else ""
+            if not order_id or order_id in active_ids:
+                continue
+            wt_raw = str(entry.get("worktree") or "").strip()
+            if not wt_raw:
+                continue
+            wt_path = Path(wt_raw).resolve()
+            if wt_path == resolved_root:
+                continue
+            _run_git(resolved_root, ["worktree", "remove", "--force", str(wt_path)], check=False)
+            if wt_path.exists():
+                _rmtree_with_retries(wt_path)
+            removed += 1
+            pruned_any = True
+        if pruned_any:
+            _run_git(resolved_root, ["worktree", "prune"], check=False)
+    return removed
+
+
+def _validate_edit_confirmation(confirmation: Any) -> Tuple[bool, str]:
+    """Verify explicit human confirmation envelope for non-local_admin edit orders."""
+    if not isinstance(confirmation, dict):
+        return False, "missing_confirmation"
+    actor = str(confirmation.get("confirmed_by") or "").strip()
+    if not actor or actor.lower() in _RESERVED_CONFIRM_ACTORS:
+        return False, "invalid_confirmed_by"
+    if confirmation.get("ceiling_ack") is not True:
+        return False, "missing_ceiling_ack"
+    raw_ts = str(confirmation.get("confirmed_at") or "").strip()
+    if not raw_ts:
+        return False, "missing_confirmed_at"
+    try:
+        dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_s = (datetime.now(timezone.utc) - dt).total_seconds()
+    except (TypeError, ValueError):
+        return False, "invalid_confirmed_at"
+    if age_s < -60.0 or age_s > _EDIT_CONFIRM_MAX_AGE_S:
+        return False, "stale_confirmation"
+    return True, ""
 
 
 class EdgeOutboxBuffer:
@@ -985,6 +1169,8 @@ class EdgeRunner:
         )
         self._order_seqs: Dict[str, int] = {}
         self._order_procs: Dict[str, Any] = {}
+        self._pending_cloud_acks: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
+        self._last_argv_error: str = ""
         self._draining = False
 
     # -- active order control registry & harness discovery -------------------
@@ -999,6 +1185,8 @@ class EdgeRunner:
         fencing_epoch: int = 0,
         pid_create_time: Optional[float] = None,
         workspace_id: str = "",
+        worktree_path: Optional[Path] = None,
+        real_root: Optional[Path] = None,
     ) -> None:
         key = str(order_id or "").strip()
         if not key:
@@ -1015,6 +1203,8 @@ class EdgeRunner:
             "fencing_token": str(fencing_token or ""),
             "fencing_epoch": int(fencing_epoch or 0),
             "workspace_id": str(workspace_id or self.workspace_id),
+            "worktree_path": str(worktree_path) if worktree_path is not None else "",
+            "real_root": str(real_root) if real_root is not None else "",
             "stale": False,
         }
         self._active_order_controls[key] = entry
@@ -1276,7 +1466,12 @@ class EdgeRunner:
         if translate_fn is None:
             from botex.edge.adapters import translate_work_order as translate_fn
         try:
-            spec = translate_fn(order, target_harness)
+            if frame.get("mode_default") is not None and self._translate_order_fn is None:
+                spec = translate_fn(
+                    order, target_harness, mode_default=str(frame.get("mode_default"))
+                )
+            else:
+                spec = translate_fn(order, target_harness)
         except Exception as exc:
             return _nack("translate_failed", error=type(exc).__name__)
         if not (isinstance(spec, dict) and spec.get("ok")):
@@ -1293,7 +1488,9 @@ class EdgeRunner:
 
             driver = self._host_driver = HostOSDriver()
         try:
-            pre = driver.preflight_runtime(str(spec.get("harness") or target_harness))
+            pre = await asyncio.to_thread(
+                driver.preflight_runtime, str(spec.get("harness") or target_harness)
+            )
         except Exception as exc:
             return _nack("preflight_error", error=type(exc).__name__)
         if not (isinstance(pre, dict) and pre.get("ok")):
@@ -1304,15 +1501,23 @@ class EdgeRunner:
             )
             return _nack("runtime_blocked", detail=detail)
 
+        spec_mode = str(spec.get("mode") or "").strip().lower()
+        req_mode = str(spec.get("mode_request") or "").strip().lower()
+        has_git = (Path(real_root) / ".git").exists()
+        if spec_mode in _NON_GIT_EDIT_MODES and not has_git:
+            return _nack("non_git_edit_unsupported")
+
         wt_path = Path(real_root)
         try:
             epoch = int(spec.get("epoch") or fencing_epoch or 0)
         except (TypeError, ValueError):
             epoch = 0
-        if (Path(real_root) / ".git").exists() and epoch > 0:
+        is_read_only = spec_mode in {"readonly", "plan"} or req_mode in {"readonly", "plan"}
+        if not is_read_only and has_git and epoch > 0:
             prep_fn = self._prepare_worktree_fn or driver.prepare_epoch_worktree
             try:
-                prepared = prep_fn(
+                prepared = await asyncio.to_thread(
+                    prep_fn,
                     Path(real_root),
                     order_id,
                     epoch,
@@ -1326,7 +1531,7 @@ class EdgeRunner:
 
         argv = self._build_spawn_argv(spec, order, token)
         if not argv:
-            return _nack("invalid_spawn_argv")
+            return _nack(self._last_argv_error or "invalid_spawn_argv")
         env = _scrubbed_child_env()
 
         guard: Any = None
@@ -1356,6 +1561,8 @@ class EdgeRunner:
             fencing_token=fencing_token,
             fencing_epoch=fencing_epoch,
             workspace_id=workspace_id,
+            worktree_path=wt_path if wt_path != Path(real_root) else None,
+            real_root=Path(real_root),
         )
         if proc is not None:
             self._order_procs[order_id] = proc
@@ -1388,6 +1595,7 @@ class EdgeRunner:
         order: Dict[str, Any],
         token: str,
     ) -> List[str]:
+        self._last_argv_error = ""
         harness = str((spec or {}).get("harness") or "").strip() or "botex"
         raw: Optional[List[Any]] = None
         for cand in (
@@ -1399,12 +1607,30 @@ class EdgeRunner:
                 break
         if raw is None:
             try:
-                from botex.edge.adapters import DEFAULT_DISCOVERY_CLI_ALLOWLIST
+                from botex.edge.adapters import (
+                    DEFAULT_DISCOVERY_CLI_ALLOWLIST,
+                    build_harness_argv,
+                )
 
                 cli = DEFAULT_DISCOVERY_CLI_ALLOWLIST.get(harness, harness)
+                if (
+                    self._translate_order_fn is not None
+                    and not str(spec.get("prompt") or "").strip()
+                ):
+                    raw = [cli]
+                else:
+                    resolved_cli = shutil.which(str(cli))
+                    if not resolved_cli:
+                        self._last_argv_error = "cli_not_found"
+                        return []
+                    raw = build_harness_argv(spec, cli=resolved_cli)
+            except ValueError:
+                raw = None
             except Exception:
-                cli = harness
-            raw = [cli]
+                raw = None
+        if not raw:
+            self._last_argv_error = "invalid_spawn_argv"
+            return []
         argv = [str(a) for a in raw if str(a).strip()]
         # F6: credential material must never reach argv.
         if token:
@@ -1429,20 +1655,41 @@ class EdgeRunner:
         argv: List[str],
         cwd: Path,
         env: Dict[str, str],
+        *,
+        capture: bool = True,
     ) -> Tuple[Any, Any]:
         """Spawn the harness child in a new POSIX session / Win32 process group."""
+        stdout_fh = tempfile.TemporaryFile(mode="w+b") if capture else None
+        stderr_fh = tempfile.TemporaryFile(mode="w+b") if capture else None
         kwargs: Dict[str, Any] = {
             "cwd": str(cwd),
             "env": env,
             "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stdout": stdout_fh if stdout_fh is not None else subprocess.DEVNULL,
+            "stderr": stderr_fh if stderr_fh is not None else subprocess.DEVNULL,
         }
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         else:
             kwargs["start_new_session"] = True
-        proc = subprocess.Popen(argv, **kwargs)
+            preexec = pdeathsig_preexec()
+            if preexec is not None:
+                kwargs["preexec_fn"] = preexec
+        try:
+            proc = subprocess.Popen(argv, **kwargs)
+        except Exception:
+            for fh in (stdout_fh, stderr_fh):
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
+            raise
+        if capture:
+            try:
+                proc._botex_capture_fhs = (stdout_fh, stderr_fh)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         guard = None
         try:
             from botex.edge.host_os_driver import WindowsJobGuard
@@ -1465,11 +1712,68 @@ class EdgeRunner:
             rc = await asyncio.to_thread(proc.wait)
         except Exception:
             rc = None
+        capture_fhs = getattr(proc, "_botex_capture_fhs", ())
+        summary = ""
+        if capture_fhs:
+            summary = await asyncio.to_thread(_read_bounded_masked_tail, *capture_fhs)
+            if self._store is not None and summary:
+                self._store.update_fields(order_id, output_summary=summary)
+        entry = self._active_order_controls.get(order_id) or {}
+        wt_str = str(entry.get("worktree_path") or "").strip()
+        root_str = str(entry.get("real_root") or "").strip()
+        term_status = str(entry.get("terminal_status") or "").strip().upper()
+        if (
+            wt_str
+            and root_str
+            and (rc not in (0, None) or term_status in {"DONE", "FAILED", "CANCELLED"})
+        ):
+            await asyncio.to_thread(_cleanup_order_worktree, Path(root_str), Path(wt_str))
         if self._stop.is_set() or self._draining:
             return
         if order_id in self._active_order_controls:
-            self.emit_work_order_event(order_id, "exited", {"returncode": rc})
+            ev_data: Dict[str, Any] = {"returncode": rc}
+            if summary:
+                ev_data["summary"] = summary
+            self.emit_work_order_event(order_id, "exited", ev_data)
             self.unregister_active_order(order_id)
+
+    async def register_work_order_with_cloud(
+        self,
+        payload: Dict[str, Any],
+        *,
+        timeout_s: float = 10.0,
+    ) -> Dict[str, Any]:
+        """Register a loopback-originated WorkOrder with Cloud before local dispatch."""
+        if self._ws is None:
+            return {"ok": False, "error": "registration_unavailable"}
+        req_id = str(payload.get("request_id") or f"reg-{secrets.token_hex(4)}").strip()
+        frame = {
+            "type": "register_work_order",
+            "request_id": req_id,
+            "order_id": str(payload.get("order_id") or "").strip(),
+            "workspace_id": str(payload.get("workspace_id") or self.workspace_id).strip(),
+            "goal": str(payload.get("goal") or "").strip(),
+            "mode_request": str(payload.get("mode_request") or "readonly").strip(),
+        }
+        if payload.get("target_harness"):
+            frame["target_harness"] = str(payload["target_harness"]).strip()
+        if isinstance(payload.get("handoff_policy"), dict):
+            frame["handoff_policy"] = payload["handoff_policy"]
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Dict[str, Any]] = loop.create_future()
+        self._pending_cloud_acks[req_id] = fut
+        try:
+            await self._send_json(self._ws, frame, priority=QOS_PRIORITY_CONTROL)
+            reply = await asyncio.wait_for(fut, timeout=max(0.1, float(timeout_s)))
+            return (
+                dict(reply)
+                if isinstance(reply, dict)
+                else {"ok": False, "error": "registration_unavailable"}
+            )
+        except Exception:
+            return {"ok": False, "error": "registration_unavailable"}
+        finally:
+            self._pending_cloud_acks.pop(req_id, None)
 
     # -- work_order_event sequence & durable outbox --------------------------
 
@@ -2048,7 +2352,16 @@ class EdgeRunner:
                                 self._log.warning(
                                     "brief_sync entry rejected (%s)", type(exc).__name__
                                 )
+                elif ftype in ("control_ack", "control_nack"):
+                    req_id = str(frame.get("request_id") or "").strip()
+                    fut = self._pending_cloud_acks.pop(req_id, None) if req_id else None
+                    if fut is not None and not fut.done():
+                        fut.set_result(frame)
         finally:
+            for req_id, fut in list(self._pending_cloud_acks.items()):
+                self._pending_cloud_acks.pop(req_id, None)
+                if not fut.done():
+                    fut.set_result({"ok": False, "error": "registration_unavailable"})
             if hb_task is not None:
                 hb_task.cancel()
                 try:
@@ -2710,6 +3023,13 @@ class EdgeHostDaemon:
                 )
             except Exception as exc:
                 return {"ok": False, "mode": "error", "error": type(exc).__name__}
+            if not attach.get("ok"):
+                return {
+                    "ok": False,
+                    "mode": "error",
+                    "error": str(attach.get("error") or attach.get("mode") or "lock_contention"),
+                    "lock_path": attach.get("lock_path", ""),
+                }
             if attach.get("mode") == "attached":
                 return {
                     "ok": True,
@@ -2723,11 +3043,13 @@ class EdgeHostDaemon:
 
         reg = self.load_registry()
         self.device_id = str(reg.get("device_id") or socket.gethostname())
-        for ws in self.enrolled_workspaces(reg):
+        enrolled_ws = self.enrolled_workspaces(reg)
+        for ws in enrolled_ws:
             agent = self._make_agent(ws)
             if agent is not None:
                 self.agents.append(agent)
                 self._ws_agent_index[agent.workspace_id] = agent
+        await self._reconcile_startup_state(enrolled_ws)
         await self._ensure_inventory_started()
         loopback_info = await self._start_loopback_ipc(port=self._loopback_port)
         self._started = True
@@ -2803,6 +3125,40 @@ class EdgeHostDaemon:
             self._log.warning("workspace %s agent init failed (%s)", ws_id, type(exc).__name__)
             return None
 
+    async def _reconcile_startup_state(self, enrolled_ws: List[Dict[str, Any]]) -> None:
+        """Reconcile stale active_orders.json PIDs and orphan wip worktrees on startup."""
+        store = EdgeActiveOrdersStore(self._swarm_home / "active_orders.json")
+        stored = store.list_orders()
+        for oid, rec in list(stored.items()):
+            try:
+                pid = int(rec.get("pid") or 0)
+            except (TypeError, ValueError):
+                pid = 0
+            stored_ct = rec.get("pid_create_time")
+            ws_id = str(rec.get("workspace_id") or "").strip()
+            alive = False
+            if pid > 0:
+                live_ct = _pid_create_time(pid)
+                if live_ct is not None:
+                    if stored_ct is None:
+                        alive = True
+                    else:
+                        try:
+                            alive = abs(live_ct - float(stored_ct)) <= _PID_CTIME_TOLERANCE_S
+                        except (TypeError, ValueError):
+                            alive = False
+            if not alive:
+                agent = self._ws_agent_index.get(ws_id)
+                if agent is not None:
+                    try:
+                        agent.emit_work_order_event(oid, "reconciled", {"returncode": None})
+                    except Exception:
+                        pass
+                store.remove(oid)
+        remaining = store.list_orders()
+        if enrolled_ws:
+            await asyncio.to_thread(_reconcile_orphan_worktrees, enrolled_ws, remaining)
+
     async def _ensure_inventory_started(self) -> None:
         if self._inventory_service is None:
             try:
@@ -2852,6 +3208,28 @@ class EdgeHostDaemon:
                 await asyncio.gather(*pending, return_exceptions=True)
         for agent in self.agents:
             for order_id in list(agent._active_order_controls):
+                entry = agent._active_order_controls.get(order_id) or {}
+                try:
+                    pid_val = int(entry.get("pid") or 0)
+                except (TypeError, ValueError):
+                    pid_val = 0
+                stored_ct = entry.get("pid_create_time")
+                if pid_val > 0 and stored_ct is not None:
+                    live_ct = _pid_create_time(pid_val)
+                    try:
+                        same_proc = live_ct is not None and (
+                            abs(live_ct - float(stored_ct)) <= _PID_CTIME_TOLERANCE_S
+                        )
+                    except (TypeError, ValueError):
+                        same_proc = False
+                    if not same_proc:
+                        pid_val = 0
+                guard = entry.get("job_guard")
+                if pid_val > 0 or guard is not None:
+                    try:
+                        await asyncio.to_thread(cancel_process_tree, pid_val, job_guard=guard)
+                    except Exception:
+                        pass
                 try:
                     agent.emit_work_order_event(order_id, "fenced", {"reason": "daemon_drain"})
                 except Exception:
@@ -2962,8 +3340,11 @@ class EdgeHostDaemon:
         self,
         writer: asyncio.StreamWriter,
         body_obj: Dict[str, Any],
+        *,
+        idem_key: str = "",
     ) -> None:
         try:
+            from botex.edge.adapters import normalize_mode_request, paid_ceiling_violations
             from botex.edge.workspaces import get_workspace
         except ImportError:
             await _write_loopback_http_response(
@@ -2971,6 +3352,27 @@ class EdgeHostDaemon:
             )
             return
         order = body_obj.get("order") if isinstance(body_obj.get("order"), dict) else dict(body_obj)
+        order_id = str(order.get("order_id") or body_obj.get("order_id") or "").strip()
+        effective_idem = str(
+            idem_key or body_obj.get("idempotency_key") or body_obj.get("request_id") or ""
+        ).strip()
+        orders_store = EdgeActiveOrdersStore(self._swarm_home / "active_orders.json")
+        if effective_idem:
+            existing_idem = orders_store.get_idempotency(effective_idem)
+            if existing_idem is not None:
+                prev_oid = str(existing_idem.get("order_id") or "")
+                if order_id and prev_oid and prev_oid != order_id:
+                    await _write_loopback_http_response(
+                        writer, 409, {"ok": False, "error": "idem_key_conflict"}
+                    )
+                    return
+                cached_resp = dict(
+                    existing_idem.get("response") or {"ok": True, "order_id": prev_oid}
+                )
+                cached_resp["duplicate"] = True
+                await _write_loopback_http_response(writer, 200, cached_resp)
+                return
+
         target_ws = str(body_obj.get("workspace_id") or order.get("workspace_id") or "").strip()
         if not target_ws:
             await _write_loopback_http_response(
@@ -2983,30 +3385,48 @@ class EdgeHostDaemon:
                 writer, 404, {"ok": False, "error": "workspace_not_found"}
             )
             return
+        raw_mode = order.get("mode_request")
+        if raw_mode is None:
+            raw_mode = order.get("mode")
+        if raw_mode is None:
+            raw_mode = body_obj.get("mode")
+        mode, mode_err = normalize_mode_request(raw_mode, default="readonly")
+        confirmed_edit_meta: Optional[Dict[str, Any]] = None
         # F7: non-local_admin workspaces stay at the $0 / branch-only ceiling.
         if not bool(ws_entry.get("local_admin")):
-            mode = (
-                str(
-                    order.get("mode_request")
-                    or order.get("mode")
-                    or body_obj.get("mode")
-                    or "readonly"
-                )
-                .strip()
-                .lower()
-            )
-            if mode not in _ORDERS_ALLOWED_MODES:
+            if mode_err is not None:
                 await _write_loopback_http_response(
                     writer, 403, {"ok": False, "error": "mode_exceeds_ceiling"}
                 )
                 return
-            for key in _ORDERS_PAID_KEYS:
-                if body_obj.get(key) or order.get(key):
+            violations = paid_ceiling_violations(order, body_obj)
+            if violations:
+                await _write_loopback_http_response(
+                    writer,
+                    403,
+                    {"ok": False, "error": "paid_ceiling_exceeded", "violations": violations},
+                )
+                return
+            if mode not in _ORDERS_ALLOWED_MODES:
+                conf = body_obj.get("confirmation") or order.get("confirmation")
+                if mode in _EDIT_CONFIRM_ALLOWED_MODES and conf is not None:
+                    conf_ok, conf_err = _validate_edit_confirmation(conf)
+                    if not conf_ok:
+                        await _write_loopback_http_response(
+                            writer,
+                            403,
+                            {"ok": False, "error": "mode_exceeds_ceiling", "detail": conf_err},
+                        )
+                        return
+                    confirmed_edit_meta = {
+                        "confirmed_by": str(conf.get("confirmed_by") or "").strip(),
+                        "confirmed_at": str(conf.get("confirmed_at") or "").strip(),
+                    }
+                else:
                     await _write_loopback_http_response(
-                        writer, 403, {"ok": False, "error": "paid_ceiling_exceeded"}
+                        writer, 403, {"ok": False, "error": "mode_exceeds_ceiling"}
                     )
                     return
-        order_id = str(order.get("order_id") or body_obj.get("order_id") or "").strip()
         if not order_id:
             await _write_loopback_http_response(
                 writer, 400, {"ok": False, "error": "missing_order_id"}
@@ -3021,10 +3441,42 @@ class EdgeHostDaemon:
                 writer, 409, {"ok": False, "error": "no_active_agent"}
             )
             return
+        target_harness = str(
+            body_obj.get("target_harness") or order.get("target_harness") or "botex"
+        )
+        goal = str(order.get("goal") or order.get("prompt") or body_obj.get("goal") or "").strip()
+        if not goal:
+            goal = f"Loopback order {order_id}"
+        reg_payload: Dict[str, Any] = {
+            "order_id": order_id,
+            "workspace_id": target_ws,
+            "goal": goal,
+            "mode_request": mode or "readonly",
+            "target_harness": target_harness,
+        }
+        if isinstance(order.get("handoff_policy"), dict):
+            reg_payload["handoff_policy"] = order["handoff_policy"]
+        reg_res = await agent.register_work_order_with_cloud(reg_payload)
+        if not reg_res.get("ok"):
+            err_code = str(reg_res.get("error") or "registration_unavailable")
+            http_status = (
+                503
+                if err_code == "registration_unavailable"
+                else (403 if err_code == "insufficient_scope" else 409)
+            )
+            await _write_loopback_http_response(
+                writer, http_status, {"ok": False, "error": err_code}
+            )
+            return
         try:
             fencing_epoch = int(body_obj.get("fencing_epoch") or order.get("epoch") or 0)
         except (TypeError, ValueError):
             fencing_epoch = 0
+        dispatch_order = dict(order)
+        if not bool(ws_entry.get("local_admin")):
+            dispatch_order.pop("argv", None)
+        if "mode_request" not in dispatch_order or not dispatch_order.get("mode_request"):
+            dispatch_order["mode_request"] = mode or "readonly"
         frame = {
             "type": _DISPATCH_WORK_ORDER_TYPE,
             "request_id": str(body_obj.get("request_id") or f"lb-{secrets.token_hex(4)}"),
@@ -3032,13 +3484,18 @@ class EdgeHostDaemon:
             "workspace_id": target_ws,
             "fencing_token": str(body_obj.get("fencing_token") or "") or secrets.token_urlsafe(24),
             "fencing_epoch": fencing_epoch,
-            "order": order,
-            "target_harness": str(
-                body_obj.get("target_harness") or order.get("target_harness") or "botex"
-            ),
+            "mode_default": "readonly",
+            "order": dispatch_order,
+            "target_harness": target_harness,
         }
+        if confirmed_edit_meta is not None:
+            agent.emit_work_order_event(
+                order_id, "confirmed_edit", _mask_recursive(confirmed_edit_meta)
+            )
         reply = await agent.handle_control_frame(frame)
         status = 200 if reply.get("ok") else 409
+        if status == 200 and effective_idem:
+            orders_store.set_idempotency(effective_idem, order_id, reply)
         await _write_loopback_http_response(writer, status, reply)
 
     async def _handle_loopback_client(
@@ -3188,7 +3645,11 @@ class EdgeHostDaemon:
                 return
 
             if method == "POST" and path_only.startswith("/orders"):
-                await self._handle_loopback_order(writer, body_obj)
+                await self._handle_loopback_order(
+                    writer,
+                    body_obj,
+                    idem_key=headers.get("idempotency-key", "").strip(),
+                )
                 return
 
             if method == "POST" and path_only.startswith("/control"):
@@ -3362,84 +3823,105 @@ def probe_edge_daemon_loopback(
     )
 
 
+def _probe_loopback_state_file(st_path: Path) -> Optional[Dict[str, Any]]:
+    if not st_path.is_file():
+        return None
+    try:
+        state = json.loads(st_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            return None
+        existing_port = int(state.get("port") or 0)
+        existing_tok = str(state.get("loopback_token") or "")
+        if existing_port > 0 and existing_tok:
+            probe = probe_edge_daemon_loopback(existing_port, existing_tok)
+            if probe.get("ok"):
+                return {
+                    "ok": True,
+                    "mode": "attached",
+                    "pid": probe.get("pid") or state.get("pid"),
+                    "port": existing_port,
+                    "device_id": probe.get("device_id") or state.get("device_id"),
+                    "workspace_id": probe.get("workspace_id") or state.get("workspace_id"),
+                }
+    except Exception:
+        pass
+    return None
+
+
 def attach_or_spawn_edge_daemon(
     *,
     state_file: Optional[Path] = None,
     lock_path: Optional[Path] = None,
     loopback_port: int = 0,
     spawn_fn: Optional[Callable[[], Dict[str, Any]]] = None,
+    health_timeout_s: float = 5.0,
 ) -> Dict[str, Any]:
     """Attach to an existing local ``--edge-daemon`` if healthy, or acquire lock to spawn."""
     swarm_home = default_swarm_home()
     st_path = Path(state_file) if state_file is not None else (swarm_home / "edge_daemon.json")
     lk_path = Path(lock_path) if lock_path is not None else (swarm_home / "edge_daemon.lock")
 
-    if st_path.is_file():
-        try:
-            state = json.loads(st_path.read_text(encoding="utf-8"))
-            if isinstance(state, dict):
-                existing_port = int(state.get("port") or 0)
-                existing_tok = str(state.get("loopback_token") or "")
-                if existing_port > 0 and existing_tok:
-                    probe = probe_edge_daemon_loopback(existing_port, existing_tok)
-                    if probe.get("ok"):
-                        return {
-                            "ok": True,
-                            "mode": "attached",
-                            "pid": probe.get("pid") or state.get("pid"),
-                            "port": existing_port,
-                            "device_id": probe.get("device_id") or state.get("device_id"),
-                            "workspace_id": probe.get("workspace_id") or state.get("workspace_id"),
-                        }
-        except Exception:
-            pass
+    attached = _probe_loopback_state_file(st_path)
+    if attached is not None:
+        return attached
 
     lock = SingleInstanceLock(lk_path)
     try:
-        lock.acquire()
+        acquired = bool(lock.acquire())
     except SingleInstanceLockError:
+        acquired = False
+    if not acquired:
         for _attempt in range(3):
             time.sleep(0.15)
-            if st_path.is_file():
-                try:
-                    state = json.loads(st_path.read_text(encoding="utf-8"))
-                    if isinstance(state, dict):
-                        existing_port = int(state.get("port") or 0)
-                        existing_tok = str(state.get("loopback_token") or "")
-                        if existing_port > 0 and existing_tok:
-                            probe = probe_edge_daemon_loopback(existing_port, existing_tok)
-                            if probe.get("ok"):
-                                return {
-                                    "ok": True,
-                                    "mode": "attached",
-                                    "pid": probe.get("pid") or state.get("pid"),
-                                    "port": existing_port,
-                                    "device_id": probe.get("device_id") or state.get("device_id"),
-                                    "workspace_id": probe.get("workspace_id")
-                                    or state.get("workspace_id"),
-                                }
-                except Exception:
-                    pass
+            attached = _probe_loopback_state_file(st_path)
+            if attached is not None:
+                return attached
         return {
-            "ok": True,
-            "mode": "attached",
-            "reason": "lock_held_by_active_daemon",
+            "ok": False,
+            "mode": "lock_contention",
+            "error": "lock_held_by_active_daemon",
             "lock_path": str(lk_path),
         }
 
     if spawn_fn is not None:
+        # Release the singleton lock before invoking the external daemon spawner so the
+        # child daemon can acquire it itself during startup without false contention.
+        lock.release()
         try:
             res = spawn_fn()
-            return {
-                "ok": True,
-                "mode": "spawned",
-                "lock": lock,
-                "loopback_port": int(loopback_port),
-                **(res if isinstance(res, dict) else {}),
-            }
         except Exception:
-            lock.release()
             raise
+        deadline = time.monotonic() + max(0.1, float(health_timeout_s))
+        while time.monotonic() < deadline:
+            probed = _probe_loopback_state_file(st_path)
+            if probed is not None:
+                extra = {
+                    k: v
+                    for k, v in (res.items() if isinstance(res, dict) else ())
+                    if k not in ("ok", "mode", "lock")
+                }
+                return {
+                    **extra,
+                    "ok": True,
+                    "mode": "spawned",
+                    "loopback_port": int(probed.get("port") or loopback_port),
+                }
+            time.sleep(0.1)
+        try:
+            spawned_pid = int(res.get("pid") or 0) if isinstance(res, dict) else 0
+        except (TypeError, ValueError):
+            spawned_pid = 0
+        if spawned_pid > 0:
+            try:
+                cancel_process_tree(spawned_pid)
+            except Exception:
+                pass
+        return {
+            "ok": False,
+            "mode": "spawn_failed_health",
+            "error": "spawn_failed_health",
+            "lock_path": str(lk_path),
+        }
 
     return {
         "ok": True,

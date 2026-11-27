@@ -980,7 +980,7 @@ def test_dispatch_frame_constants_and_harness_spawn_cap() -> None:
     """Plan 051 §4.1: dispatch_work_order joins all typed/control sets;
     work_order_event is Control Lane; EdgeCapabilities.harness_spawn round-trips."""
     assert "dispatch_work_order" in TYPED_CONTROL_FRAME_TYPES
-    assert "dispatch_work_order" in LOOPBACK_CONTROL_ALLOWLIST
+    assert "dispatch_work_order" not in LOOPBACK_CONTROL_ALLOWLIST
     assert "dispatch_work_order" in CONTROL_LANE_FRAME_TYPES
     assert "work_order_event" in CONTROL_LANE_FRAME_TYPES
     assert frame_qos_priority({"type": "dispatch_work_order"}) == QOS_PRIORITY_CONTROL
@@ -994,11 +994,14 @@ def test_dispatch_frame_constants_and_harness_spawn_cap() -> None:
     assert loaded.to_dict()["harness_spawn"] is True
 
 
-def test_dispatch_work_order_pipeline_persistence_and_env_scrub(tmp_path: Path) -> None:
+def test_dispatch_work_order_pipeline_persistence_and_env_scrub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """dispatch_work_order: enrolled re-verify -> translate -> preflight -> spawn,
     durable active_orders.json + offline edge_outbox.jsonl, F6 env scrub."""
     ws_root = tmp_path / "ws_a"
     ws_root.mkdir()
+    (ws_root / ".git").mkdir()
     cand_root = tmp_path / "ws_cand"
     cand_root.mkdir()
     ws_file = tmp_path / "host_workspaces.json"
@@ -1034,6 +1037,7 @@ def test_dispatch_work_order_pipeline_persistence_and_env_scrub(tmp_path: Path) 
         spawn_fn=fake_spawn,
         host_driver=_FakeHostDriver(),
     )
+    monkeypatch.setattr("shutil.which", lambda cli: f"/fake/bin/{cli}")
 
     async def _run() -> None:
         import os
@@ -1058,7 +1062,15 @@ def test_dispatch_work_order_pipeline_persistence_and_env_scrub(tmp_path: Path) 
             assert reply["order_id"] == "ord-9"
             assert reply["pid"] == 98765
             assert reply["spec_echo"]["harness"] == "zcode"
-            assert spawned["argv"] == ["zcode"]
+            assert spawned["argv"] == [
+                "/fake/bin/zcode",
+                "--prompt",
+                "run it",
+                "--mode",
+                "edit",
+                "--json",
+                "--no-color",
+            ]
             assert "SWARM_TEST_SECRET" not in spawned["env"]
             assert "BOTEX_EDGE_TOKEN" not in spawned["env"]
             assert "leak-me-not" not in spawned["env"].values()
@@ -1204,6 +1216,7 @@ def test_edge_workspace_agent_manifest_jitter_and_outbox_replay(tmp_path: Path) 
     durable outbox in (order_id, seq) order after hello_ack."""
     ws_root = tmp_path / "ws_a"
     ws_root.mkdir()
+    (ws_root / ".git").mkdir()
     ws_file = tmp_path / "host_workspaces.json"
     swarm_home = tmp_path / "swarm"
     swarm_home.mkdir()
@@ -1400,6 +1413,7 @@ def test_edge_host_daemon_loopback_ipc_host_token_and_routes(tmp_path: Path) -> 
     stripping, /harnesses limits, and the $0/branch-only /orders ceiling."""
     ws_root = tmp_path / "ws_a"
     ws_root.mkdir()
+    (ws_root / ".git").mkdir()
     admin_root = tmp_path / "ws_admin"
     admin_root.mkdir()
     ws_file = tmp_path / "host_workspaces.json"
@@ -1495,7 +1509,29 @@ def test_edge_host_daemon_loopback_ipc_host_token_and_routes(tmp_path: Path) -> 
             )
             assert b"403 Forbidden" in raw5
             assert b"paid_ceiling_exceeded" in raw5
-            # 9. /orders mode=plan non-admin passes ceiling -> dispatch nacks
+            # 9. /orders mode=plan non-admin passes ceiling -> offline Cloud fails closed (503)
+            raw6_off = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="lb-tok-123",
+                host=good_host,
+                body={
+                    "workspace_id": _WS_A,
+                    "order_id": "ord-y",
+                    "mode": "plan",
+                    "order": {"order_id": "ord-y", "mode_request": "plan"},
+                },
+            )
+            assert b"503" in raw6_off.split(b"\r\n", 1)[0]
+            assert b"registration_unavailable" in raw6_off
+
+            # 9b. With Cloud registration acked, mode=plan passes ceiling -> dispatch nacks
+            async def _ack_reg(payload, **_kw):
+                return {"ok": True, "order_id": payload.get("order_id"), "status": "QUEUED"}
+
+            for a in daemon.agents:
+                a.register_work_order_with_cloud = _ack_reg
             raw6 = await _loopback_request(
                 port,
                 "POST",
@@ -1526,6 +1562,153 @@ def test_edge_host_daemon_loopback_ipc_host_token_and_routes(tmp_path: Path) -> 
                 },
             )
             assert b"403 Forbidden" not in raw7.split(b"\r\n", 1)[0]
+        finally:
+            await daemon.stop(drain_timeout_s=1.0)
+
+    asyncio.run(_run())
+
+
+def test_loopback_control_rejects_dispatch_and_orders_enforces_ceilings_and_idem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import datetime, timezone
+
+    from botex.edge.credentials import save_edge_token
+    from botex.edge.runner import EdgeHostDaemon
+    from botex.edge.workspaces import save_workspaces_registry
+
+    ws_root = tmp_path / "ws_ceil"
+    ws_root.mkdir()
+    ws_file = tmp_path / "workspaces.json"
+    save_workspaces_registry(
+        {
+            "device_id": "dev-ceil",
+            "workspaces": [
+                {
+                    "workspace_id": "ws_ceil",
+                    "root": str(ws_root),
+                    "state": "enrolled",
+                    "local_admin": False,
+                }
+            ],
+        },
+        path=ws_file,
+    )
+    cred_dir = tmp_path / "creds"
+    save_edge_token("dev-ceil", "ws_ceil", "btxd_1111222233334444.secret", base_dir=cred_dir)
+
+    async def _run() -> None:
+        daemon = EdgeHostDaemon(
+            "ws://127.0.0.1:9/api/edge/ws",
+            workspaces_file=ws_file,
+            credentials_dir=cred_dir,
+            swarm_home=tmp_path / "swarm_home",
+            loopback_token="tok-ceil",
+            single_instance=False,
+        )
+        await daemon.start()
+        port = daemon._loopback_port_bound or 0
+        host = f"127.0.0.1:{port}"
+        try:
+
+            async def _ack_reg(payload, **_kw):
+                return {"ok": True, "order_id": payload.get("order_id"), "status": "QUEUED"}
+
+            for a in daemon.agents:
+                a.register_work_order_with_cloud = _ack_reg
+
+            # 1. /control rejects dispatch_work_order bypass
+            r_ctrl = await _loopback_request(
+                port,
+                "POST",
+                "/control",
+                token="tok-ceil",
+                host=host,
+                body={
+                    "local_exec": True,
+                    "frame": {
+                        "type": "dispatch_work_order",
+                        "order_id": "ord-bypass",
+                        "fencing_token": "tok",
+                    },
+                },
+            )
+            assert b"400 Bad Request" in r_ctrl
+            assert b"forbidden_control_frame_type" in r_ctrl
+
+            # 2. botex:<paid> and handoff_policy.max_cost_usd blocked
+            r_paid = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="tok-ceil",
+                host=host,
+                body={
+                    "workspace_id": "ws_ceil",
+                    "order_id": "ord-p1",
+                    "mode": "readonly",
+                    "target_harness": "botex:openai",
+                },
+            )
+            assert b"403 Forbidden" in r_paid
+            assert b"paid_ceiling_exceeded" in r_paid
+
+            # 3. Confirmed edit passes ceiling when confirmation is fresh
+            now_iso = datetime.now(timezone.utc).isoformat()
+            r_conf = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="tok-ceil",
+                host=host,
+                body={
+                    "workspace_id": "ws_ceil",
+                    "order_id": "ord-conf-1",
+                    "mode": "edit",
+                    "confirmation": {
+                        "confirmed_by": "kubai@win11",
+                        "confirmed_at": now_iso,
+                        "ceiling_ack": True,
+                    },
+                },
+            )
+            assert b"403 Forbidden" not in r_conf
+            assert b"harness_spawn_disabled" in r_conf
+
+            # 4. Idempotency-Key duplicate returns 200 duplicate=True; conflicting order_id -> 409
+            for a in daemon.agents:
+                a.handle_control_frame = lambda frame: asyncio.sleep(
+                    0, result={"ok": True, "order_id": frame["order_id"], "pid": 123}
+                )
+            raw_body = json.dumps(
+                {"workspace_id": "ws_ceil", "order_id": "ord-idem-1", "mode": "readonly"}
+            ).encode("utf-8")
+
+            async def _post_idem(payload_bytes: bytes) -> bytes:
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                req = (
+                    f"POST /orders HTTP/1.1\r\nHost: {host}\r\n"
+                    f"X-Loopback-Token: tok-ceil\r\n"
+                    f"Idempotency-Key: idem-k1\r\n"
+                    f"Content-Length: {len(payload_bytes)}\r\nConnection: close\r\n\r\n"
+                ).encode("ascii") + payload_bytes
+                writer.write(req)
+                await writer.drain()
+                resp = await reader.read()
+                writer.close()
+                return resp
+
+            first = await _post_idem(raw_body)
+            assert b"200 OK" in first
+            second = await _post_idem(raw_body)
+            assert b"200 OK" in second
+            assert b'"duplicate": true' in second
+            conflict_body = json.dumps(
+                {"workspace_id": "ws_ceil", "order_id": "ord-idem-other", "mode": "readonly"}
+            ).encode("utf-8")
+            conflict = await _post_idem(conflict_body)
+            assert b"409" in conflict.split(b"\r\n", 1)[0]
+            assert b"idem_key_conflict" in conflict
         finally:
             await daemon.stop(drain_timeout_s=1.0)
 
