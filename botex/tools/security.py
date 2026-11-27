@@ -148,6 +148,31 @@ def sanitize_error_text(text: Any, max_len: int = 200) -> str:
     return mask_secrets(stripped)
 
 
+def exception_evidence(exc: BaseException) -> str:
+    """Persistence-safe error evidence built exclusively from type identity and
+    integer codes — never from ``str(exc)``. Exception free-text can embed
+    request URLs carrying query secrets or userinfo, and regex masking is a
+    taint step rather than a sanitizing barrier, so the only architectural fix
+    is to keep the message body out of persisted evidence entirely. The class
+    name plus optional numeric context (HTTP status, errno) stays actionable
+    for operators: auth vs rate-limit vs transport failure remain distinguishable."""
+    evidence = type(exc).__name__
+    attrs: "list[str]" = []
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is None:
+        status = getattr(exc, "code", None)  # urllib.error.HTTPError
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        attrs.append(f"http={status}")
+    errno_val = getattr(exc, "errno", None)
+    if isinstance(errno_val, int) and not isinstance(errno_val, bool) and errno_val:
+        attrs.append(f"errno={errno_val}")
+    if attrs:
+        evidence = f"{evidence}[{','.join(attrs)}]"
+    return evidence
+
+
 def coerce_text(text: Any) -> str:
     """
     Coerce a value to str for logs, errors and stored text while severing static

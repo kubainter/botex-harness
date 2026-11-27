@@ -435,28 +435,23 @@ def test_end_to_end_redaction_report_and_health(wired, monkeypatch, tmp_path, ca
 
 
 def test_per_provider_error_urls_scrubbed(wired, monkeypatch):
-    """Per-provider error strings arrive from catalog.py pre-masked but with
-    raw URLs intact — the report boundary must scrub them."""
-    from botex.providers import catalog as catalog_mod
+    """Exceptions carrying secret-bearing URLs must surface as typed evidence
+    only — class name and numeric codes, never the free text — through the
+    real catalog.py extraction path into the persisted report."""
+    from botex.providers.catalog import ModelCatalog
 
     secret = "mycustomsecret123456"
 
-    def partial(registry, provider_names, cache_file=None, timeout=10.0, provider_configs=None):
-        return {
-            n: {
-                "status": "error",
-                "model_count": 0,
-                "error": f"HTTP 401 for url 'https://api.example.test/v1/models?key={secret}'",
-                "fetched_at": 0.0,
-            }
-            for n in provider_names
-        }
+    def boom_fetch(self, timeout=10.0):
+        raise RuntimeError(f"GET https://api.example.test/v1/models?key={secret} failed")
 
-    monkeypatch.setattr(catalog_mod, "sync_provider_catalogs", partial)
+    monkeypatch.setattr(ModelCatalog, "fetch_from_provider", boom_fetch)
     maintenance.run_catalog_drift_sync(wired["cfg"], force=True)
     on_disk = wired["report"].read_text(encoding="utf-8")
     assert secret not in on_disk
     assert "api.example.test" not in on_disk
+    parsed = json.loads(on_disk)
+    assert parsed["sync"]["groq"]["error"].startswith("RuntimeError")
 
 
 # ---------------------------------------------------------------------------

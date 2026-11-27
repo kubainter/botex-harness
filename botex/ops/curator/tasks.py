@@ -38,14 +38,14 @@ class CuratorTask:
 
 
 def _bounded_error(exc: BaseException) -> str:
-    """Masked, length-capped exception text for machine-readable failure reports."""
+    """Typed, length-bounded exception evidence for machine-readable failure
+    reports — free text stays out because it can carry secret-bearing URLs."""
     try:
-        from botex.tools.security import sanitize_error_text
+        from botex.tools.security import exception_evidence
 
-        masked = sanitize_error_text(str(exc) or "")
+        return exception_evidence(exc)[:220]
     except Exception:
-        masked = ""
-    return f"{type(exc).__name__}: {masked}" if masked else type(exc).__name__
+        return type(exc).__name__
 
 
 def _task_index_sync(workspace_dir: str) -> Dict[str, Any]:

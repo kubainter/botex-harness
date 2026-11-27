@@ -862,12 +862,11 @@ def _run_catalog_drift_sync_impl(
     except Exception as exc:
         sys.stderr.write("[BoteX] catalog sync failed\n")
         try:
-            from botex.tools.security import sanitize_error_text
+            from botex.tools.security import exception_evidence
 
-            masked = sanitize_error_text(str(exc) or "")
+            sync_exception = exception_evidence(exc)
         except Exception:
-            masked = ""
-        sync_exception = f"{type(exc).__name__}: {masked}" if masked else type(exc).__name__
+            sync_exception = type(exc).__name__
         # Countable no-evidence: every attempted provider must surface as an
         # error entry — an empty sync section would read as zero errors.
         sync_results = {
@@ -880,18 +879,10 @@ def _run_catalog_drift_sync_impl(
             for name in provider_names
         }
 
-    # Persistence-boundary sanitization: per-provider error strings arrive
-    # pre-masked from catalog.py, but raw URLs (query secrets, userinfo) survive
-    # that masking — scrub them before they hit the report or the return value.
-    try:
-        from botex.tools.security import sanitize_error_text as _sanitize_err
-
-        for entry in sync_results.values():
-            if isinstance(entry, dict) and isinstance(entry.get("error"), str) and entry["error"]:
-                entry["error"] = _sanitize_err(entry["error"])
-    except Exception:
-        pass
-
+    # No persistence-boundary scrubber here by design: catalog.py emits typed
+    # error evidence only (class name + numeric codes, never exception free
+    # text), so secret-bearing text cannot enter the report at the source —
+    # regex re-masking at this boundary would only multiply taint-graph edges.
     try:
         catalogs = load_cached_catalogs(provider_names, providers_cfg, cache_file)
         drift_entries = drift_fn(providers_cfg, catalogs)
