@@ -227,6 +227,7 @@ def test_curator_only_force_performs_real_sync(wired, sync_spy, tmp_path):
         "present",
         "providers_ok",
         "providers_error",
+        "dynamic_candidates_status",
     }
 
 
