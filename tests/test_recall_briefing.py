@@ -196,6 +196,111 @@ def test_select_briefing_projects_excludes_briefing_notes(ws):
 
 
 # ---------------------------------------------------------------------------
+# 3b. Collapsed-scope deployments (plan 058: VPS local==global physical shape)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ws_collapsed(ws, monkeypatch):
+    """VPS-shaped deployment: the global memory dir IS the workspace local dir.
+
+    Path dedup in `_resolve_scope_dirs` then collapses the scope labels by
+    itself (first label `local` wins) — exactly the production shape — with no
+    need to monkeypatch the resolver. Config is env-overlaid and cached, so the
+    override needs an explicit reload (same pattern as the conftest fixture).
+    """
+    import botex.config as _cfg_mod
+
+    monkeypatch.setenv("BOTEX_GLOBAL_MEMORY_DIR", str(ws / ".botex" / "memory"))
+    _cfg_mod.load_config(reload=True)
+    yield ws
+    monkeypatch.undo()
+    _cfg_mod.load_config(reload=True)
+
+
+def test_collapsed_fixture_reproduces_vps_shape(ws_collapsed):
+    """Probe: a note seeded scope=global on a collapsed deployment is labeled local."""
+    ids = _seed_project(ws_collapsed, "swarm", 2, scope="global")
+    res = memory.search_memory(
+        workspace_dir=str(ws_collapsed), query="", scope="all", status="active"
+    )
+    assert res.get("ok")
+    seen = {e.get("id"): e.get("scope") for e in (res.get("memories") or [])}
+    for mid in ids:
+        assert seen.get(mid) == "local", (
+            f"fixture does not reproduce the VPS collapse: {mid} labeled {seen.get(mid)!r}"
+        )
+
+
+def test_collapsed_scope_selects_projects_by_frontmatter(ws_collapsed):
+    """Regression (plan 058): eligibility follows the note's frontmatter scope,
+    not the directory label the scan happened to assign."""
+    _seed_project(ws_collapsed, "swarm", 5, scope="global")
+    projects = dict(select_briefing_projects(str(ws_collapsed), min_notes=5))
+    assert projects.get("swarm") == 5
+
+
+def test_collapsed_scope_still_excludes_frontmatter_local(ws_collapsed):
+    """Design intent: notes recorded scope:local must never feed shared-brain
+    briefings, even when they physically co-live with global notes."""
+    _seed_project(ws_collapsed, "swarm", 6, scope="local")
+    projects = dict(select_briefing_projects(str(ws_collapsed), min_notes=1))
+    assert "swarm" not in projects
+
+
+def test_collapsed_probe_asserts_physical_frontmatter(ws_collapsed):
+    """Stop-condition coverage: the seeded file physically sits in the shared
+    dir and its frontmatter records scope: global — the collapse is in the
+    scan label only, never in the note's own metadata."""
+    ids = _seed_project(ws_collapsed, "swarm", 1, scope="global")
+    note_file = ws_collapsed / ".botex" / "memory" / f"{ids[0]}.md"
+    assert note_file.is_file()
+    meta, _body = memory._parse_frontmatter(note_file.read_text(encoding="utf-8"))
+    assert str(meta.get("scope") or "").strip().lower() == "global"
+
+
+def test_collapsed_long_frontmatter_scope_survives(ws_collapsed):
+    """Regression (zcode M1): link-heavy notes push frontmatter past any fixed
+    head slice. Truncating the parse input severs the closing marker and the
+    scope silently falls back to the collapsed label — the very bug being fixed."""
+    ids = _seed_project(ws_collapsed, "swarm", 4, scope="global")
+    note_file = ws_collapsed / ".botex" / "memory" / f"{ids[0]}.md"
+    raw = note_file.read_text(encoding="utf-8")
+    # Inflate the links list so the frontmatter exceeds 2 KB before scope:.
+    fat_links = "\n".join(f"  - mem_linkfill_{i:04d}" for i in range(150))
+    raw = raw.replace("links:", f"links:\n{fat_links}", 1)
+    assert raw.index("scope:") > 2048, "fixture must push scope past the 2 KB line"
+    note_file.write_text(raw, encoding="utf-8")
+    projects = dict(select_briefing_projects(str(ws_collapsed), min_notes=4))
+    assert projects.get("swarm") == 4
+
+
+def test_collapsed_mixed_scope_counts_only_shared(ws_collapsed):
+    """Same project, mixed scopes physically co-living: only the notes whose
+    frontmatter records a shared scope count toward eligibility."""
+    _seed_project(ws_collapsed, "swarm", 6, scope="global")
+    _seed_project(ws_collapsed, "swarm", 4, scope="local")
+    projects = dict(select_briefing_projects(str(ws_collapsed), min_notes=1))
+    assert projects.get("swarm") == 6
+
+
+def test_malformed_scope_value_falls_back_to_label(ws_collapsed):
+    """A frontmatter scope outside the canonical table (or aliases of ``all``)
+    is not a parseable shared-scope declaration — the dir label decides, which
+    on a collapsed deployment excludes the note."""
+    ids = _seed_project(ws_collapsed, "swarm", 3, scope="global")
+    note_file = ws_collapsed / ".botex" / "memory" / f"{ids[0]}.md"
+    raw = note_file.read_text(encoding="utf-8")
+    note_file.write_text(
+        raw.replace("scope: global", "scope: local # trailing", 1), encoding="utf-8"
+    )
+    projects = dict(select_briefing_projects(str(ws_collapsed), min_notes=1))
+    # Two surviving valid global notes remain eligible; the corrupted one must
+    # not count toward the total.
+    assert projects.get("swarm") == 2
+
+
+# ---------------------------------------------------------------------------
 # 4. Body validation
 # ---------------------------------------------------------------------------
 

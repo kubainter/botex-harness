@@ -24,7 +24,9 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+import unicodedata
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from botex import memory
@@ -209,6 +211,78 @@ async def run_briefing_compilation(
     return {"ok": True, "compiled": compiled, "results": results}
 
 
+def _scope_probe_dirs(workspace_dir: str) -> Dict[str, Optional[Path]]:
+    """Physical dir per scope label, resolved once per batch — never per entry."""
+    local_dir = Path(workspace_dir).resolve() / ".botex" / "memory"
+    try:
+        global_dir: Optional[Path] = Path(memory.get_global_memory_dir())
+    except Exception:
+        global_dir = None
+    try:
+        swarm_dir = memory.get_swarm_memory_dir()
+    except Exception:
+        swarm_dir = None
+    return {"local": local_dir, "global": global_dir, "swarm": swarm_dir}
+
+
+def _resolve_note_file(entry: Dict[str, Any], dirs: Dict[str, Optional[Path]]) -> Optional[Path]:
+    """Locate the vault file behind a search entry in its label's own dir.
+
+    ``entry["path"]`` is a display label (``~/.botex/...``, ``swarm memory/...``),
+    not a filesystem path, so resolution probes the scan's scope dir by note id.
+    Only the label's own dir is probed: same-id twins exist by design (curator
+    ``promote_to_global`` copies a lesson with its id intact), and borrowing a
+    twin's file would read the wrong frontmatter scope. A miss degrades to the
+    dir label downstream — the fallback value the scan already assigned."""
+    nid = str(entry.get("id") or "").strip()
+    if not nid:
+        return None
+    try:
+        nid = memory._sanitize_id(nid)
+    except Exception:
+        return None
+    cand = dirs.get(str(entry.get("scope") or "local"))
+    if cand is None:
+        return None
+    probe = cand / f"{nid}.md"
+    try:
+        return probe if probe.is_file() else None
+    except OSError:
+        return None
+
+
+def _effective_scope(entry: Dict[str, Any], dirs: Dict[str, Optional[Path]]) -> str:
+    """The note's recorded intent: frontmatter ``scope:`` when parseable, else
+    the scan's directory label.
+
+    On collapsed-scope deployments (service home == repo dir) every scope
+    directory resolves to the same path and dedup labels all entries ``local``
+    regardless of writer intent — the frontmatter is the only surviving record.
+    The full file is parsed (the indexer parses the same input): truncating the
+    frontmatter would silently drop the closing marker on link-heavy notes and
+    fall back to the very label this logic exists to correct. Only canonical
+    scope values count — a malformed value degrades to the dir label, so a
+    ``scope: local`` note can never slip in through a parse edge."""
+    label = str(entry.get("scope") or "local")
+    note_file = _resolve_note_file(entry, dirs)
+    if note_file is not None:
+        try:
+            raw = note_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raw = ""
+        if raw:
+            try:
+                meta, _body = memory._parse_frontmatter(raw)
+            except Exception:
+                meta = {}
+            fm_scope = memory._VALID_SCOPES_MAP.get(
+                unicodedata.normalize("NFKC", str(meta.get("scope") or "")).strip().lower()
+            )
+            if fm_scope in ("local", "global", "swarm"):
+                return fm_scope
+    return label
+
+
 def _search_active_notes(workspace_dir: str) -> List[Dict[str, Any]]:
     """Active global/swarm-scope notes usable as briefing inputs.
 
@@ -217,14 +291,15 @@ def _search_active_notes(workspace_dir: str) -> List[Dict[str, Any]]:
     res = memory.search_memory(workspace_dir=workspace_dir, query="", scope="all", status="active")
     if not res.get("ok"):
         return []
+    dirs = _scope_probe_dirs(workspace_dir)
     entries: List[Dict[str, Any]] = []
     for entry in res.get("memories") or []:
-        if str(entry.get("scope") or "local") == "local":
-            continue
         tags = {str(t).strip().lower() for t in (entry.get("tags") or [])}
         if BRIEFING_TAG in tags:
             continue
         if memory._is_ledger_node(entry):
+            continue
+        if _effective_scope(entry, dirs) == "local":
             continue
         entries.append(entry)
     return entries
