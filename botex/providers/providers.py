@@ -21,10 +21,11 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type
 
 import httpx2
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
@@ -33,9 +34,11 @@ try:
     from botex.server.config import app_headers, load_config
     from botex.tools.security import mask_secrets
 
+    from .incident_probe import build_incident_record, emit_incident_safe
     from .retry import parse_retry_delay, resolve_retry_config, status_code_of
 except (ImportError, ValueError):
     from config import app_headers, load_config
+    from incident_probe import build_incident_record, emit_incident_safe
     from retry import parse_retry_delay, resolve_retry_config, status_code_of
     from security import mask_secrets
 
@@ -806,6 +809,8 @@ class BaseProvider:
         self,
         api_key: Optional[str] = None,
         timeout: float = 10.0,
+        *,
+        incident_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch model list from provider's /models endpoint.
 
@@ -813,6 +818,10 @@ class BaseProvider:
         completions — because urllib's resolver breaks on IPv6-only hosts
         (the VPS catalog stayed stale forever with URLError while chat
         completions succeeded).
+
+        ``incident_sink`` receives a redacted wire-shape record per attempt
+        (plan 060) on both success and failure; it never affects the return
+        value or raised exceptions.
         """
         url = self.base_url.rstrip("/") + "/models"
         resolved_key = self.resolve_api_key(explicit_key=api_key)
@@ -821,10 +830,46 @@ class BaseProvider:
             headers["Authorization"] = f"Bearer {resolved_key}"
         from botex.providers.http_pool import get_sync_client
 
-        resp = get_sync_client().get(url, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json() or {}
-        return data.get("data", [])
+        started = time.monotonic()
+        resp: Any = None
+        data: Any = None
+        try:
+            resp = get_sync_client().get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            models = data.get("data", [])
+        except Exception as exc:
+            emit_incident_safe(
+                incident_sink,
+                build_incident_record(
+                    provider=self.name,
+                    operation="catalog_models_openai",
+                    method="GET",
+                    url=url,
+                    headers=headers,
+                    response_status=getattr(resp, "status_code", None),
+                    response_headers=getattr(resp, "headers", None),
+                    response_body=data,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    exception=exc,
+                ),
+            )
+            raise
+        emit_incident_safe(
+            incident_sink,
+            build_incident_record(
+                provider=self.name,
+                operation="catalog_models_openai",
+                method="GET",
+                url=url,
+                headers=headers,
+                response_status=getattr(resp, "status_code", None),
+                response_headers=getattr(resp, "headers", None),
+                response_body=data,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            ),
+        )
+        return models
 
     def get_credits(self, api_key: Optional[str] = None) -> CreditsInfo:
         """Query provider credits. Default implementation returns unsupported."""
@@ -1457,8 +1502,9 @@ class CloudflareWorkersAIProvider(BaseProvider):
     Model ids are namespaced (``@cf/<author>/<model>``). The free
     allocation is 10,000 Neurons/day (resets 00:00 UTC); over-quota
     requests fail with HTTP 429 rather than billing. There is no
-    credits API. ``fetch_catalog`` tries the OpenAI-style ``/models``
-    route first, then the native ``/ai/models/search`` endpoint.
+    credits API. ``fetch_catalog`` queries the native
+    ``/ai/models/search`` route first, falling back to the OpenAI-style
+    ``/models`` route only when the native one fails.
     """
 
     default_api_key_env: str = "CLOUDFLARE_API_TOKEN"
@@ -1553,33 +1599,94 @@ class CloudflareWorkersAIProvider(BaseProvider):
         self,
         api_key: Optional[str] = None,
         timeout: float = 10.0,
+        *,
+        incident_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
-        """Fetch the model list, falling back to the native search route.
+        """Fetch the model list from the native search route first.
 
-        The OpenAI-style ``GET {base_url}/models`` is tried first; when
-        the account/plan does not expose it, the native
-        ``GET {account_base}/ai/models/search`` endpoint is queried and
-        its ``result[].name`` values normalized to OpenAI ``{data: [...]}``
-        entries so catalog parsing stays shape-agnostic.
+        The account-scoped OpenAI-style ``GET {base_url}/models``
+        deterministically fails with HTTP 405 (error code 7001), so the
+        native ``GET {account_base}/ai/models/search`` endpoint is
+        queried first and its ``result[].name`` values normalized to
+        OpenAI ``{data: [...]}`` entries. Only when the native route
+        raises does the OpenAI-style fallback in ``BaseProvider`` run,
+        so a plan/endpoint drift on the native route still yields a
+        catalog.
+
+        ``incident_sink`` receives one redacted record per attempt: a local
+        ``catalog_skipped_unconfigured`` when the account id is unresolved,
+        ``catalog_models_native`` for the primary route and
+        ``catalog_models_openai`` for the fallback — every attempt's
+        evidence is preserved, none silently discarded (plan 060).
         """
-        self._require_account_id()
-        try:
-            return super().fetch_catalog(api_key=api_key, timeout=timeout)
-        except Exception:
-            pass
-        account_base = self.base_url.rstrip("/")
-        if account_base.endswith("/ai/v1"):
-            account_base = account_base[: -len("/ai/v1")]
-        url = f"{account_base}/ai/models/search"
         resolved_key = self.resolve_api_key(explicit_key=api_key)
         headers = {"Accept": "application/json"}
         if resolved_key:
             headers["Authorization"] = f"Bearer {resolved_key}"
+        try:
+            self._require_account_id()
+        except Exception as exc:
+            emit_incident_safe(
+                incident_sink,
+                build_incident_record(
+                    provider=self.name,
+                    operation="catalog_skipped_unconfigured",
+                    method="GET",
+                    url=self.base_url,
+                    headers=headers,
+                    exception=exc,
+                ),
+            )
+            raise
+        account_base = self.base_url.rstrip("/")
+        if account_base.endswith("/ai/v1"):
+            account_base = account_base[: -len("/ai/v1")]
+        url = f"{account_base}/ai/models/search"
         from botex.providers.http_pool import get_sync_client
 
-        resp = get_sync_client().get(url, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json() or {}
+        started = time.monotonic()
+        resp: Any = None
+        data: Any = None
+        try:
+            resp = get_sync_client().get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json() or {}
+        except Exception as exc:
+            emit_incident_safe(
+                incident_sink,
+                build_incident_record(
+                    provider=self.name,
+                    operation="catalog_models_native",
+                    method="GET",
+                    url=url,
+                    headers=headers,
+                    response_status=getattr(resp, "status_code", None),
+                    response_headers=getattr(resp, "headers", None),
+                    response_body=data,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    exception=exc,
+                ),
+            )
+            # Preserve the native failure evidence, then let the
+            # OpenAI-style fallback try the legacy /models route; its
+            # own failure records already come from BaseProvider.
+            return super().fetch_catalog(
+                api_key=api_key, timeout=timeout, incident_sink=incident_sink
+            )
+        emit_incident_safe(
+            incident_sink,
+            build_incident_record(
+                provider=self.name,
+                operation="catalog_models_native",
+                method="GET",
+                url=url,
+                headers=headers,
+                response_status=getattr(resp, "status_code", None),
+                response_headers=getattr(resp, "headers", None),
+                response_body=data,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            ),
+        )
         items = data.get("result") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return []
@@ -1632,10 +1739,14 @@ class GenericOpenAIProvider(BaseProvider):
         self,
         api_key: Optional[str] = None,
         timeout: float = 10.0,
+        *,
+        incident_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Query /models, falling back across loopback ports (:8080 vs :11434) for local LLMs."""
         try:
-            return super().fetch_catalog(api_key=api_key, timeout=timeout)
+            return super().fetch_catalog(
+                api_key=api_key, timeout=timeout, incident_sink=incident_sink
+            )
         except Exception:
             if self.name.lower().strip() not in ("ollama", "bielik", "local"):
                 raise
@@ -1645,7 +1756,9 @@ class GenericOpenAIProvider(BaseProvider):
                 raise
             self.config = dict(self.config)
             self.config["base_url"] = alt_base
-            return super().fetch_catalog(api_key=api_key, timeout=timeout)
+            return super().fetch_catalog(
+                api_key=api_key, timeout=timeout, incident_sink=incident_sink
+            )
 
 
 _LOCAL_LLM_LOG = logging.getLogger(__name__)

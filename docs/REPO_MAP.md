@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 78 Python modules (`server.py` + `botex/`), 103 test files (`tests/`).
+- **Codebase footprint:** 79 Python modules (`server.py` + `botex/`), 107 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -25,7 +25,7 @@ targeted + integration tests.
 
 | Module | File | Imported By (modules) | Direct Tests |
 |---|---|---:|---:|
-| `botex.tools.security` | `botex/tools/security.py` | 41 | 10 |
+| `botex.tools.security` | `botex/tools/security.py` | 42 | 10 |
 | `botex.server.config` | `botex/server/config.py` | 26 | 25 |
 | `botex.memory.memory` | `botex/memory/memory.py` | 10 | 6 |
 | `botex.providers` | `botex/providers/__init__.py` | 9 | 15 |
@@ -33,7 +33,7 @@ targeted + integration tests.
 | `botex.memory` | `botex/memory/__init__.py` | 7 | 23 |
 | `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 6 |
 | `botex.providers.denylist` | `botex/providers/denylist.py` | 7 | 6 |
-| `botex.providers.providers` | `botex/providers/providers.py` | 6 | 9 |
+| `botex.providers.providers` | `botex/providers/providers.py` | 6 | 11 |
 | `botex.tools.file_tools` | `botex/tools/file_tools.py` | 6 | 2 |
 | `botex.core.context_guard` | `botex/core/context_guard.py` | 5 | 1 |
 | `botex.ops.curator` | `botex/ops/curator/__init__.py` | 5 | 10 |
@@ -132,12 +132,13 @@ targeted + integration tests.
 | `botex/providers/adapters/__init__.py` | — | — |
 | `botex/providers/analytics.py` | `is_free_model`, `calculate_cost_usd`, `load_analytics`, `save_analytics`, `log_run`, `check_budget_limit`, `+6 more` | `test_analytics.py`, `test_botex.py`, `test_groq_cloudflare_providers.py`, `test_idle_layers_l1.py`, +2 more |
 | `botex/providers/benchmarks.py` | `fetch_openrouter_benchmarks`, `get_recommended_models`, `estimate_task_tier`, `normalize_task_tier`, `resolve_tier_profile` | `test_challenger_m5_empiric.py`, `test_integration.py`, `test_nvidia_streaming.py`, `test_stage_4_6.py`, +2 more |
-| `botex/providers/catalog.py` | `ModelMetadata`, `ModelCatalog`, `get_consolidated_models`, `get_free_tier_failover_candidates`, `sync_provider_catalogs`, `compute_config_drift` | `test_catalog.py`, `test_catalog_drift_integration.py`, `test_catalog_maintenance.py`, `test_catalog_sync.py`, +7 more |
+| `botex/providers/catalog.py` | `ModelMetadata`, `ModelCatalog`, `get_consolidated_models`, `get_free_tier_failover_candidates`, `sync_provider_catalogs`, `compute_config_drift` | `test_catalog.py`, `test_catalog_drift_integration.py`, `test_catalog_maintenance.py`, `test_catalog_sync.py`, +9 more |
 | `botex/providers/denylist.py` | `DenialRecord`, `DenylistFilter`, `matches_pattern`, `get_default_denylist_filter`, `check_model_denylist`, `filter_model_candidates` | `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_denylist.py`, `test_groq_cloudflare_providers.py`, +2 more |
-| `botex/providers/http_pool.py` | `NonClosingAsyncClient`, `get_async_client`, `get_sync_client`, `close_http_pool`, `reset_http_pool` | `test_challenger_m7_concurrency.py`, `test_challenger_m7_empirical.py`, `test_credits_stress.py`, `test_e2e_contracts.py`, +3 more |
+| `botex/providers/http_pool.py` | `NonClosingAsyncClient`, `get_async_client`, `get_sync_client`, `close_http_pool`, `reset_http_pool` | `test_challenger_m7_concurrency.py`, `test_challenger_m7_empirical.py`, `test_cloudflare_catalog_probe.py`, `test_credits_stress.py`, +5 more |
+| `botex/providers/incident_probe.py` | `normalize_operation`, `redact_url_template`, `redact_headers`, `summarize_payload`, `summarize_response`, `build_incident_record`, `+2 more` | `test_provider_incident_redaction.py` |
 | `botex/providers/pricing.py` | `load_catalog`, `model_price`, `model_supports_tools`, `check_model_tools`, `check_model_price` | `test_botex.py`, `test_groq_cloudflare_providers.py`, `test_providers.py` |
 | `botex/providers/prompt_cache.py` | `CachePolicy`, `resolve_policy`, `apply_prompt_cache`, `map_usage`, `should_disable_cache` | `test_prompt_cache.py` |
-| `botex/providers/providers.py` | `NormalizedToolCall`, `NormalizedUsage`, `NormalizedResponse`, `GenerationStats`, `CreditsInfo`, `BaseProvider`, `+19 more` | `test_catalog_sync.py`, `test_challenger_m8_empiric.py`, `test_challenger_m8_empirical.py`, `test_e2e_contracts.py`, +5 more |
+| `botex/providers/providers.py` | `NormalizedToolCall`, `NormalizedUsage`, `NormalizedResponse`, `GenerationStats`, `CreditsInfo`, `BaseProvider`, `+19 more` | `test_catalog_sync.py`, `test_challenger_m8_empiric.py`, `test_challenger_m8_empirical.py`, `test_cloudflare_catalog_probe.py`, +7 more |
 | `botex/providers/rate_limiter.py` | `TokenBucket`, `ProviderLimit`, `ProviderRateLimiter`, `parse_rate_limits`, `default_state_path`, `get_rate_limiter`, `+1 more` | `test_idle_layers_l1.py`, `test_rate_limiter.py` |
 | `botex/providers/retry.py` | `CircuitBreakerOpenError`, `ProviderCircuitBreaker`, `resolve_retry_config`, `resolve_circuit_breaker_config`, `status_code_of`, `parse_retry_delay`, `+5 more` | `test_circuit_breaker.py`, `test_google_provider_wire.py`, `test_idle_layers_l1.py`, `test_integration.py`, +2 more |
 | `botex/providers/wallet.py` | `OpenRouterKeyData`, `OpenRouterCreditsData`, `WalletService`, `parse_openrouter_key_data`, `parse_openrouter_credits_data`, `parse_openrouter_payloads`, `+2 more` | `test_challenger_m5_empiric.py`, `test_challenger_m8_empiric.py`, `test_challenger_m8_empirical.py`, `test_credits_stress.py`, +4 more |

@@ -90,6 +90,7 @@ def test_cloudflare_api_key_env_fallbacks(monkeypatch):
 
 
 def test_cloudflare_fetch_catalog_native_fallback(monkeypatch):
+    """Native /ai/models/search is queried first; /ai/v1/models only on failure."""
     calls = []
 
     class FakeResp:
@@ -107,8 +108,6 @@ def test_cloudflare_fetch_catalog_native_fallback(monkeypatch):
     class FakeClient:
         def get(self, url, headers=None, timeout=None):
             calls.append(url)
-            if url.endswith("/ai/v1/models"):
-                return FakeResp({}, status=404)
             if url.endswith("/ai/models/search"):
                 return FakeResp(
                     {
@@ -120,6 +119,8 @@ def test_cloudflare_fetch_catalog_native_fallback(monkeypatch):
                         "success": True,
                     }
                 )
+            if url.endswith("/ai/v1/models"):
+                return FakeResp({}, status=404)
             raise AssertionError(f"unexpected url {url}")
 
     monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acc123")
@@ -133,8 +134,8 @@ def test_cloudflare_fetch_catalog_native_fallback(monkeypatch):
         {"id": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"},
         {"id": "@cf/qwen/qwen2.5-coder-32b-instruct"},
     ]
-    assert calls[0].endswith("/ai/v1/models")
-    assert calls[1].endswith("/ai/models/search")
+    assert calls == [calls[0]]
+    assert calls[0].endswith("/ai/models/search")
 
 
 def test_config_registers_providers():
