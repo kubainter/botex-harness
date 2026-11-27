@@ -21,14 +21,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from botex.server.config import PROJECT_ROOT, catalog_cache_file
-    from botex.tools.security import mask_secrets
+    from botex.tools.security import exception_evidence, mask_secrets
 
     from .providers import BaseProvider, ProviderRegistry
     from .wallet import _sanitize_raw_payload
 except (ImportError, ValueError):
     from config import PROJECT_ROOT, catalog_cache_file
     from providers import BaseProvider, ProviderRegistry
-    from security import mask_secrets
+    from security import exception_evidence, mask_secrets
     from wallet import _sanitize_raw_payload
 
 # Allowlist of verified active models hosted on NVIDIA Cloud Functions
@@ -1120,8 +1120,10 @@ def sync_provider_catalogs(
                 model_count = len(models)
                 fetched_at = time.time()
         except Exception as exc:
-            masked = mask_secrets(str(exc) or "").strip()[:200]
-            error = f"{type(exc).__name__}: {masked}" if masked else type(exc).__name__
+            # Typed evidence only: exception free-text can embed request URLs
+            # carrying query secrets (e.g. ``?key=`` credentials), and masking
+            # does not sever that flow — the class name and numeric codes do.
+            error = exception_evidence(exc)
         results[name] = {
             "status": status,
             "model_count": model_count,

@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 78 Python modules (`server.py` + `botex/`), 102 test files (`tests/`).
+- **Codebase footprint:** 78 Python modules (`server.py` + `botex/`), 103 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -25,10 +25,10 @@ targeted + integration tests.
 
 | Module | File | Imported By (modules) | Direct Tests |
 |---|---|---:|---:|
-| `botex.tools.security` | `botex/tools/security.py` | 39 | 10 |
-| `botex.server.config` | `botex/server/config.py` | 26 | 24 |
+| `botex.tools.security` | `botex/tools/security.py` | 41 | 10 |
+| `botex.server.config` | `botex/server/config.py` | 26 | 25 |
 | `botex.memory.memory` | `botex/memory/memory.py` | 10 | 6 |
-| `botex.providers` | `botex/providers/__init__.py` | 8 | 14 |
+| `botex.providers` | `botex/providers/__init__.py` | 9 | 15 |
 | `botex.skills.skills` | `botex/skills/skills.py` | 8 | 2 |
 | `botex.memory` | `botex/memory/__init__.py` | 7 | 23 |
 | `botex.providers.analytics` | `botex/providers/analytics.py` | 7 | 6 |
@@ -36,7 +36,7 @@ targeted + integration tests.
 | `botex.providers.providers` | `botex/providers/providers.py` | 6 | 9 |
 | `botex.tools.file_tools` | `botex/tools/file_tools.py` | 6 | 2 |
 | `botex.core.context_guard` | `botex/core/context_guard.py` | 5 | 1 |
-| `botex.ops.curator` | `botex/ops/curator/__init__.py` | 5 | 9 |
+| `botex.ops.curator` | `botex/ops/curator/__init__.py` | 5 | 10 |
 
 ## Domain Dependencies
 
@@ -112,27 +112,27 @@ targeted + integration tests.
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/ops/__init__.py` | — | `test_idle_layers_l1.py` |
-| `botex/ops/curator/__init__.py` | — | `test_brief_curator.py`, `test_curator.py`, `test_curator_f7.py`, `test_curator_tasks.py`, +5 more |
+| `botex/ops/__init__.py` | — | `test_catalog_maintenance.py`, `test_idle_layers_l1.py` |
+| `botex/ops/curator/__init__.py` | — | `test_brief_curator.py`, `test_catalog_maintenance.py`, `test_curator.py`, `test_curator_f7.py`, +6 more |
 | `botex/ops/curator/brief_curator.py` | `is_brief_curator_inflight`, `refresh_bot_brief` | `test_brief_curator.py` |
 | `botex/ops/curator/curator_service.py` | `CuratorResult`, `CuratorLock`, `CuratorService`, `check_active_agent_tasks`, `get_curator_status`, `run_curation_async`, `+1 more` | `test_curator.py`, `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_idle_layers_l1.py`, +2 more |
 | `botex/ops/curator/prompts.py` | `build_curator_user_prompt`, `build_recall_user_prompt`, `build_compiled_truth_user_prompt`, `build_recall_briefing_user_prompt` | `test_curator_and_migration_f4.py`, `test_recall_briefing.py`, `test_recall_curator.py` |
 | `botex/ops/curator/recall_briefing.py` | `parse_briefing_header`, `compute_inputs_hash`, `select_briefing_projects`, `validate_briefing_body`, `compile_project_briefing`, `run_briefing_compilation`, `+5 more` | `test_recall_briefing.py`, `test_recall_briefing_serving.py` |
 | `botex/ops/curator/recall_curator.py` | `synthesize_recall` | `test_recall_curator.py`, `test_recall_observability.py`, `test_tracing_wiring.py` |
-| `botex/ops/curator/tasks.py` | `CuratorTask`, `load_task_state`, `run_due_tasks`, `main` | `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_curator_tasks.py` |
+| `botex/ops/curator/tasks.py` | `CuratorTask`, `load_task_state`, `run_due_tasks`, `main` | `test_catalog_maintenance.py`, `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_curator_tasks.py` |
 | `botex/ops/curator/telegram.py` | `TelegramNotifier`, `get_telegram_config`, `mask_telegram_token`, `format_curator_telegram_message`, `send_telegram_notification` | `test_curator.py` |
-| `botex/ops/maintenance.py` | `warm_provider_metadata`, `sweep_empty_chat_sessions`, `repair_frontmatter_ids`, `rotate_analytics_ledger`, `repair_dead_links` | `test_idle_backend_layers.py`, `test_idle_layers_l1.py` |
+| `botex/ops/maintenance.py` | `warm_provider_metadata`, `sweep_empty_chat_sessions`, `repair_frontmatter_ids`, `rotate_analytics_ledger`, `repair_dead_links`, `catalog_drift_report_path`, `+3 more` | `test_catalog_maintenance.py`, `test_idle_backend_layers.py`, `test_idle_layers_l1.py` |
 | `botex/ops/migrate_projects.py` | `infer_project_from_note`, `migrate_memory_dir`, `consolidate_mangled_windows_dirs`, `ensure_projects_migrated`, `main` | `test_curator_and_migration_f4.py`, `test_curator_f7.py`, `test_memory_v2.py` |
 
 ### `botex.providers`
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/providers/__init__.py` | — | `test_botex.py`, `test_catalog.py`, `test_catalog_drift_integration.py`, `test_catalog_sync.py`, +10 more |
+| `botex/providers/__init__.py` | — | `test_botex.py`, `test_catalog.py`, `test_catalog_drift_integration.py`, `test_catalog_maintenance.py`, +11 more |
 | `botex/providers/adapters/__init__.py` | — | — |
 | `botex/providers/analytics.py` | `is_free_model`, `calculate_cost_usd`, `load_analytics`, `save_analytics`, `log_run`, `check_budget_limit`, `+6 more` | `test_analytics.py`, `test_botex.py`, `test_groq_cloudflare_providers.py`, `test_idle_layers_l1.py`, +2 more |
 | `botex/providers/benchmarks.py` | `fetch_openrouter_benchmarks`, `get_recommended_models`, `estimate_task_tier`, `normalize_task_tier`, `resolve_tier_profile` | `test_challenger_m5_empiric.py`, `test_integration.py`, `test_nvidia_streaming.py`, `test_stage_4_6.py`, +2 more |
-| `botex/providers/catalog.py` | `ModelMetadata`, `ModelCatalog`, `get_consolidated_models`, `get_free_tier_failover_candidates`, `sync_provider_catalogs`, `compute_config_drift` | `test_catalog.py`, `test_catalog_drift_integration.py`, `test_catalog_sync.py`, `test_challenger_m5_empiric.py`, +6 more |
+| `botex/providers/catalog.py` | `ModelMetadata`, `ModelCatalog`, `get_consolidated_models`, `get_free_tier_failover_candidates`, `sync_provider_catalogs`, `compute_config_drift` | `test_catalog.py`, `test_catalog_drift_integration.py`, `test_catalog_maintenance.py`, `test_catalog_sync.py`, +7 more |
 | `botex/providers/denylist.py` | `DenialRecord`, `DenylistFilter`, `matches_pattern`, `get_default_denylist_filter`, `check_model_denylist`, `filter_model_candidates` | `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, `test_denylist.py`, `test_groq_cloudflare_providers.py`, +2 more |
 | `botex/providers/http_pool.py` | `NonClosingAsyncClient`, `get_async_client`, `get_sync_client`, `close_http_pool`, `reset_http_pool` | `test_challenger_m7_concurrency.py`, `test_challenger_m7_empirical.py`, `test_credits_stress.py`, `test_e2e_contracts.py`, +3 more |
 | `botex/providers/pricing.py` | `load_catalog`, `model_price`, `model_supports_tools`, `check_model_tools`, `check_model_price` | `test_botex.py`, `test_groq_cloudflare_providers.py`, `test_providers.py` |
@@ -146,12 +146,12 @@ targeted + integration tests.
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/server/__init__.py` | — | `test_brief_curator.py`, `test_catalog_drift_integration.py`, `test_containment_recall_gate.py`, `test_edge_delegation_api.py`, +8 more |
+| `botex/server/__init__.py` | — | `test_brief_curator.py`, `test_catalog_drift_integration.py`, `test_catalog_maintenance.py`, `test_containment_recall_gate.py`, +9 more |
 | `botex/server/chat.py` | `ChatMessage`, `ChatSession`, `ChatManager`, `execute_chat_tool`, `stream_chat_turn`, `chat_turn` | `test_chat.py`, `test_chat_error_observability.py`, `test_server_f4_provenance.py`, `test_stage_4_8.py` |
-| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +20 more |
+| `botex/server/config.py` | `WorkspaceOutOfBounds`, `is_cross_host_windows_path`, `get_mcp_client_origin`, `load_config`, `set_local_config`, `normalize_provider_name`, `+24 more` | `test_botex.py`, `test_brief_curator.py`, `test_challenger_m4_3.py`, `test_challenger_m5_empiric.py`, +21 more |
 | `botex/server/i18n.py` | `detect_language`, `init_language`, `set_language`, `get_language`, `t` | — |
 | `botex/server/plugins.py` | `PluginError`, `PluginValidationError`, `PluginExecutionError`, `PluginExecutionTimeout`, `PluginPermissionError`, `BoteXPluginDefinition`, `+5 more` | `test_approval.py`, `test_plugins_creator.py` |
-| `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+92 more` | `test_brief_curator.py`, `test_catalog_drift_integration.py`, `test_challenger_m7_empirical.py`, `test_challenger_m8_empiric.py`, +18 more |
+| `botex/server/server_cloud.py` | `TaskCreateRequest`, `ApprovalDecisionRequest`, `MemorySaveRequest`, `ChatRequest`, `SaveChatToMemoryRequest`, `SkillInstallRequest`, `+92 more` | `test_brief_curator.py`, `test_catalog_drift_integration.py`, `test_catalog_maintenance.py`, `test_challenger_m7_empirical.py`, +19 more |
 | `botex/server/task_store.py` | `save_task_persistent`, `load_task_persistent`, `load_tasks_persistent` | `test_server_cloud.py`, `test_server_f4_provenance.py`, `test_task_store.py` |
 | `botex/server/ui.py` | `colors_enabled`, `paint`, `title`, `accent`, `ok`, `warn`, `+3 more` | `test_botex.py` |
 
@@ -173,7 +173,7 @@ targeted + integration tests.
 | `botex/tools/file_tools.py` | `get_file_outline`, `read_file_lines`, `read_file`, `create_file`, `delete_file`, `move_file`, `+1 more` | `test_botex.py`, `test_patch_concurrency.py` |
 | `botex/tools/net_tools.py` | `resolve_net_scope`, `read_url`, `fetch_url` | `test_botex.py` |
 | `botex/tools/patch_engine.py` | `SnapshotManager`, `validate_syntax`, `apply_fuzzy_patch`, `apply_patch` | `test_botex.py`, `test_edge_runner.py`, `test_patch_concurrency.py`, `test_state_checkpoint.py` |
-| `botex/tools/security.py` | `SecurityError`, `mask_secrets`, `coerce_text`, `sanitize_identifier`, `sanitize_for_storage`, `wrap_untrusted_content`, `+8 more` | `test_botex.py`, `test_credits_stress.py`, `test_edge_delegation.py`, `test_recall_briefing_serving.py`, +6 more |
+| `botex/tools/security.py` | `SecurityError`, `mask_secrets`, `sanitize_error_text`, `exception_evidence`, `coerce_text`, `sanitize_identifier`, `+10 more` | `test_botex.py`, `test_credits_stress.py`, `test_edge_delegation.py`, `test_recall_briefing_serving.py`, +6 more |
 | `botex/tools/vision.py` | `validate_image_safety`, `compute_dhash`, `hamming_distance`, `triage_visual_defect` | `test_vision_pipeline.py` |
 
 ### `root`

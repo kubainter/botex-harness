@@ -31,7 +31,21 @@ _STATE_FILENAME = "tasks_state.json"
 class CuratorTask:
     name: str
     interval_s: float
-    fn: Callable[[str], Dict[str, Any]]
+    fn: Callable[..., Dict[str, Any]]
+    # Opt-in force propagation: only tasks whose inner frequency gate understands
+    # ``force`` receive it — for the rest, force is purely a curator-interval bypass.
+    accepts_force: bool = False
+
+
+def _bounded_error(exc: BaseException) -> str:
+    """Typed, length-bounded exception evidence for machine-readable failure
+    reports — free text stays out because it can carry secret-bearing URLs."""
+    try:
+        from botex.tools.security import exception_evidence
+
+        return exception_evidence(exc)[:220]
+    except Exception:
+        return type(exc).__name__
 
 
 def _task_index_sync(workspace_dir: str) -> Dict[str, Any]:
@@ -75,6 +89,43 @@ def _task_ledger_rotation(workspace_dir: str) -> Dict[str, Any]:
     from botex.ops.maintenance import rotate_analytics_ledger
 
     return dict(rotate_analytics_ledger(workspace_dir=workspace_dir))
+
+
+def _task_catalog_drift_sync(workspace_dir: str, force: bool = False) -> Dict[str, Any]:
+    """Catalog drift maintenance tick: cheap local freshness check most ticks,
+    live provider sync only when the inner 12h gate (or total-outage retry)
+    demands it. Returns compact counts only — never raw errors, URLs, or paths."""
+    from botex.ops import maintenance as _maintenance
+
+    cfg = _maintenance._load_config()
+    result = _maintenance.run_catalog_drift_sync(cfg, force=force)
+    status = str(result.get("status") or "unknown")
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    ok_count = result.get("providers_ok")
+    err_count = result.get("providers_error")
+    if ok_count is None or err_count is None:
+        ok_count, err_count = _maintenance.count_provider_evidence(result.get("sync"))
+    return {
+        "status": status,
+        "drifted": _bounded_int(summary.get("drifted")),
+        "no_data": _bounded_int(summary.get("no_data")),
+        "present": _bounded_int(summary.get("present")),
+        "providers_ok": _bounded_int(ok_count),
+        "providers_error": _bounded_int(err_count),
+    }
+
+
+def _bounded_int(value: Any) -> int:
+    """Zero-fallback int coercion — malformed report values must not turn a
+    compact maintenance result into a task failure."""
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0
+        if value != value or value in (float("inf"), float("-inf")):
+            return 0
+        return int(value)
+    except Exception:
+        return 0
 
 
 def _task_provider_warmup(workspace_dir: str) -> Dict[str, Any]:
@@ -192,6 +243,14 @@ DEFAULT_TASKS: Sequence[CuratorTask] = (
     CuratorTask("frontmatter_repair", TICK_INTERVAL_S, _task_frontmatter_repair),
     CuratorTask("chat_sweep", TICK_INTERVAL_S, _task_chat_sweep),
     CuratorTask("ledger_rotation", TICK_INTERVAL_S, _task_ledger_rotation),
+    # Registered before provider_warmup: after a real sync the warmup reuses the
+    # fresh shared cache instead of issuing a duplicate /models request.
+    CuratorTask(
+        "catalog_drift_sync",
+        TICK_INTERVAL_S,
+        _task_catalog_drift_sync,
+        accepts_force=True,
+    ),
     CuratorTask("provider_warmup", TICK_INTERVAL_S, _task_provider_warmup),
     CuratorTask("scratchpad_prune", 86400.0, _task_scratchpad_prune),
     CuratorTask("temp_handoff_sweep", 3600.0, _task_temp_handoff_sweep),
@@ -259,10 +318,13 @@ def run_due_tasks(
             continue
         started = time.monotonic()
         try:
-            result = task.fn(workspace_dir)
+            if task.accepts_force:
+                result = task.fn(workspace_dir, force=force)
+            else:
+                result = task.fn(workspace_dir)
         except Exception as exc:
-            logger.warning("curator task %s failed: %s", task.name, exc)
-            report[task.name] = {"status": "failed", "error": str(exc)}
+            logger.warning("curator task %s failed: %s", task.name, type(exc).__name__)
+            report[task.name] = {"status": "failed", "error": _bounded_error(exc)}
             continue
         state[task.name] = {"last_run": now}
         report[task.name] = {

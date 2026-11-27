@@ -123,6 +123,59 @@ def mask_secrets(text: str) -> str:
     return text
 
 
+_URL_PATTERN = re.compile(r"(?:https?://|//)[^\s'\")\]]+", re.IGNORECASE)
+
+# Secret-shaped key/value forms mask_secrets does not enumerate: bare ``key=``
+# (Google-style credentials), ``sig=``, ``access_token=`` and Authorization
+# header fragments outside a full URL.
+_ERROR_EXTRA_SECRET_RE = re.compile(
+    r"(?i)\b(x-api-key|api[-_]?key|key|client[-_]?secret|access[-_]?token|token|secret|password|sig|authorization)"
+    r'\s*["\']?\s*[=:]\s*(?:(?:bearer|basic|token|digest)\s+)?["\']?[^\s"\',&]{4,}["\']?'
+)
+
+
+def sanitize_error_text(text: Any, max_len: int = 200) -> str:
+    """Error text safe for persistence: raw URLs removed wholesale (query
+    strings and userinfo can carry secrets regexes cannot enumerate), residual
+    secrets masked, final length trim applied only after redaction. URLs in
+    exceptions are diagnostic noise compared to the leak risk — provider and
+    host context belongs in structured fields."""
+    if text is None:
+        return ""
+    # Wide anti-ReDoS input bound only — the final ``max_len`` trim must run
+    # after redaction, otherwise a secret cut mid-way at the cap boundary
+    # leaves an unredacted prefix below the length thresholds of the patterns.
+    bounded = str(text).strip()[:4096]
+    stripped = _URL_PATTERN.sub("[URL]", bounded)
+    stripped = _ERROR_EXTRA_SECRET_RE.sub("[REDACTED]", stripped)
+    return mask_secrets(stripped)[:max_len]
+
+
+def exception_evidence(exc: BaseException) -> str:
+    """Persistence-safe error evidence built exclusively from type identity and
+    integer codes — never from ``str(exc)``. Exception free-text can embed
+    request URLs carrying query secrets or userinfo, and regex masking is a
+    taint step rather than a sanitizing barrier, so the only architectural fix
+    is to keep the message body out of persisted evidence entirely. The class
+    name plus optional numeric context (HTTP status, errno) stays actionable
+    for operators: auth vs rate-limit vs transport failure remain distinguishable."""
+    evidence = type(exc).__name__
+    attrs: "list[str]" = []
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is None:
+        status = getattr(exc, "code", None)  # urllib.error.HTTPError
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        attrs.append(f"http={status}")
+    errno_val = getattr(exc, "errno", None)
+    if isinstance(errno_val, int) and not isinstance(errno_val, bool) and errno_val:
+        attrs.append(f"errno={errno_val}")
+    if attrs:
+        evidence = f"{evidence}[{','.join(attrs)}]"
+    return evidence
+
+
 def coerce_text(text: Any) -> str:
     """
     Coerce a value to str for logs, errors and stored text while severing static

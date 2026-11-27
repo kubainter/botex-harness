@@ -116,16 +116,29 @@ def test_night_pulse_drift_emits_stderr_lines(_wired, capsys):
 def test_night_pulse_sync_exception_does_not_escape(_wired, monkeypatch):
     import server as botex_server
 
-    def _boom(registry, provider_names, cache_file=None, timeout=10.0):
+    def _boom(registry, provider_names, cache_file=None, timeout=10.0, provider_configs=None):
         raise RuntimeError("simulated sync explosion")
 
     monkeypatch.setattr(_wired["catalog_mod"], "sync_provider_catalogs", _boom)
 
     res = botex_server._execute_night_pulse_cycle()
     assert res["catalog_drift"]["status"] == "ok"
-    assert res["catalog_sync"] == {}
+    # Plan 062: a sync-level exception must leave countable error evidence —
+    # an empty sync section would read as a false-green zero-error report.
+    assert res["catalog_sync"]["groq"]["status"] == "error"
     # Report is still written even when the sync blew up.
     assert _wired["report_path"].is_file()
+    import json as _json
+
+    on_disk = _json.loads(_wired["report_path"].read_text(encoding="utf-8"))
+    assert on_disk["sync"]["groq"]["status"] == "error"
+    assert "sync_exception" in on_disk
+    # The evidence must identify the simulated RuntimeError, not a TypeError
+    # from a mock signature mismatch at the call boundary. Evidence is typed
+    # by design (class name + numeric codes) — free text never persists.
+    assert "RuntimeError" in on_disk["sync_exception"]
+    assert "TypeError" not in on_disk["sync_exception"]
+    assert "simulated sync explosion" not in on_disk["sync_exception"]
 
 
 def test_night_pulse_drift_disabled_by_config(_wired, monkeypatch, tmp_path: Path):
