@@ -10,7 +10,7 @@
   (local + global/swarm), Skill Vault, and a Vue 3 + Vite PWA frontend (`web/`).
 - **Runtime & Stack:** Python `>=3.13,<3.15` (`openai`, `mcp`, `fastapi`, `httpx2`,
   `websockets`, `sse-starlette`), Vue 3 + TypeScript + Pinia + Tailwind in `web/`.
-- **Codebase footprint:** 80 Python modules (`server.py` + `botex/`), 110 test files (`tests/`).
+- **Codebase footprint:** 80 Python modules (`server.py` + `botex/`), 111 test files (`tests/`).
 - **Change flow:** `local changes -> PR -> merge to main -> deploy to VPS` (never patch VPS
   directly; `web/src/**` must never expose internal backend paths or config keys).
 - **Verification commands:** `ruff check .`, `ruff format --check .`,
@@ -80,14 +80,14 @@ targeted + integration tests.
 
 | File | Key Public Symbols | Tests |
 |---|---|---|
-| `botex/edge/__init__.py` | — | `test_edge_brief_sync.py`, `test_edge_cli_daemon.py`, `test_edge_delegation.py`, `test_edge_integration.py`, +2 more |
-| `botex/edge/adapters.py` | `HarnessLimitsCollector`, `HarnessInventoryService`, `EpochCheckpointManager`, `normalize_limits_payload`, `discover_local_harnesses`, `check_harness_eligible`, `+3 more` | `test_edge_harness_limits.py`, `test_groq_cloudflare_providers.py`, `test_host_os_driver.py`, `test_work_order_supervisor.py` |
-| `botex/edge/credentials.py` | `get_edge_credentials_dir`, `validate_credential_id`, `edge_token_path`, `extract_token_jti`, `save_edge_token`, `load_edge_token`, `+3 more` | `test_edge_cli_daemon.py`, `test_edge_credentials.py` |
+| `botex/edge/__init__.py` | — | `test_edge_brief_sync.py`, `test_edge_cli_daemon.py`, `test_edge_credentials.py`, `test_edge_delegation.py`, +3 more |
+| `botex/edge/adapters.py` | `HarnessLimitsCollector`, `HarnessInventoryService`, `EpochCheckpointManager`, `normalize_limits_payload`, `discover_local_harnesses`, `check_harness_eligible`, `+6 more` | `test_edge_argv_dispatch.py`, `test_edge_harness_limits.py`, `test_groq_cloudflare_providers.py`, `test_host_os_driver.py`, +1 more |
+| `botex/edge/credentials.py` | `get_edge_credentials_dir`, `validate_credential_id`, `edge_token_path`, `extract_token_jti`, `save_edge_token`, `load_edge_token`, `+3 more` | `test_edge_cli_daemon.py`, `test_edge_credentials.py`, `test_edge_integration.py`, `test_edge_qos_daemon.py`, +1 more |
 | `botex/edge/delegation.py` | `DelegationError`, `EdgeSkillSpec`, `EdgeDelegationPolicy`, `EdgeDelegationHandler`, `validate_params`, `verify_skill_digest` | `test_edge_delegation.py` |
-| `botex/edge/host_os_driver.py` | `SingleInstanceLockError`, `SingleInstanceLock`, `WindowsJobGuard`, `HostOSDriver`, `default_swarm_home`, `kill_posix_process_group`, `+6 more` | `test_host_os_driver.py` |
-| `botex/edge/runner.py` | `EdgeActiveOrdersStore`, `EdgeOutboxBuffer`, `EdgeCapabilities`, `EdgeRunner`, `EdgeWorkspaceAgent`, `EdgeHostDaemon`, `+7 more` | `test_edge_brief_sync.py`, `test_edge_qos_daemon.py`, `test_edge_runner.py`, `test_tethered_bot_visibility.py` |
+| `botex/edge/host_os_driver.py` | `SingleInstanceLockError`, `SingleInstanceLock`, `WindowsJobGuard`, `HostOSDriver`, `default_swarm_home`, `kill_posix_process_group`, `+7 more` | `test_edge_runner.py`, `test_host_os_driver.py` |
+| `botex/edge/runner.py` | `EdgeActiveOrdersStore`, `EdgeOutboxBuffer`, `EdgeCapabilities`, `EdgeRunner`, `EdgeWorkspaceAgent`, `EdgeHostDaemon`, `+7 more` | `test_edge_brief_sync.py`, `test_edge_integration.py`, `test_edge_qos_daemon.py`, `test_edge_runner.py`, +1 more |
 | `botex/edge/verify_gate.py` | `default_supervisor_ledger_path`, `build_clean_verify_env`, `scan_test_taint`, `append_supervisor_ledger`, `run_external_verify` | `test_verify_gate.py` |
-| `botex/edge/workspaces.py` | `get_host_workspaces_path`, `generate_workspace_id`, `generate_daemon_device_id`, `is_opaque_workspace_id`, `is_opaque_host_id`, `load_workspaces_registry`, `+9 more` | `test_edge_cli_daemon.py`, `test_edge_qos_daemon.py`, `test_edge_workspaces.py` |
+| `botex/edge/workspaces.py` | `get_host_workspaces_path`, `generate_workspace_id`, `generate_daemon_device_id`, `is_opaque_workspace_id`, `is_opaque_host_id`, `load_workspaces_registry`, `+9 more` | `test_edge_cli_daemon.py`, `test_edge_integration.py`, `test_edge_qos_daemon.py`, `test_edge_runner.py`, +1 more |
 
 ### `botex.mcp_bridge`
 
