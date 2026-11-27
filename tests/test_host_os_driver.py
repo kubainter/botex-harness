@@ -594,3 +594,72 @@ def test_night_pulse_syncs_fences_and_runs_verify(_isolated_cloud_swarm, tmp_pat
         check=True,
     )
     assert "night-pulse: 1 cycle(s)" in cli_proc.stdout
+
+
+def test_pdeathsig_preexec_platform_and_linux_prctl(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(driver_module.sys, "platform", "win32")
+    assert driver_module.pdeathsig_preexec() is None
+
+    monkeypatch.setattr(driver_module.sys, "platform", "darwin")
+    assert driver_module.pdeathsig_preexec() is None
+
+    calls: list[tuple[int, int, int, int, int]] = []
+
+    class _FakeLibc:
+        def prctl(self, option: int, arg2: int, arg3: int, arg4: int, arg5: int) -> int:
+            calls.append((option, arg2, arg3, arg4, arg5))
+            return 0
+
+    monkeypatch.setattr(driver_module.sys, "platform", "linux")
+    monkeypatch.setattr(driver_module.ctypes, "CDLL", lambda *a, **kw: _FakeLibc())
+    hook = driver_module.pdeathsig_preexec()
+    assert callable(hook)
+    hook()
+    assert len(calls) == 1
+    assert calls[0][0] == 1
+    assert calls[0][1] == int(getattr(signal, "SIGKILL", 9))
+
+    class _FailPrctlLibc:
+        def prctl(self, option: int, arg2: int, arg3: int, arg4: int, arg5: int) -> int:
+            return -1
+
+    monkeypatch.setattr(driver_module.ctypes, "CDLL", lambda *a, **kw: _FailPrctlLibc())
+    fail_hook = driver_module.pdeathsig_preexec()
+    assert callable(fail_hook)
+    with pytest.raises(OSError, match="PR_SET_PDEATHSIG"):
+        fail_hook()
+
+    monkeypatch.setattr(driver_module.ctypes, "CDLL", lambda *a, **kw: object())
+    with pytest.raises(OSError, match="prctl"):
+        driver_module.pdeathsig_preexec()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux PR_SET_PDEATHSIG test")
+def test_pdeathsig_kills_child_when_parent_dies(tmp_path: Path):
+    pid_file = tmp_path / "child.pid"
+    hook_code = (
+        "import os, subprocess, sys, time\n"
+        "from botex.edge.host_os_driver import pdeathsig_preexec\n"
+        f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+        "preexec_fn=pdeathsig_preexec(), start_new_session=True)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(30)\n"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", hook_code])
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not pid_file.exists():
+        time.sleep(0.05)
+    assert pid_file.is_file()
+    child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+    parent.kill()
+    parent.wait(timeout=5)
+    end = time.monotonic() + 5.0
+    alive = True
+    while time.monotonic() < end:
+        try:
+            os.kill(child_pid, 0)
+            time.sleep(0.05)
+        except ProcessLookupError:
+            alive = False
+            break
+    assert alive is False

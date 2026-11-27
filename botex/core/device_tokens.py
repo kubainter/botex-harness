@@ -22,7 +22,12 @@ except (ImportError, ValueError):
     from security import coerce_text, mask_secrets, sanitize_identifier
 
 _TOKEN_PREFIX = "btxd_"
-_VALID_SCOPE_PREFIXES = frozenset({"task_pull", "result_push", "delegate_local"})
+_VALID_SCOPE_PREFIXES = frozenset(
+    {"task_pull", "result_push", "delegate_local", "work_order_create"}
+)
+# Lifecycle-granting scopes must name one concrete workspace: the wildcard
+# workspace is refused at normalization and never expanded on lookup.
+_EXACT_WORKSPACE_SCOPE_PREFIXES = frozenset({"work_order_create"})
 _DEFAULT_TTL_S = 30 * 24 * 3600
 _MAX_TTL_S = 90 * 24 * 3600
 
@@ -40,6 +45,8 @@ def _normalize_scope(scope: str) -> Optional[str]:
         return None
     clean_ws = ws.strip()
     if not clean_ws:
+        return None
+    if kind in _EXACT_WORKSPACE_SCOPE_PREFIXES and "*" in clean_ws:
         return None
     return f"{kind}:{clean_ws}"
 
@@ -65,6 +72,8 @@ class DeviceTokenRecord:
         if req in self.scopes:
             return True
         kind, _ = req.split(":", 1)
+        if kind in _EXACT_WORKSPACE_SCOPE_PREFIXES:
+            return False
         return f"{kind}:*" in self.scopes
 
     def to_dict(self) -> Dict[str, Any]:
