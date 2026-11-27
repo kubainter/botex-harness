@@ -2053,9 +2053,9 @@ def _catalog_drift_report_file() -> Path:
     if _CATALOG_DRIFT_REPORT_PATH is not None:
         return Path(_CATALOG_DRIFT_REPORT_PATH)
     try:
-        from botex.config import PROJECT_ROOT
+        from botex.ops import maintenance as _maintenance
 
-        return PROJECT_ROOT / ".botex" / "catalog_drift.json"
+        return _maintenance.catalog_drift_report_path()
     except Exception:
         return Path(_root_dir) / ".botex" / "catalog_drift.json"
 
@@ -2087,14 +2087,25 @@ def _catalog_drift_health() -> Dict[str, Any]:
                     drifted_ids.append(f"{prov}:{mid}")
 
         sync_results = report.get("sync")
-        sync_errors = 0
-        if isinstance(sync_results, dict):
-            sync_errors = sum(
-                1
-                for s in sync_results.values()
-                if isinstance(s, dict) and s.get("status") == "error"
-            )
+        try:
+            from botex.ops import maintenance as _maintenance
 
+            providers_ok, sync_errors = _maintenance.count_provider_evidence(sync_results)
+        except Exception:
+            sync_errors = 0
+            providers_ok = 0
+            if isinstance(sync_results, dict):
+                for s in sync_results.values():
+                    if not isinstance(s, dict):
+                        continue
+                    if s.get("status") == "error":
+                        sync_errors += 1
+                    elif s.get("status") == "ok":
+                        providers_ok += 1
+
+        # Positive-evidence surfacing: a report whose sync section carries no
+        # successful provider must be distinguishable from a healthy one — a
+        # bare status=ok with sync_errors=0 is false green otherwise. Count-only.
         return {
             "status": "ok",
             "generated_at": generated_at,
@@ -2102,6 +2113,8 @@ def _catalog_drift_health() -> Dict[str, Any]:
             "per_provider": per_provider,
             "drifted_ids": drifted_ids,
             "sync_errors": sync_errors,
+            "providers_ok": providers_ok,
+            "no_evidence": providers_ok == 0,
         }
     except Exception:
         return {"status": "unknown"}

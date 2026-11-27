@@ -23,6 +23,7 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -642,3 +643,317 @@ def repair_dead_links(workspace_dir: str = ".", apply: bool = False) -> Dict[str
         except Exception as exc:
             logger.warning("dead-link reindex failed: %s", type(exc).__name__)
     return results
+
+
+# ============================================================================
+# Catalog drift sync (extracted from root server.py — plan 062)
+# ============================================================================
+
+
+def catalog_drift_report_path() -> Path:
+    """Single report-path source: rooted at the installation/config root,
+    never at an arbitrary task workspace or process cwd. The fallback derives
+    from this file's own location (ops -> botex -> installation root), which is
+    deterministic for both repo checkouts and installed deployments."""
+    try:
+        from botex.server.config import PROJECT_ROOT
+
+        return PROJECT_ROOT / ".botex" / "catalog_drift.json"
+    except Exception:
+        return Path(__file__).resolve().parents[2] / ".botex" / "catalog_drift.json"
+
+
+def load_cached_catalogs(
+    provider_names: list,
+    providers_cfg: Dict[str, Any],
+    cache_file: Path,
+) -> Dict[str, Dict[str, Any]]:
+    """Load per-provider catalogs from the shared cache file only — never network."""
+    from botex.providers.catalog import ModelCatalog, ModelMetadata
+
+    try:
+        raw = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+    except Exception:
+        raw = {}
+    entries = raw.get("catalogs") if isinstance(raw, dict) else None
+    if not isinstance(entries, dict):
+        entries = {}
+
+    catalogs: Dict[str, Dict[str, Any]] = {}
+    for name in provider_names:
+        models: Dict[str, Any] = {}
+        try:
+            pcfg = providers_cfg.get(name) if isinstance(providers_cfg, dict) else None
+            cat = ModelCatalog(
+                provider_name=name,
+                provider_cfg=pcfg if isinstance(pcfg, dict) else None,
+                cache_file=cache_file,
+            )
+            entry = entries.get(cat.cache_key)
+            raw_cat = (
+                (entry.get("catalog") or entry.get("models")) if isinstance(entry, dict) else None
+            )
+            if isinstance(raw_cat, dict):
+                models = {
+                    mid: ModelMetadata.from_dict(d if isinstance(d, dict) else {}, default_id=mid)
+                    for mid, d in raw_cat.items()
+                    if isinstance(mid, str)
+                }
+        except Exception:
+            models = {}
+        catalogs[name] = models
+    return catalogs
+
+
+def count_provider_evidence(sync_results: Any) -> tuple:
+    """(ok_count, error_count) over per-provider sync result entries.
+
+    Shared by the freshness gate and the health reader so positive-evidence
+    semantics cannot drift apart."""
+    ok_count = 0
+    error_count = 0
+    if isinstance(sync_results, dict):
+        for entry in sync_results.values():
+            if not isinstance(entry, dict):
+                continue
+            status = entry.get("status")
+            if status == "ok":
+                ok_count += 1
+            elif status == "error":
+                error_count += 1
+    return ok_count, error_count
+
+
+def run_catalog_drift_sync(
+    cfg: Dict[str, Any],
+    *,
+    force: bool = False,
+    report_path: "Path | None" = None,
+) -> Dict[str, Any]:
+    """Live catalog sync + config drift detection. Never raises.
+
+    Refreshes the shared provider-model cache (one GET /models per provider),
+    diffs configured model ids against the freshly loaded cached catalogs,
+    persists the drift report atomically, and emits count-only stderr lines.
+    The static config is never written.
+
+    Frequency contract: a fresh previous report skips the network only when it
+    carries positive evidence (at least one provider ``ok``). A fresh but
+    all-error report must not suppress retry for 12 hours; ``force`` bypasses
+    the gate outright. A sync-level exception still writes countable
+    per-provider error evidence so health never reads a failed run as a clean
+    empty report.
+    """
+    try:
+        return _run_catalog_drift_sync_impl(cfg, force=force, report_path=report_path)
+    except Exception:
+        # Absolute never-raises: even import/config catastrophes surface as a
+        # compact countable status, never as an exception into the curator tick.
+        try:
+            import sys
+
+            sys.stderr.write("[BoteX] catalog drift sync failed\n")
+        except Exception:
+            pass
+        return {"status": "error", "providers_ok": 0, "providers_error": 0}
+
+
+def _run_catalog_drift_sync_impl(
+    cfg: Dict[str, Any],
+    *,
+    force: bool = False,
+    report_path: "Path | None" = None,
+) -> Dict[str, Any]:
+    import sys
+
+    from botex.providers import catalog as catalog_mod
+    from botex.providers.providers import ProviderRegistry
+
+    sync_cfg = cfg.get("catalog_sync") if isinstance(cfg, dict) else None
+    if not isinstance(sync_cfg, dict):
+        sync_cfg = {}
+    if not bool(sync_cfg.get("enabled", True)):
+        return {"status": "disabled"}
+
+    default_providers = ["google", "groq", "nvidia", "cloudflare", "openrouter", "openrouter-free"]
+    raw_providers = sync_cfg.get("providers")
+    if raw_providers is None or not isinstance(raw_providers, (list, tuple)):
+        provider_names = list(default_providers)
+    else:
+        provider_names = [str(p).strip() for p in raw_providers if str(p).strip()]
+        if not provider_names:
+            # Explicit empty configuration means no providers — distinguishable
+            # no-data, never silently reinterpreted as the default set.
+            return {"status": "no_providers", "providers_ok": 0, "providers_error": 0}
+    try:
+        timeout = float(sync_cfg.get("timeout_s", 10.0) or 10.0)
+    except (ValueError, TypeError):
+        timeout = 10.0
+    raw_interval = sync_cfg.get("interval_s")
+    try:
+        interval_s = 43200.0 if raw_interval is None else float(raw_interval)
+    except (ValueError, TypeError):
+        interval_s = 43200.0
+    if not math.isfinite(interval_s) or interval_s < 0.0:
+        interval_s = 43200.0
+
+    resolved_report = Path(report_path) if report_path is not None else catalog_drift_report_path()
+
+    # Frequency gate: a live sync is a per-provider network call and must stay
+    # a ~daily maintenance job. Positive-evidence requirement: only a report
+    # with at least one successful provider counts as a successful fresh sync.
+    if interval_s > 0.0 and not force:
+        try:
+            if resolved_report.exists():
+                prev = json.loads(resolved_report.read_text(encoding="utf-8"))
+                prev_ts = float(prev.get("generated_at") or 0.0) if isinstance(prev, dict) else 0.0
+                age = time.time() - prev_ts
+                # Negative age (clock skew / future timestamp) or non-finite ts
+                # must not suppress syncs indefinitely — re-sync rewrites the ts.
+                if math.isfinite(prev_ts) and prev_ts > 0.0 and 0.0 <= age < interval_s:
+                    prev_ok, _prev_err = count_provider_evidence(
+                        prev.get("sync") if isinstance(prev, dict) else None
+                    )
+                    if prev_ok >= 1:
+                        return {
+                            "status": "skipped_fresh",
+                            "age_s": round(age, 1),
+                            "sync": prev.get("sync") if isinstance(prev, dict) else {},
+                            "summary": prev.get("summary") if isinstance(prev, dict) else {},
+                        }
+        except Exception:
+            pass
+
+    cat_cfg = cfg.get("catalog") if isinstance(cfg, dict) else None
+    cat_cache = cat_cfg.get("cache_file") if isinstance(cat_cfg, dict) else None
+    if isinstance(cat_cache, str) and cat_cache.strip():
+        cache_file = Path(cat_cache.strip())
+        if not cache_file.is_absolute():
+            try:
+                from botex.server.config import PROJECT_ROOT
+
+                cache_file = PROJECT_ROOT / cache_file
+            except Exception:
+                cache_file = cache_file.resolve()
+    else:
+        cache_file = catalog_mod.CACHE_FILE_DEFAULT
+
+    sync_fn = getattr(catalog_mod, "sync_provider_catalogs", None)
+    drift_fn = getattr(catalog_mod, "compute_config_drift", None)
+    if sync_fn is None or drift_fn is None:
+        return {"status": "unavailable", "reason": "catalog sync API missing"}
+
+    providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else {}
+    if not isinstance(providers_cfg, dict):
+        providers_cfg = {}
+
+    sync_results: Dict[str, Any] = {}
+    sync_exception = ""
+    try:
+        sync_results = sync_fn(
+            ProviderRegistry,
+            provider_names,
+            cache_file=cache_file,
+            timeout=timeout,
+            provider_configs=providers_cfg,
+        )
+        if not isinstance(sync_results, dict):
+            sync_results = {}
+    except Exception as exc:
+        sys.stderr.write("[BoteX] catalog sync failed\n")
+        try:
+            from botex.tools.security import sanitize_error_text
+
+            masked = sanitize_error_text(str(exc) or "")
+        except Exception:
+            masked = ""
+        sync_exception = f"{type(exc).__name__}: {masked}" if masked else type(exc).__name__
+        # Countable no-evidence: every attempted provider must surface as an
+        # error entry — an empty sync section would read as zero errors.
+        sync_results = {
+            name: {
+                "status": "error",
+                "model_count": 0,
+                "error": sync_exception,
+                "fetched_at": 0.0,
+            }
+            for name in provider_names
+        }
+
+    # Persistence-boundary sanitization: per-provider error strings arrive
+    # pre-masked from catalog.py, but raw URLs (query secrets, userinfo) survive
+    # that masking — scrub them before they hit the report or the return value.
+    try:
+        from botex.tools.security import sanitize_error_text as _sanitize_err
+
+        for entry in sync_results.values():
+            if isinstance(entry, dict) and isinstance(entry.get("error"), str) and entry["error"]:
+                entry["error"] = _sanitize_err(entry["error"])
+    except Exception:
+        pass
+
+    try:
+        catalogs = load_cached_catalogs(provider_names, providers_cfg, cache_file)
+        drift_entries = drift_fn(providers_cfg, catalogs)
+        if not isinstance(drift_entries, list):
+            drift_entries = []
+    except Exception:
+        drift_entries = []
+        sys.stderr.write("[BoteX] catalog drift computation failed\n")
+
+    drifted = [
+        e for e in drift_entries if isinstance(e, dict) and e.get("present_in_catalog") is False
+    ]
+    if drifted:
+        sys.stderr.write(
+            f"[BoteX] DRIFT: {len(drifted)} configured model entries absent from live catalog\n"
+        )
+
+    report = {
+        "generated_at": time.time(),
+        "generated_at_iso": datetime.now().isoformat(),
+        "sync": sync_results,
+        "drift": drift_entries,
+        "summary": {
+            "drifted": len(drifted),
+            "no_data": sum(
+                1
+                for e in drift_entries
+                if isinstance(e, dict) and e.get("present_in_catalog") is None
+            ),
+            "present": sum(
+                1
+                for e in drift_entries
+                if isinstance(e, dict) and e.get("present_in_catalog") is True
+            ),
+        },
+    }
+    if sync_exception:
+        report["sync_exception"] = sync_exception
+    written_path: "Path | None" = None
+    tmp_path: "Path | None" = None
+    try:
+        written_path = resolved_report
+        written_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = written_path.with_name(f"{written_path.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        os.replace(str(tmp_path), str(written_path))
+    except Exception:
+        written_path = None
+        sys.stderr.write("[BoteX] catalog drift report write failed\n")
+        try:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+    ok_count, error_count = count_provider_evidence(sync_results)
+    return {
+        "status": "ok",
+        "sync": sync_results,
+        "drift": drift_entries,
+        "summary": report["summary"],
+        "providers_ok": ok_count,
+        "providers_error": error_count,
+        "report_path": str(written_path) if written_path else "",
+    }

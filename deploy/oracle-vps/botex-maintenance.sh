@@ -10,7 +10,16 @@
 set -euo pipefail
 
 BOTEX_DIR="${BOTEX_DIR:-/opt/botex}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+# Prefer the deployment virtualenv (the cloud service runs on it too); system
+# python3 may lack the locked dependencies. Operator override still wins.
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if [ -x "$BOTEX_DIR/.venv/bin/python" ]; then
+        PYTHON_BIN="$BOTEX_DIR/.venv/bin/python"
+    else
+        PYTHON_BIN="python3"
+    fi
+fi
 
 log() { printf '[botex-maintenance] %s\n' "$*"; }
 

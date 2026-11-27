@@ -234,3 +234,45 @@ def test_wikilink_redos_resilience():
     elapsed = time.monotonic() - t0
     assert elapsed < 0.25
     assert links == ["valid_link"]
+
+
+def test_sanitize_error_text_strips_urls_and_secrets():
+    from botex.tools.security import sanitize_error_text
+
+    secret = "mycustomsecret123456"
+    # Bare ?key= query params and userinfo survive mask_secrets alone — the
+    # whole URL must go.
+    out = sanitize_error_text(
+        f"GET https://api.example.test/v1/models?key={secret} via https://user:{secret}@proxy.example.test failed"
+    )
+    assert secret not in out
+    assert "api.example.test" not in out
+    assert "proxy.example.test" not in out
+    assert "[URL]" in out
+
+    # Non-URL secrets still masked residually.
+    out2 = sanitize_error_text(f"api_key={SECRET} exploded")
+    assert SECRET not in out2
+
+    # Length cap and None tolerance.
+    assert len(sanitize_error_text("x" * 500)) <= 200
+    assert sanitize_error_text(None) == ""
+
+
+def test_sanitize_error_text_bare_key_and_schemeless():
+    from botex.tools.security import sanitize_error_text
+
+    secret = "mycustomsecret123456"
+    # Bare key= outside any URL — Google-style credential form.
+    out = sanitize_error_text(f"GET /models?key={secret} failed")
+    assert secret not in out
+    # Scheme-less/protocol-relative URL forms.
+    out2 = sanitize_error_text(f"GET //api.example.test/v1/models?key={secret}")
+    assert secret not in out2
+    assert "api.example.test" not in out2
+    # Non-URL authorization header fragments.
+    out3 = sanitize_error_text(f"Authorization: {secret} rejected")
+    assert secret not in out3
+    # Ordinary text without secrets survives.
+    out4 = sanitize_error_text("connection reset by peer")
+    assert out4 == "connection reset by peer"

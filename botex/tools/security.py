@@ -123,6 +123,31 @@ def mask_secrets(text: str) -> str:
     return text
 
 
+_URL_PATTERN = re.compile(r"(?:https?://|//)[^\s'\")\]]+", re.IGNORECASE)
+
+# Secret-shaped key/value forms mask_secrets does not enumerate: bare ``key=``
+# (Google-style credentials), ``sig=``, ``access_token=`` and Authorization
+# header fragments outside a full URL.
+_ERROR_EXTRA_SECRET_RE = re.compile(
+    r"(?i)\b(key|apikey|access_token|sig|authorization)"
+    r'\s*["\']?\s*[=:]\s*["\']?[^\s"\',&]{4,}["\']?'
+)
+
+
+def sanitize_error_text(text: Any, max_len: int = 200) -> str:
+    """Error text safe for persistence: input capped first so redaction is the
+    terminal operation, raw URLs removed wholesale (query strings and userinfo
+    can carry secrets regexes cannot enumerate), residual secrets masked. URLs
+    in exceptions are diagnostic noise compared to the leak risk — provider and
+    host context belongs in structured fields."""
+    if text is None:
+        return ""
+    capped = str(text).strip()[:max_len]
+    stripped = _URL_PATTERN.sub("[URL]", capped)
+    stripped = _ERROR_EXTRA_SECRET_RE.sub("[REDACTED]", stripped)
+    return mask_secrets(stripped)
+
+
 def coerce_text(text: Any) -> str:
     """
     Coerce a value to str for logs, errors and stored text while severing static
