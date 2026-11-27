@@ -172,6 +172,103 @@ jobs:
             exit "$rc"
           fi
 
+  edge-smoke:
+    name: Edge daemon smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    env:
+      BOTEX_DISABLE_DOTENV: "1"
+      PYTHONPATH: "."
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Focused edge test matrix
+        run: >
+          python -m pytest
+          tests/test_edge_runner.py
+          tests/test_edge_qos_daemon.py
+          tests/test_edge_cli_daemon.py
+          tests/test_edge_workspaces.py
+          tests/test_edge_credentials.py
+          tests/test_edge_argv_dispatch.py
+          tests/test_host_os_driver.py
+          -q
+
+      # Zero-network smoke: isolated BOTEX_SWARM_HOME, no Cloud endpoint; an
+      # offline-enrolled workspace lets the host daemon boot its loopback lane
+      # and publish the health state file, then drain on SIGTERM.
+      - name: Zero-network daemon health & shutdown smoke
+        shell: bash
+        run: |
+          export BOTEX_SWARM_HOME="$RUNNER_TEMP/botex-swarm-home"
+          export BOTEX_CREDENTIALS_DIR="$RUNNER_TEMP/botex-creds"
+          export BOTEX_WORKSPACES_FILE="$RUNNER_TEMP/host_workspaces.json"
+          mkdir -p "$BOTEX_SWARM_HOME" "$BOTEX_CREDENTIALS_DIR"
+          python - << 'PYEOF'
+          import os, signal, subprocess, sys, tempfile, time
+
+          py = [sys.executable, "server.py"]
+
+          def run(*args):
+              subprocess.run(py + list(args), check=False, timeout=60)
+
+          smoke_ws = tempfile.mkdtemp(prefix="smoke-ws-")
+          tok_file = os.path.join(smoke_ws, "token.txt")
+          with open(tok_file, "w", encoding="utf-8") as fh:
+              fh.write("btxd_smoke0000000000000000.smokeSecret0000000000\n")
+          run("edge", "enroll", "--device-id", "smoke-dev",
+              "--workspace-id", "smoke-ws",
+              "--workspace", smoke_ws, "--token-file", tok_file)
+          run("edge", "workspaces", "add", smoke_ws)
+
+          proc = subprocess.Popen(
+              py + ["edge", "--edge-daemon",
+                    "--server", "wss://smoke.invalid/api/edge/ws",
+                    "--loopback-port", "0"],
+          )
+          state_file = os.path.join(
+              os.environ["BOTEX_SWARM_HOME"], "edge_daemon.json")
+          deadline = time.monotonic() + 30
+          healthy = False
+          while time.monotonic() < deadline:
+              if proc.poll() is not None:
+                  break
+              if os.path.exists(state_file):
+                  healthy = True
+                  break
+              time.sleep(0.3)
+          if os.name == "nt":
+              proc.terminate()
+          else:
+              proc.send_signal(signal.SIGTERM)
+          try:
+              rc = proc.wait(timeout=20)
+          except subprocess.TimeoutExpired:
+              proc.kill()
+              rc = 1
+          print(f"smoke: healthy={healthy} exit={rc}")
+          if not healthy:
+              raise SystemExit(1)
+          PYEOF
+
   workflow-audit:
     name: Workflow Security Audit (zizmor)
     runs-on: ubuntu-latest

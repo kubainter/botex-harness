@@ -3157,8 +3157,15 @@ def _run_edge_host_daemon(
         allow_destructive=bool(allow_destructive),
     )
 
+    start_failed = {"error": ""}
+
     async def _run_daemon_main() -> None:
         start_res = await daemon.start()
+        if isinstance(start_res, dict) and not start_res.get("ok"):
+            start_failed["error"] = str(
+                start_res.get("error") or start_res.get("mode") or "daemon_start_failed"
+            )
+            return
         if isinstance(start_res, dict) and start_res.get("mode") == "attached":
             print(
                 ok(
@@ -3170,13 +3177,44 @@ def _run_edge_host_daemon(
         print(title("BoteX edge host daemon: serving enrolled workspaces from the host registry"))
         await daemon.run_forever()
 
+    import signal as _signal
+
+    def _handle_stop_signal(signum: int, _frame: Any) -> None:
+        # SIGTERM/SIGINT both funnel into the KeyboardInterrupt drain path below
+        # so systemd/Task Scheduler stops get a graceful in-flight drain.
+        raise KeyboardInterrupt
+
+    prev_handlers: list[tuple[int, Any]] = []
+    for _sig_name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        _sig = getattr(_signal, _sig_name, None)
+        if _sig is None:
+            continue
+        try:
+            prev = _signal.signal(_sig, _handle_stop_signal)
+            prev_handlers.append((_sig, prev))
+        except (OSError, ValueError):
+            # Non-main thread or platform restriction: default behavior stays.
+            pass
+
     try:
         asyncio.run(_run_daemon_main())
     except KeyboardInterrupt:
         try:
-            asyncio.run(daemon.stop())
+            asyncio.run(daemon.stop(drain_timeout_s=10.0))
         except Exception:
             pass
+    finally:
+        for _sig, _prev in prev_handlers:
+            try:
+                _signal.signal(_sig, _prev)
+            except (OSError, ValueError):
+                pass
+    if start_failed["error"]:
+        print(
+            err(f"BoteX edge daemon failed to start ({start_failed['error']})."),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _cli_edge(argv: list[str]) -> None:
@@ -3659,6 +3697,19 @@ def _cli_edge(argv: list[str]) -> None:
                 )
             )
             return
+        if not attach_res.get("ok"):
+            # Fail closed: without the singleton lock a second runner would fight
+            # the live daemon (or a spawn that never became healthy); never fall
+            # through lockless.
+            mode = str(attach_res.get("mode") or "unavailable")
+            print(
+                err(
+                    f"BoteX edge daemon is not available (mode={mode}); "
+                    "refusing to start a second runner without the singleton lock."
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
         daemon_lock = attach_res.get("lock")
 
     print(
