@@ -10,6 +10,7 @@ and TTL-backed caching with graceful stale fallback.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sys
@@ -17,16 +18,26 @@ import time
 from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:
     from botex.server.config import PROJECT_ROOT, catalog_cache_file
     from botex.tools.security import exception_evidence, mask_secrets
 
+    from .incident_probe import (
+        append_incident_record,
+        build_incident_record,
+        emit_incident_safe,
+    )
     from .providers import BaseProvider, ProviderRegistry
     from .wallet import _sanitize_raw_payload
 except (ImportError, ValueError):
     from config import PROJECT_ROOT, catalog_cache_file
+    from incident_probe import (
+        append_incident_record,
+        build_incident_record,
+        emit_incident_safe,
+    )
     from providers import BaseProvider, ProviderRegistry
     from security import exception_evidence, mask_secrets
     from wallet import _sanitize_raw_payload
@@ -382,10 +393,29 @@ class ModelCatalog:
         self._loaded = True
         return self._models
 
-    def fetch_from_provider(self, timeout: float = 10.0) -> List[ModelMetadata]:
-        """Fetch model list from provider API and parse into ModelMetadata."""
-        resolved_key = self.provider.resolve_api_key(explicit_key=self.api_key)
-        raw_list = self.provider.fetch_catalog(api_key=resolved_key, timeout=timeout)
+    def fetch_from_provider(
+        self,
+        timeout: float = 10.0,
+        *,
+        incident_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> List[ModelMetadata]:
+        """Fetch model list from provider API and parse into ModelMetadata.
+
+        ``incident_sink`` receives redacted wire-shape records (plan 060); it
+        is forwarded to the provider adapter only when the adapter's
+        ``fetch_catalog`` accepts the kwarg, so plain mocks keep working.
+        """
+        try:
+            resolved_key = self.provider.resolve_api_key(explicit_key=self.api_key)
+        except Exception as exc:
+            _emit_skipped_incident(incident_sink, self.provider_name, self.provider, exc)
+            raise
+        raw_list = _call_maybe_with_incident_sink(
+            self.provider.fetch_catalog,
+            incident_sink,
+            api_key=resolved_key,
+            timeout=timeout,
+        )
 
         deny_patterns: Sequence[str] = ((self.provider_cfg or {}).get("zdr") or {}).get(
             "deny_patterns"
@@ -1075,12 +1105,84 @@ def get_free_tier_failover_candidates(
     return candidates
 
 
+def _call_maybe_with_incident_sink(
+    fn: Callable[..., Any],
+    sink: Optional[Callable[[Dict[str, Any]], None]],
+    **kwargs: Any,
+) -> Any:
+    """Call ``fn`` forwarding ``incident_sink=sink`` only when non-None and the
+    callee's signature accepts it — mocks and legacy adapters never see the
+    kwarg."""
+    if sink is not None:
+        try:
+            params = inspect.signature(fn).parameters
+            accepts = "incident_sink" in params or any(
+                p.kind == p.VAR_KEYWORD for p in params.values()
+            )
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            return fn(incident_sink=sink, **kwargs)
+    return fn(**kwargs)
+
+
+def _compose_incident_sink(
+    incident_sink: Optional[Callable[[Dict[str, Any]], None]],
+    incident_log_path: Optional[Path | str],
+) -> Optional[Callable[[Dict[str, Any]], None]]:
+    """Combine an in-memory sink with a JSONL file sink. Each sub-sink is
+    invoked through ``emit_incident_safe`` so observability can never abort a
+    catalog sync."""
+    sinks: List[Callable[[Dict[str, Any]], None]] = []
+    if callable(incident_sink):
+        sinks.append(incident_sink)
+    if incident_log_path is not None:
+        sinks.append(lambda record: append_incident_record(record, path=incident_log_path))
+    if not sinks:
+        return None
+
+    def _dispatch(record: Dict[str, Any]) -> None:
+        for sink in sinks:
+            emit_incident_safe(sink, record)
+
+    return _dispatch
+
+
+def _emit_skipped_incident(
+    sink: Optional[Callable[[Dict[str, Any]], None]],
+    provider_name: str,
+    provider: Any,
+    exc: BaseException,
+) -> None:
+    """Emit a local pre-network ``catalog_skipped_unconfigured`` record.
+
+    Observability must never mask or replace the original provider failure:
+    any record-building error is swallowed here and ``exc`` still propagates.
+    """
+    if sink is None:
+        return
+    try:
+        url = str(getattr(provider, "base_url", "") or "")
+        record = build_incident_record(
+            provider=provider_name,
+            operation="catalog_skipped_unconfigured",
+            method="GET",
+            url=url,
+            exception=exc,
+        )
+    except Exception:
+        return
+    emit_incident_safe(sink, record)
+
+
 def sync_provider_catalogs(
     registry: ProviderRegistry,
     provider_names: Sequence[str],
     cache_file: Optional[Path | str] = None,
     timeout: float = 10.0,
     provider_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+    incident_log_path: Optional[Path | str] = None,
+    incident_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Live-sync provider catalogs into the shared cache, isolated per provider.
 
@@ -1094,8 +1196,14 @@ def sync_provider_catalogs(
     the shared cache with an empty catalog would destroy the last-known-good
     pricing data other consumers rely on, so the stale cache is preserved.
     ``fetched_at`` is 0.0 on any error path (nothing was fetched).
+
+    ``incident_sink``/``incident_log_path`` (plan 060) record redacted
+    wire-shape evidence per provider attempt without changing the return
+    schema; ``catalog_skipped_unconfigured`` is emitted when a provider
+    fails locally before any network call.
     """
     resolved_cache = Path(cache_file) if cache_file else catalog_cache_file()
+    sink = _compose_incident_sink(incident_sink, incident_log_path)
     results: Dict[str, Dict[str, Any]] = {}
 
     for raw_name in provider_names:
@@ -1106,11 +1214,16 @@ def sync_provider_catalogs(
         model_count = 0
         error: Optional[str] = None
         fetched_at = 0.0
+        reached_fetch = False
+        provider: Any = None
         try:
             pcfg = (provider_configs or {}).get(name)
             provider = registry.get(name, pcfg if isinstance(pcfg, dict) else None)
             catalog = ModelCatalog(provider=provider, cache_file=resolved_cache)
-            fetched = catalog.fetch_from_provider(timeout=timeout)
+            reached_fetch = True
+            fetched = _call_maybe_with_incident_sink(
+                catalog.fetch_from_provider, sink, timeout=timeout
+            )
             if not fetched:
                 error = "provider returned empty catalog; stale cache preserved"
             else:
@@ -1120,6 +1233,8 @@ def sync_provider_catalogs(
                 model_count = len(models)
                 fetched_at = time.time()
         except Exception as exc:
+            if not reached_fetch:
+                _emit_skipped_incident(sink, name, provider, exc)
             # Typed evidence only: exception free-text can embed request URLs
             # carrying query secrets (e.g. ``?key=`` credentials), and masking
             # does not sever that flow — the class name and numeric codes do.
