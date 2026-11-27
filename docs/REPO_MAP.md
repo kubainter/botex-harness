@@ -173,7 +173,7 @@ targeted + integration tests.
 | `botex/tools/file_tools.py` | `get_file_outline`, `read_file_lines`, `read_file`, `create_file`, `delete_file`, `move_file`, `+1 more` | `test_botex.py`, `test_patch_concurrency.py` |
 | `botex/tools/net_tools.py` | `resolve_net_scope`, `read_url`, `fetch_url` | `test_botex.py` |
 | `botex/tools/patch_engine.py` | `SnapshotManager`, `validate_syntax`, `apply_fuzzy_patch`, `apply_patch` | `test_botex.py`, `test_edge_runner.py`, `test_patch_concurrency.py`, `test_state_checkpoint.py` |
-| `botex/tools/security.py` | `SecurityError`, `mask_secrets`, `sanitize_error_text`, `coerce_text`, `sanitize_identifier`, `sanitize_for_storage`, `+9 more` | `test_botex.py`, `test_credits_stress.py`, `test_edge_delegation.py`, `test_recall_briefing_serving.py`, +6 more |
+| `botex/tools/security.py` | `SecurityError`, `mask_secrets`, `sanitize_error_text`, `exception_evidence`, `coerce_text`, `sanitize_identifier`, `+10 more` | `test_botex.py`, `test_credits_stress.py`, `test_edge_delegation.py`, `test_recall_briefing_serving.py`, +6 more |
 | `botex/tools/vision.py` | `validate_image_safety`, `compute_dhash`, `hamming_distance`, `triage_visual_defect` | `test_vision_pipeline.py` |
 
 ### `root`

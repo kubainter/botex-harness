@@ -133,10 +133,12 @@ def test_night_pulse_sync_exception_does_not_escape(_wired, monkeypatch):
     on_disk = _json.loads(_wired["report_path"].read_text(encoding="utf-8"))
     assert on_disk["sync"]["groq"]["status"] == "error"
     assert "sync_exception" in on_disk
-    # The exception text must be the simulated RuntimeError, not a TypeError
-    # from a mock signature mismatch at the call boundary.
+    # The evidence must identify the simulated RuntimeError, not a TypeError
+    # from a mock signature mismatch at the call boundary. Evidence is typed
+    # by design (class name + numeric codes) — free text never persists.
     assert "RuntimeError" in on_disk["sync_exception"]
-    assert "simulated sync explosion" in on_disk["sync_exception"]
+    assert "TypeError" not in on_disk["sync_exception"]
+    assert "simulated sync explosion" not in on_disk["sync_exception"]
 
 
 def test_night_pulse_drift_disabled_by_config(_wired, monkeypatch, tmp_path: Path):
