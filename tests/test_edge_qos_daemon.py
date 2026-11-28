@@ -1064,8 +1064,7 @@ def test_dispatch_work_order_pipeline_persistence_and_env_scrub(
             assert reply["spec_echo"]["harness"] == "zcode"
             assert spawned["argv"] == [
                 "/fake/bin/zcode",
-                "--prompt",
-                "run it",
+                "--prompt=run it",
                 "--mode",
                 "edit",
                 "--json",
@@ -1709,6 +1708,200 @@ def test_loopback_control_rejects_dispatch_and_orders_enforces_ceilings_and_idem
             conflict = await _post_idem(conflict_body)
             assert b"409" in conflict.split(b"\r\n", 1)[0]
             assert b"idem_key_conflict" in conflict
+        finally:
+            await daemon.stop(drain_timeout_s=1.0)
+
+    asyncio.run(_run())
+
+
+def test_loopback_orders_strip_raw_command_for_non_local_admin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-1: raw argv/command payloads must never reach the harness spawn path."""
+    from botex.edge.credentials import save_edge_token
+    from botex.edge.workspaces import save_workspaces_registry
+
+    ws_root = tmp_path / "ws_cmd"
+    ws_root.mkdir()
+    ws_file = tmp_path / "workspaces.json"
+    save_workspaces_registry(
+        {
+            "device_id": "dev-cmd",
+            "workspaces": [
+                {
+                    "workspace_id": "ws_cmd",
+                    "root": str(ws_root),
+                    "state": "enrolled",
+                    "local_admin": False,
+                }
+            ],
+        },
+        path=ws_file,
+    )
+    cred_dir = tmp_path / "creds"
+    save_edge_token("dev-cmd", "ws_cmd", "btxd_5555666677778888.secret", base_dir=cred_dir)
+
+    async def _run() -> None:
+        daemon = EdgeHostDaemon(
+            "ws://127.0.0.1:9/api/edge/ws",
+            workspaces_file=ws_file,
+            credentials_dir=cred_dir,
+            swarm_home=tmp_path / "swarm_home",
+            loopback_token="tok-cmd",
+            single_instance=False,
+        )
+        await daemon.start()
+        port = daemon._loopback_port_bound or 0
+        host = f"127.0.0.1:{port}"
+        try:
+            captured: List[Dict[str, Any]] = []
+
+            async def _capture(frame, **_kw):
+                captured.append(frame)
+                return {"ok": True, "order_id": frame.get("order_id"), "pid": 321}
+
+            async def _ack_reg(payload, **_kw):
+                return {"ok": True, "order_id": payload.get("order_id"), "status": "QUEUED"}
+
+            for a in daemon.agents:
+                a.register_work_order_with_cloud = _ack_reg
+                a.handle_control_frame = _capture
+
+            # 1. Nested order dict with smuggled command/argv is stripped.
+            r_nested = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="tok-cmd",
+                host=host,
+                body={
+                    "workspace_id": "ws_cmd",
+                    "order_id": "ord-cmd-1",
+                    "mode": "readonly",
+                    "order": {
+                        "goal": "Inspect repo",
+                        "command": ["/bin/sh", "-c", "echo pwned"],
+                        "argv": ["sh", "-c", "id"],
+                    },
+                },
+            )
+            assert b"200 OK" in r_nested
+            assert len(captured) == 1
+            nested_dispatch = captured[0]["order"]
+            assert "command" not in nested_dispatch
+            assert "argv" not in nested_dispatch
+            # translate_work_order needs the order identity even when the
+            # nested order dict omits it (loopback {"order": {...}} shape).
+            assert nested_dispatch.get("order_id") == "ord-cmd-1"
+            assert nested_dispatch.get("goal") == "Inspect repo"
+
+            # 2. Flat top-level body smuggling is stripped the same way.
+            r_flat = await _loopback_request(
+                port,
+                "POST",
+                "/orders",
+                token="tok-cmd",
+                host=host,
+                body={
+                    "workspace_id": "ws_cmd",
+                    "order_id": "ord-cmd-2",
+                    "mode": "readonly",
+                    "command": ["/bin/sh", "-c", "echo pwned"],
+                    "argv": ["sh", "-c", "id"],
+                    "goal": "Inspect repo",
+                },
+            )
+            assert b"200 OK" in r_flat
+            assert len(captured) == 2
+            flat_dispatch = captured[1]["order"]
+            assert "command" not in flat_dispatch
+            assert "argv" not in flat_dispatch
+            assert flat_dispatch.get("order_id") == "ord-cmd-2"
+            assert flat_dispatch.get("goal") == "Inspect repo"
+        finally:
+            await daemon.stop(drain_timeout_s=1.0)
+
+    asyncio.run(_run())
+
+
+def test_loopback_orders_concurrent_same_idem_key_single_dispatch(tmp_path: Path) -> None:
+    """P3-2: same-key concurrent POST /orders must register exactly once."""
+    from botex.edge.credentials import save_edge_token
+    from botex.edge.workspaces import save_workspaces_registry
+
+    ws_root = tmp_path / "ws_race"
+    ws_root.mkdir()
+    ws_file = tmp_path / "workspaces.json"
+    save_workspaces_registry(
+        {
+            "device_id": "dev-race",
+            "workspaces": [
+                {
+                    "workspace_id": "ws_race",
+                    "root": str(ws_root),
+                    "state": "enrolled",
+                    "local_admin": False,
+                }
+            ],
+        },
+        path=ws_file,
+    )
+    cred_dir = tmp_path / "creds"
+    save_edge_token("dev-race", "ws_race", "btxd_9999000011112222.secret", base_dir=cred_dir)
+
+    async def _run() -> None:
+        daemon = EdgeHostDaemon(
+            "ws://127.0.0.1:9/api/edge/ws",
+            workspaces_file=ws_file,
+            credentials_dir=cred_dir,
+            swarm_home=tmp_path / "swarm_home",
+            loopback_token="tok-race",
+            single_instance=False,
+        )
+        await daemon.start()
+        port = daemon._loopback_port_bound or 0
+        host = f"127.0.0.1:{port}"
+        try:
+            reg_calls = {"n": 0}
+
+            async def _ack_reg(payload, **_kw):
+                reg_calls["n"] += 1
+                await asyncio.sleep(0.05)
+                return {"ok": True, "order_id": payload.get("order_id"), "status": "QUEUED"}
+
+            async def _ok_reply(frame, **_kw):
+                await asyncio.sleep(0.05)
+                return {"ok": True, "order_id": frame.get("order_id"), "pid": 77}
+
+            for a in daemon.agents:
+                a.register_work_order_with_cloud = _ack_reg
+                a.handle_control_frame = _ok_reply
+
+            payload_bytes = json.dumps(
+                {"workspace_id": "ws_race", "order_id": "ord-race-1", "mode": "readonly"}
+            ).encode("utf-8")
+
+            async def _post_raw() -> bytes:
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                req = (
+                    f"POST /orders HTTP/1.1\r\nHost: {host}\r\n"
+                    f"X-Loopback-Token: tok-race\r\n"
+                    f"Idempotency-Key: idem-race-1\r\n"
+                    f"Content-Length: {len(payload_bytes)}\r\nConnection: close\r\n\r\n"
+                ).encode("ascii") + payload_bytes
+                writer.write(req)
+                await writer.drain()
+                resp = await asyncio.wait_for(reader.read(65536), timeout=5.0)
+                writer.close()
+                await writer.wait_closed()
+                return resp
+
+            first, second = await asyncio.gather(_post_raw(), _post_raw())
+            assert b"200 OK" in first
+            assert b"200 OK" in second
+            # Exactly one Cloud registration and exactly one cached duplicate.
+            assert reg_calls["n"] == 1
+            assert sum(b'"duplicate": true' in r for r in (first, second)) == 1
         finally:
             await daemon.stop(drain_timeout_s=1.0)
 

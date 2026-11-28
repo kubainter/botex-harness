@@ -283,6 +283,10 @@ def _tighten_acl_windows(path: Path) -> None:
             ["icacls", str(path), "/inheritance:r", "/grant:r", f"{username}:F", "/Q"],
             capture_output=True,
             text=True,
+            # icacls emits OEM-codepage text on localized Windows (e.g. cp852);
+            # strict decoding would raise UnicodeDecodeError (a ValueError, not
+            # an OSError) and skip the allow_weak_acl / cleanup handling.
+            errors="replace",
             timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:

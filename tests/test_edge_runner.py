@@ -876,8 +876,21 @@ def test_build_spawn_argv_uses_adapters_and_fails_on_missing_cli(tmp_path, monke
     monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
     argv = runner._build_spawn_argv(spec, {}, "btxd_test.secret")
     assert argv[0] == "/usr/bin/zcode"
-    assert "--prompt" in argv and "--mode" in argv
+    # F6 drops any element carrying credential material — including a fused
+    # --prompt=<text> element — so the token never reaches the child argv.
     assert all("btxd_test.secret" not in a for a in argv)
+
+    clean_argv = runner._build_spawn_argv(
+        {"harness": "zcode", "mode": "plan", "prompt": "inspect status"}, {}, "btxd_test.secret"
+    )
+    assert clean_argv == [
+        "/usr/bin/zcode",
+        "--prompt=inspect status",
+        "--mode",
+        "plan",
+        "--json",
+        "--no-color",
+    ]
 
 
 def test_attach_or_spawn_lock_contention_returns_error(tmp_path, monkeypatch):
@@ -1015,3 +1028,112 @@ def test_reconcile_orphan_worktrees_prunes_only_orphans(tmp_path):
     assert removed == 1
     assert wt_active.is_dir()
     assert not wt_orphan.exists()
+
+
+def test_reconcile_orphan_worktrees_preserves_dirty_orphans(tmp_path):
+    """P1-2: orphan worktrees with uncommitted work must never be force-removed."""
+    import subprocess
+
+    from botex.edge.host_os_driver import prepare_epoch_worktree
+    from botex.edge.runner import _reconcile_orphan_worktrees
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "t@botex.local"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"],
+        check=True,
+        capture_output=True,
+    )
+    (repo / "a.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True
+    )
+
+    wt_root = tmp_path / "wt_root"
+    wt_clean = prepare_epoch_worktree(repo, wt_root, order_id="ord-clean", epoch=1)
+    wt_dirty = prepare_epoch_worktree(repo, wt_root, order_id="ord-dirty", epoch=1)
+    assert wt_clean.is_dir() and wt_dirty.is_dir()
+    # Uncommitted agent output (untracked + modified) inside the orphan worktree.
+    (wt_dirty / "dirty.txt").write_text("unverified work\n", encoding="utf-8")
+    (wt_dirty / "tracked.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(wt_dirty), "add", "tracked.txt"], check=True, capture_output=True
+    )
+
+    removed = _reconcile_orphan_worktrees(
+        [{"workspace_id": "ws-1", "root": str(repo)}],
+        {},
+    )
+    assert removed == 1
+    assert not wt_clean.exists()
+    assert wt_dirty.is_dir()
+    assert (wt_dirty / "dirty.txt").read_text(encoding="utf-8") == "unverified work\n"
+
+
+def test_control_nack_unknown_order_drops_outbox_frame(tmp_path):
+    """P2-2: cloud `unknown_order` nack must purge the stale outbox event."""
+    outbox_file = tmp_path / "edge_outbox.jsonl"
+
+    async def handler(ws):
+        # Server side: ack the hello, then reject a replayed work_order_event.
+        hello = json.loads(await ws.recv())
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "hello_ack",
+                    "device_id": hello["device_id"],
+                    "workspace_id": hello["workspace_id"],
+                }
+            )
+        )
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "control_nack",
+                    "action": "work_order_event",
+                    "order_id": "ord-gone",
+                    "seq": 1,
+                    "ok": False,
+                    "error": "unknown_order",
+                    "reason": "unknown_order",
+                    "request_id": "",
+                }
+            )
+        )
+        await ws.close(code=1000)
+
+    def _main():
+        from websockets.asyncio.server import serve
+
+        async def main():
+            async with serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                runner = EdgeRunner(
+                    f"ws://127.0.0.1:{port}",
+                    token="tok_test",
+                    device_id="dev-1",
+                    workspace_id="ws-1",
+                    workspace_root=tmp_path,
+                    caps=EdgeCapabilities(),
+                    outbox_path=outbox_file,
+                )
+                # Offline emit: session not established -> durable outbox append.
+                frame = runner.emit_work_order_event("ord-gone", "started", {"pid": 42})
+                assert frame["seq"] == 1
+                assert len(runner._outbox_buffer.pending()) == 1
+                status = await runner.run_once()
+                return status, runner
+
+        return asyncio.run(main())
+
+    status, runner = _main()
+    assert status == "closed"
+    assert runner._outbox_buffer.pending() == []
+    assert not outbox_file.exists() or outbox_file.read_text(encoding="utf-8").strip() == ""

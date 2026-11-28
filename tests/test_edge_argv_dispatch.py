@@ -129,11 +129,12 @@ def test_build_harness_argv_botex_forwards_positional_prompt_mode_and_provider()
     assert build_harness_argv(spec, cli="botex") == [
         "botex",
         "run",
-        "implement the adapter slice",
         "--mode",
         "edit",
         "--provider",
         "openrouter-free",
+        "--",
+        "implement the adapter slice",
     ]
 
     without_provider = dict(spec)
@@ -145,14 +146,35 @@ def test_build_harness_argv_botex_forwards_positional_prompt_mode_and_provider()
     assert "--provider" not in argv
 
 
+def test_build_harness_argv_dash_leading_prompt_never_parsed_as_flag() -> None:
+
+    dash_prompt = "- napraw błąd zgodnie z listą poniżej"
+
+    botex_argv = build_harness_argv(
+        {"harness": "botex", "prompt": dash_prompt, "mode": "edit"}, cli="botex"
+    )
+
+    assert botex_argv[-1] == dash_prompt
+
+    assert botex_argv[botex_argv.index("--") + 1 :] == [dash_prompt]
+
+    zcode_argv = build_harness_argv(
+        {"harness": "zcode", "prompt": dash_prompt, "mode": "plan"}, cli="zcode"
+    )
+
+    assert zcode_argv[1] == f"--prompt={dash_prompt}"
+
+    # The prompt must never appear as a standalone flag-position token.
+    assert dash_prompt not in zcode_argv[1:]
+
+
 def test_build_harness_argv_zcode_uses_verified_headless_flags() -> None:
 
     spec = {"harness": "zcode", "prompt": "review only", "mode": "plan"}
 
     assert build_harness_argv(spec, cli="zcode") == [
         "zcode",
-        "--prompt",
-        "review only",
+        "--prompt=review only",
         "--mode",
         "plan",
         "--json",
@@ -291,3 +313,60 @@ def test_paid_ceiling_violations_free_zero_ceiling_payload_is_clean() -> None:
     }
 
     assert paid_ceiling_violations(order, {}) == []
+
+
+def test_paid_ceiling_violations_paid_flag_alias_keys_fail_closed() -> None:
+
+    assert paid_ceiling_violations({"allow_expensive_model": True}, {"allow_paid": True}) == [
+        "paid_key.allow_expensive_model",
+        "paid_key.allow_paid",
+    ]
+
+
+def test_paid_ceiling_violations_slash_prefixed_allowlist_entry_is_paid() -> None:
+
+    assert paid_ceiling_violations({}, {"handoff_policy": {"allowed_providers": ["/openai"]}}) == [
+        "handoff_policy.provider_allowlist"
+    ]
+
+    assert paid_ceiling_violations(
+        {}, {"handoff_policy": {"allowed_providers": ["botex:/openai"]}}
+    ) == ["handoff_policy.provider_allowlist"]
+
+    # Slash-prefixed free provider resolves cleanly and stays allowed.
+    assert paid_ceiling_violations({}, {"handoff_policy": {"allowed_providers": ["/nvidia"]}}) == []
+
+
+def test_paid_ceiling_violations_mapping_allowlist_entries_are_validated() -> None:
+
+    assert paid_ceiling_violations(
+        {}, {"handoff_policy": {"paid_allowlist": {"openrouter": True}}}
+    ) == ["handoff_policy.provider_allowlist"]
+
+    assert paid_ceiling_violations(
+        {}, {"handoff_policy": {"allowed_providers": {"openai": True}}}
+    ) == ["handoff_policy.provider_allowlist"]
+
+    assert (
+        paid_ceiling_violations({}, {"handoff_policy": {"allowed_providers": {"nvidia": True}}})
+        == []
+    )
+
+
+def test_paid_ceiling_violations_nan_and_negative_cost_fail_closed() -> None:
+
+    assert paid_ceiling_violations({}, {"handoff_policy": {"max_cost_usd": float("nan")}}) == [
+        "handoff_policy.max_cost_usd"
+    ]
+
+    assert paid_ceiling_violations({}, {"handoff_policy": {"max_cost_usd": float("inf")}}) == [
+        "handoff_policy.max_cost_usd"
+    ]
+
+    assert paid_ceiling_violations({}, {"handoff_policy": {"max_cost_usd": -5}}) == [
+        "handoff_policy.max_cost_usd"
+    ]
+
+    assert paid_ceiling_violations({}, {"handoff_policy": {"max_cost_usd": "not-a-number"}}) == [
+        "handoff_policy.max_cost_usd"
+    ]

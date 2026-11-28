@@ -3158,6 +3158,7 @@ def _run_edge_host_daemon(
     )
 
     start_failed = {"error": ""}
+    drained = {"ok": False}
 
     async def _run_daemon_main() -> None:
         start_res = await daemon.start()
@@ -3175,7 +3176,15 @@ def _run_edge_host_daemon(
             )
             return
         print(title("BoteX edge host daemon: serving enrolled workspaces from the host registry"))
-        await daemon.run_forever()
+        try:
+            await daemon.run_forever()
+        except KeyboardInterrupt:
+            # Drain on the SAME still-running event loop: daemon.stop() touches
+            # sockets, tasks and WS connections owned by this loop — running it
+            # from a second asyncio.run() loop hits "Event loop is closed" and
+            # fenced (daemon_drain) frames never reach Cloud.
+            drained["ok"] = True
+            await daemon.stop(drain_timeout_s=10.0)
 
     import signal as _signal
 
@@ -3199,10 +3208,11 @@ def _run_edge_host_daemon(
     try:
         asyncio.run(_run_daemon_main())
     except KeyboardInterrupt:
-        try:
-            asyncio.run(daemon.stop(drain_timeout_s=10.0))
-        except Exception:
-            pass
+        if not drained["ok"]:
+            try:
+                asyncio.run(daemon.stop(drain_timeout_s=10.0))
+            except Exception:
+                pass
     finally:
         for _sig, _prev in prev_handlers:
             try:

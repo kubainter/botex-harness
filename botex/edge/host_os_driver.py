@@ -275,11 +275,19 @@ def pdeathsig_preexec() -> Optional[Callable[[], None]]:
     except AttributeError:
         pass
 
+    parent_pid = os.getpid()
+
     def _set_pdeathsig() -> None:
         ctypes.set_errno(0)
         rc = int(prctl(1, sig, 0, 0, 0))
         if rc != 0:
             raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+        # Close the fork()->prctl() race: if the spawning parent died between
+        # fork and prctl, the signal will never fire — self-terminate instead.
+        # The getpid() guard keeps a bare hook() call (no fork, e.g. unit
+        # tests) from killing the running process.
+        if os.getpid() != parent_pid and os.getppid() != parent_pid:
+            os.kill(os.getpid(), sig)
 
     return _set_pdeathsig
 

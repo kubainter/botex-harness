@@ -176,7 +176,6 @@ _OUTPUT_TAIL_MAX_LINES = 200
 _OUTPUT_TAIL_MAX_BYTES = 16_384
 _EDIT_CONFIRM_MAX_AGE_S = 900.0
 _EDIT_CONFIRM_ALLOWED_MODES = frozenset({"edit", "destructive"})
-_NON_GIT_EDIT_MODES = frozenset({"edit", "fs_write", "destructive", "full"})
 _RESERVED_CONFIRM_ACTORS = frozenset({"human", "human-curated", "operator", "curator"})
 
 # F6: secret-bearing env vars never reach spawned harness children; the
@@ -193,6 +192,8 @@ _SCRUB_ENV_PREFIXES = ("SWARM_",)
 # Loopback POST /orders ceiling for non-local_admin workspaces (F7).
 _ORDERS_ALLOWED_MODES = frozenset({"readonly", "plan"})
 _ORDERS_PAID_KEYS = frozenset({"allow_expensive", "paid", "provider"})
+# Bound on per-key asyncio.Lock entries for concurrent /orders idempotency.
+_ORDERS_IDEM_LOCK_MAX = 256
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
@@ -631,6 +632,26 @@ def _cleanup_order_worktree(real_root: Path, wt_path: Path) -> None:
         pass
 
 
+def _worktree_is_dirty(wt_path: Path) -> bool:
+    """True when a worktree still holds uncommitted work; fails closed on errors.
+
+    Losing unverified agent output is irreversible, so any ``git status``
+    failure (missing repo, git unavailable, spawn error) is treated as dirty.
+    """
+    try:
+        resolved = wt_path.resolve()
+        if not resolved.exists():
+            return False
+        from botex.edge.host_os_driver import _run_git
+
+        res = _run_git(resolved, ["status", "--porcelain"], check=False, timeout_s=30.0)
+        if res.returncode != 0:
+            return True
+        return bool(str(res.stdout or "").strip())
+    except Exception:
+        return True
+
+
 def _reconcile_orphan_worktrees(
     workspaces: List[Dict[str, Any]],
     active_orders: Dict[str, Any],
@@ -667,6 +688,14 @@ def _reconcile_orphan_worktrees(
                 continue
             wt_path = Path(wt_raw).resolve()
             if wt_path == resolved_root:
+                continue
+            if _worktree_is_dirty(wt_path):
+                # Uncommitted agent work is irrecoverable once the worktree is
+                # gone — leave dirty orphans for Supervisor / checkpointing.
+                _LOG.warning(
+                    "reconcile: keeping dirty orphan worktree %s (uncommitted changes)",
+                    wt_path,
+                )
                 continue
             _run_git(resolved_root, ["worktree", "remove", "--force", str(wt_path)], check=False)
             if wt_path.exists():
@@ -803,6 +832,27 @@ class EdgeOutboxBuffer:
 
     def clear(self) -> None:
         self.rewrite([])
+
+    def drop_event(self, order_id: str, seq: int) -> int:
+        """Drop ``work_order_event`` frames matching ``(order_id, seq)``; returns count."""
+        if self.path is None or not self.path.is_file():
+            return 0
+        frames = self.pending()
+        kept: List[Dict[str, Any]] = []
+        dropped = 0
+        for frame in frames:
+            same_key = (
+                frame.get("type") == _WORK_ORDER_EVENT_TYPE
+                and str(frame.get("order_id") or "") == str(order_id)
+                and str(frame.get("seq") or "") == str(seq)
+            )
+            if same_key:
+                dropped += 1
+            else:
+                kept.append(frame)
+        if dropped:
+            self.rewrite(kept)
+        return dropped
 
     def last_seqs(self) -> Dict[str, int]:
         out: Dict[str, int] = {}
@@ -1504,7 +1554,10 @@ class EdgeRunner:
         spec_mode = str(spec.get("mode") or "").strip().lower()
         req_mode = str(spec.get("mode_request") or "").strip().lower()
         has_git = (Path(real_root) / ".git").exists()
-        if spec_mode in _NON_GIT_EDIT_MODES and not has_git:
+        is_read_only = spec_mode in {"readonly", "plan"} or req_mode in {"readonly", "plan"}
+        # Fail closed for every mutating mode (edit / destructive / full / yolo):
+        # without git there is no epoch worktree, no diff review, no rollback.
+        if not is_read_only and not has_git:
             return _nack("non_git_edit_unsupported")
 
         wt_path = Path(real_root)
@@ -1512,7 +1565,6 @@ class EdgeRunner:
             epoch = int(spec.get("epoch") or fencing_epoch or 0)
         except (TypeError, ValueError):
             epoch = 0
-        is_read_only = spec_mode in {"readonly", "plan"} or req_mode in {"readonly", "plan"}
         if not is_read_only and has_git and epoch > 0:
             prep_fn = self._prepare_worktree_fn or driver.prepare_epoch_worktree
             try:
@@ -1722,12 +1774,13 @@ class EdgeRunner:
         wt_str = str(entry.get("worktree_path") or "").strip()
         root_str = str(entry.get("real_root") or "").strip()
         term_status = str(entry.get("terminal_status") or "").strip().upper()
-        if (
-            wt_str
-            and root_str
-            and (rc not in (0, None) or term_status in {"DONE", "FAILED", "CANCELLED"})
-        ):
-            await asyncio.to_thread(_cleanup_order_worktree, Path(root_str), Path(wt_str))
+        if wt_str and root_str:
+            dirty = await asyncio.to_thread(_worktree_is_dirty, Path(wt_str))
+            # Destroy the worktree only for explicitly verified terminal
+            # statuses or when nothing uncommitted remains; dirty state after a
+            # failed run stays for Supervisor checkpointing / recovery.
+            if term_status in {"DONE", "CANCELLED"} or not dirty:
+                await asyncio.to_thread(_cleanup_order_worktree, Path(root_str), Path(wt_str))
         if self._stop.is_set() or self._draining:
             return
         if order_id in self._active_order_controls:
@@ -2357,6 +2410,29 @@ class EdgeRunner:
                     fut = self._pending_cloud_acks.pop(req_id, None) if req_id else None
                     if fut is not None and not fut.done():
                         fut.set_result(frame)
+                    if (
+                        ftype == "control_nack"
+                        and str(frame.get("action") or "") == _WORK_ORDER_EVENT_TYPE
+                        and str(frame.get("error") or frame.get("reason") or "") == "unknown_order"
+                    ):
+                        # Cloud is the lifecycle authority: a rejected event will
+                        # never be accepted on replay, so drop it from the
+                        # durable outbox instead of resending it forever.
+                        try:
+                            nack_seq = int(frame.get("seq") or 0)
+                        except (TypeError, ValueError):
+                            nack_seq = 0
+                        nack_oid = str(frame.get("order_id") or "").strip()
+                        if nack_oid and self._outbox_buffer is not None:
+                            dropped = self._outbox_buffer.drop_event(nack_oid, nack_seq)
+                            if dropped:
+                                self._log.warning(
+                                    "cloud rejected work_order_event order=%s seq=%s "
+                                    "as unknown_order — dropped %d stale outbox frame(s)",
+                                    nack_oid,
+                                    nack_seq,
+                                    dropped,
+                                )
         finally:
             for req_id, fut in list(self._pending_cloud_acks.items()):
                 self._pending_cloud_acks.pop(req_id, None)
@@ -2984,6 +3060,7 @@ class EdgeHostDaemon:
         self._stopped: Optional[asyncio.Event] = None
         self._loopback_server: Optional[asyncio.AbstractServer] = None
         self._loopback_port_bound: Optional[int] = None
+        self._orders_idem_locks: Dict[str, asyncio.Lock] = {}
 
     # -- registry ------------------------------------------------------------
 
@@ -3343,6 +3420,41 @@ class EdgeHostDaemon:
         *,
         idem_key: str = "",
     ) -> None:
+        effective_idem = str(
+            idem_key or body_obj.get("idempotency_key") or body_obj.get("request_id") or ""
+        ).strip()
+        # Serialize same-key POST /orders replays: two concurrent requests must
+        # not both miss the idempotency cache and race the Cloud registration
+        # (409 order_exists) — the loser gets the cached 200 duplicate instead.
+        idem_lock = (
+            self._orders_idem_locks.setdefault(effective_idem, asyncio.Lock())
+            if effective_idem
+            else None
+        )
+        if idem_lock is not None:
+            await idem_lock.acquire()
+        try:
+            await self._handle_loopback_order_locked(
+                writer, body_obj, effective_idem=effective_idem
+            )
+        finally:
+            if idem_lock is not None:
+                idem_lock.release()
+                if len(self._orders_idem_locks) > _ORDERS_IDEM_LOCK_MAX:
+                    for stale_key in [
+                        k
+                        for k in self._orders_idem_locks
+                        if k != effective_idem and not self._orders_idem_locks[k].locked()
+                    ]:
+                        self._orders_idem_locks.pop(stale_key, None)
+
+    async def _handle_loopback_order_locked(
+        self,
+        writer: asyncio.StreamWriter,
+        body_obj: Dict[str, Any],
+        *,
+        effective_idem: str = "",
+    ) -> None:
         try:
             from botex.edge.adapters import normalize_mode_request, paid_ceiling_violations
             from botex.edge.workspaces import get_workspace
@@ -3353,9 +3465,6 @@ class EdgeHostDaemon:
             return
         order = body_obj.get("order") if isinstance(body_obj.get("order"), dict) else dict(body_obj)
         order_id = str(order.get("order_id") or body_obj.get("order_id") or "").strip()
-        effective_idem = str(
-            idem_key or body_obj.get("idempotency_key") or body_obj.get("request_id") or ""
-        ).strip()
         orders_store = EdgeActiveOrdersStore(self._swarm_home / "active_orders.json")
         if effective_idem:
             existing_idem = orders_store.get_idempotency(effective_idem)
@@ -3472,9 +3581,29 @@ class EdgeHostDaemon:
             fencing_epoch = int(body_obj.get("fencing_epoch") or order.get("epoch") or 0)
         except (TypeError, ValueError):
             fencing_epoch = 0
-        dispatch_order = dict(order)
-        if not bool(ws_entry.get("local_admin")):
-            dispatch_order.pop("argv", None)
+        if bool(ws_entry.get("local_admin")):
+            dispatch_order = dict(order)
+        else:
+            # F7 ceiling: non-local_admin dispatches are rebuilt from an explicit
+            # field allowlist, so raw ``argv``/``command`` payloads can never
+            # reach the spawn path — ``build_harness_argv`` stays the only source.
+            dispatch_order = {
+                key: order[key]
+                for key in (
+                    "order_id",
+                    "goal",
+                    "prompt",
+                    "mode_request",
+                    "epoch",
+                    "workspace_id",
+                    "target_harness",
+                    "handoff_policy",
+                )
+                if key in order
+            }
+        # translate_work_order requires the order identity inside the payload,
+        # including the {"order": {"goal": ...}} loopback body shape.
+        dispatch_order["order_id"] = order_id
         if "mode_request" not in dispatch_order or not dispatch_order.get("mode_request"):
             dispatch_order["mode_request"] = mode or "readonly"
         frame = {

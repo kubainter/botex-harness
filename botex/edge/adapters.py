@@ -1622,13 +1622,17 @@ def build_harness_argv(spec: dict, *, cli: str) -> List[str]:
         raise ValueError("unsupported_mode")
 
     if harness == "botex":
-        argv = [executable, "run", prompt, "--mode", mode]
+        argv = [executable, "run", "--mode", mode]
         provider = str(spec.get("provider") or "").strip()
         if provider:
             argv.extend(["--provider", provider])
+        # Flags before "--" so a dash-leading prompt (Markdown bullet list)
+        # is never parsed as an unknown CLI option.
+        argv.extend(["--", prompt])
         return argv
     if harness == "zcode":
-        return [executable, "--prompt", prompt, "--mode", mode, "--json", "--no-color"]
+        # --prompt=<value> keeps dash-leading prompts out of the flag parser.
+        return [executable, f"--prompt={prompt}", "--mode", mode, "--json", "--no-color"]
 
     permission_mode = _DEVIN_PERMISSION_MODE_MAP.get(mode)
     if permission_mode is None:
@@ -1645,7 +1649,7 @@ def build_harness_argv(spec: dict, *, cli: str) -> List[str]:
     ]
 
 
-_PAID_FLAG_KEYS = ("allow_expensive", "paid")
+_PAID_FLAG_KEYS = ("allow_expensive", "allow_expensive_model", "paid", "allow_paid")
 _PAID_QUOTA_KEYS = ("acu", "credits", "budget_usd", "max_cost_usd")
 _HANDOFF_QUOTA_KEYS = ("acu", "credits", "budget_usd")
 _PROVIDER_ALLOWLIST_KEYS = (
@@ -1687,9 +1691,13 @@ def _positive_cost(value: Any) -> bool:
     if value is None or isinstance(value, bool):
         return False
     try:
-        return float(value) > 0.0
+        fval = float(value)
     except (TypeError, ValueError):
         return bool(str(value).strip())
+    if not math.isfinite(fval) or fval < 0.0:
+        # NaN compares False against 0.0; negative/NaN quotas fail closed as paid.
+        return True
+    return fval > 0.0
 
 
 def _policy_value(policy: Any, name: str, default: Any = None) -> Any:
@@ -1707,6 +1715,9 @@ def _policy_value_present(policy: Any, name: str) -> bool:
 def _iter_text_entries(value: Any) -> List[str]:
     if isinstance(value, str):
         return [value] if value.strip() else []
+    if isinstance(value, Mapping):
+        # Allowlists given as {"provider": True} must not silently skip validation.
+        return [str(k) for k in value.keys() if str(k or "").strip()]
     if isinstance(value, (list, tuple, set, frozenset)):
         return [str(item) for item in value if str(item or "").strip()]
     return []
@@ -1718,8 +1729,11 @@ def _allowlist_entry_is_paid(entry: Any) -> bool:
         return False
     if token.startswith("botex:"):
         token = token.split(":", 1)[1]
-    token = token.split("/", 1)[0].strip()
-    return bool(token) and not _is_free_botex_provider(token)
+    token = token.lstrip("/").split("/", 1)[0].strip()
+    if not token:
+        # Malformed provider references ("/openai") fail closed as paid.
+        return True
+    return not _is_free_botex_provider(token)
 
 
 def paid_ceiling_violations(order: dict, body: dict) -> List[str]:
