@@ -852,3 +852,288 @@ def test_cli_edge_respects_disable_dotenv(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         server._cli_edge(["-w", str(tmp_path)])
     assert exc.value.code == 2
+
+
+def test_build_spawn_argv_uses_adapters_and_fails_on_missing_cli(tmp_path, monkeypatch):
+    from botex.edge.runner import EdgeRunner
+
+    runner = EdgeRunner(
+        "wss://cloud.example.invalid/api/edge/ws",
+        token="btxd_test.secret",
+        device_id="dev-1",
+        workspace_id="ws-1",
+        workspace_root=tmp_path,
+    )
+    spec = {
+        "harness": "zcode",
+        "mode": "plan",
+        "prompt": "inspect status btxd_test.secret",
+    }
+    monkeypatch.setattr("shutil.which", lambda _cli: None)
+    assert runner._build_spawn_argv(spec, {}, "btxd_test.secret") == []
+    assert runner._last_argv_error == "cli_not_found"
+
+    monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
+    argv = runner._build_spawn_argv(spec, {}, "btxd_test.secret")
+    assert argv[0] == "/usr/bin/zcode"
+    # F6 drops any element carrying credential material — including a fused
+    # --prompt=<text> element — so the token never reaches the child argv.
+    assert all("btxd_test.secret" not in a for a in argv)
+
+    clean_argv = runner._build_spawn_argv(
+        {"harness": "zcode", "mode": "plan", "prompt": "inspect status"}, {}, "btxd_test.secret"
+    )
+    assert clean_argv == [
+        "/usr/bin/zcode",
+        "--prompt=inspect status",
+        "--mode",
+        "plan",
+        "--json",
+        "--no-color",
+    ]
+
+
+def test_attach_or_spawn_lock_contention_returns_error(tmp_path, monkeypatch):
+    from botex.edge import runner as runner_mod
+    from botex.edge.host_os_driver import SingleInstanceLock
+
+    state_file = tmp_path / "edge_daemon.json"
+    state_file.write_text('{"port": 0, "loopback_token": "tok"}', encoding="utf-8")
+    before = state_file.read_text(encoding="utf-8")
+    lock_file = tmp_path / "edge_daemon.lock"
+
+    monkeypatch.setattr(SingleInstanceLock, "acquire", lambda self: False)
+    spawned = []
+    res = runner_mod.attach_or_spawn_edge_daemon(
+        state_file=state_file,
+        lock_path=lock_file,
+        spawn_fn=lambda: spawned.append(1) or {"pid": 999},
+    )
+    assert res["ok"] is False
+    assert res["mode"] == "lock_contention"
+    assert spawned == []
+    assert state_file.read_text(encoding="utf-8") == before
+
+
+def test_dispatch_non_git_edit_fails_closed_and_preflight_offloaded(tmp_path, monkeypatch):
+    import asyncio
+    import subprocess
+
+    from botex.edge.credentials import save_edge_token
+    from botex.edge.runner import EdgeCapabilities, EdgeRunner
+    from botex.edge.workspaces import save_workspaces_registry
+
+    ws_root = tmp_path / "nongit_ws"
+    ws_root.mkdir()
+    ws_file = tmp_path / "workspaces.json"
+    save_workspaces_registry(
+        {
+            "device_id": "dev-ng",
+            "workspaces": [{"workspace_id": "ws-ng", "root": str(ws_root), "state": "enrolled"}],
+        },
+        path=ws_file,
+    )
+    cred_dir = tmp_path / "creds"
+    save_edge_token("dev-ng", "ws-ng", "btxd_abcd1234efgh5678.secret", base_dir=cred_dir)
+
+    class _SlowDriver:
+        def preflight_runtime(self, _harness):
+            import time
+
+            time.sleep(0.25)
+            return {"ok": True}
+
+        def prepare_epoch_worktree(self, *args, **kwargs):
+            raise AssertionError("worktree must not be created on non-git workspace")
+
+    runner = EdgeRunner(
+        "wss://cloud.example.invalid/api/edge/ws",
+        token="btxd_abcd1234efgh5678.secret",
+        device_id="dev-ng",
+        workspace_id="ws-ng",
+        workspace_root=ws_root,
+        caps=EdgeCapabilities(harness_spawn=True),
+        workspaces_file=ws_file,
+        credentials_dir=cred_dir,
+        host_driver=_SlowDriver(),
+    )
+
+    ticks = 0
+
+    async def _exercise():
+        nonlocal ticks
+
+        async def _ticker():
+            nonlocal ticks
+            for _ in range(5):
+                await asyncio.sleep(0.04)
+                ticks += 1
+
+        t = asyncio.create_task(_ticker())
+        reply = await runner.handle_control_frame(
+            {
+                "type": "dispatch_work_order",
+                "request_id": "req-ng",
+                "order_id": "ord-ng",
+                "workspace_id": "ws-ng",
+                "fencing_token": "tok-1",
+                "order": {"order_id": "ord-ng", "goal": "Edit file", "mode_request": "edit"},
+                "target_harness": "botex",
+            }
+        )
+        await t
+        return reply
+
+    reply = asyncio.run(_exercise())
+    assert reply["ok"] is False
+    assert reply["reason"] == "non_git_edit_unsupported"
+    assert ticks >= 3
+    assert isinstance(subprocess.DEVNULL, int)
+
+
+def test_reconcile_orphan_worktrees_prunes_only_orphans(tmp_path):
+    import subprocess
+
+    from botex.edge.host_os_driver import prepare_epoch_worktree
+    from botex.edge.runner import _reconcile_orphan_worktrees
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "t@botex.local"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"],
+        check=True,
+        capture_output=True,
+    )
+    (repo / "a.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True
+    )
+
+    wt_root = tmp_path / "wt_root"
+    wt_active = prepare_epoch_worktree(repo, wt_root, order_id="ord-active", epoch=1)
+    wt_orphan = prepare_epoch_worktree(repo, wt_root, order_id="ord-orphan", epoch=1)
+    assert wt_active.is_dir() and wt_orphan.is_dir()
+
+    removed = _reconcile_orphan_worktrees(
+        [{"workspace_id": "ws-1", "root": str(repo)}],
+        {"ord-active": {"order_id": "ord-active"}},
+    )
+    assert removed == 1
+    assert wt_active.is_dir()
+    assert not wt_orphan.exists()
+
+
+def test_reconcile_orphan_worktrees_preserves_dirty_orphans(tmp_path):
+    """P1-2: orphan worktrees with uncommitted work must never be force-removed."""
+    import subprocess
+
+    from botex.edge.host_os_driver import prepare_epoch_worktree
+    from botex.edge.runner import _reconcile_orphan_worktrees
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "t@botex.local"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"],
+        check=True,
+        capture_output=True,
+    )
+    (repo / "a.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True
+    )
+
+    wt_root = tmp_path / "wt_root"
+    wt_clean = prepare_epoch_worktree(repo, wt_root, order_id="ord-clean", epoch=1)
+    wt_dirty = prepare_epoch_worktree(repo, wt_root, order_id="ord-dirty", epoch=1)
+    assert wt_clean.is_dir() and wt_dirty.is_dir()
+    # Uncommitted agent output (untracked + modified) inside the orphan worktree.
+    (wt_dirty / "dirty.txt").write_text("unverified work\n", encoding="utf-8")
+    (wt_dirty / "tracked.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(wt_dirty), "add", "tracked.txt"], check=True, capture_output=True
+    )
+
+    removed = _reconcile_orphan_worktrees(
+        [{"workspace_id": "ws-1", "root": str(repo)}],
+        {},
+    )
+    assert removed == 1
+    assert not wt_clean.exists()
+    assert wt_dirty.is_dir()
+    assert (wt_dirty / "dirty.txt").read_text(encoding="utf-8") == "unverified work\n"
+
+
+def test_control_nack_unknown_order_drops_outbox_frame(tmp_path):
+    """P2-2: cloud `unknown_order` nack must purge the stale outbox event."""
+    outbox_file = tmp_path / "edge_outbox.jsonl"
+
+    async def handler(ws):
+        # Server side: ack the hello, then reject a replayed work_order_event.
+        hello = json.loads(await ws.recv())
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "hello_ack",
+                    "device_id": hello["device_id"],
+                    "workspace_id": hello["workspace_id"],
+                }
+            )
+        )
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "control_nack",
+                    "action": "work_order_event",
+                    "order_id": "ord-gone",
+                    "seq": 1,
+                    "ok": False,
+                    "error": "unknown_order",
+                    "reason": "unknown_order",
+                    "request_id": "",
+                }
+            )
+        )
+        await ws.close(code=1000)
+
+    def _main():
+        from websockets.asyncio.server import serve
+
+        async def main():
+            async with serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                runner = EdgeRunner(
+                    f"ws://127.0.0.1:{port}",
+                    token="tok_test",
+                    device_id="dev-1",
+                    workspace_id="ws-1",
+                    workspace_root=tmp_path,
+                    caps=EdgeCapabilities(),
+                    outbox_path=outbox_file,
+                )
+                # Offline emit: session not established -> durable outbox append.
+                frame = runner.emit_work_order_event("ord-gone", "started", {"pid": 42})
+                assert frame["seq"] == 1
+                assert len(runner._outbox_buffer.pending()) == 1
+                status = await runner.run_once()
+                return status, runner
+
+        return asyncio.run(main())
+
+    status, runner = _main()
+    assert status == "closed"
+    assert runner._outbox_buffer.pending() == []
+    assert not outbox_file.exists() or outbox_file.read_text(encoding="utf-8").strip() == ""

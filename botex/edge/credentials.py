@@ -28,6 +28,7 @@ __all__ = [
 _CRED_DIR_ENV = "BOTEX_CREDENTIALS_DIR"
 _TOKEN_PREFIX = "btxd_"
 _SEPARATOR = "__"
+_IS_WINDOWS = os.name == "nt"
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _JTI_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -88,6 +89,7 @@ def save_edge_token(
     token: str,
     *,
     base_dir: Optional[str | Path] = None,
+    allow_weak_acl: bool = False,
 ) -> Dict[str, Any]:
     """Atomically persist a ``btxd_`` device token; the returned metadata never contains it."""
     dev = validate_credential_id(device_id, "device_id")
@@ -100,7 +102,8 @@ def save_edge_token(
     cred_dir = target.parent
     cred_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     raw = text.encode("utf-8")
-    if os.name != "nt":
+    weak_acl = False
+    if not _IS_WINDOWS:
         os.chmod(cred_dir, 0o700)
         # O_EXCL guarantees the 0o600 mode applies to a fresh inode (no umask window).
         fd: Optional[int] = None
@@ -126,6 +129,12 @@ def save_edge_token(
             except OSError:
                 pass
     else:
+        try:
+            _tighten_acl_windows(cred_dir)
+        except OSError:
+            if not allow_weak_acl:
+                raise
+            weak_acl = True
         tmp_path: Optional[Path] = None
         try:
             fd, tmp_name = tempfile.mkstemp(
@@ -136,6 +145,12 @@ def save_edge_token(
                 fh.write(raw)
                 fh.flush()
                 os.fsync(fh.fileno())
+            try:
+                _tighten_acl_windows(tmp_path)
+            except OSError:
+                if not allow_weak_acl:
+                    raise
+                weak_acl = True
             os.replace(tmp_path, target)
             tmp_path = None
         finally:
@@ -144,15 +159,28 @@ def save_edge_token(
                     tmp_path.unlink()
                 except OSError:
                     pass
-        _tighten_acl_windows(cred_dir)
-        _tighten_acl_windows(target)
-    return {
+        try:
+            _tighten_acl_windows(target)
+        except OSError as acl_exc:
+            if not allow_weak_acl:
+                try:
+                    target.unlink()
+                except OSError as unlink_exc:
+                    raise OSError(
+                        f"{acl_exc}; additionally failed removing unprotected target {target}: {unlink_exc}"
+                    ) from acl_exc
+                raise
+            weak_acl = True
+    meta: Dict[str, Any] = {
         "ok": True,
         "device_id": dev,
         "workspace_id": ws,
         "jti": extract_token_jti(text),
         "path": str(target),
     }
+    if weak_acl:
+        meta["weak_acl"] = True
+    return meta
 
 
 def load_edge_token(
@@ -246,15 +274,23 @@ def resolve_edge_token(
 
 
 def _tighten_acl_windows(path: Path) -> None:
-    """Best-effort current-user-only ACL via ``icacls``; silently skipped when unavailable."""
+    """Restrict ACL to the current Windows user via ``icacls``; fails closed on error."""
     username = str(os.environ.get("USERNAME", "") or "").strip()
     if not username:
-        return
+        raise OSError("Cannot tighten Windows ACL without USERNAME environment variable")
     try:
-        subprocess.run(
+        res = subprocess.run(
             ["icacls", str(path), "/inheritance:r", "/grant:r", f"{username}:F", "/Q"],
             capture_output=True,
+            text=True,
+            # icacls emits OEM-codepage text on localized Windows (e.g. cp852);
+            # strict decoding would raise UnicodeDecodeError (a ValueError, not
+            # an OSError) and skip the allow_weak_acl / cleanup handling.
+            errors="replace",
             timeout=15,
         )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"Failed running icacls on {path}: {exc}") from exc
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout or "").strip() or f"exit={res.returncode}"
+        raise OSError(f"icacls failed for {path}: {detail}")

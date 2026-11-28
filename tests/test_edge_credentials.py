@@ -376,3 +376,67 @@ def test_cli_edge_runner_store_beats_stale_dotenv_while_process_env_wins(
         ]
     )
     assert seen_tokens[-1] == TOK_B
+
+
+def test_windows_acl_failure_fails_closed_without_persisting_token(
+    cred_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from botex.edge import credentials as cred_mod
+
+    monkeypatch.setattr(cred_mod, "_IS_WINDOWS", True)
+    monkeypatch.setenv("USERNAME", "tester")
+
+    class _FailProc:
+        returncode = 5
+        stderr = "Access is denied."
+        stdout = ""
+
+    monkeypatch.setattr(cred_mod.subprocess, "run", lambda *a, **kw: _FailProc())
+    with pytest.raises(OSError, match="icacls failed"):
+        save_edge_token(DEV, WS_A, TOK_A, base_dir=cred_dir)
+
+    assert not edge_token_path(DEV, WS_A, base_dir=cred_dir).exists()
+    assert [p for p in cred_dir.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_windows_acl_opt_out_allows_weak_acl_when_explicit(
+    cred_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from botex.edge import credentials as cred_mod
+
+    monkeypatch.setattr(cred_mod, "_IS_WINDOWS", True)
+    monkeypatch.setenv("USERNAME", "tester")
+    monkeypatch.setattr(
+        cred_mod.subprocess,
+        "run",
+        lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("icacls")),
+    )
+    res = save_edge_token(DEV, WS_A, TOK_A, base_dir=cred_dir, allow_weak_acl=True)
+    assert res["ok"] is True
+    assert res["weak_acl"] is True
+    assert load_edge_token(DEV, WS_A, base_dir=cred_dir) == TOK_A
+
+
+def test_windows_acl_post_replace_failure_removes_target(
+    cred_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from botex.edge import credentials as cred_mod
+
+    monkeypatch.setattr(cred_mod, "_IS_WINDOWS", True)
+    monkeypatch.setenv("USERNAME", "tester")
+    calls = 0
+
+    def _fail_third(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return type(
+            "_Res",
+            (),
+            {"returncode": 0 if calls < 3 else 5, "stderr": "denied", "stdout": ""},
+        )()
+
+    monkeypatch.setattr(cred_mod.subprocess, "run", _fail_third)
+    with pytest.raises(OSError, match="icacls failed"):
+        save_edge_token(DEV, WS_A, TOK_A, base_dir=cred_dir)
+
+    assert not edge_token_path(DEV, WS_A, base_dir=cred_dir).exists()

@@ -55,10 +55,13 @@ __all__ = [
     "HarnessInventoryService",
     "HarnessLimitsCollector",
     "build_anti_spiral_reset",
+    "build_harness_argv",
     "check_harness_eligible",
     "discover_local_harnesses",
     "finalize_verified_work_order",
     "normalize_limits_payload",
+    "normalize_mode_request",
+    "paid_ceiling_violations",
     "translate_work_order",
 ]
 
@@ -1381,6 +1384,21 @@ def _mode_block(harness: str, mode_request: str, detail: str) -> Dict[str, Any]:
     }
 
 
+def normalize_mode_request(
+    raw: Any, *, default: str = "readonly"
+) -> tuple[str, Optional[Dict[str, Any]]]:
+    """Normalize a requested mode, substituting ``default`` only for omitted/empty input."""
+    if raw is None:
+        req = str(default or "").strip().lower()
+    else:
+        req = str(raw).strip().lower()
+        if not req:
+            req = str(default or "").strip().lower()
+    if req not in RESTRICTIVENESS_RANK:
+        return "", _mode_block("", req, "mode_request_not_in_restrictiveness_rank")
+    return req, None
+
+
 def _resolve_mode(
     harness: str, mode_request: Any
 ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -1447,6 +1465,7 @@ def translate_work_order(
     *,
     checkpoint_ref: str = "",
     blind_alley_note: str = "",
+    mode_default: str = "edit",
 ) -> Dict[str, Any]:
     """Translate ``order`` into a fresh-epoch dispatch spec for ``target_harness``.
 
@@ -1456,6 +1475,7 @@ def translate_work_order(
 
     ``target_harness`` may carry a sub-provider specifier (``botex:nvidia``);
     for ``botex`` targets the result always names an explicit ``provider``.
+    ``mode_default`` is used only when ``mode_request`` is omitted or empty.
     """
     target_name, _, sub_provider = str(target_harness or "").partition(":")
     elig = check_harness_eligible(target_name)
@@ -1492,7 +1512,12 @@ def translate_work_order(
         new_epoch = raw_epoch + 1
     branch = f"swarm/wip/{order_id}/e{new_epoch}"
 
-    mode_request = _order_field(order, "mode_request", "edit")
+    mode_request, mode_err = normalize_mode_request(
+        _order_field(order, "mode_request", None), default=mode_default
+    )
+    if mode_err is not None:
+        mode_err["harness"] = harness
+        return mode_err
     mapped_mode, mode_err = _resolve_mode(harness, mode_request)
     if mode_err is not None:
         return mode_err
@@ -1532,7 +1557,7 @@ def translate_work_order(
         "harness": harness,
         "transport": HARNESS_TRANSPORT.get(harness, ""),
         "mode": mapped_mode,
-        "mode_request": str(mode_request or "").strip().lower(),
+        "mode_request": mode_request,
         "order_id": order_id,
         "epoch": new_epoch,
         "base_epoch": base_epoch,
@@ -1561,6 +1586,216 @@ def translate_work_order(
         result["transport_fallback"] = "stdout"
         result["acp"] = {"protocol": "agent-client-protocol", "framing": "json-rpc/stdio"}
     return result
+
+
+_DEVIN_PERMISSION_MODE_MAP: Dict[str, str] = {
+    "readonly": "auto",
+    "plan": "auto",
+    "edit": "accept-edits",
+    "destructive": "dangerous",
+    "full": "dangerous",
+}
+
+
+def build_harness_argv(spec: dict, *, cli: str) -> List[str]:
+    """Build the verified non-interactive CLI argv for a translated dispatch spec.
+
+    Raw ACP server argv cannot carry the WorkOrder prompt as an argument. ACP
+    harnesses therefore use the stdout fallback shape advertised by
+    ``translate_work_order``; protocol-driven ACP startup belongs to a dedicated
+    client path outside this argv builder.
+    """
+    if not isinstance(spec, Mapping):
+        raise ValueError("invalid_spec")
+    harness = _normalize_harness_name(spec.get("harness"))
+    if harness not in SUPPORTED_HARNESSES:
+        raise ValueError("unsupported_harness")
+    executable = str(cli or "").strip()
+    if not executable:
+        raise ValueError("missing_cli")
+    prompt = str(spec.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("missing_prompt")
+    mode = str(spec.get("mode") or "").strip().lower()
+    mapped_modes = {str(m) for m in HARNESS_MODE_MAP.get(harness, {}).values()}
+    if mode not in mapped_modes:
+        raise ValueError("unsupported_mode")
+
+    if harness == "botex":
+        argv = [executable, "run", "--mode", mode]
+        provider = str(spec.get("provider") or "").strip()
+        if provider:
+            argv.extend(["--provider", provider])
+        # Flags before "--" so a dash-leading prompt (Markdown bullet list)
+        # is never parsed as an unknown CLI option.
+        argv.extend(["--", prompt])
+        return argv
+    if harness == "zcode":
+        # --prompt=<value> keeps dash-leading prompts out of the flag parser.
+        return [executable, f"--prompt={prompt}", "--mode", mode, "--json", "--no-color"]
+
+    permission_mode = _DEVIN_PERMISSION_MODE_MAP.get(mode)
+    if permission_mode is None:
+        raise ValueError("unsupported_mode")
+    return [
+        executable,
+        "--process-model",
+        "in-process",
+        "--print",
+        "--permission-mode",
+        permission_mode,
+        "--",
+        prompt,
+    ]
+
+
+_PAID_FLAG_KEYS = ("allow_expensive", "allow_expensive_model", "paid", "allow_paid")
+_PAID_QUOTA_KEYS = ("acu", "credits", "budget_usd", "max_cost_usd")
+_HANDOFF_QUOTA_KEYS = ("acu", "credits", "budget_usd")
+_PROVIDER_ALLOWLIST_KEYS = (
+    "allowed_providers",
+    "provider_allowlist",
+    "provider_allowlists",
+    "providers",
+    "paid_allowlist",
+)
+
+
+def _ordered_payload_mappings(order: Any, body: Any) -> List[Mapping[str, Any]]:
+    candidates = [order, body]
+    if isinstance(body, Mapping):
+        candidates.append(body.get("order"))
+    out: List[Mapping[str, Any]] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        out.append(candidate)
+    return out
+
+
+def _is_free_botex_provider(provider: Any) -> bool:
+    clean = str(provider or "").strip().lower()
+    if not clean:
+        return False
+    if clean in _BOTEX_FREE_PROVIDER_PREF:
+        return True
+    resolved, err = _botex_dispatch_provider(clean)
+    if err is not None or not resolved:
+        return False
+    return str(resolved).strip().lower() in _BOTEX_FREE_PROVIDER_PREF
+
+
+def _positive_cost(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        fval = float(value)
+    except (TypeError, ValueError):
+        return bool(str(value).strip())
+    if not math.isfinite(fval) or fval < 0.0:
+        # NaN compares False against 0.0; negative/NaN quotas fail closed as paid.
+        return True
+    return fval > 0.0
+
+
+def _policy_value(policy: Any, name: str, default: Any = None) -> Any:
+    if isinstance(policy, Mapping):
+        return policy.get(name, default)
+    return getattr(policy, name, default)
+
+
+def _policy_value_present(policy: Any, name: str) -> bool:
+    if isinstance(policy, Mapping):
+        return name in policy and policy.get(name) is not None
+    return getattr(policy, name, None) is not None
+
+
+def _iter_text_entries(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, Mapping):
+        # Allowlists given as {"provider": True} must not silently skip validation.
+        return [str(k) for k in value.keys() if str(k or "").strip()]
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [str(item) for item in value if str(item or "").strip()]
+    return []
+
+
+def _allowlist_entry_is_paid(entry: Any) -> bool:
+    token = str(entry or "").strip().lower()
+    if not token:
+        return False
+    if token.startswith("botex:"):
+        token = token.split(":", 1)[1]
+    token = token.lstrip("/").split("/", 1)[0].strip()
+    if not token:
+        # Malformed provider references ("/openai") fail closed as paid.
+        return True
+    return not _is_free_botex_provider(token)
+
+
+def paid_ceiling_violations(order: dict, body: dict) -> List[str]:
+    """Return static reason strings for any paid-capability signal in an order payload."""
+    violations: List[str] = []
+
+    def add(reason: str) -> None:
+        if reason not in violations:
+            violations.append(reason)
+
+    mappings = _ordered_payload_mappings(order, body)
+    for key in _PAID_FLAG_KEYS:
+        if any(key in payload and bool(payload.get(key)) for payload in mappings):
+            add(f"paid_key.{key}")
+    for key in _PAID_QUOTA_KEYS:
+        if any(key in payload and payload.get(key) is not None for payload in mappings):
+            add(f"paid_key.{key}")
+    for payload in mappings:
+        provider = payload.get("provider")
+        if provider is not None and str(provider).strip() and not _is_free_botex_provider(provider):
+            add("paid_key.provider")
+            break
+
+    for key in ("target_harness", "harness"):
+        for payload in mappings:
+            raw_target = str(payload.get(key) or "")
+            target_name, sep, sub_provider = raw_target.partition(":")
+            if (
+                sep
+                and sub_provider.strip()
+                and _normalize_harness_name(target_name) == "botex"
+                and not _is_free_botex_provider(sub_provider)
+            ):
+                add("target_harness.paid_provider")
+
+    policies: List[Any] = []
+    seen_policies: set[int] = set()
+    for payload in mappings:
+        if "handoff_policy" not in payload:
+            continue
+        policy = payload.get("handoff_policy")
+        if policy is None or id(policy) in seen_policies:
+            continue
+        seen_policies.add(id(policy))
+        policies.append(policy)
+
+    for policy in policies:
+        if _positive_cost(_policy_value(policy, "max_cost_usd")):
+            add("handoff_policy.max_cost_usd")
+        for key in _HANDOFF_QUOTA_KEYS:
+            if _policy_value_present(policy, key):
+                add(f"handoff_policy.{key}")
+        if bool(_policy_value(policy, "allow_paid", False)):
+            add("handoff_policy.allow_paid")
+        for key in _PROVIDER_ALLOWLIST_KEYS:
+            entries = _iter_text_entries(_policy_value(policy, key))
+            if not entries:
+                continue
+            if key == "paid_allowlist" or any(_allowlist_entry_is_paid(entry) for entry in entries):
+                add("handoff_policy.provider_allowlist")
+                break
+    return violations
 
 
 # ---------------------------------------------------------------------------

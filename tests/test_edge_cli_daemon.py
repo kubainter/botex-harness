@@ -625,7 +625,7 @@ def test_edge_daemon_legacy_spawned_full_flow(
     lock = _FakeLock()
     monkeypatch.setattr(
         "botex.edge.runner.attach_or_spawn_edge_daemon",
-        lambda loopback_port=0: {"mode": "spawned", "lock": lock},
+        lambda loopback_port=0: {"ok": True, "mode": "spawned", "lock": lock},
     )
 
     _run_cli(
@@ -648,3 +648,114 @@ def test_edge_daemon_legacy_spawned_full_flow(
     assert runner.workspace_root == str(isolated_env["tmp"])
     assert _FakeLegacyRunner.calls == [("start", 0), ("run", None), ("stop", None)]
     assert lock.released is True
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 (064/S10): fail-closed singleton lock + graceful SIGTERM drain
+# ---------------------------------------------------------------------------
+
+
+class _DrainRecordingHostDaemon(_FakeHostDaemon):
+    stop_kwargs: ClassVar[list[dict[str, Any]]] = []
+
+    async def stop(self, drain_timeout_s: float = 10.0) -> None:
+        type(self).stop_kwargs.append({"drain_timeout_s": drain_timeout_s})
+        await super().stop(drain_timeout_s=drain_timeout_s)
+
+
+class _SignalStoppedHostDaemon(_DrainRecordingHostDaemon):
+    async def run_forever(self) -> None:
+        type(self).calls.append(("run", None))
+        # Mimics the SIGTERM/SIGINT handler raising into the running loop.
+        raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize(
+    ("mode", "error"),
+    [
+        ("lock_contention", "lock_held_by_active_daemon"),
+        ("spawn_failed_health", "spawn_failed_health"),
+    ],
+)
+def test_edge_daemon_legacy_fails_closed_without_lock(
+    isolated_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, mode: str, error: str
+) -> None:
+    monkeypatch.setenv("BOTEX_EDGE_TOKEN", "btxd_env111122223333.envSecret_00000000")
+    monkeypatch.setattr(botex.edge, "EdgeRunner", _FakeLegacyRunner)
+    monkeypatch.setattr("botex.edge.runner.EdgeHostDaemon", _FakeHostDaemon, raising=False)
+    monkeypatch.setattr(
+        "botex.edge.runner.attach_or_spawn_edge_daemon",
+        lambda loopback_port=0: {"ok": False, "mode": mode, "error": error},
+    )
+
+    argv = [
+        "--edge-daemon",
+        "--server",
+        "wss://edge.example.com/api/edge/ws",
+        "--device-id",
+        DEV,
+        "--workspace-id",
+        WS_A,
+    ]
+    out, err_out = _run_cli_expect_exit(argv, 1)
+
+    assert mode in out + err_out
+    # Fail closed: the runner object is constructed earlier, but it must never
+    # start loopback IPC or run without the singleton lock held.
+    assert not _FakeLegacyRunner.calls
+
+
+def test_edge_daemon_host_registers_sigterm_and_sigint_handlers(
+    isolated_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+
+    registered: dict[Any, Any] = {}
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: registered.setdefault(sig, handler))
+    monkeypatch.setattr("botex.edge.runner.EdgeHostDaemon", _FakeHostDaemon, raising=False)
+    _register_workspace(isolated_env["tmp"], "daemon-ws-sig")
+
+    out, _ = _run_cli(["--edge-daemon", "--server", "wss://edge.example.com/api/edge/ws"])
+
+    assert hasattr(signal, "SIGINT")
+    assert signal.SIGINT in registered
+    if hasattr(signal, "SIGTERM"):
+        assert signal.SIGTERM in registered
+    for handler in registered.values():
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGTERM, None)
+    assert "host daemon" in out
+
+
+def test_edge_daemon_sigint_drains_with_timeout(
+    isolated_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _DrainRecordingHostDaemon.stop_kwargs.clear()
+    _register_workspace(isolated_env["tmp"], "daemon-ws-drain")
+    monkeypatch.setattr("botex.edge.runner.EdgeHostDaemon", _SignalStoppedHostDaemon, raising=False)
+
+    _run_cli(["--edge-daemon", "--server", "wss://edge.example.com/api/edge/ws"])
+
+    assert _DrainRecordingHostDaemon.stop_kwargs == [{"drain_timeout_s": 10.0}]
+    assert _FakeHostDaemon.calls[:3] == [("start", 0), ("run", None), ("stop", None)]
+
+
+def test_cli_edge_host_daemon_restores_signals_and_exits_nonzero_on_start_failure(
+    isolated_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import signal
+
+    class _FailStartDaemon(_FakeHostDaemon):
+        async def start(self) -> dict[str, Any]:
+            _FakeHostDaemon.calls.append(("start", 0))
+            return {"ok": False, "mode": "error", "error": "lock_contention"}
+
+    before_sigint = signal.getsignal(signal.SIGINT)
+    _register_workspace(isolated_env["tmp"], "daemon-ws-fail")
+    monkeypatch.setattr("botex.edge.runner.EdgeHostDaemon", _FailStartDaemon, raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(["--edge-daemon", "--server", "wss://edge.example.com/api/edge/ws"])
+    assert exc.value.code == 1
+    assert signal.getsignal(signal.SIGINT) == before_sigint

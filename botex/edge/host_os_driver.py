@@ -28,6 +28,7 @@ __all__ = [
     "WindowsJobGuard",
     "HostOSDriver",
     "kill_posix_process_group",
+    "pdeathsig_preexec",
     "cancel_process_tree",
     "pause_process_tree",
     "resume_process_tree",
@@ -241,6 +242,54 @@ def kill_posix_process_group(pgid: int, sig: Optional[int] = None) -> bool:
         return True
     except ProcessLookupError:
         return False
+
+
+def pdeathsig_preexec() -> Optional[Callable[[], None]]:
+    """Return a fork-safe Linux ``preexec_fn`` setting ``PR_SET_PDEATHSIG=SIGKILL``.
+
+    ``libc`` and ``prctl`` signatures are bound before ``fork()`` so the child
+    only invokes the raw C syscall prior to ``exec``. Fails closed if ``prctl``
+    is unavailable or returns non-zero. Note: Linux tracks parent-death by the
+    spawning OS thread, so callers should spawn from a persistent loop thread.
+    Returns ``None`` on non-Linux hosts.
+    """
+    if not sys.platform.startswith("linux") or not hasattr(ctypes, "CDLL"):
+        return None
+    sig = int(getattr(signal, "SIGKILL", 9))
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    prctl = getattr(libc, "prctl", None)
+    if prctl is None:
+        raise OSError("Linux libc prctl symbol unavailable for PR_SET_PDEATHSIG")
+    try:
+        prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        prctl.restype = ctypes.c_int
+    except AttributeError:
+        pass
+
+    parent_pid = os.getpid()
+
+    def _set_pdeathsig() -> None:
+        ctypes.set_errno(0)
+        rc = int(prctl(1, sig, 0, 0, 0))
+        if rc != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+        # Close the fork()->prctl() race: if the spawning parent died between
+        # fork and prctl, the signal will never fire — self-terminate instead.
+        # The getpid() guard keeps a bare hook() call (no fork, e.g. unit
+        # tests) from killing the running process.
+        if os.getpid() != parent_pid and os.getppid() != parent_pid:
+            os.kill(os.getpid(), sig)
+
+    return _set_pdeathsig
 
 
 class WindowsJobGuard:

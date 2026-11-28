@@ -520,3 +520,81 @@ def test_cloud_edge_delegation_optin_disabled_rejected(live_gateway):
             assert "disabled" in res.json()["detail"].lower()
 
     asyncio.run(main())
+
+
+def test_edge_readonly_stub_cli_captures_masked_summary_without_worktree(tmp_path: Path):
+    """Plan 064 S2.3/S3.3: readonly stub CLI spawns in real_root and masks output tail."""
+    import sys
+
+    from botex.edge.credentials import save_edge_token
+    from botex.edge.runner import EdgeCapabilities, EdgeRunner
+    from botex.edge.workspaces import save_workspaces_registry
+
+    ws_root = tmp_path / "repo"
+    ws_root.mkdir()
+    (ws_root / ".git").mkdir()
+    ws_file = tmp_path / "workspaces.json"
+    save_workspaces_registry(
+        {
+            "device_id": "dev-int",
+            "workspaces": [{"workspace_id": "ws-int", "root": str(ws_root), "state": "enrolled"}],
+        },
+        path=ws_file,
+    )
+    cred_dir = tmp_path / "creds"
+    save_edge_token("dev-int", "ws-int", "btxd_aaaa1111bbbb2222.secret", base_dir=cred_dir)
+
+    class _FakeDriver:
+        def preflight_runtime(self, _h):
+            return {"ok": True}
+
+        def prepare_epoch_worktree(self, *args, **kwargs):
+            raise AssertionError("readonly order must never create a worktree")
+
+    runner = EdgeRunner(
+        "wss://cloud.example.invalid/api/edge/ws",
+        token="btxd_aaaa1111bbbb2222.secret",
+        device_id="dev-int",
+        workspace_id="ws-int",
+        workspace_root=ws_root,
+        caps=EdgeCapabilities(harness_spawn=True),
+        workspaces_file=ws_file,
+        credentials_dir=cred_dir,
+        outbox_path=tmp_path / "edge_outbox.jsonl",
+        active_orders_path=tmp_path / "active_orders.json",
+        host_driver=_FakeDriver(),
+    )
+    stub_code = "import sys; print('HELLO', 'sk_live_secretvalue1234567890')"
+
+    async def _run():
+        reply = await runner.handle_control_frame(
+            {
+                "type": "dispatch_work_order",
+                "request_id": "req-ro",
+                "order_id": "ord-ro-1",
+                "workspace_id": "ws-int",
+                "fencing_token": "tok-ro",
+                "fencing_epoch": 1,
+                "order": {
+                    "order_id": "ord-ro-1",
+                    "goal": "Check repo",
+                    "mode_request": "readonly",
+                    "argv": [sys.executable, "-c", stub_code],
+                },
+                "target_harness": "botex",
+            }
+        )
+        assert reply["ok"] is True
+        pending = list(runner._pending)
+        if pending:
+            await asyncio.gather(*pending)
+
+    asyncio.run(_run())
+    assert not (ws_root / ".botex" / "worktrees").exists()
+    assert runner._active_order_controls == {}
+    assert runner._outbox_buffer is not None
+    exited = [e for e in runner._outbox_buffer.pending() if e.get("kind") == "exited"]
+    assert len(exited) == 1
+    summary = exited[0]["data"]["summary"]
+    assert "HELLO" in summary
+    assert "sk_live_secretvalue1234567890" not in summary

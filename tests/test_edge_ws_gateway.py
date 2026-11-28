@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -861,7 +862,13 @@ def test_edge_ws_work_order_event_dedup_and_no_self_report_done(monkeypatch, tmp
     monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
 
     swarm_store.create_work_order(
-        {"order_id": "ord_ev_1", "status": "RUNNING", "epoch": 1},
+        {
+            "order_id": "ord_ev_1",
+            "status": "RUNNING",
+            "epoch": 1,
+            "host_id": "host_ev1",
+            "workspace_id": "ws_ev1",
+        },
         db_path=db_file,
     )
 
@@ -1041,3 +1048,329 @@ def test_edge_ws_live_dispatch_work_order_roundtrip(monkeypatch, tmp_path):
     assert seen_dispatches[0]["fencing_token"]
     assert swarm_store.get_work_order("ord_rt_ok", db_path=db_file)["status"] == "RUNNING"
     assert swarm_store.get_work_order("ord_rt_nack", db_path=db_file)["status"] == "QUEUED"
+
+
+@contextmanager
+def _edge_ws_session(client: TestClient, raw_token: str, device_id: str, workspace_id: str):
+    """Open an authenticated ``/api/edge/ws`` session and complete the ``hello`` handshake."""
+    with client.websocket_connect(
+        "/api/edge/ws", headers={"Authorization": f"Bearer {raw_token}"}
+    ) as ws:
+        ws.send_json(
+            {
+                "type": "hello",
+                "device_id": device_id,
+                "workspace_id": workspace_id,
+                "capabilities": {},
+            }
+        )
+        assert ws.receive_json()["type"] == "hello_ack"
+        yield ws
+
+
+def test_edge_ws_register_work_order_scope_and_ownership(monkeypatch, tmp_path):
+    """Plan 064 S3.1/S4: only a ``work_order_create``-scoped session registers an order."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "edge_ws_register.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+
+    tok_store = DeviceTokenStore(tmp_path / "reg_tokens.json")
+    raw_scoped, _ = tok_store.issue_token(
+        "host_reg1",
+        "ws_reg1",
+        scopes=["task_pull:ws_reg1", "result_push:ws_reg1", "work_order_create:ws_reg1"],
+    )
+    raw_pull_only, _ = tok_store.issue_token(
+        "host_reg2",
+        "ws_reg2",
+        scopes=["task_pull:ws_reg2", "result_push:ws_reg2"],
+    )
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        server_cloud, "_broadcast_swarm_event", lambda et, pl: events.append((et, pl))
+    )
+
+    register_frame = {
+        "type": "register_work_order",
+        "request_id": "lb-reg-1",
+        "order_id": "ord_reg_1",
+        "workspace_id": "ws_reg1",
+        "goal": "Summarize the repo using key sk_live_abcdefghijklmnop1234",
+        "mode_request": "readonly",
+        "target_harness": "zcode",
+        "handoff_policy": {
+            "allowed_harnesses": ["ZCode", "devin"],
+            "max_hops": 1,
+            "signed_by": "",
+            "allow_paid": False,
+            "paid_allowlist": [],
+        },
+    }
+
+    with TestClient(server_cloud.app) as client:
+        with _edge_ws_session(client, raw_scoped, "host_reg1", "ws_reg1") as ws_scoped:
+            ws_scoped.send_json(register_frame)
+            ack = ws_scoped.receive_json()
+            assert ack["type"] == "control_ack"
+            assert ack["ok"] is True
+            assert ack["action"] == "register_work_order"
+            assert ack["request_id"] == "lb-reg-1"
+            assert ack["order_id"] == "ord_reg_1"
+            assert ack["status"] == "QUEUED"
+            assert ack["epoch"] == 0
+
+            # Re-registration is an explicit conflict, never a silent overwrite
+            ws_scoped.send_json({**register_frame, "request_id": "lb-reg-2"})
+            dup = ws_scoped.receive_json()
+            assert dup["type"] == "control_nack"
+            assert dup["ok"] is False
+            assert dup["error"] == "order_exists"
+            assert dup["reason"] == "order_exists"
+
+            # Once registered, the owner's events are accepted again
+            ws_scoped.send_json(
+                {
+                    "type": "work_order_event",
+                    "order_id": "ord_reg_1",
+                    "seq": 1,
+                    "kind": "started",
+                    "data": {"pid": 4242},
+                }
+            )
+            ws_scoped.send_json({"type": "ping", "ts": 7.0})
+            assert ws_scoped.receive_json()["type"] == "pong"
+
+        with _edge_ws_session(client, raw_pull_only, "host_reg2", "ws_reg2") as ws_pull:
+            # task_pull/result_push alone can never register an order
+            ws_pull.send_json(
+                {**register_frame, "order_id": "ord_reg_2", "workspace_id": "ws_reg2"}
+            )
+            denied = ws_pull.receive_json()
+            assert denied["type"] == "control_nack"
+            assert denied["error"] == "insufficient_scope"
+            assert swarm_store.get_work_order("ord_reg_2", db_path=db_file) is None
+
+            # Ownership bound at registration keeps foreign sessions off the order
+            ws_pull.send_json(
+                {"type": "work_order_event", "order_id": "ord_reg_1", "seq": 2, "kind": "started"}
+            )
+            ws_pull.send_json({"type": "ping", "ts": 8.0})
+            assert ws_pull.receive_json()["type"] == "pong"
+
+    stored = swarm_store.get_work_order("ord_reg_1", db_path=db_file)
+    assert stored["status"] == "QUEUED"
+    assert stored["host_id"] == "host_reg1"
+    assert stored["assigned_host"] == "host_reg1"
+    assert stored["workspace_id"] == "ws_reg1"
+    assert stored["mode_request"] == "readonly"
+    assert stored["target_harness"] == "zcode"
+    assert stored["handoff_policy"] == {
+        "allowed_harnesses": ["zcode", "devin"],
+        "max_hops": 1,
+        "signed_by": "",
+        "allow_paid": False,
+        "paid_allowlist": [],
+    }
+    assert "sk_live_abcdefghijklmnop1234" not in str(stored)
+
+    stored_events = swarm_store.list_work_order_events("ord_reg_1", db_path=db_file)
+    assert [e["seq"] for e in stored_events] == [1]
+
+    updates = [pl for et, pl in events if et == "work_order_update"]
+    assert [u["order_id"] for u in updates] == ["ord_reg_1"]
+    assert updates[0]["status"] == "QUEUED"
+
+    # Registered rows stay reachable for the existing REST lifecycle paths
+    with TestClient(server_cloud.app) as client:
+        cancelled = client.post(
+            "/api/swarm/orders/ord_reg_1/cancel", json={"reason": "operator abort"}
+        )
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "CANCELLED"
+    assert swarm_store.get_work_order("ord_reg_1", db_path=db_file)["status"] == "CANCELLED"
+
+
+def test_edge_ws_register_work_order_rejects_invalid_frames(monkeypatch, tmp_path):
+    """Plan 064 S3.1: every malformed or mis-bound registration is an explicit nack, never a row."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "edge_ws_register_bad.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+
+    tok_store = DeviceTokenStore(tmp_path / "reg_bad_tokens.json")
+    raw_token, _ = tok_store.issue_token(
+        "host_reg3",
+        "ws_reg3",
+        scopes=["task_pull:ws_reg3", "result_push:ws_reg3", "work_order_create:ws_reg3"],
+    )
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+
+    base = {
+        "type": "register_work_order",
+        "request_id": "lb-reg-3",
+        "order_id": "ord_reg_3",
+        "workspace_id": "ws_reg3",
+        "goal": "List the top-level modules",
+        "mode_request": "plan",
+    }
+    without_workspace = {k: v for k, v in base.items() if k != "workspace_id"}
+    cases = [
+        ({**base, "order_id": ""}, "invalid_order_id"),
+        ({**base, "order_id": "bad id!"}, "invalid_order_id"),
+        (without_workspace, "invalid_workspace_id"),
+        ({**base, "workspace_id": "ws_other"}, "workspace_mismatch"),
+        ({**base, "goal": "   "}, "invalid_goal"),
+        ({**base, "goal": 42}, "invalid_goal"),
+        ({**base, "goal": "x" * 8001}, "invalid_goal"),
+        ({**base, "mode_request": "turbo"}, "invalid_mode_request"),
+        ({**base, "mode_request": None}, "invalid_mode_request"),
+        ({**base, "target_harness": "zcode; rm -rf"}, "invalid_target_harness"),
+        ({**base, "handoff_policy": "anything"}, "invalid_handoff_policy"),
+        ({**base, "handoff_policy": {"allowed_harnesses": 5}}, "invalid_handoff_policy"),
+        ({**base, "handoff_policy": {"signed_by": "operator"}}, "invalid_handoff_policy"),
+        ({**base, "handoff_policy": {"allow_paid": True}}, "invalid_handoff_policy"),
+        ({**base, "handoff_policy": {"paid_allowlist": ["openai"]}}, "invalid_handoff_policy"),
+        ({**base, "handoff_policy": {"allowed_harnesses": ["evil"]}}, "invalid_handoff_policy"),
+    ]
+
+    with TestClient(server_cloud.app) as client:
+        with _edge_ws_session(client, raw_token, "host_reg3", "ws_reg3") as ws:
+            for frame, expected_error in cases:
+                ws.send_json(frame)
+                reply = ws.receive_json()
+                assert reply["type"] == "control_nack", (expected_error, reply)
+                assert reply["ok"] is False
+                assert reply["error"] == expected_error
+                assert reply["reason"] == expected_error
+                assert reply["action"] == "register_work_order"
+
+            # A failing store is reported explicitly and must not kill the session
+            def _boom_create(payload, db_path=None):
+                raise RuntimeError("disk full")
+
+            monkeypatch.setattr(server_cloud, "create_work_order", _boom_create)
+            ws.send_json(base)
+            failed = ws.receive_json()
+            assert failed["type"] == "control_nack"
+            assert failed["error"] == "registration_failed"
+            ws.send_json({"type": "ping", "ts": 9.0})
+            assert ws.receive_json()["type"] == "pong"
+
+    assert swarm_store.list_work_orders(db_path=db_file) == []
+
+
+def test_edge_ws_work_order_event_unknown_order_rejected(monkeypatch, tmp_path):
+    """Plan 064 S3.1: events for orders absent from Cloud are nacked ``unknown_order``, never stored."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "edge_ws_unknown.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+
+    tok_store = DeviceTokenStore(tmp_path / "unknown_tokens.json")
+    raw_token, _ = tok_store.issue_token("host_unk1", "ws_unk1")
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        server_cloud, "_broadcast_swarm_event", lambda et, pl: events.append((et, pl))
+    )
+
+    ghost_events = [
+        {
+            "type": "work_order_event",
+            "order_id": "ord_ghost",
+            "seq": 1,
+            "kind": "started",
+            "data": {"pid": 1},
+        },
+        {
+            "type": "work_order_event",
+            "order_id": "ord_ghost",
+            "seq": 2,
+            "kind": "exited",
+            "status": "DONE",
+            "data": {"status": "DONE"},
+        },
+        {
+            "type": "work_order_event",
+            "order_id": "ord_ghost",
+            "seq": 3,
+            "kind": "done",
+            "data": {"ok": True, "status": "DONE"},
+        },
+    ]
+
+    with TestClient(server_cloud.app) as client:
+        with _edge_ws_session(client, raw_token, "host_unk1", "ws_unk1") as ws:
+            for frame in ghost_events:
+                ws.send_json(frame)
+            nacks = [ws.receive_json() for _ in ghost_events]
+            ws.send_json({"type": "ping", "ts": 11.0})
+            assert ws.receive_json()["type"] == "pong"
+
+            # A failed lookup is not an "unknown order" verdict: drop without an ack
+            def _boom_lookup(order_id, db_path=None):
+                raise RuntimeError("swarm store offline")
+
+            monkeypatch.setattr(server_cloud, "get_work_order", _boom_lookup)
+            ws.send_json(
+                {"type": "work_order_event", "order_id": "ord_lookup", "seq": 1, "kind": "started"}
+            )
+            ws.send_json({"type": "ping", "ts": 12.0})
+            assert ws.receive_json()["type"] == "pong"
+
+    assert [nack["seq"] for nack in nacks] == [1, 2, 3]
+    for nack in nacks:
+        assert nack["type"] == "control_nack"
+        assert nack["action"] == "work_order_event"
+        assert nack["order_id"] == "ord_ghost"
+        assert nack["ok"] is False
+        assert nack["error"] == "unknown_order"
+        assert nack["reason"] == "unknown_order"
+
+    assert swarm_store.list_work_order_events("ord_ghost", db_path=db_file) == []
+    assert swarm_store.list_work_order_events("ord_lookup", db_path=db_file) == []
+    assert swarm_store.get_work_order("ord_ghost", db_path=db_file) is None
+    assert events == []
+
+
+def test_edge_ws_work_order_event_rejects_ownerless_and_partial_owner(monkeypatch, tmp_path):
+    """Orders missing either host_id or workspace_id cannot receive edge telemetry."""
+    from botex.core import swarm_store
+
+    db_file = tmp_path / "edge_ws_ownerless.db"
+    monkeypatch.setattr(swarm_store, "_swarm_store_db_path", lambda: db_file)
+
+    tok_store = DeviceTokenStore(tmp_path / "ownerless_tokens.json")
+    raw_token, _ = tok_store.issue_token("host_o1", "ws_o1")
+    monkeypatch.setattr(server_cloud, "_edge_token_store", lambda: tok_store)
+
+    swarm_store.create_work_order(
+        {"order_id": "ord_ownerless", "status": "RUNNING", "epoch": 1},
+        db_path=db_file,
+    )
+    swarm_store.create_work_order(
+        {
+            "order_id": "ord_partial_host",
+            "status": "RUNNING",
+            "epoch": 1,
+            "host_id": "host_o1",
+            "workspace_id": "",
+        },
+        db_path=db_file,
+    )
+
+    with TestClient(server_cloud.app) as client:
+        with _edge_ws_session(client, raw_token, "host_o1", "ws_o1") as ws:
+            for oid in ("ord_ownerless", "ord_partial_host"):
+                ws.send_json(
+                    {"type": "work_order_event", "order_id": oid, "seq": 1, "kind": "started"}
+                )
+            ws.send_json({"type": "ping", "ts": 13.0})
+            assert ws.receive_json()["type"] == "pong"
+
+    assert swarm_store.list_work_order_events("ord_ownerless", db_path=db_file) == []
+    assert swarm_store.list_work_order_events("ord_partial_host", db_path=db_file) == []

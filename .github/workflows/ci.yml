@@ -172,6 +172,131 @@ jobs:
             exit "$rc"
           fi
 
+  edge-smoke:
+    name: Edge daemon smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    env:
+      BOTEX_DISABLE_DOTENV: "1"
+      PYTHONPATH: "."
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Focused edge test matrix
+        run: >
+          python -m pytest
+          tests/test_edge_runner.py
+          tests/test_edge_qos_daemon.py
+          tests/test_edge_cli_daemon.py
+          tests/test_edge_workspaces.py
+          tests/test_edge_credentials.py
+          tests/test_edge_argv_dispatch.py
+          tests/test_host_os_driver.py
+          -q
+
+      # Zero-network smoke: isolated BOTEX_SWARM_HOME, no Cloud endpoint; an
+      # offline-enrolled workspace lets the host daemon boot its loopback lane,
+      # publish the health state file, answer a token-authenticated /status
+      # probe, then drain cleanly on SIGTERM (Linux requires exit code 0).
+      - name: Zero-network daemon health & shutdown smoke
+        shell: bash
+        run: |
+          export BOTEX_SWARM_HOME="$RUNNER_TEMP/botex-swarm-home"
+          export BOTEX_CREDENTIALS_DIR="$RUNNER_TEMP/botex-creds"
+          export BOTEX_WORKSPACES_FILE="$RUNNER_TEMP/botex-swarm-home/host_workspaces.json"
+          mkdir -p "$BOTEX_SWARM_HOME" "$BOTEX_CREDENTIALS_DIR"
+          python - << 'PYEOF'
+          import json, os, shutil, signal, subprocess, sys, tempfile, time, urllib.request
+
+          py = [sys.executable, "server.py"]
+
+          def run(*args):
+              subprocess.run(py + list(args), check=True, timeout=60)
+
+          smoke_ws = tempfile.mkdtemp(prefix="smoke-ws-")
+          try:
+              tok_file = os.path.join(smoke_ws, "token.txt")
+              with open(tok_file, "w", encoding="utf-8") as fh:
+                  fh.write("btxd_smoke0000000000000000.smokeSecret0000000000\n")
+              run("edge", "enroll", "--device-id", "smoke-dev",
+                  "--workspace-id", "smoke-ws",
+                  "--workspace", smoke_ws, "--token-file", tok_file)
+              run("edge", "workspaces", "add", smoke_ws)
+
+              proc = subprocess.Popen(
+                  py + ["edge", "--edge-daemon",
+                        "--server", "wss://smoke.invalid/api/edge/ws",
+                        "--loopback-port", "0"],
+              )
+              state_file = os.path.join(
+                  os.environ["BOTEX_SWARM_HOME"], "edge_daemon.json")
+              deadline = time.monotonic() + 30
+              healthy = False
+              health_url = ""
+              while time.monotonic() < deadline:
+                  if proc.poll() is not None:
+                      break
+                  if os.path.exists(state_file):
+                      try:
+                          with open(state_file, encoding="utf-8") as fh:
+                              state = json.load(fh)
+                          port = int(state.get("port") or 0)
+                          loop_tok = str(state.get("loopback_token") or "")
+                          if port > 0 and loop_tok:
+                              # /status is the daemon's health endpoint; the
+                              # probe data comes from edge_daemon.json.
+                              health_url = f"http://127.0.0.1:{port}/status"
+                              req = urllib.request.Request(health_url)
+                              req.add_header("X-Loopback-Token", loop_tok)
+                              req.add_header("Host", f"127.0.0.1:{port}")
+                              with urllib.request.urlopen(req, timeout=3) as resp:
+                                  body = json.loads(resp.read().decode("utf-8"))
+                                  healthy = (
+                                      resp.status == 200
+                                      and bool(body.get("ok"))
+                                      and body.get("status") == "running"
+                                  )
+                          if healthy:
+                              break
+                      except (OSError, ValueError):
+                          pass
+                  time.sleep(0.3)
+              if os.name == "nt":
+                  proc.terminate()
+              else:
+                  proc.send_signal(signal.SIGTERM)
+              try:
+                  rc = proc.wait(timeout=20)
+              except subprocess.TimeoutExpired:
+                  proc.kill()
+                  proc.wait(timeout=10)
+                  rc = 1
+              print(f"smoke: healthy={healthy} exit={rc} health_url={health_url}")
+              if not healthy:
+                  raise SystemExit(1)
+              if os.name != "nt" and rc != 0:
+                  raise SystemExit(f"daemon exited {rc} after SIGTERM (expected 0)")
+          finally:
+              shutil.rmtree(smoke_ws, ignore_errors=True)
+          PYEOF
+
   workflow-audit:
     name: Workflow Security Audit (zizmor)
     runs-on: ubuntu-latest

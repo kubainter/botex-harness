@@ -5788,6 +5788,154 @@ async def delegate_to_edge_device(body: EdgeDelegateRequest) -> Dict[str, Any]:
     }
 
 
+_EDGE_REGISTER_ACTION = "register_work_order"
+_EDGE_ORDER_GOAL_MAX_CHARS = 8000
+_EDGE_ORDER_POLICY_MAX_CHARS = 4096
+# Mirrors ``RESTRICTIVENESS_RANK`` in ``botex/edge/adapters.py``. Kept as a literal
+# so the gateway never imports edge code; drift fails closed (rejection), never open.
+_EDGE_ORDER_MODES: Dict[str, str] = {
+    mode: mode for mode in ("readonly", "plan", "edit", "fs_write", "destructive", "full", "yolo")
+}
+_EDGE_ORDER_HARNESSES: Dict[str, str] = {h: h for h in ("botex", "zcode", "devin")}
+
+
+async def _register_edge_work_order(session: _EdgeSession, frame: Dict[str, Any]) -> Dict[str, Any]:
+    """Register a loopback-originated WorkOrder on behalf of an authenticated edge session.
+
+    The order is owned by the session's ``(device_id, workspace_id)`` and enters the
+    FSM at ``QUEUED``; only the existing REST/night-pulse paths move it forward.
+    ``NEEDS_HUMAN`` is a supervisor-level WorkOrder status and stays separate from
+    live in-task HITL (``/api/approvals``, ``botex/core/approval.py``).
+
+    Replies use the typed-control ``control_ack``/``control_nack`` envelope; on
+    rejection ``error`` carries the code and ``reason`` mirrors it for runners
+    that follow the ``control_nack`` convention.
+    """
+    req_id = coerce_text(str(frame.get("request_id") or ""))[:128]
+    raw_order_id = frame.get("order_id")
+    clean_order = sanitize_identifier(raw_order_id) if isinstance(raw_order_id, str) else ""
+
+    def _reply(ok: bool, error: str = "", **extra: Any) -> Dict[str, Any]:
+        reply: Dict[str, Any] = {
+            "type": "control_ack" if ok else "control_nack",
+            "request_id": req_id,
+            "action": _EDGE_REGISTER_ACTION,
+            "order_id": clean_order,
+            "ok": ok,
+        }
+        if not ok:
+            reply["error"] = error
+            reply["reason"] = error
+        reply.update(extra)
+        return reply
+
+    try:
+        if not clean_order:
+            return _reply(False, "invalid_order_id")
+        if not session.token_record.has_scope(f"work_order_create:{session.workspace_id}"):
+            return _reply(False, "insufficient_scope")
+        raw_ws = frame.get("workspace_id")
+        if not isinstance(raw_ws, str) or not raw_ws.strip():
+            return _reply(False, "invalid_workspace_id")
+        if raw_ws.strip() != session.workspace_id:
+            return _reply(False, "workspace_mismatch")
+
+        raw_goal = frame.get("goal")
+        if (
+            not isinstance(raw_goal, str)
+            or not raw_goal.strip()
+            or len(raw_goal) > _EDGE_ORDER_GOAL_MAX_CHARS
+        ):
+            return _reply(False, "invalid_goal")
+        goal = coerce_text(mask_secrets(raw_goal)).strip()
+
+        raw_mode = frame.get("mode_request")
+        mode = (
+            _EDGE_ORDER_MODES.get(raw_mode.strip().lower(), "") if isinstance(raw_mode, str) else ""
+        )
+        if not mode:
+            return _reply(False, "invalid_mode_request")
+
+        raw_harness = frame.get("target_harness")
+        if raw_harness is None or raw_harness == "":
+            target_harness = ""
+        else:
+            target_harness = (
+                _sanitize_harness_spec(raw_harness) if isinstance(raw_harness, str) else ""
+            )
+            if not target_harness:
+                return _reply(False, "invalid_target_harness")
+
+        handoff_policy: Optional[Dict[str, Any]] = None
+        raw_policy = frame.get("handoff_policy")
+        if raw_policy is not None:
+            if not isinstance(raw_policy, dict):
+                return _reply(False, "invalid_handoff_policy")
+            if (
+                str(raw_policy.get("signed_by") or "").strip()
+                or bool(raw_policy.get("allow_paid", False))
+                or bool(raw_policy.get("paid_allowlist"))
+            ):
+                return _reply(False, "invalid_handoff_policy")
+            try:
+                parsed_policy = work_orders.HandoffPolicy.from_dict(raw_policy).to_dict()
+            except (TypeError, ValueError, AttributeError):
+                return _reply(False, "invalid_handoff_policy")
+            normalized_harnesses: List[str] = []
+            for h_name in parsed_policy.get("allowed_harnesses") or []:
+                mapped_h = _EDGE_ORDER_HARNESSES.get(str(h_name or "").strip().lower(), "")
+                if not mapped_h:
+                    return _reply(False, "invalid_handoff_policy")
+                if mapped_h not in normalized_harnesses:
+                    normalized_harnesses.append(mapped_h)
+            parsed_policy["allowed_harnesses"] = normalized_harnesses
+            parsed_policy["signed_by"] = ""
+            parsed_policy["allow_paid"] = False
+            parsed_policy["paid_allowlist"] = []
+            handoff_policy = parsed_policy
+            policy_chars = len(json.dumps(handoff_policy))
+            if policy_chars > _EDGE_ORDER_POLICY_MAX_CHARS:
+                return _reply(False, "invalid_handoff_policy")
+
+        order_payload: Dict[str, Any] = {
+            "order_id": clean_order,
+            "status": work_orders.WorkOrderStatus.QUEUED,
+            "goal": goal,
+            "mode_request": mode,
+            "workspace_id": session.workspace_id,
+            "host_id": session.device_id,
+            "assigned_host": session.device_id,
+        }
+        if target_harness:
+            order_payload["target_harness"] = target_harness
+        if handoff_policy is not None:
+            order_payload["handoff_policy"] = handoff_policy
+        try:
+            res = await asyncio.to_thread(create_work_order, order_payload)
+        except Exception:
+            logger.warning("register_work_order failed order=%s", clean_order, exc_info=True)
+            return _reply(False, "registration_failed")
+        if not res.get("ok"):
+            error = "order_exists" if res.get("error") == "ORDER_EXISTS" else "registration_failed"
+            logger.warning("register_work_order rejected order=%s error=%s", clean_order, error)
+            return _reply(False, error)
+    except Exception:
+        # A registration bug must never take the long-lived edge session down.
+        logger.warning("register_work_order crashed order=%s", clean_order, exc_info=True)
+        return _reply(False, "registration_failed")
+
+    _broadcast_swarm_event(
+        "work_order_update",
+        {
+            "order_id": res.get("order_id"),
+            "status": res.get("status"),
+            "epoch": res.get("epoch"),
+            "order": res,
+        },
+    )
+    return _reply(True, status=res.get("status"), epoch=res.get("epoch"))
+
+
 @app.websocket("/api/edge/ws")
 async def edge_bridge_websocket(websocket: WebSocket) -> None:
     """Bidirectional compressed WSS channel connecting outbound ``botex edge`` runners."""
@@ -6013,6 +6161,10 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                                 "last_seen": frame.get("last_seen"),
                             },
                         )
+            elif ftype == "register_work_order":
+                await session.send_frame(
+                    await _register_edge_work_order(session, frame), priority=0
+                )
             elif ftype == "work_order_event":
                 # Edge events record telemetry only and NEVER self-transition an order
                 # to DONE (STOP #5 / no_self_report_done: only verify_gate sets DONE).
@@ -6040,20 +6192,50 @@ async def edge_bridge_websocket(websocket: WebSocket) -> None:
                     try:
                         existing_order = await asyncio.to_thread(get_work_order, ev_order_id)
                     except Exception:
-                        existing_order = None
-                    if isinstance(existing_order, dict):
-                        exp_host = str(existing_order.get("host_id") or "").strip()
-                        exp_ws = str(existing_order.get("workspace_id") or "").strip()
-                        if (exp_host and exp_host != session.device_id) or (
-                            exp_ws and exp_ws != session.workspace_id
-                        ):
-                            logger.warning(
-                                "Ignoring cross-owner work_order_event order=%s host=%s ws=%s",
-                                ev_order_id,
-                                session.device_id,
-                                session.workspace_id,
-                            )
-                            continue
+                        logger.warning(
+                            "Failed loading work order for event order=%s",
+                            ev_order_id,
+                            exc_info=True,
+                        )
+                        continue
+                    if not isinstance(existing_order, dict):
+                        # Cloud is the lifecycle authority: an order absent from
+                        # ``work_orders`` has no owner to fence, so its events are
+                        # rejected instead of being persisted as unfenceable orphans.
+                        logger.warning(
+                            "Rejecting work_order_event for unknown order=%s host=%s ws=%s",
+                            ev_order_id,
+                            session.device_id,
+                            session.workspace_id,
+                        )
+                        await session.send_frame(
+                            {
+                                "type": "control_nack",
+                                "action": "work_order_event",
+                                "order_id": ev_order_id,
+                                "seq": seq_val,
+                                "ok": False,
+                                "error": "unknown_order",
+                                "reason": "unknown_order",
+                            },
+                            priority=0,
+                        )
+                        continue
+                    exp_host = str(existing_order.get("host_id") or "").strip()
+                    exp_ws = str(existing_order.get("workspace_id") or "").strip()
+                    if (
+                        not exp_host
+                        or exp_host != session.device_id
+                        or not exp_ws
+                        or exp_ws != session.workspace_id
+                    ):
+                        logger.warning(
+                            "Ignoring cross-owner work_order_event order=%s host=%s ws=%s",
+                            ev_order_id,
+                            session.device_id,
+                            session.workspace_id,
+                        )
+                        continue
                     try:
                         ev_res = await asyncio.to_thread(
                             record_work_order_event,
