@@ -1570,8 +1570,6 @@ def test_edge_host_daemon_loopback_ipc_host_token_and_routes(tmp_path: Path) -> 
 def test_loopback_control_rejects_dispatch_and_orders_enforces_ceilings_and_idem(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from datetime import datetime, timezone
-
     from botex.edge.credentials import save_edge_token
     from botex.edge.runner import EdgeHostDaemon
     from botex.edge.workspaces import save_workspaces_registry
@@ -1652,8 +1650,9 @@ def test_loopback_control_rejects_dispatch_and_orders_enforces_ceilings_and_idem
             assert b"403 Forbidden" in r_paid
             assert b"paid_ceiling_exceeded" in r_paid
 
-            # 3. Confirmed edit passes ceiling when confirmation is fresh
-            now_iso = datetime.now(timezone.utc).isoformat()
+            # 3. Confirmation envelope must NOT lift the ceiling (CWE-807):
+            # mutating modes for non-admin workspaces stay 403 even when a
+            # well-formed confirmation is supplied.
             r_conf = await _loopback_request(
                 port,
                 "POST",
@@ -1666,13 +1665,13 @@ def test_loopback_control_rejects_dispatch_and_orders_enforces_ceilings_and_idem
                     "mode": "edit",
                     "confirmation": {
                         "confirmed_by": "kubai@win11",
-                        "confirmed_at": now_iso,
+                        "confirmed_at": "2026-01-01T00:00:00+00:00",
                         "ceiling_ack": True,
                     },
                 },
             )
-            assert b"403 Forbidden" not in r_conf
-            assert b"harness_spawn_disabled" in r_conf
+            assert b"403 Forbidden" in r_conf
+            assert b"mode_exceeds_ceiling" in r_conf
 
             # 4. Idempotency-Key duplicate returns 200 duplicate=True; conflicting order_id -> 409
             for a in daemon.agents:

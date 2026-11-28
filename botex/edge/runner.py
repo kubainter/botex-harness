@@ -174,9 +174,6 @@ _OUTBOX_MAX_LINES = 10_000
 _PID_CTIME_TOLERANCE_S = 0.01
 _OUTPUT_TAIL_MAX_LINES = 200
 _OUTPUT_TAIL_MAX_BYTES = 16_384
-_EDIT_CONFIRM_MAX_AGE_S = 900.0
-_EDIT_CONFIRM_ALLOWED_MODES = frozenset({"edit", "destructive"})
-_RESERVED_CONFIRM_ACTORS = frozenset({"human", "human-curated", "operator", "curator"})
 
 # F6: secret-bearing env vars never reach spawned harness children; the
 # SWARM_* namespace is reserved for supervisor-only state.
@@ -705,30 +702,6 @@ def _reconcile_orphan_worktrees(
         if pruned_any:
             _run_git(resolved_root, ["worktree", "prune"], check=False)
     return removed
-
-
-def _validate_edit_confirmation(confirmation: Any) -> Tuple[bool, str]:
-    """Verify explicit human confirmation envelope for non-local_admin edit orders."""
-    if not isinstance(confirmation, dict):
-        return False, "missing_confirmation"
-    actor = str(confirmation.get("confirmed_by") or "").strip()
-    if not actor or actor.lower() in _RESERVED_CONFIRM_ACTORS:
-        return False, "invalid_confirmed_by"
-    if confirmation.get("ceiling_ack") is not True:
-        return False, "missing_ceiling_ack"
-    raw_ts = str(confirmation.get("confirmed_at") or "").strip()
-    if not raw_ts:
-        return False, "missing_confirmed_at"
-    try:
-        dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        age_s = (datetime.now(timezone.utc) - dt).total_seconds()
-    except (TypeError, ValueError):
-        return False, "invalid_confirmed_at"
-    if age_s < -60.0 or age_s > _EDIT_CONFIRM_MAX_AGE_S:
-        return False, "stale_confirmation"
-    return True, ""
 
 
 class EdgeOutboxBuffer:
@@ -3500,10 +3473,12 @@ class EdgeHostDaemon:
         if raw_mode is None:
             raw_mode = body_obj.get("mode")
         mode, mode_err = normalize_mode_request(raw_mode, default="readonly")
-        confirmed_edit_meta: Optional[Dict[str, Any]] = None
         # F7: non-local_admin workspaces stay at the $0 / branch-only ceiling.
+        # Mutating modes for non-admin workspaces must come from the
+        # authenticated cloud register_work_order path; a caller-supplied
+        # confirmation envelope is not daemon-verifiable proof (CWE-807).
         if not bool(ws_entry.get("local_admin")):
-            if mode_err is not None:
+            if mode_err is not None or mode not in _ORDERS_ALLOWED_MODES:
                 await _write_loopback_http_response(
                     writer, 403, {"ok": False, "error": "mode_exceeds_ceiling"}
                 )
@@ -3516,26 +3491,6 @@ class EdgeHostDaemon:
                     {"ok": False, "error": "paid_ceiling_exceeded", "violations": violations},
                 )
                 return
-            if mode not in _ORDERS_ALLOWED_MODES:
-                conf = body_obj.get("confirmation") or order.get("confirmation")
-                if mode in _EDIT_CONFIRM_ALLOWED_MODES and conf is not None:
-                    conf_ok, conf_err = _validate_edit_confirmation(conf)
-                    if not conf_ok:
-                        await _write_loopback_http_response(
-                            writer,
-                            403,
-                            {"ok": False, "error": "mode_exceeds_ceiling", "detail": conf_err},
-                        )
-                        return
-                    confirmed_edit_meta = {
-                        "confirmed_by": str(conf.get("confirmed_by") or "").strip(),
-                        "confirmed_at": str(conf.get("confirmed_at") or "").strip(),
-                    }
-                else:
-                    await _write_loopback_http_response(
-                        writer, 403, {"ok": False, "error": "mode_exceeds_ceiling"}
-                    )
-                    return
         if not order_id:
             await _write_loopback_http_response(
                 writer, 400, {"ok": False, "error": "missing_order_id"}
@@ -3617,10 +3572,6 @@ class EdgeHostDaemon:
             "order": dispatch_order,
             "target_harness": target_harness,
         }
-        if confirmed_edit_meta is not None:
-            agent.emit_work_order_event(
-                order_id, "confirmed_edit", _mask_recursive(confirmed_edit_meta)
-            )
         reply = await agent.handle_control_frame(frame)
         status = 200 if reply.get("ok") else 409
         if status == 200 and effective_idem:
